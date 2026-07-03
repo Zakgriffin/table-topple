@@ -51,29 +51,24 @@ export interface GridDetection {
 // extrapolated (see detectGrid / sampleFullGrid), producing visible drift
 // toward the far side of the visible grid.
 //
-// The raw per-lag scores get a light 3-tap smoothing before peak-finding and
-// interpolation: derotating by resampling (nearest-neighbor in the Node
-// test, and even canvas's smoother resampling isn't immune) introduces
-// staircase aliasing along cell boundaries, which otherwise shows up as
-// single-lag noise spikes that throw off the 3-point parabolic fit far more
-// than they'd throw off just picking the best integer lag — confirmed by
-// this exact failure mode (near-total decode failure on any rotated input,
-// while axis-aligned input was unaffected) before this smoothing was added.
+// Peak SELECTION uses the raw (unsmoothed) scores, unchanged from the
+// original integer-only version — that part was already robust. Only the
+// interpolation's validity check is stricter than a naive parabolic fit: a
+// genuine sub-pixel offset from an already-best integer lag should be small
+// (well under half a pixel), so a large delta is a sign the fit is reacting
+// to noise (e.g. staircase aliasing from resampling during derotation, which
+// showed up as single-lag score spikes) rather than the true peak shape —
+// confirmed by this exact failure mode (near-total decode failure on any
+// rotated input, axis-aligned input unaffected) with a looser threshold.
 export function findPitch(energy: Float64Array, minLag: number, maxLag: number): number {
-  const raw = new Float64Array(maxLag - minLag + 1);
+  const scores = new Float64Array(maxLag - minLag + 1);
+  let bestIdx = 0, bestScore = -Infinity;
   for (let lag = minLag; lag <= maxLag; lag++) {
     let score = 0;
     for (let x = 0; x + lag < energy.length; x++) score += energy[x] * energy[x + lag];
-    raw[lag - minLag] = score;
+    scores[lag - minLag] = score;
+    if (score > bestScore) { bestScore = score; bestIdx = lag - minLag; }
   }
-  const scores = new Float64Array(raw.length);
-  for (let i = 0; i < raw.length; i++) {
-    const a = raw[Math.max(0, i - 1)], b = raw[i], c = raw[Math.min(raw.length - 1, i + 1)];
-    scores[i] = (a + b + c) / 3;
-  }
-
-  let bestIdx = 0, bestScore = -Infinity;
-  for (let i = 0; i < scores.length; i++) if (scores[i] > bestScore) { bestScore = scores[i]; bestIdx = i; }
   const bestLag = bestIdx + minLag;
 
   if (bestIdx > 0 && bestIdx < scores.length - 1) {
@@ -81,7 +76,7 @@ export function findPitch(energy: Float64Array, minLag: number, maxLag: number):
     const denom = yMinus - 2 * y0 + yPlus;
     if (Math.abs(denom) > 1e-9) {
       const delta = 0.5 * (yMinus - yPlus) / denom;
-      if (Math.abs(delta) < 1) return bestLag + delta;
+      if (Math.abs(delta) < 0.3) return bestLag + delta;
     }
   }
   return bestLag;

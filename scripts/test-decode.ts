@@ -73,13 +73,16 @@ for (let t = 0; t < trials; t++) {
   const rgba = cropAt(testRow, testCol);
   const result = decode(rgba);
   if (!result) { misses++; console.log(`MISS at true (${testRow},${testCol}) — no lock`); continue; }
-  // The decoded window is centered in the crop, not necessarily exactly at
-  // (testRow, testCol) since sampleWindow picks the centered ORDER-window —
-  // just check the result is a cell that's actually near the crop center.
-  const dr = Math.min(Math.abs(result.row - testRow), R - Math.abs(result.row - testRow));
-  const dc = Math.min(Math.abs(result.col - testCol), C - Math.abs(result.col - testCol));
-  if (dr <= 1 && dc <= 1) hits++;
-  else { wrong++; console.log(`WRONG: true (${testRow},${testCol}) -> decoded (${result.row},${result.col})`); }
+  // decodeFrame reports the decoded window's TOP-LEFT cell (that's what the
+  // lookup table stores), not the crop's center — so the real correctness
+  // check is "does the window returned actually contain the crop-center
+  // cell", allowing a little slack (+-1) for phase-detection rounding.
+  const within = (target: number, start: number, span: number, mod: number) => {
+    const rel = ((target - start) % mod + mod) % mod;
+    return rel <= span - 1 + 1 || rel >= mod - 1; // window range, +-1 slack
+  };
+  if (within(testRow, result.row, order, R) && within(testCol, result.col, order, C)) hits++;
+  else { wrong++; console.log(`WRONG: true (${testRow},${testCol}) -> decoded window at (${result.row},${result.col})`); }
 }
 console.log(`\n${hits}/${trials} correct, ${misses} no-lock, ${wrong} wrong.`);
 if (wrong > 0) { console.error('FAIL: some decodes were wrong (not just missed).'); process.exit(1); }

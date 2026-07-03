@@ -74,29 +74,53 @@ function tryTaps(taps: number[], N: number): Uint8Array | null {
   return seq;
 }
 
-// Finds a maximal-length feedback tap set for degree N by trying sparse
-// candidates first (trinomial-style: taps = [N, k]), then falling back to
-// denser 4-tap and 6-tap searches. Primitive polynomials of every degree
-// exist, and in practice a match — usually a trinomial — turns up quickly.
-function findMaximalSequence(N: number): { taps: number[]; seq: Uint8Array } {
-  for (let k = 1; k < N; k++) {
-    const seq = tryTaps([N, k], N);
-    if (seq) return { taps: [N, k], seq };
+// Deterministic PRNG (mulberry32) so a given order always produces the same
+// pattern rather than a different one each run.
+function mulberry32(seed: number): () => number {
+  let a = seed;
+  return () => {
+    a |= 0; a = (a + 0x6D2B79F5) | 0;
+    let t = Math.imul(a ^ (a >>> 15), 1 | a);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+// Picks `weight` tap positions from 1..N-1, one drawn from each of `weight`
+// equal-width bins spanning the register — this directly forces the taps to
+// be spread out rather than clustered near one end, which is what caused
+// visible short-range correlation (diagonal texture) with the earlier
+// clustered 4-tap search. Sparse *or* clustered feedback polynomials are a
+// known source of visually-detectable structure in LFSR sequences; spreading
+// the taps out is the standard fix and doesn't affect the maximal-length
+// property (that depends only on primitivity, verified below regardless).
+function stratifiedTaps(N: number, weight: number, rng: () => number): number[] {
+  const taps = new Set<number>();
+  for (let i = 0; i < weight; i++) {
+    const lo = 1 + Math.floor((i * (N - 1)) / weight);
+    const hi = 1 + Math.floor(((i + 1) * (N - 1)) / weight) - 1;
+    taps.add(Math.min(lo + Math.floor(rng() * (hi - lo + 1)), N - 1));
   }
-  for (let a = 1; a < N; a++)
-    for (let b = a + 1; b < N; b++)
-      for (let c = b + 1; c < N; c++) {
-        const seq = tryTaps([N, a, b, c], N);
-        if (seq) return { taps: [N, a, b, c], seq };
-      }
-  for (let a = 1; a < N; a++)
-    for (let b = a + 1; b < N; b++)
-      for (let c = b + 1; c < N; c++)
-        for (let d = c + 1; d < N; d++)
-          for (let e = d + 1; e < N; e++) {
-            const seq = tryTaps([N, a, b, c, d, e], N);
-            if (seq) return { taps: [N, a, b, c, d, e], seq };
-          }
+  return [N, ...taps];
+}
+
+// Finds a maximal-length feedback tap set for degree N. Searches spread-out,
+// moderately dense candidates (via stratified random sampling) rather than
+// the sparsest possible polynomial, since primitive polynomials aren't rare
+// (roughly a 1/N fraction of candidates) and denser, well-spread taps give a
+// less structured, more visually uncorrelated sequence — with no cost to the
+// uniqueness guarantee (still checked exhaustively) or to how the pattern
+// will eventually be looked up (position recovery uses a lookup table or a
+// discrete-log solve, both of which work the same regardless of tap weight).
+function findMaximalSequence(N: number): { taps: number[]; seq: Uint8Array } {
+  const rng = mulberry32(N * 2654435761);
+  const weight = Math.min(Math.max(6, Math.round(N / 3)), N - 1);
+  const maxAttempts = 5000;
+  for (let i = 0; i < maxAttempts; i++) {
+    const taps = stratifiedTaps(N, weight, rng);
+    const seq = tryTaps(taps, N);
+    if (seq) return { taps, seq };
+  }
   throw new Error(`Could not find a maximal-length LFSR for degree ${N} within search budget.`);
 }
 

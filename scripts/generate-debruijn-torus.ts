@@ -23,14 +23,18 @@
 //      where that's tractable) instead of just trusting the theorem.
 //
 // Usage:
-//   node scripts/generate-debruijn-torus.ts --order 4 --side 2048 --out torus.png
+//   node scripts/generate-debruijn-torus.ts --order 4 --cell-size 8 --out torus.png
 //
-//   --order  Window order n (window is n x n cells). Determines how many
-//            cells the camera must see to uniquely determine its position.
-//            Order 5 alone is a 25-bit torus, ~33.5M cells, already a lot to
-//            print, so in practice order 3 or 4 is the realistic range.
-//   --side   Output PNG width & height in pixels (square image).
-//   --out    Output file path (default: debruijn-torus-order<n>.png).
+//   --order      Window order n (window is n x n cells). Determines how many
+//                cells the camera must see to uniquely determine its position.
+//                Order 5 alone is a 25-bit torus, ~33.5M cells, already a lot
+//                to print, so in practice order 3 or 4 is the realistic range.
+//   --cell-size  Pixels per cell edge, uniform in both dimensions (default 8).
+//                The output image is exactly (C * cell-size) x (R * cell-size)
+//                px — no stretching to force a square canvas, so a torus whose
+//                R x C grid isn't square (2^N-1 doesn't always factor nicely)
+//                shows up as a genuinely non-square image.
+//   --out        Output file path (default: debruijn-torus-order<n>.png).
 
 import { PNG } from 'pngjs';
 import { createWriteStream } from 'node:fs';

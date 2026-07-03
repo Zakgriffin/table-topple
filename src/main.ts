@@ -12,7 +12,7 @@ status.textContent = `Building order-${ORDER} torus + lookup table...`;
 
 const debruijn = generateTorus(ORDER);
 const lookup = buildLookupTable(debruijn);
-const { R, C, N } = debruijn;
+const { R, C } = debruijn;
 console.log(`Torus ready: ${R}x${C} cells, order ${ORDER}, ${lookup.length} lookup entries.`);
 
 // ── Camera ────────────────────────────────────────────────────────────────────

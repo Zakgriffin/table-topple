@@ -1,5 +1,5 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
-import { detectGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad } from './decode.ts';
+import { detectGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual } from './decode.ts';
 import type { Patch } from './decode.ts';
 
 // ── Pattern setup ─────────────────────────────────────────────────────────────

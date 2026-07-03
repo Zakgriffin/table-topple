@@ -23,8 +23,37 @@ const video = document.createElement('video');
 video.setAttribute('playsinline', '');
 
 const switchCamBtn = document.getElementById('switchCam') as HTMLButtonElement;
+const zoomSlider = document.getElementById('zoom') as HTMLInputElement;
 let currentStream: MediaStream | null = null;
 let currentFacing = 'environment';
+
+// Hardware zoom is a non-standard MediaTrackCapabilities extension (missing
+// from TS's DOM lib types, hence the `any`s) with patchy real-world support —
+// mainly some Android Chrome + camera hardware combos. No software fallback:
+// if the device doesn't report a zoom capability, the slider stays disabled
+// and red so that's visibly true rather than silently doing something else.
+function setupZoomControl() {
+  const track = currentStream?.getVideoTracks()[0];
+  let caps: any = null;
+  try { caps = track && 'getCapabilities' in track ? (track as any).getCapabilities() : null; }
+  catch { caps = null; }
+
+  if (caps && caps.zoom) {
+    zoomSlider.disabled = false;
+    zoomSlider.min = String(caps.zoom.min);
+    zoomSlider.max = String(caps.zoom.max);
+    zoomSlider.step = String(caps.zoom.step || 0.1);
+    const settings: any = track!.getSettings();
+    zoomSlider.value = String(settings.zoom ?? caps.zoom.min);
+  } else {
+    zoomSlider.disabled = true;
+  }
+}
+
+zoomSlider.addEventListener('input', () => {
+  const track = currentStream?.getVideoTracks()[0];
+  track?.applyConstraints({ advanced: [{ zoom: parseFloat(zoomSlider.value) } as any] }).catch(() => {});
+});
 
 async function startCamera(desiredFacing: string) {
   const newStream = await navigator.mediaDevices.getUserMedia({
@@ -37,6 +66,7 @@ async function startCamera(desiredFacing: string) {
   const settings = currentStream.getVideoTracks()[0].getSettings();
   currentFacing = settings.facingMode || 'user';
   canvas.classList.toggle('mirror', currentFacing === 'user');
+  setupZoomControl();
 }
 
 switchCamBtn.addEventListener('click', async () => {

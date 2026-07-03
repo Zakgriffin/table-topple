@@ -1,5 +1,5 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
-import { detectLocalGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual } from './decode.ts';
+import { detectLocalGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual, buildBoundaries } from './decode.ts';
 import type { LocalGridDetection } from './decode.ts';
 import type { Patch } from './decode.ts';
 

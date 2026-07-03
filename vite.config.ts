@@ -7,7 +7,4 @@ import basicSsl from '@vitejs/plugin-basic-ssl';
 // certificate warning in the phone's browser.
 export default defineConfig({
   plugins: [basicSsl()],
-  server: {
-    https: true,
-  },
 });

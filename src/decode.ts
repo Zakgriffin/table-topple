@@ -28,14 +28,20 @@
 //      derotation angle shifts tile boundaries too, not just content, so
 //      reading-orientation and derotation-angle ambiguity must both be
 //      resolved together).
-//   6. Pick whichever of the 4 angle candidates gives the most *mutually
-//      consistent* patches (adjacent tiles decoding to nearby torus
-//      positions — see scoreConsistency and pickBestCandidate). This
-//      matters because with only 16 bits of key space at order 4, 65535 of
-//      65536 possible windows are valid, so a single patch finding "a"
-//      match is very weak evidence; only cross-patch agreement reliably
-//      distinguishes a correct decode from noise that happened to hash to
-//      some valid-but-wrong position.
+//   6. Each patch's exact-match lookup gives a candidate SEED anchor
+//      position — fast, narrows the search from "every torus position" to a
+//      handful, but weak evidence on its own: with only 16 bits of key
+//      space at order 4, 65535 of 65536 possible windows are valid, so a
+//      single patch finding "a" match doesn't mean much. pickBestCandidate
+//      scores every distinct seed by CORRELATING the entire sampled grid
+//      (not just one patch) against the actual known pattern at the
+//      position that seed implies (see scoreCorrelation), and keeps
+//      whichever seed — and whichever of the 4 angle candidates — scores
+//      highest. This tolerates individual misread bits gracefully (a
+//      genuinely correct anchor stays close to 1.0 even with some noise)
+//      while a wrong anchor sits close to 0.5 (uncorrelated with a random
+//      binary pattern) — a much better-separated signal than checking
+//      patches only agree with each other.
 
 export interface GridDetection {
   px: number; py: number; // phase (px offset of first cell boundary)

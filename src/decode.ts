@@ -258,20 +258,52 @@ export interface SampledGrid {
   originRow: number; originCol: number;
 }
 
-export function sampleFullGrid(bin: Uint8Array, w: number, h: number, grid: GridDetection): SampledGrid {
+// Walks outward from `anchor` in both directions, accumulating cell
+// boundary positions using a LOCALLY-interpolated pitch at each step
+// (basePitch + grad * distance-from-anchor) rather than a constant pitch —
+// this is how gradPitchX/Y (see detectLocalGrid) actually get applied. With
+// grad = 0 this reduces to exactly basePitch per step, i.e. identical
+// boundaries to the old constant-pitch formula (anchor + basePitch*k).
+function buildBoundaries(anchor: number, basePitch: number, grad: number, minPos: number, maxPos: number): { boundaries: number[]; anchorIndex: number } {
+  const localPitch = (pos: number) => Math.max(1, basePitch + grad * (pos - anchor));
+  const right: number[] = [anchor];
+  let x = anchor;
+  while (x < maxPos) { x += localPitch(x); right.push(x); }
+  const left: number[] = [];
+  x = anchor;
+  while (x > minPos) { x -= localPitch(x); left.unshift(x); }
+  return { boundaries: [...left, ...right], anchorIndex: left.length };
+}
+
+// Samples every fully-visible cell in the (assumed axis-aligned, but
+// possibly locally-varying-pitch — see detectLocalGrid) buffer into a 2D
+// grid, cells[row][col], row 0 = top. Extends in BOTH directions from
+// (px, py) — not just rightward/downward — since detectGrid re-anchors
+// (px, py) near the buffer's center rather than near index 0. originRow/
+// originCol give the array index of the cell whose top-left corner sits at
+// exactly (px, py), for callers that need to map back to pixel positions
+// (e.g. drawing overlay lines) without recomputing the anchor themselves.
+export interface SampledGrid {
+  rows: number; cols: number; cells: SampledCell[][];
+  originRow: number; originCol: number;
+}
+
+export function sampleFullGrid(bin: Uint8Array, w: number, h: number, grid: GridDetection, gradients?: { gradPitchX: number; gradPitchY: number }): SampledGrid {
   const { px, py, pitchX, pitchY } = grid;
-  const colsLeft = Math.floor(px / pitchX), colsRight = Math.floor((w - px) / pitchX);
-  const rowsUp = Math.floor(py / pitchY), rowsDown = Math.floor((h - py) / pitchY);
-  const cols = colsLeft + colsRight, rows = rowsUp + rowsDown;
-  const bx = Math.max(2, Math.floor(pitchX * 0.2));
-  const by = Math.max(2, Math.floor(pitchY * 0.2));
+  const { gradPitchX, gradPitchY } = gradients ?? { gradPitchX: 0, gradPitchY: 0 };
+
+  const { boundaries: xB, anchorIndex: colsLeft } = buildBoundaries(px, pitchX, gradPitchX, 0, w);
+  const { boundaries: yB, anchorIndex: rowsUp } = buildBoundaries(py, pitchY, gradPitchY, 0, h);
+  const cols = xB.length - 1, rows = yB.length - 1;
 
   const cells: SampledCell[][] = [];
   for (let i = 0; i < rows; i++) {
-    const cy = py + pitchY * (i - rowsUp + 0.5);
+    const cy = (yB[i] + yB[i + 1]) / 2;
+    const by = Math.max(2, Math.floor((yB[i + 1] - yB[i]) * 0.2));
     const rowCells: SampledCell[] = [];
     for (let j = 0; j < cols; j++) {
-      const cx = px + pitchX * (j - colsLeft + 0.5);
+      const cx = (xB[j] + xB[j + 1]) / 2;
+      const bx = Math.max(2, Math.floor((xB[j + 1] - xB[j]) * 0.2));
       let sum = 0, count = 0;
       for (let dy = -by; dy <= by; dy++) {
         const yy = Math.round(cy + dy);

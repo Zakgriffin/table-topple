@@ -252,7 +252,7 @@ export interface SampledCell { x: number; y: number; bit: number; }
 // this is how gradPitchX/Y (see detectLocalGrid) actually get applied. With
 // grad = 0 this reduces to exactly basePitch per step, i.e. identical
 // boundaries to the old constant-pitch formula (anchor + basePitch*k).
-function buildBoundaries(anchor: number, basePitch: number, grad: number, minPos: number, maxPos: number): { boundaries: number[]; anchorIndex: number } {
+export function buildBoundaries(anchor: number, basePitch: number, grad: number, minPos: number, maxPos: number): { boundaries: number[]; anchorIndex: number } {
   const localPitch = (pos: number) => Math.max(1, basePitch + grad * (pos - anchor));
   const right: number[] = [anchor];
   let x = anchor;

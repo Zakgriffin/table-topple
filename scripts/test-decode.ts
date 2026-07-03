@@ -58,9 +58,9 @@ function cropAt(testRow: number, testCol: number): Uint8ClampedArray {
 function decode(rgba: Uint8ClampedArray): { row: number; col: number } | null {
   const bin = binarizeRGBA(rgba, CROP, CROP);
   const grid = detectGrid(bin, CROP, CROP);
-  const key = sampleWindow(bin, CROP, CROP, grid, order);
-  if (key === null) return null;
-  const packed = lookup[key];
+  const sampled = sampleWindow(bin, CROP, CROP, grid, order);
+  if (sampled === null) return null;
+  const packed = lookup[sampled.key];
   if (packed === -1) return null;
   return { row: Math.floor(packed / C), col: packed % C };
 }

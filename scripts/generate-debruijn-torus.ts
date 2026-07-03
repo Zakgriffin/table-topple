@@ -181,17 +181,8 @@ async function main() {
   const N = order * order;
   console.log(`Order n=${order} -> window is ${order}x${order} cells, N=${N} bits, period L=2^${N}-1=${2 ** N - 1}`);
 
-  const seq = generateMSequence(N);
-
-  const SEQ_CHECK_LIMIT = 2 ** 26; // ~64M, keeps the visited array under ~64MB
-  if (seq.length <= SEQ_CHECK_LIMIT) {
-    if (!verifyMSequence(seq, N)) {
-      throw new Error(`LFSR for order ${order} (N=${N}) is not maximal-length — the tap table entry is wrong. Aborting rather than emit a broken pattern.`);
-    }
-    console.log('m-sequence verified maximal-length (all nonzero N-bit windows distinct).');
-  } else {
-    console.log('m-sequence too large to verify exhaustively — skipping (order is likely impractically large anyway).');
-  }
+  const { taps, seq } = findMaximalSequence(N);
+  console.log(`Found maximal-length feedback taps ${JSON.stringify(taps)} — sequence verified full-period (${seq.length} distinct nonzero states) as a byproduct of the search.`);
 
   const { R, C } = bestCoprimeSplit(seq.length);
   const aspect = Math.max(R, C) / Math.min(R, C);

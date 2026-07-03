@@ -158,3 +158,53 @@ for (let t = 0; t < trials; t++) {
 }
 console.log(`\nWith CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD}: ${gatedHits}/${trials} correct, ${gatedMisses} no-lock, ${gatedWrong} wrong.`);
 if (gatedWrong > 0) { console.error('FAIL: threshold did not eliminate wrong decodes.'); process.exit(1); }
+
+// Third pass: the actual point of correlation-based decode — every previous
+// trial was either bit-perfect-correct or totally-wrong, never PARTIALLY
+// corrupted, so none of them actually exercised graceful degradation. This
+// injects random bit flips directly into the sampled grid (simulating real
+// misreads from lighting/blur/etc, downstream of the pixel pipeline) and
+// checks that decoding still succeeds, and that the confidence score
+// degrades roughly with the noise rate rather than falling off a cliff.
+function decodeSampledGrids(sampledGrids: SampledGrid[]) {
+  return pickBestCandidate(sampledGrids, order, lookup, debruijn.torus, R, C);
+}
+
+function buildSampledGrids(rgba: Uint8ClampedArray): SampledGrid[] {
+  const rawGray = toGrayscale(rgba, RAW, RAW);
+  const thetaCoarse = estimateRotationRad(rawGray, RAW, RAW);
+  const previewGray = derotate(rawGray, thetaCoarse);
+  const residual = asSignedResidual(estimateRotationRad(previewGray, ALIGNED, ALIGNED));
+  const theta0 = thetaCoarse + residual;
+  return [0, 1, 2, 3].map(k => {
+    const theta = theta0 + k * (Math.PI / 2);
+    const alignedBin = binarize(derotate(rawGray, theta));
+    const grid = detectGrid(alignedBin, ALIGNED, ALIGNED);
+    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid);
+  });
+}
+
+function injectNoise(sampledGrids: SampledGrid[], rate: number): SampledGrid[] {
+  return sampledGrids.map(sg => ({
+    ...sg,
+    cells: sg.cells.map(row => row.map(cell => Math.random() < rate ? { ...cell, bit: 1 - cell.bit } : cell)),
+  }));
+}
+
+console.log('\nBit-noise tolerance (injected directly into the sampled grid):');
+for (const noiseRate of [0, 0.02, 0.05, 0.1, 0.15, 0.2]) {
+  let nHits = 0, nMisses = 0, nWrong = 0;
+  const scores: number[] = [];
+  for (let t = 0; t < 100; t++) {
+    const testRow = Math.floor(Math.random() * R);
+    const testCol = Math.floor(Math.random() * C);
+    const rgba = cropAtRotated(testRow, testCol, 20 * Math.PI / 180);
+    const sampledGrids = injectNoise(buildSampledGrids(rgba), noiseRate);
+    const { match, consistency } = decodeSampledGrids(sampledGrids);
+    if (!match || consistency < CONFIDENCE_THRESHOLD) { nMisses++; continue; }
+    scores.push(consistency);
+    if (within(testRow, match.row, order, R) && within(testCol, match.col, order, C)) nHits++;
+    else nWrong++;
+  }
+  console.log(`  ${(noiseRate * 100).toFixed(0)}% bit noise: ${nHits}/100 correct, ${nMisses} no-lock, ${nWrong} wrong, avg score ${stats(scores)}`);
+}

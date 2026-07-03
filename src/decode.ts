@@ -204,16 +204,45 @@ export interface Patch {
 export interface PatchDecodeResult {
   patches: Patch[];
   orientation: number | null; // resolved 0/90/180/270 reading orientation, shared across all patches this frame
+  consistency: number; // fraction of adjacent-tile pairs whose decoded positions agree, 0..1
+}
+
+// Scores how self-consistent a set of decoded patches is: for each pair of
+// tiles that are adjacent in the tile grid (share an edge), their decoded
+// torus positions should be close together (within a couple of cells) if the
+// decode is genuinely correct. With only 16 bits of key space (order 4),
+// 65535 of 65536 possible windows are valid, so a single patch's "found a
+// match" is very weak evidence on its own — cross-checking neighbors against
+// each other is what actually distinguishes a correct decode from noise that
+// happened to hash to *some* valid-but-wrong position.
+function scoreConsistency(patches: Patch[], order: number, R: number, C: number): number {
+  const byTile = new Map<string, Patch>();
+  for (const p of patches) byTile.set(`${p.tileRow},${p.tileCol}`, p);
+  const wrapDist = (a: number, b: number, mod: number) => Math.min(Math.abs(a - b), mod - Math.abs(a - b));
+
+  let agree = 0, total = 0;
+  for (const p of patches) {
+    if (!p.match) continue;
+    for (const [dI, dJ] of [[1, 0], [0, 1]] as const) {
+      const neighbor = byTile.get(`${p.tileRow + dI},${p.tileCol + dJ}`);
+      if (!neighbor || !neighbor.match) continue;
+      total++;
+      const dr = wrapDist(p.match.row, neighbor.match.row, R);
+      const dc = wrapDist(p.match.col, neighbor.match.col, C);
+      if (dr <= order * 2 && dc <= order * 2) agree++;
+    }
+  }
+  return total > 0 ? agree / total : 0;
 }
 
 // Tiles the sampled grid into discrete, non-overlapping order x order
-// patches. The gradient-histogram rotation estimate only pins down the grid
-// angle modulo 90 degrees, so this resolves the remaining 4-fold reading
-// ambiguity by trying patches (and all 4 orientations per patch) until one
-// produces a valid lookup hit — false positives across unrelated windows
-// should be astronomically unlikely given the uniqueness guarantee — then
-// reuses that same orientation for every other patch in the frame.
-export function decodePatches(sg: SampledGrid, order: number, lookup: Int32Array, C: number): PatchDecodeResult {
+// patches, resolves the shared 0/90/180/270 reading-orientation ambiguity
+// (the gradient-histogram rotation estimate only pins down the grid angle
+// modulo 90 degrees) by trying every orientation and picking whichever gives
+// the most self-consistent set of decoded patches (see scoreConsistency —
+// picking the first orientation with any valid hit is NOT reliable here,
+// since almost any noise hashes to *some* valid window).
+export function decodePatches(sg: SampledGrid, order: number, lookup: Int32Array, R: number, C: number): PatchDecodeResult {
   const tileRows = Math.floor(sg.rows / order);
   const tileCols = Math.floor(sg.cols / order);
 
@@ -226,24 +255,33 @@ export function decodePatches(sg: SampledGrid, order: number, lookup: Int32Array
     }
   }
 
-  let orientation: number | null = null;
-  outer:
-  for (const tile of tiles) {
-    for (let o = 0; o < 4; o++) {
-      if (lookup[packPatchCells(tile.cells, order, o)] !== -1) { orientation = o; break outer; }
-    }
+  let best: PatchDecodeResult = { patches: [], orientation: null, consistency: -1 };
+  for (let o = 0; o < 4; o++) {
+    const patches: Patch[] = tiles.map(tile => {
+      const packed = lookup[packPatchCells(tile.cells, order, o)];
+      const match = packed === -1 ? null : { row: Math.floor(packed / C), col: packed % C };
+      return { tileRow: tile.tileRow, tileCol: tile.tileCol, cells: tile.cells, match };
+    });
+    const consistency = scoreConsistency(patches, order, R, C);
+    if (consistency > best.consistency) best = { patches, orientation: o, consistency };
   }
+  return best;
+}
 
-  const patches: Patch[] = tiles.map(tile => {
-    let match: { row: number; col: number } | null = null;
-    if (orientation !== null) {
-      const packed = lookup[packPatchCells(tile.cells, order, orientation)];
-      if (packed !== -1) match = { row: Math.floor(packed / C), col: packed % C };
-    }
-    return { tileRow: tile.tileRow, tileCol: tile.tileCol, cells: tile.cells, match };
-  });
+// Runs decodePatches across several rotation candidates (typically the
+// gradient-histogram estimate plus 90/180/270-degree offsets of it — see
+// this module's header comment for why the full angle isn't pinned down by
+// edge orientation alone) and returns whichever candidate scores the most
+// self-consistent set of patches.
+export interface CandidateResult extends PatchDecodeResult { candidateIndex: number; }
 
-  return { patches, orientation };
+export function pickBestCandidate(sampledGrids: SampledGrid[], order: number, lookup: Int32Array, R: number, C: number): CandidateResult {
+  let best: CandidateResult | null = null;
+  for (let i = 0; i < sampledGrids.length; i++) {
+    const result = decodePatches(sampledGrids[i], order, lookup, R, C);
+    if (!best || result.consistency > best.consistency) best = { ...result, candidateIndex: i };
+  }
+  return best!;
 }
 
 export function toGrayscale(rgba: Uint8ClampedArray | Uint8Array, w: number, h: number): Float64Array {

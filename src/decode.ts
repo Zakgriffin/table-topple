@@ -149,6 +149,19 @@ export function estimateRotationRad(gray: Float64Array, w: number, h: number): n
   return theta; // [0, PI/2)
 }
 
+// Reinterprets an estimateRotationRad() result as a signed correction near 0
+// rather than an unsigned angle in [0, PI/2) — for refining a buffer that's
+// already nearly aligned, where the true residual is expected to be small
+// but wraps to near PI/2 if it was actually a small negative correction.
+// Lets a caller derotate once with a coarse estimate, then call
+// estimateRotationRad again on that mostly-aligned result to correct
+// residual error (which grows with distance from the rotation pivot, so it
+// matters more the larger the capture region is) — reusing the same
+// estimator rather than adding a second one.
+export function asSignedResidual(angle: number): number {
+  return angle > Math.PI / 4 ? angle - Math.PI / 2 : angle;
+}
+
 export interface SampledCell { x: number; y: number; bit: number; }
 
 // Samples every fully-visible cell in the (assumed axis-aligned) buffer into

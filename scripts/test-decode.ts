@@ -120,7 +120,8 @@ for (let t = 0; t < trials; t++) {
   const rgba = cropAtRotated(testRow, testCol, phiDeg * Math.PI / 180);
   const { anyMatch, matches, consistency } = decode(rgba);
 
-  if (!anyMatch) { misses++; console.log(`MISS at true (${testRow},${testCol}) angle ${phiDeg}deg — no patch matched`); continue; }
+  const CONFIDENCE_THRESHOLD = 0.5;
+  if (!anyMatch || consistency < CONFIDENCE_THRESHOLD) { misses++; continue; }
 
   const anyCorrect = matches.some(m => within(testRow, m.row, order, R) && within(testCol, m.col, order, C));
   if (anyCorrect) hits++;

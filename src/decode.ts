@@ -196,22 +196,31 @@ export function asSignedResidual(angle: number): number {
 export interface SampledCell { x: number; y: number; bit: number; }
 
 // Samples every fully-visible cell in the (assumed axis-aligned) buffer into
-// a 2D grid, cells[row][col], row 0 = top.
-export interface SampledGrid { rows: number; cols: number; cells: SampledCell[][]; }
+// a 2D grid, cells[row][col], row 0 = top. Extends in BOTH directions from
+// (px, py) — not just rightward/downward — since detectGrid now re-anchors
+// (px, py) near the buffer's center rather than near index 0. originRow/
+// originCol give the array index of the cell whose top-left corner sits at
+// exactly (px, py), for callers that need to map back to pixel positions
+// (e.g. drawing overlay lines) without recomputing the anchor themselves.
+export interface SampledGrid {
+  rows: number; cols: number; cells: SampledCell[][];
+  originRow: number; originCol: number;
+}
 
 export function sampleFullGrid(bin: Uint8Array, w: number, h: number, grid: GridDetection): SampledGrid {
   const { px, py, pitchX, pitchY } = grid;
-  const cols = Math.floor((w - px) / pitchX);
-  const rows = Math.floor((h - py) / pitchY);
+  const colsLeft = Math.floor(px / pitchX), colsRight = Math.floor((w - px) / pitchX);
+  const rowsUp = Math.floor(py / pitchY), rowsDown = Math.floor((h - py) / pitchY);
+  const cols = colsLeft + colsRight, rows = rowsUp + rowsDown;
   const bx = Math.max(2, Math.floor(pitchX * 0.2));
   const by = Math.max(2, Math.floor(pitchY * 0.2));
 
   const cells: SampledCell[][] = [];
   for (let i = 0; i < rows; i++) {
-    const cy = py + pitchY * (i + 0.5);
+    const cy = py + pitchY * (i - rowsUp + 0.5);
     const rowCells: SampledCell[] = [];
     for (let j = 0; j < cols; j++) {
-      const cx = px + pitchX * (j + 0.5);
+      const cx = px + pitchX * (j - colsLeft + 0.5);
       let sum = 0, count = 0;
       for (let dy = -by; dy <= by; dy++) {
         const yy = Math.round(cy + dy);
@@ -227,7 +236,7 @@ export function sampleFullGrid(bin: Uint8Array, w: number, h: number, grid: Grid
     }
     cells.push(rowCells);
   }
-  return { rows, cols, cells };
+  return { rows, cols, cells, originRow: rowsUp, originCol: colsLeft };
 }
 
 // Packs an order x order cell block into a lookup key, reading it under one

@@ -23,9 +23,10 @@
 //
 //   --order  Window order n (window is n x n cells). Determines how many
 //            cells the camera must see to uniquely determine its position.
-//            Supported: 2-9 (bounded by the primitive-polynomial table below
-//            and by what's practically printable — order 9 alone is an
-//            81-bit torus, i.e. ~2.4e24 cells, so in practice stick to 3-6).
+//            Supported: 2-5, bounded by the primitive-polynomial table below
+//            (needs an entry for N = order^2, table goes up to degree 32) —
+//            order 5 alone is a 25-bit torus, ~33.5M cells, already a lot to
+//            print, so in practice order 3 or 4 is the realistic range.
 //   --side   Output PNG width & height in pixels (square image).
 //   --out    Output file path (default: debruijn-torus-order<n>.png).
 

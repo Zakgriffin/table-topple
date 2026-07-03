@@ -85,19 +85,24 @@ function derotate(gray: Float64Array, theta: number): Float64Array {
   return out;
 }
 
-function decode(rgba: Uint8ClampedArray): { anyMatch: boolean; matches: { row: number; col: number }[] } {
+// Edge orientation alone only pins the grid angle down modulo 90 degrees, so
+// this derotates at all 4 candidate full angles and lets pickBestCandidate
+// decide which one actually produces self-consistent patches.
+function decode(rgba: Uint8ClampedArray): { anyMatch: boolean; matches: { row: number; col: number }[]; consistency: number } {
   const rawGray = toGrayscale(rgba, RAW, RAW);
-  const theta = estimateRotationRad(rawGray, RAW, RAW);
+  const theta0 = estimateRotationRad(rawGray, RAW, RAW);
 
-  const alignedGray = derotate(rawGray, theta);
-  const alignedBin = binarize(alignedGray);
+  const sampledGrids = [0, 1, 2, 3].map(k => {
+    const theta = theta0 + k * (Math.PI / 2);
+    const alignedGray = derotate(rawGray, theta);
+    const alignedBin = binarize(alignedGray);
+    const grid = detectGrid(alignedBin, ALIGNED, ALIGNED);
+    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid);
+  });
 
-  const grid = detectGrid(alignedBin, ALIGNED, ALIGNED);
-  const sg = sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid);
-  const { patches } = decodePatches(sg, order, lookup, C);
-
+  const { patches, consistency } = pickBestCandidate(sampledGrids, order, lookup, R, C);
   const matches = patches.map(p => p.match).filter((m): m is { row: number; col: number } => m !== null);
-  return { anyMatch: matches.length > 0, matches };
+  return { anyMatch: matches.length > 0, matches, consistency };
 }
 
 function within(target: number, start: number, span: number, mod: number): boolean {

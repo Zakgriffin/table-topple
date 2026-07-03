@@ -32,19 +32,37 @@ let currentFacing = 'environment';
 // mainly some Android Chrome + camera hardware combos. No software fallback:
 // if the device doesn't report a zoom capability, the slider stays disabled
 // and red so that's visibly true rather than silently doing something else.
+//
+// Zoom is a multiplicative factor (2x, 4x, 8x, ...), so a slider mapped
+// linearly to it "feels" wrong: equal slider movement near the low end
+// (1x -> 2x) is a much bigger visual change than the same movement near the
+// high end (7x -> 8x). The slider's own position stays linear (0..1); we map
+// that position to the zoom value geometrically (zoomMin * (zoomMax/zoomMin)^t)
+// so equal slider steps feel like equal visual zoom changes throughout.
+let zoomMin = 1, zoomMax = 1;
+
+function sliderToZoom(t: number): number {
+  return zoomMin * Math.pow(zoomMax / zoomMin, t);
+}
+function zoomToSlider(z: number): number {
+  return Math.log(z / zoomMin) / Math.log(zoomMax / zoomMin);
+}
+
 function setupZoomControl() {
   const track = currentStream?.getVideoTracks()[0];
   let caps: any = null;
   try { caps = track && 'getCapabilities' in track ? (track as any).getCapabilities() : null; }
   catch { caps = null; }
 
-  if (caps && caps.zoom) {
+  if (caps && caps.zoom && caps.zoom.min > 0 && caps.zoom.max > caps.zoom.min) {
     zoomSlider.disabled = false;
-    zoomSlider.min = String(caps.zoom.min);
-    zoomSlider.max = String(caps.zoom.max);
-    zoomSlider.step = String(caps.zoom.step || 0.1);
+    zoomMin = caps.zoom.min;
+    zoomMax = caps.zoom.max;
+    zoomSlider.min = '0';
+    zoomSlider.max = '1';
+    zoomSlider.step = '0.001';
     const settings: any = track!.getSettings();
-    zoomSlider.value = String(settings.zoom ?? caps.zoom.min);
+    zoomSlider.value = String(zoomToSlider(settings.zoom ?? zoomMin));
   } else {
     zoomSlider.disabled = true;
   }
@@ -52,7 +70,8 @@ function setupZoomControl() {
 
 zoomSlider.addEventListener('input', () => {
   const track = currentStream?.getVideoTracks()[0];
-  track?.applyConstraints({ advanced: [{ zoom: parseFloat(zoomSlider.value) } as any] }).catch(() => {});
+  const zoom = sliderToZoom(parseFloat(zoomSlider.value));
+  track?.applyConstraints({ advanced: [{ zoom } as any] }).catch(() => {});
 });
 
 async function startCamera(desiredFacing: string) {

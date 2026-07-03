@@ -3,7 +3,8 @@
     "version": "1.0.0",
     "type": "module",
     "scripts": {
-        "dev": "vite --host"
+        "dev": "vite --host",
+        "generate:torus": "node scripts/generate-debruijn-torus.ts"
     },
     "devDependencies": {
         "vite": "^8.0.14"

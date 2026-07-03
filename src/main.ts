@@ -297,7 +297,11 @@ function render() {
           ctx.fillStyle = cell.bit ? '#000' : '#fff';
           ctx.fill();
           ctx.lineWidth = Math.max(1, dotRadius * 0.3);
-          ctx.strokeStyle = patch.match ? '#0f0' : '#f00';
+          // Per-cell ground truth when available (does THIS cell match the
+          // actual pattern, not just "did the patch find a match") — falls
+          // back to the coarser patch-level match when no anchor was found
+          // to compare against at all (see Patch.correct in decode.ts).
+          ctx.strokeStyle = patch.correct ? (patch.correct[i][j] ? '#0f0' : '#f00') : (patch.match ? '#0f0' : '#f00');
           ctx.stroke();
         }
       }

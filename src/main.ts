@@ -239,17 +239,21 @@ function render() {
 
     // Blue lines for the estimated grid edges (both line families), so you
     // can visually check the detected grid against the real one on screen.
+    // px/py are anchored near the buffer CENTER (see detectGrid), so lines
+    // must extend in both directions from them — mirrors the colsLeft/
+    // colsRight/rowsUp/rowsDown range sampleFullGrid computes internally,
+    // so the drawn lines cover exactly the region actually being sampled.
     const { px, py, pitchX, pitchY } = result.grid;
     ctx.strokeStyle = 'rgba(60,140,255,0.8)';
     ctx.lineWidth = Math.max(1, result.rawScale * 1.2);
-    const numCellsX = Math.floor((result.alignedW - px) / pitchX);
-    const numCellsY = Math.floor((result.alignedH - py) / pitchY);
-    for (let k = 0; k <= numCellsX; k++) {
+    const colsLeft = Math.floor(px / pitchX), colsRight = Math.floor((result.alignedW - px) / pitchX);
+    const rowsUp = Math.floor(py / pitchY), rowsDown = Math.floor((result.alignedH - py) / pitchY);
+    for (let k = -colsLeft; k <= colsRight; k++) {
       const x = px + k * pitchX;
       const a = toVideo(x, 0), b = toVideo(x, result.alignedH);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
-    for (let k = 0; k <= numCellsY; k++) {
+    for (let k = -rowsUp; k <= rowsDown; k++) {
       const y = py + k * pitchY;
       const a = toVideo(0, y), b = toVideo(result.alignedW, y);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();

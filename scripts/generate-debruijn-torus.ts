@@ -112,16 +112,36 @@ function stratifiedTaps(N: number, weight: number, rng: () => number): number[] 
 // uniqueness guarantee (still checked exhaustively) or to how the pattern
 // will eventually be looked up (position recovery uses a lookup table or a
 // discrete-log solve, both of which work the same regardless of tap weight).
+//
+// Tap-count parity matters: empirically (verified for N=16: array lengths of
+// 4, 6, 8 all found primitive candidates; 5 and 7 never did in thousands of
+// tries), the taps array — which always includes N itself as one entry —
+// must have EVEN total length for a candidate to have any chance of being
+// primitive. So the extra-tap count (beyond N) must be odd.
+//
+// If the preferred (denser) weight tier doesn't turn up a hit within its
+// attempt budget, this falls back to progressively sparser odd weights, down
+// to weight 1 (an [N, k] trinomial-style search, exhaustive over all k) as a
+// last resort — guaranteeing termination even for small or awkward N.
 function findMaximalSequence(N: number): { taps: number[]; seq: Uint8Array } {
-  const rng = mulberry32(N * 2654435761);
-  const weight = Math.min(Math.max(6, Math.round(N / 3)), N - 1);
-  const maxAttempts = 5000;
-  for (let i = 0; i < maxAttempts; i++) {
-    const taps = stratifiedTaps(N, weight, rng);
-    const seq = tryTaps(taps, N);
-    if (seq) return { taps, seq };
+  const preferredWeight = Math.min(Math.max(5, Math.round(N / 3) | 1), N % 2 === 0 ? N - 1 : N - 2);
+  for (let weight = preferredWeight; weight >= 1; weight -= 2) {
+    if (weight === 1) {
+      for (let k = 1; k < N; k++) {
+        const seq = tryTaps([N, k], N);
+        if (seq) return { taps: [N, k], seq };
+      }
+      continue;
+    }
+    const rng = mulberry32(((N * 2654435761) ^ weight) >>> 0);
+    for (let i = 0; i < 2000; i++) {
+      const taps = stratifiedTaps(N, weight, rng);
+      if (taps.length !== weight + 1) continue; // stratification collision broke exact parity — skip
+      const seq = tryTaps(taps, N);
+      if (seq) return { taps, seq };
+    }
   }
-  throw new Error(`Could not find a maximal-length LFSR for degree ${N} within search budget.`);
+  throw new Error(`Could not find a maximal-length LFSR for degree ${N}.`);
 }
 
 function primePowerFactors(nInput: number): number[] {

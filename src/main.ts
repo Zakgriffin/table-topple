@@ -206,6 +206,7 @@ function decodeFrame(): DecodeResult | null {
   });
 
   const best = pickBestCandidate(sampledGrids, ORDER, lookup, debruijn.torus, R, C);
+  if (best.candidateIndex === -1) return null; // no candidate found any valid reading orientation at all
   const theta = theta0 + best.candidateIndex * (Math.PI / 2);
   const grid = grids[best.candidateIndex];
   const match = best.consistency >= CONFIDENCE_THRESHOLD ? best.match : null;

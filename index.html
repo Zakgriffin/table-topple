@@ -40,11 +40,40 @@
   #zoom::-webkit-slider-thumb { width: 42px; height: 42px; }
   #zoom::-moz-range-thumb { width: 42px; height: 42px; }
   #zoom:disabled { accent-color: #f00; opacity: 0.5; }
+
+  #meshPanel {
+    position: fixed; top: 30px; right: 30px; z-index: 10;
+    background: rgba(255,255,255,0.15); backdrop-filter: blur(4px);
+    border-radius: 24px; padding: 24px 30px;
+    display: flex; flex-direction: column; gap: 14px;
+    color: white; font-family: monospace; font-size: 30px;
+  }
+  #analyzeBtn {
+    padding: 20px 28px; border-radius: 999px; border: none;
+    background: rgba(60,140,255,0.5); color: white;
+    font-family: monospace; font-size: 30px;
+  }
+  #analyzeBtn:active { background: rgba(60,140,255,0.8); }
+  #meshPanel label { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+  #meshPanel input[type=checkbox] { width: 30px; height: 30px; accent-color: #0f0; }
+  #meshStatus {
+    position: fixed; top: 30px; left: 30px; color: #3cf;
+    font-family: monospace; font-size: 30px; white-space: pre;
+    text-shadow: 0 0 9px #000, 0 0 9px #000;
+    margin-top: 220px;
+  }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="status">Starting camera...</div>
+<div id="meshStatus"></div>
+<div id="meshPanel">
+  <button id="analyzeBtn">🔍 Analyze</button>
+  <label><input type="checkbox" id="toggleJunctions" checked> junctions</label>
+  <label><input type="checkbox" id="toggleMesh" checked> mesh</label>
+  <label><input type="checkbox" id="toggleCells" checked> cells</label>
+</div>
 <div id="zoomBox">
   <span id="zoomLabel">Zoom</span>
   <input type="range" id="zoom" min="0" max="1" step="0.01" value="0" disabled>

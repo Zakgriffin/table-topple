@@ -1,7 +1,11 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
-import { detectGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual, buildBoundaries } from './decode.ts';
-import type { GridDetection } from './decode.ts';
+import { detectGrid, sampleFullGrid, sampleFromMesh, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual, buildBoundaries } from './decode.ts';
+import type { GridDetection, SampledGrid, CandidateResult } from './decode.ts';
 import type { Patch } from './decode.ts';
+import { computeJunctionField, detectJunctions, refineJunctionSubPixel } from './cornerdetect.ts';
+import type { JunctionType } from './cornerdetect.ts';
+import { buildMesh, pruneInconsistentNodes } from './mesh.ts';
+import type { Mesh } from './mesh.ts';
 
 // ── Pattern setup ─────────────────────────────────────────────────────────────
 //
@@ -98,6 +102,134 @@ switchCamBtn.addEventListener('click', async () => {
 startCamera('environment')
   .then(() => render())
   .catch((e: any) => { status.textContent = 'Camera error: ' + e.message; });
+
+// ── Mesh-based geometry pipeline (Option B) — on-demand debug analysis ─────────
+// Unlike the Stage 2 pipeline below, corner detection is rotation-robust by
+// construction (validated up to 75deg, see scripts/test-junctions.ts), so
+// this skips the derotation-candidate search entirely — one capture,
+// analyzed directly. Still far too slow for every frame (~2.4s/analysis in
+// Node testing, 500-1500 junctions on a real capture), so it runs on
+// demand (the Analyze button) rather than every render().
+//
+// End-to-end decode through this pipeline isn't reliable yet — a whole
+// connected region of the mesh can drift together during construction and
+// still look locally self-consistent to pruneInconsistentNodes, so the
+// decoded row/col here should not be trusted. This is wired in as a
+// DIAGNOSTIC view of each stage (what got detected, what got kept vs
+// pruned, how many corners sourced each cell), not as the app's actual
+// position source — the status text above still comes from decodeFrame's
+// Stage 2 result.
+
+const meshStatus = document.getElementById('meshStatus')!;
+const analyzeBtn = document.getElementById('analyzeBtn') as HTMLButtonElement;
+const toggleJunctions = document.getElementById('toggleJunctions') as HTMLInputElement;
+const toggleMesh = document.getElementById('toggleMesh') as HTMLInputElement;
+const toggleCells = document.getElementById('toggleCells') as HTMLInputElement;
+
+const MESH_ANALYSIS_BUDGET = 320 * 320;
+const MESH_PATCH = 120; // small central patch, only for an accurate pitch seed under roll
+const meshRawCanvas = document.createElement('canvas');
+const meshRawCtx = meshRawCanvas.getContext('2d', { willReadFrequently: true })!;
+const meshPatchCanvas = document.createElement('canvas');
+const meshPatchCtx = meshPatchCanvas.getContext('2d', { willReadFrequently: true })!;
+
+interface MeshAnalysisResult {
+  cropSx: number; cropSy: number; rawScale: number; rawW: number; rawH: number;
+  theta0: number;
+  refinedJunctions: { x: number; y: number; type: JunctionType }[];
+  rawMesh: Mesh;
+  prunedMesh: Mesh;
+  sampledGrid: SampledGrid | null;
+  decodeResult: CandidateResult | null;
+}
+
+let meshResult: MeshAnalysisResult | null = null;
+
+function rawToVideo(rx: number, ry: number, d: MeshAnalysisResult): { x: number; y: number } {
+  return { x: d.cropSx + rx * d.rawScale, y: d.cropSy + ry * d.rawScale };
+}
+
+function runMeshAnalysis() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) return;
+
+  const cropW = vw * 0.95, cropH = vh * 0.95;
+  const cropSx = (vw - cropW) / 2, cropSy = (vh - cropH) / 2;
+  const aspect = cropW / cropH;
+  const rawH = Math.round(Math.sqrt(MESH_ANALYSIS_BUDGET / aspect));
+  const rawW = Math.round(rawH * aspect);
+  const rawScale = cropW / rawW;
+
+  meshRawCanvas.width = rawW; meshRawCanvas.height = rawH;
+  meshRawCtx.drawImage(video, cropSx, cropSy, cropW, cropH, 0, 0, rawW, rawH);
+  const rawRgba = meshRawCtx.getImageData(0, 0, rawW, rawH).data;
+  const gray = toGrayscale(rawRgba, rawW, rawH);
+  const bin = binarize(gray);
+
+  const theta0 = estimateRotationRad(gray, rawW, rawH);
+
+  // Pitch estimate needs derotating first to be accurate under roll (it
+  // assumes axis-aligned grid lines to measure pitch, which roll breaks) —
+  // a small central patch only, via canvas rotate.
+  meshPatchCanvas.width = MESH_PATCH; meshPatchCanvas.height = MESH_PATCH;
+  meshPatchCtx.fillStyle = '#fff';
+  meshPatchCtx.fillRect(0, 0, MESH_PATCH, MESH_PATCH);
+  meshPatchCtx.save();
+  meshPatchCtx.translate(MESH_PATCH / 2, MESH_PATCH / 2);
+  meshPatchCtx.rotate(-theta0);
+  meshPatchCtx.translate(-rawW / 2, -rawH / 2);
+  meshPatchCtx.drawImage(meshRawCanvas, 0, 0);
+  meshPatchCtx.restore();
+  const patchGray = toGrayscale(meshPatchCtx.getImageData(0, 0, MESH_PATCH, MESH_PATCH).data, MESH_PATCH, MESH_PATCH);
+  const patchBin = binarize(patchGray);
+  const coarseGrid = detectGrid(patchBin, MESH_PATCH, MESH_PATCH);
+
+  // tensorRadius/minDistance scale with the actual apparent pitch — a fixed
+  // default doesn't transfer across different capture distances/zoom.
+  const apparentPitch = (coarseGrid.pitchX + coarseGrid.pitchY) / 2;
+  const tensorRadius = Math.max(2, Math.round(apparentPitch / 4));
+  const minDistance = Math.max(5, Math.round(tensorRadius * 2.5));
+
+  const field = computeJunctionField(gray, rawW, rawH, 1, tensorRadius);
+  const coarseJ = detectJunctions(field, 0.15, minDistance);
+  const refinedJunctions = coarseJ.map(j => {
+    const r = refineJunctionSubPixel(gray, rawW, rawH, j.x, j.y);
+    return { x: r.x, y: r.y, type: j.type };
+  });
+
+  const rawMesh = buildMesh(refinedJunctions, rawW / 2, rawH / 2, coarseGrid.pitchX, coarseGrid.pitchY, -theta0, 3, 0.45);
+  const prunedMesh = pruneInconsistentNodes(rawMesh, apparentPitch);
+
+  let sampledGrid: SampledGrid | null = null;
+  let decodeResult: CandidateResult | null = null;
+  if (prunedMesh.nodes.length >= ORDER * ORDER) {
+    sampledGrid = sampleFromMesh(bin, rawW, rawH, prunedMesh);
+    if (sampledGrid.rows >= ORDER && sampledGrid.cols >= ORDER) {
+      decodeResult = pickBestCandidate([sampledGrid], ORDER, lookup, debruijn.torus, R, C);
+    }
+  }
+
+  meshResult = { cropSx, cropSy, rawScale, rawW, rawH, theta0, refinedJunctions, rawMesh, prunedMesh, sampledGrid, decodeResult };
+
+  const locked = !!decodeResult?.match && decodeResult.consistency >= CONFIDENCE_THRESHOLD;
+  meshStatus.textContent = [
+    `mesh: ${refinedJunctions.length} junctions, ${rawMesh.nodes.length}->${prunedMesh.nodes.length} nodes (pruned)`,
+    sampledGrid ? `sampled ${sampledGrid.rows}x${sampledGrid.cols}` : 'sampled: n/a',
+    decodeResult ? `score ${(decodeResult.consistency * 100).toFixed(0)}%${locked ? ` -> row ${decodeResult.match!.row} col ${decodeResult.match!.col}` : ' (no lock)'}` : 'decode: n/a',
+  ].join('\n');
+}
+
+analyzeBtn.addEventListener('click', () => {
+  analyzeBtn.disabled = true;
+  meshStatus.textContent = 'analyzing...';
+  // Double rAF: the DOM update above is guaranteed painted by the time the
+  // heavy synchronous work in the second callback runs and blocks the
+  // thread — a single rAF doesn't guarantee the paint has happened yet.
+  requestAnimationFrame(() => requestAnimationFrame(() => {
+    try { runMeshAnalysis(); }
+    finally { analyzeBtn.disabled = false; }
+  }));
+});
 
 // ── Grid decode pipeline (Stage 2: rotation + uniform scale) ───────────────────
 // See src/decode.ts's module header for the full algorithm writeup. Summary:
@@ -308,4 +440,87 @@ function render() {
   status.textContent = result?.match
     ? `order ${ORDER}  torus ${R}x${C}\nrow ${result.match.row}  col ${result.match.col}\nconfidence ${(result.consistency * 100).toFixed(0)}%`
     : `order ${ORDER}  torus ${R}x${C}\nno lock — move closer / center the pattern`;
+
+  if (meshResult) drawMeshDebug(meshResult);
+}
+
+// Draws whichever of the mesh-pipeline's diagnostic layers are toggled on,
+// from the last Analyze snapshot (see runMeshAnalysis — this data is stale
+// relative to the live video by however long ago the button was pressed,
+// unlike everything else in render() which is per-frame).
+function drawMeshDebug(d: MeshAnalysisResult) {
+  const toVideo = (rx: number, ry: number) => rawToVideo(rx, ry, d);
+  const dotR = Math.max(2, d.rawScale * 4);
+
+  if (toggleJunctions.checked) {
+    for (const j of d.refinedJunctions) {
+      const p = toVideo(j.x, j.y);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, dotR, 0, Math.PI * 2);
+      ctx.fillStyle = j.type === 'saddle' ? '#0ff' : '#fa0'; // saddle=cyan (precise), lcorner=amber (majority, less precise)
+      ctx.fill();
+    }
+  }
+
+  if (toggleMesh.checked) {
+    const kept = d.prunedMesh.byCoord;
+    // Links between adjacent surviving nodes, so the mesh reads as a graph
+    // rather than a scatter of dots.
+    ctx.strokeStyle = 'rgba(0,255,0,0.6)';
+    ctx.lineWidth = Math.max(1, d.rawScale);
+    for (const node of d.prunedMesh.nodes) {
+      const right = kept.get(`${node.row},${node.col + 1}`);
+      const down = kept.get(`${node.row + 1},${node.col}`);
+      for (const nb of [right, down]) {
+        if (!nb) continue;
+        const a = toVideo(node.x, node.y), b = toVideo(nb.x, nb.y);
+        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+      }
+    }
+    // Surviving nodes as small green dots.
+    for (const node of d.prunedMesh.nodes) {
+      const p = toVideo(node.x, node.y);
+      ctx.beginPath();
+      ctx.arc(p.x, p.y, dotR * 0.6, 0, Math.PI * 2);
+      ctx.fillStyle = '#0f0';
+      ctx.fill();
+    }
+    // Nodes buildMesh found but pruneInconsistentNodes rejected — shown as
+    // red X marks, so it's visible what got thrown out and why the surviving
+    // mesh is sparser than raw detection alone would suggest.
+    ctx.strokeStyle = '#f00';
+    ctx.lineWidth = Math.max(1, d.rawScale * 1.5);
+    for (const node of d.rawMesh.nodes) {
+      if (kept.has(`${node.row},${node.col}`)) continue;
+      const p = toVideo(node.x, node.y);
+      const r = dotR * 0.7;
+      ctx.beginPath(); ctx.moveTo(p.x - r, p.y - r); ctx.lineTo(p.x + r, p.y + r); ctx.stroke();
+      ctx.beginPath(); ctx.moveTo(p.x + r, p.y - r); ctx.lineTo(p.x - r, p.y + r); ctx.stroke();
+    }
+  }
+
+  if (toggleCells.checked && d.sampledGrid) {
+    // Dot size/opacity encodes how many of the cell's 4 corners were
+    // actually known (2, 3, or 4 — see sampleFromMesh's diagonal-pair
+    // comment) — a rough per-cell confidence signal: a full, opaque dot
+    // means all 4 corners were found, a small, faint one means the position
+    // was estimated from just one diagonal pair.
+    for (const row of d.sampledGrid.cells) {
+      for (const cell of row) {
+        if (!cell.valid) continue;
+        const p = toVideo(cell.x, cell.y);
+        const frac = Math.max(0, Math.min(1, (cell.cornerCount - 2) / 2)); // 2->0, 3->0.5, 4->1
+        const r = dotR * (0.5 + 0.5 * frac);
+        ctx.globalAlpha = 0.5 + 0.5 * frac;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
+        ctx.fillStyle = cell.bit ? '#000' : '#fff';
+        ctx.fill();
+        ctx.lineWidth = Math.max(1, r * 0.3);
+        ctx.strokeStyle = '#888';
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
 }

@@ -50,15 +50,30 @@ export interface GridDetection {
 // compounds with distance from the phase anchor when cell positions are
 // extrapolated (see detectGrid / sampleFullGrid), producing visible drift
 // toward the far side of the visible grid.
+//
+// The raw per-lag scores get a light 3-tap smoothing before peak-finding and
+// interpolation: derotating by resampling (nearest-neighbor in the Node
+// test, and even canvas's smoother resampling isn't immune) introduces
+// staircase aliasing along cell boundaries, which otherwise shows up as
+// single-lag noise spikes that throw off the 3-point parabolic fit far more
+// than they'd throw off just picking the best integer lag — confirmed by
+// this exact failure mode (near-total decode failure on any rotated input,
+// while axis-aligned input was unaffected) before this smoothing was added.
 export function findPitch(energy: Float64Array, minLag: number, maxLag: number): number {
-  const scores = new Float64Array(maxLag - minLag + 1);
-  let bestIdx = 0, bestScore = -Infinity;
+  const raw = new Float64Array(maxLag - minLag + 1);
   for (let lag = minLag; lag <= maxLag; lag++) {
     let score = 0;
     for (let x = 0; x + lag < energy.length; x++) score += energy[x] * energy[x + lag];
-    scores[lag - minLag] = score;
-    if (score > bestScore) { bestScore = score; bestIdx = lag - minLag; }
+    raw[lag - minLag] = score;
   }
+  const scores = new Float64Array(raw.length);
+  for (let i = 0; i < raw.length; i++) {
+    const a = raw[Math.max(0, i - 1)], b = raw[i], c = raw[Math.min(raw.length - 1, i + 1)];
+    scores[i] = (a + b + c) / 3;
+  }
+
+  let bestIdx = 0, bestScore = -Infinity;
+  for (let i = 0; i < scores.length; i++) if (scores[i] > bestScore) { bestScore = scores[i]; bestIdx = i; }
   const bestLag = bestIdx + minLag;
 
   if (bestIdx > 0 && bestIdx < scores.length - 1) {

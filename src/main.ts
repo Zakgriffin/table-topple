@@ -199,8 +199,7 @@ function decodeFrame(): DecodeResult | null {
   const grids: { px: number; py: number; pitchX: number; pitchY: number }[] = [];
   const sampledGrids = [0, 1, 2, 3].map(k => {
     const theta = theta0 + k * (Math.PI / 2);
-    const alignedGray = k === 0 ? derotateToGray(theta) : derotateToGray(theta);
-    const alignedBin = binarize(alignedGray);
+    const alignedBin = binarize(derotateToGray(theta));
     const grid = detectGrid(alignedBin, alignedW, alignedH);
     grids.push(grid);
     return sampleFullGrid(alignedBin, alignedW, alignedH, grid);

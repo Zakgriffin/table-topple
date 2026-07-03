@@ -15,25 +15,30 @@
     transform: translate(-50%, -50%) scaleX(-1);
   }
   #status {
-    position: fixed; top: 10px; left: 10px; color: #0f0;
-    font-family: monospace; font-size: 14px; white-space: pre;
-    text-shadow: 0 0 3px #000, 0 0 3px #000;
+    position: fixed; top: 30px; left: 30px; color: #0f0;
+    font-family: monospace; font-size: 42px; white-space: pre;
+    text-shadow: 0 0 9px #000, 0 0 9px #000;
   }
   #switchCam {
-    position: fixed; bottom: 16px; right: 16px; z-index: 10;
-    padding: 10px 14px; border-radius: 999px; border: none;
+    position: fixed; bottom: 48px; right: 48px; z-index: 10;
+    padding: 30px 42px; border-radius: 999px; border: none;
     background: rgba(255,255,255,0.15); color: white;
-    font-family: monospace; font-size: 14px; backdrop-filter: blur(4px);
+    font-family: monospace; font-size: 42px; backdrop-filter: blur(4px);
   }
   #switchCam:active { background: rgba(255,255,255,0.3); }
   #zoomBox {
-    position: fixed; bottom: 16px; left: 16px; right: 90px; z-index: 10;
-    display: flex; align-items: center; gap: 8px;
+    position: fixed; bottom: 48px; left: 48px; right: 48px; z-index: 10;
+    display: flex; align-items: center; gap: 24px;
     background: rgba(255,255,255,0.15); backdrop-filter: blur(4px);
-    border-radius: 999px; padding: 6px 14px;
+    border-radius: 999px; padding: 18px 42px;
   }
-  #zoomLabel { color: white; font-family: monospace; font-size: 12px; white-space: nowrap; }
-  #zoom { flex: 1; accent-color: #0f0; }
+  #zoomLabel { color: white; font-family: monospace; font-size: 36px; white-space: nowrap; }
+  #zoom {
+    flex: 1; accent-color: #0f0;
+    height: 24px;
+  }
+  #zoom::-webkit-slider-thumb { width: 42px; height: 42px; }
+  #zoom::-moz-range-thumb { width: 42px; height: 42px; }
   #zoom:disabled { accent-color: #f00; opacity: 0.5; }
 </style>
 </head>

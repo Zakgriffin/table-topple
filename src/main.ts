@@ -148,15 +148,8 @@ function isGlbUrl(text: string) {
 const canvas = document.getElementById('c') as HTMLCanvasElement;
 const ctx = canvas.getContext('2d')!;
 const status = document.getElementById('status')!;
-const debug = document.getElementById('debug')!;
 const video = document.createElement('video');
 video.setAttribute('playsinline', '');
-
-// BarcodeDetector is Chromium-only — no browser on iOS supports it (they all
-// share Safari's WebKit engine under the hood), so QR detection silently
-// never runs there. Surface that immediately instead of failing silently.
-const barcodeSupported = 'BarcodeDetector' in window;
-debug.textContent = `BarcodeDetector supported: ${barcodeSupported}`;
 
 // ── Color from QR text ────────────────────────────────────────────────────────
 

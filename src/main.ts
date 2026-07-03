@@ -170,20 +170,37 @@ function decodeFrame(): DecodeResult | null {
 
   const rawImg = rawCtx.getImageData(0, 0, rawSide, rawSide).data;
   const rawGray = toGrayscale(rawImg, rawSide, rawSide);
-  const theta0 = estimateRotationRad(rawGray, rawSide, rawSide);
 
-  const grids: { px: number; py: number; pitchX: number; pitchY: number }[] = [];
-  const sampledGrids = [0, 1, 2, 3].map(k => {
-    const theta = theta0 + k * (Math.PI / 2);
+  // Derotates rawCanvas by theta into alignedCanvas and returns its grayscale.
+  const derotateToGray = (theta: number): Float64Array => {
     alignedCtx.save();
     alignedCtx.translate(alignedW / 2, alignedH / 2);
     alignedCtx.rotate(-theta);
     alignedCtx.translate(-rawSide / 2, -rawSide / 2);
     alignedCtx.drawImage(rawCanvas, 0, 0);
     alignedCtx.restore();
+    return toGrayscale(alignedCtx.getImageData(0, 0, alignedW, alignedH).data, alignedW, alignedH);
+  };
 
-    const alignedImg = alignedCtx.getImageData(0, 0, alignedW, alignedH).data;
-    const alignedBin = binarize(toGrayscale(alignedImg, alignedW, alignedH));
+  const thetaCoarse = estimateRotationRad(rawGray, rawSide, rawSide);
+
+  // Coarse-to-fine: derotate once with the coarse estimate, then re-run the
+  // SAME estimator on that now-mostly-aligned result to correct residual
+  // angular error. Error from a wrong rotation grows with distance from the
+  // pivot, so this matters more now that capture uses the full viewport
+  // (bigger radius) than it did with the old small centered crop. Reuses
+  // estimateRotationRad rather than adding new rotation-specific machinery,
+  // since this single-angle model is scoped to be superseded by full
+  // homography estimation later anyway.
+  const previewGray = derotateToGray(thetaCoarse);
+  const residual = asSignedResidual(estimateRotationRad(previewGray, alignedW, alignedH));
+  const theta0 = thetaCoarse + residual;
+
+  const grids: { px: number; py: number; pitchX: number; pitchY: number }[] = [];
+  const sampledGrids = [0, 1, 2, 3].map(k => {
+    const theta = theta0 + k * (Math.PI / 2);
+    const alignedGray = k === 0 ? derotateToGray(theta) : derotateToGray(theta);
+    const alignedBin = binarize(alignedGray);
     const grid = detectGrid(alignedBin, alignedW, alignedH);
     grids.push(grid);
     return sampleFullGrid(alignedBin, alignedW, alignedH, grid);

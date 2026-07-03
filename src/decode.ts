@@ -42,13 +42,32 @@ export interface GridDetection {
   pitchX: number; pitchY: number;
 }
 
-// Finds the pitch (dominant period) of a 1D energy profile via autocorrelation.
+// Finds the pitch (dominant period) of a 1D energy profile via autocorrelation,
+// refined to sub-pixel precision via parabolic interpolation of the
+// autocorrelation score around the best integer lag. Without this, findPitch
+// could only ever return whole-pixel cell sizes — any true (real-world) pitch
+// that isn't an exact integer of pixels gets rounded, and that rounding error
+// compounds with distance from the phase anchor when cell positions are
+// extrapolated (see detectGrid / sampleFullGrid), producing visible drift
+// toward the far side of the visible grid.
 export function findPitch(energy: Float64Array, minLag: number, maxLag: number): number {
-  let bestLag = minLag, bestScore = -Infinity;
+  const scores = new Float64Array(maxLag - minLag + 1);
+  let bestIdx = 0, bestScore = -Infinity;
   for (let lag = minLag; lag <= maxLag; lag++) {
     let score = 0;
     for (let x = 0; x + lag < energy.length; x++) score += energy[x] * energy[x + lag];
-    if (score > bestScore) { bestScore = score; bestLag = lag; }
+    scores[lag - minLag] = score;
+    if (score > bestScore) { bestScore = score; bestIdx = lag - minLag; }
+  }
+  const bestLag = bestIdx + minLag;
+
+  if (bestIdx > 0 && bestIdx < scores.length - 1) {
+    const yMinus = scores[bestIdx - 1], y0 = scores[bestIdx], yPlus = scores[bestIdx + 1];
+    const denom = yMinus - 2 * y0 + yPlus;
+    if (Math.abs(denom) > 1e-9) {
+      const delta = 0.5 * (yMinus - yPlus) / denom;
+      if (Math.abs(delta) < 1) return bestLag + delta;
+    }
   }
   return bestLag;
 }

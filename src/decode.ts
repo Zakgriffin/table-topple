@@ -84,38 +84,49 @@ export function findPhase(energy: Float64Array, pitch: number): number {
   return bestPhase;
 }
 
-export function detectGrid(bin: Uint8Array, w: number, h: number): GridDetection {
-  const colEnergy = new Float64Array(w);
-  for (let x = 1; x < w; x++) {
+// Runs pitch/phase detection restricted to the sub-rectangle [x0,x1) x
+// [y0,y1) of the buffer (still indexed in full-buffer coordinates in the
+// result). detectGrid is just this called on the whole buffer; the region
+// form also backs detectLocalGrid's per-half regional estimates.
+function detectGridInRegion(bin: Uint8Array, w: number, h: number, x0: number, y0: number, x1: number, y1: number): GridDetection {
+  const rw = x1 - x0, rh = y1 - y0;
+  const colEnergy = new Float64Array(rw);
+  for (let x = 1; x < rw; x++) {
     let e = 0;
-    for (let y = 0; y < h; y++) e += Math.abs(bin[y * w + x] - bin[y * w + x - 1]);
+    for (let y = y0; y < y1; y++) e += Math.abs(bin[y * w + (x0 + x)] - bin[y * w + (x0 + x - 1)]);
     colEnergy[x] = e;
   }
-  const rowEnergy = new Float64Array(h);
-  for (let y = 1; y < h; y++) {
+  const rowEnergy = new Float64Array(rh);
+  for (let y = 1; y < rh; y++) {
     let e = 0;
-    for (let x = 0; x < w; x++) e += Math.abs(bin[y * w + x] - bin[(y - 1) * w + x]);
+    for (let x = x0; x < x1; x++) e += Math.abs(bin[(y0 + y) * w + x] - bin[(y0 + y - 1) * w + x]);
     rowEnergy[y] = e;
   }
 
-  const minLag = 4, maxLagX = Math.floor(w / 4), maxLagY = Math.floor(h / 4);
+  const minLag = 4, maxLagX = Math.floor(rw / 4), maxLagY = Math.floor(rh / 4);
   const pitchX = findPitch(colEnergy, minLag, maxLagX);
   const pitchY = findPitch(rowEnergy, minLag, maxLagY);
-  let px = findPhase(colEnergy, pitchX);
-  let py = findPhase(rowEnergy, pitchY);
+  let px = findPhase(colEnergy, pitchX) + x0;
+  let py = findPhase(rowEnergy, pitchY) + y0;
 
-  // Re-anchor the phase to the boundary nearest the buffer's center, rather
+  // Re-anchor the phase to the boundary nearest the REGION's center, rather
   // than leaving it wherever findPhase's [0, pitch) search happened to land
-  // it (always near index 0). Cell positions are extrapolated outward from
-  // this anchor (see sampleFullGrid), so any residual pitch error compounds
-  // with distance from it — anchoring near one edge means the far edge
-  // carries the full accumulated error; anchoring near the center means
-  // every visible edge is at most half that distance away, roughly halving
-  // the worst-case drift and making it symmetric instead of one-sided.
-  px += pitchX * Math.round((w / 2 - px) / pitchX);
-  py += pitchY * Math.round((h / 2 - py) / pitchY);
+  // it (always near the region's own index 0). Cell positions are
+  // extrapolated outward from this anchor (see sampleFullGrid), so any
+  // residual pitch error compounds with distance from it — anchoring near
+  // one edge means the far edge carries the full accumulated error;
+  // anchoring near the center means every visible edge is at most half that
+  // distance away, roughly halving the worst-case drift and making it
+  // symmetric instead of one-sided.
+  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
+  px += pitchX * Math.round((cx - px) / pitchX);
+  py += pitchY * Math.round((cy - py) / pitchY);
 
   return { px, py, pitchX, pitchY };
+}
+
+export function detectGrid(bin: Uint8Array, w: number, h: number): GridDetection {
+  return detectGridInRegion(bin, w, h, 0, 0, w, h);
 }
 
 // Estimates the grid's rotation, folded into [0, PI/2) radians, via a

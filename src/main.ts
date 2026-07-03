@@ -196,7 +196,10 @@ function decodeFrame(): DecodeResult | null {
   const matched = best.patches.filter(p => p.match !== null);
   const match = (best.consistency >= CONFIDENCE_THRESHOLD && matched.length > 0) ? matched[0].match : null;
 
-  return { match, patches: best.patches, consistency: best.consistency, theta, grid, cropSx, cropSy, rawScale };
+  return {
+    match, patches: best.patches, consistency: best.consistency, theta, grid,
+    alignedW, alignedH, cropSx, cropSy, rawScale, rawSide, contentDx, contentDy,
+  };
 }
 
 // ── Render loop ───────────────────────────────────────────────────────────────

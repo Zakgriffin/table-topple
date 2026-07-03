@@ -1,5 +1,6 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
-import { detectGrid, sampleWindow, binarizeRGBA } from './decode.ts';
+import { detectGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad } from './decode.ts';
+import type { Patch } from './decode.ts';
 
 // ── Pattern setup ─────────────────────────────────────────────────────────────
 //
@@ -97,51 +98,88 @@ startCamera('environment')
   .then(() => render())
   .catch((e: any) => { status.textContent = 'Camera error: ' + e.message; });
 
-// ── Grid decode pipeline (Stage 1: axis-aligned, no rotation) ──────────────────
-//
-// 1. Crop a square region from the center of the video frame, downscaled to a
-//    fixed working resolution — keeps analysis cost constant regardless of
-//    native camera resolution.
-// 2. Binarize (global mean threshold — the pattern is pure black/white, so
-//    this is robust as long as lighting is roughly even across the crop).
-// 3. Find the cell pitch in each axis via autocorrelation of an "edge energy"
-//    profile (sum of adjacent-pixel differences) — periodic peaks in that
-//    profile land at cell boundaries, spaced by the pitch.
-// 4. Find the phase (sub-pitch offset) that best aligns with those boundaries.
-// 5. Sample the ORDER x ORDER grid of cells nearest the crop center, average
-//    brightness per cell, threshold to a bit.
-// 6. Pack into a window key (top-to-bottom, left-to-right, MSB-first — must
-//    match src/debruijn.ts's windowKey order) and look it up.
+// ── Grid decode pipeline (Stage 2: rotation + uniform scale) ───────────────────
+// See src/decode.ts's module header for the full algorithm writeup. Summary:
+//   1. Crop a square RAW region from the video center.
+//   2. Estimate rotation mod 90 degrees via gradient-orientation histogram.
+//   3. Derotate at that angle plus 90/180/270-degree offsets (4 candidates —
+//      edge orientation alone can't tell which of the 4 is the true one).
+//   4. For each candidate: detect grid pitch/phase, sample every visible
+//      cell, tile into discrete order x order patches, decode each patch.
+//   5. Keep whichever candidate's patches are most mutually consistent.
 
-const CROP = 200; // working resolution for the analysis crop, in px
-const cropCanvas = document.createElement('canvas');
-cropCanvas.width = CROP;
-cropCanvas.height = CROP;
-const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true })!;
+const RAW = 260; // pre-rotation capture buffer (working resolution, px)
+const ALIGNED = 180; // post-rotation analysis buffer — RAW >= ALIGNED*sqrt(2) so
+                      // the aligned buffer is fully covered after any rotation
+const CONFIDENCE_THRESHOLD = 0.5; // min fraction of agreeing adjacent patches to trust a frame
+
+const rawCanvas = document.createElement('canvas');
+rawCanvas.width = RAW; rawCanvas.height = RAW;
+const rawCtx = rawCanvas.getContext('2d', { willReadFrequently: true })!;
+
+const alignedCanvas = document.createElement('canvas');
+alignedCanvas.width = ALIGNED; alignedCanvas.height = ALIGNED;
+const alignedCtx = alignedCanvas.getContext('2d', { willReadFrequently: true })!;
 
 interface DecodeResult {
   match: { row: number; col: number } | null;
-  cells: { x: number; y: number; bit: number }[]; // crop-local (0..CROP) coords
-  cropSx: number; cropSy: number; cropSrc: number; // maps crop-local -> video coords
+  patches: Patch[];
+  consistency: number;
+  theta: number; // resolved full rotation angle (radians) for the winning candidate
+  grid: { px: number; py: number; pitchX: number; pitchY: number };
+  cropSx: number; cropSy: number; rawScale: number; // maps RAW-buffer coords -> video coords
+}
+
+// Maps a point in the (winning candidate's) ALIGNED buffer back to video
+// coordinates, for overlay drawing: aligned -> raw (inverse of the
+// ctx.rotate(-theta) derotation, see src/decode.ts's header) -> video.
+function alignedToVideo(ax: number, ay: number, theta: number, cropSx: number, cropSy: number, rawScale: number): { x: number; y: number } {
+  const relX = ax - ALIGNED / 2, relY = ay - ALIGNED / 2;
+  const cosT = Math.cos(theta), sinT = Math.sin(theta);
+  const rx = relX * cosT - relY * sinT + RAW / 2;
+  const ry = relX * sinT + relY * cosT + RAW / 2;
+  return { x: cropSx + rx * rawScale, y: cropSy + ry * rawScale };
 }
 
 function decodeFrame(): DecodeResult | null {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
-  const cropSrc = Math.min(vw, vh) * 0.6;
+  const cropSrc = Math.min(vw, vh) * 0.7;
   const cropSx = (vw - cropSrc) / 2, cropSy = (vh - cropSrc) / 2;
-  cropCtx.drawImage(video, cropSx, cropSy, cropSrc, cropSrc, 0, 0, CROP, CROP);
+  const rawScale = cropSrc / RAW;
+  rawCtx.drawImage(video, cropSx, cropSy, cropSrc, cropSrc, 0, 0, RAW, RAW);
 
-  const img = cropCtx.getImageData(0, 0, CROP, CROP).data;
-  const bin = binarizeRGBA(img, CROP, CROP);
+  const rawImg = rawCtx.getImageData(0, 0, RAW, RAW).data;
+  const rawGray = toGrayscale(rawImg, RAW, RAW);
+  const theta0 = estimateRotationRad(rawGray, RAW, RAW);
 
-  const grid = detectGrid(bin, CROP, CROP);
-  const sampled = sampleWindow(bin, CROP, CROP, grid, ORDER);
-  if (sampled === null) return { match: null, cells: [], cropSx, cropSy, cropSrc };
+  const grids: { px: number; py: number; pitchX: number; pitchY: number }[] = [];
+  const sampledGrids = [0, 1, 2, 3].map(k => {
+    const theta = theta0 + k * (Math.PI / 2);
+    alignedCtx.save();
+    alignedCtx.translate(ALIGNED / 2, ALIGNED / 2);
+    alignedCtx.rotate(-theta);
+    alignedCtx.translate(-RAW / 2, -RAW / 2);
+    alignedCtx.fillStyle = '#fff';
+    alignedCtx.fillRect(0, 0, RAW, RAW);
+    alignedCtx.drawImage(rawCanvas, 0, 0);
+    alignedCtx.restore();
 
-  const packed = lookup[sampled.key];
-  const match = packed === -1 ? null : { row: Math.floor(packed / C), col: packed % C };
-  return { match, cells: sampled.cells, cropSx, cropSy, cropSrc };
+    const alignedImg = alignedCtx.getImageData(0, 0, ALIGNED, ALIGNED).data;
+    const alignedBin = binarize(toGrayscale(alignedImg, ALIGNED, ALIGNED));
+    const grid = detectGrid(alignedBin, ALIGNED, ALIGNED);
+    grids.push(grid);
+    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid);
+  });
+
+  const best = pickBestCandidate(sampledGrids, ORDER, lookup, R, C);
+  const theta = theta0 + best.candidateIndex * (Math.PI / 2);
+  const grid = grids[best.candidateIndex];
+
+  const matched = best.patches.filter(p => p.match !== null);
+  const match = (best.consistency >= CONFIDENCE_THRESHOLD && matched.length > 0) ? matched[0].match : null;
+
+  return { match, patches: best.patches, consistency: best.consistency, theta, grid, cropSx, cropSy, rawScale };
 }
 
 // ── Render loop ───────────────────────────────────────────────────────────────
@@ -157,37 +195,64 @@ function render() {
   canvas.style.height = (canvas.height * scaleToFit) + 'px';
   ctx.drawImage(video, 0, 0);
 
-  // Show the analyzed crop region for visual alignment feedback.
-  const vw = video.videoWidth, vh = video.videoHeight;
-  const cropSrc = Math.min(vw, vh) * 0.6;
-  const sx = (vw - cropSrc) / 2, sy = (vh - cropSrc) / 2;
-  ctx.strokeStyle = '#0f0';
-  ctx.lineWidth = 2;
-  ctx.strokeRect(sx, sy, cropSrc, cropSrc);
-
   const result = decodeFrame();
 
-  // Overlay a circle on every sampled cell: filled with the bit this pipeline
-  // detected (black/white), with a bright outline so it's visible regardless
-  // of the cell's own color. Lets you visually cross-check detected bits
-  // against what's actually on screen, cell by cell.
   if (result) {
-    const scale = result.cropSrc / CROP;
-    const radius = Math.max(3, scale * 3);
-    for (const cell of result.cells) {
-      const vx = result.cropSx + cell.x * scale;
-      const vy = result.cropSy + cell.y * scale;
+    const toVideo = (ax: number, ay: number) => alignedToVideo(ax, ay, result.theta, result.cropSx, result.cropSy, result.rawScale);
+    const confident = result.consistency >= CONFIDENCE_THRESHOLD;
+
+    // Blue lines for the estimated grid edges (both line families), so you
+    // can visually check the detected grid against the real one on screen.
+    const { px, py, pitchX, pitchY } = result.grid;
+    ctx.strokeStyle = 'rgba(60,140,255,0.8)';
+    ctx.lineWidth = Math.max(1, result.rawScale * 1.2);
+    const numCellsX = Math.floor((ALIGNED - px) / pitchX);
+    const numCellsY = Math.floor((ALIGNED - py) / pitchY);
+    for (let k = 0; k <= numCellsX; k++) {
+      const x = px + k * pitchX;
+      const a = toVideo(x, 0), b = toVideo(x, ALIGNED);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+    for (let k = 0; k <= numCellsY; k++) {
+      const y = py + k * pitchY;
+      const a = toVideo(0, y), b = toVideo(ALIGNED, y);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+
+    // Each patch drawn as a discrete outlined quad (green if it decoded to a
+    // valid position AND the frame is confident overall, orange if it found
+    // a lookup hit but overall confidence is low, red if no hit), containing
+    // its own black/white dots so patches are visually distinguishable.
+    for (const patch of result.patches) {
+      const x0 = px + patch.tileCol * ORDER * pitchX, x1 = x0 + ORDER * pitchX;
+      const y0 = py + patch.tileRow * ORDER * pitchY, y1 = y0 + ORDER * pitchY;
+      const corners = [toVideo(x0, y0), toVideo(x1, y0), toVideo(x1, y1), toVideo(x0, y1)];
+      ctx.strokeStyle = patch.match ? (confident ? '#0f0' : '#fa0') : '#f00';
+      ctx.lineWidth = Math.max(1, result.rawScale);
       ctx.beginPath();
-      ctx.arc(vx, vy, radius, 0, Math.PI * 2);
-      ctx.fillStyle = cell.bit ? '#000' : '#fff';
-      ctx.fill();
-      ctx.lineWidth = Math.max(1, radius * 0.3);
-      ctx.strokeStyle = result.match ? '#0f0' : '#f00';
+      ctx.moveTo(corners[0].x, corners[0].y);
+      for (const c of corners.slice(1)) ctx.lineTo(c.x, c.y);
+      ctx.closePath();
       ctx.stroke();
+
+      const dotRadius = Math.max(2, pitchX * result.rawScale * 0.25);
+      for (let i = 0; i < ORDER; i++) {
+        for (let j = 0; j < ORDER; j++) {
+          const cell = patch.cells[i][j];
+          const p = toVideo(cell.x, cell.y);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, dotRadius, 0, Math.PI * 2);
+          ctx.fillStyle = cell.bit ? '#000' : '#fff';
+          ctx.fill();
+          ctx.lineWidth = Math.max(1, dotRadius * 0.3);
+          ctx.strokeStyle = patch.match ? '#0f0' : '#f00';
+          ctx.stroke();
+        }
+      }
     }
   }
 
   status.textContent = result?.match
-    ? `order ${ORDER}  torus ${R}x${C}\nrow ${result.match.row}  col ${result.match.col}`
+    ? `order ${ORDER}  torus ${R}x${C}\nrow ${result.match.row}  col ${result.match.col}\nconfidence ${(result.consistency * 100).toFixed(0)}%`
     : `order ${ORDER}  torus ${R}x${C}\nno lock — move closer / center the pattern`;
 }

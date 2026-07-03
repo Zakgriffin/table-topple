@@ -13,6 +13,7 @@ import { PNG } from 'pngjs';
 import { readFileSync } from 'node:fs';
 import { generateTorus, buildLookupTable } from '../src/debruijn.ts';
 import { detectGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual } from '../src/decode.ts';
+import type { SampledGrid } from '../src/decode.ts';
 
 const order = parseInt(process.argv[2] ?? '4', 10);
 const pngPath = `samples/order${order}.png`;

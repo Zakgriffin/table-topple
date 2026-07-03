@@ -64,6 +64,22 @@ export function makeHomographySampler(pose: CameraPose, rawW: number, rawH: numb
   };
 }
 
+// Forward projection — maps a world-plane (pattern) point to the image pixel
+// it appears at under this pose, i.e. the inverse of makeHomographySampler.
+// Ground truth for perspective-mesh validation: unlike simple rotation,
+// there's no simple closed-form "true pixel position" for a world point
+// without actually running the camera's own pinhole projection math.
+export function projectToImage(pose: CameraPose, rawW: number, rawH: number, worldX: number, worldY: number): [number, number] | null {
+  const { camPos, right, up, forward } = buildCamera(pose);
+  const rel: Vec3 = sub([worldX, worldY, 0], camPos);
+  const zCam = rel[0] * forward[0] + rel[1] * forward[1] + rel[2] * forward[2];
+  if (zCam <= 1e-6) return null; // behind the camera
+  const xCam = rel[0] * right[0] + rel[1] * right[1] + rel[2] * right[2];
+  const yCam = rel[0] * up[0] + rel[1] * up[1] + rel[2] * up[2];
+  const f = pose.focal;
+  return [rawW / 2 + (f * xCam) / zCam, rawH / 2 + (f * yCam) / zCam];
+}
+
 export interface SourceImage { width: number; height: number; data: Uint8Array | Buffer; }
 
 // Renders a rawW x rawH RGBA capture by nearest-neighbor sampling `png`

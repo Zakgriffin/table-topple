@@ -117,13 +117,18 @@ function within(target: number, start: number, span: number, mod: number): boole
   return rel <= span || rel >= mod - 1;
 }
 
-// First pass: no confidence threshold, just log raw scores split by
-// correct/incorrect, to empirically justify where to set the threshold
-// rather than guessing.
-const trials = 300;
+// Single pass covering both checks that used to be two separate loops of
+// identical trial generation (each freshly randomized anyway, so running it
+// twice bought no additional statistical power, just double the runtime):
+// raw scores split by correct/incorrect (to empirically justify where to
+// set the threshold rather than guessing), AND accuracy after applying the
+// CONFIDENCE_THRESHOLD main.ts actually uses.
+const trials = 150;
 const testAngles = [0, 15, 30, 45, -20, -40, 60, 80];
+const CONFIDENCE_THRESHOLD = 0.85;
 const correctScores: number[] = [], wrongScores: number[] = [];
 let hits = 0, misses = 0, wrong = 0;
+let gatedHits = 0, gatedMisses = 0, gatedWrong = 0;
 for (let t = 0; t < trials; t++) {
   const testRow = Math.floor(Math.random() * R);
   const testCol = Math.floor(Math.random() * C);
@@ -131,10 +136,15 @@ for (let t = 0; t < trials; t++) {
   const rgba = cropAtRotated(testRow, testCol, phiDeg * Math.PI / 180);
   const { match, consistency } = decode(rgba);
 
-  if (!match) { misses++; continue; }
+  if (!match) { misses++; } else {
+    const correct = within(testRow, match.row, order, R) && within(testCol, match.col, order, C);
+    if (correct) { hits++; correctScores.push(consistency); }
+    else { wrong++; wrongScores.push(consistency); console.log(`WRONG at true (${testRow},${testCol}) angle ${phiDeg}deg consistency=${consistency.toFixed(3)} decoded=(${match.row},${match.col})`); }
+  }
+
+  if (!match || consistency < CONFIDENCE_THRESHOLD) { gatedMisses++; continue; }
   const correct = within(testRow, match.row, order, R) && within(testCol, match.col, order, C);
-  if (correct) { hits++; correctScores.push(consistency); }
-  else { wrong++; wrongScores.push(consistency); console.log(`WRONG at true (${testRow},${testCol}) angle ${phiDeg}deg consistency=${consistency.toFixed(3)} decoded=(${match.row},${match.col})`); }
+  if (correct) gatedHits++; else gatedWrong++;
 }
 
 function stats(xs: number[]): string {
@@ -150,21 +160,6 @@ const wrongRate = wrong / trials;
 if (wrongRate > 0.1) { console.error(`FAIL: wrong-decode rate ${(wrongRate * 100).toFixed(1)}% is too high.`); process.exit(1); }
 console.log(`PASS (wrong-decode rate ${(wrongRate * 100).toFixed(1)}%).`);
 
-// Second pass: with the CONFIDENCE_THRESHOLD main.ts actually uses (0.85 —
-// well above the highest observed wrong-match score of ~0.6, comfortably
-// below what a correct decode should show even with real-world bit noise).
-const CONFIDENCE_THRESHOLD = 0.85;
-let gatedHits = 0, gatedMisses = 0, gatedWrong = 0;
-for (let t = 0; t < trials; t++) {
-  const testRow = Math.floor(Math.random() * R);
-  const testCol = Math.floor(Math.random() * C);
-  const phiDeg = testAngles[t % testAngles.length];
-  const rgba = cropAtRotated(testRow, testCol, phiDeg * Math.PI / 180);
-  const { match, consistency } = decode(rgba);
-  if (!match || consistency < CONFIDENCE_THRESHOLD) { gatedMisses++; continue; }
-  const correct = within(testRow, match.row, order, R) && within(testCol, match.col, order, C);
-  if (correct) gatedHits++; else gatedWrong++;
-}
 console.log(`\nWith CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD}: ${gatedHits}/${trials} correct, ${gatedMisses} no-lock, ${gatedWrong} wrong.`);
 if (gatedWrong > 0) { console.error('FAIL: threshold did not eliminate wrong decodes.'); process.exit(1); }
 
@@ -201,10 +196,11 @@ function injectNoise(sampledGrids: SampledGrid[], rate: number): SampledGrid[] {
 }
 
 console.log('\nBit-noise tolerance (injected directly into the sampled grid):');
+const noiseTrials = 60;
 for (const noiseRate of [0, 0.02, 0.05, 0.1, 0.15, 0.2]) {
   let nHits = 0, nMisses = 0, nWrong = 0;
   const scores: number[] = [];
-  for (let t = 0; t < 100; t++) {
+  for (let t = 0; t < noiseTrials; t++) {
     const testRow = Math.floor(Math.random() * R);
     const testCol = Math.floor(Math.random() * C);
     const rgba = cropAtRotated(testRow, testCol, 20 * Math.PI / 180);
@@ -215,5 +211,5 @@ for (const noiseRate of [0, 0.02, 0.05, 0.1, 0.15, 0.2]) {
     if (within(testRow, match.row, order, R) && within(testCol, match.col, order, C)) nHits++;
     else nWrong++;
   }
-  console.log(`  ${(noiseRate * 100).toFixed(0)}% bit noise: ${nHits}/100 correct, ${nMisses} no-lock, ${nWrong} wrong, avg score ${stats(scores)}`);
+  console.log(`  ${(noiseRate * 100).toFixed(0)}% bit noise: ${nHits}/${noiseTrials} correct, ${nMisses} no-lock, ${nWrong} wrong, avg score ${stats(scores)}`);
 }

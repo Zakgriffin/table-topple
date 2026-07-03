@@ -246,18 +246,6 @@ export function asSignedResidual(angle: number): number {
 
 export interface SampledCell { x: number; y: number; bit: number; }
 
-// Samples every fully-visible cell in the (assumed axis-aligned) buffer into
-// a 2D grid, cells[row][col], row 0 = top. Extends in BOTH directions from
-// (px, py) — not just rightward/downward — since detectGrid now re-anchors
-// (px, py) near the buffer's center rather than near index 0. originRow/
-// originCol give the array index of the cell whose top-left corner sits at
-// exactly (px, py), for callers that need to map back to pixel positions
-// (e.g. drawing overlay lines) without recomputing the anchor themselves.
-export interface SampledGrid {
-  rows: number; cols: number; cells: SampledCell[][];
-  originRow: number; originCol: number;
-}
-
 // Walks outward from `anchor` in both directions, accumulating cell
 // boundary positions using a LOCALLY-interpolated pitch at each step
 // (basePitch + grad * distance-from-anchor) rather than a constant pitch —

@@ -210,8 +210,8 @@ async function main() {
     console.log('Torus too large to brute-force verify window uniqueness — skipping (relying on the CRT-fold construction).');
   }
 
-  await writePng(torus, R, C, side, outPath);
-  console.log(`Wrote ${outPath} (${side}x${side}px, ${R}x${C} cells, ~${(side / C).toFixed(1)}x${(side / R).toFixed(1)}px per cell)`);
+  await writePng(torus, R, C, cellSize, outPath);
+  console.log(`Wrote ${outPath} (${C * cellSize}x${R * cellSize}px, ${R}x${C} cells, ${cellSize}x${cellSize}px per cell)`);
 }
 
 main().catch(e => { console.error(e); process.exit(1); });

@@ -210,7 +210,13 @@ export function asSignedResidual(angle: number): number {
 // every grid lattice point is 2D-localizable (see src/cornerdetect.ts); x/y/
 // bit are meaningless placeholders in that case. sampleFullGrid's constant-
 // pitch model has no gaps, so valid is always true there.
-export interface SampledCell { x: number; y: number; bit: number; valid: boolean; }
+//
+// cornerCount is how many of the cell's 4 mesh corners were actually known
+// when sampleFromMesh estimated its center (2, 3, or 4 — see its diagonal-
+// pair comment for why 2 is enough) — a rough per-cell confidence signal,
+// mainly for debug display (src/main.ts's overlay). 0 for sampleFullGrid,
+// which isn't corner-based at all.
+export interface SampledCell { x: number; y: number; bit: number; valid: boolean; cornerCount: number; }
 
 // Walks outward from `anchor` in both directions at a constant `pitch`,
 // accumulating cell boundary positions.
@@ -262,7 +268,7 @@ export function sampleFullGrid(bin: Uint8Array, w: number, h: number, grid: Grid
           count++;
         }
       }
-      rowCells.push({ x: cx, y: cy, bit: count > 0 && sum / count > 0.5 ? 1 : 0, valid: true });
+      rowCells.push({ x: cx, y: cy, bit: count > 0 && sum / count > 0.5 ? 1 : 0, valid: true, cornerCount: 0 });
     }
     cells.push(rowCells);
   }
@@ -319,9 +325,10 @@ export function sampleFromMesh(bin: Uint8Array, w: number, h: number, mesh: Mesh
       const diag1 = tl && br ? { ax: tl.x, ay: tl.y, bx: br.x, by: br.y } : null; // TL-BR
       const diag2 = tr && bl ? { ax: tr.x, ay: tr.y, bx: bl.x, by: bl.y } : null; // TR-BL
       if (!diag1 && !diag2) {
-        rowCells.push({ x: NaN, y: NaN, bit: 0, valid: false });
+        rowCells.push({ x: NaN, y: NaN, bit: 0, valid: false, cornerCount: 0 });
         continue;
       }
+      const cornerCount = [tl, tr, bl, br].filter(c => c !== undefined).length;
       // Average both diagonal midpoints when both happen to be known (all 4
       // corners present) for slightly better precision; otherwise use
       // whichever one is available.
@@ -349,7 +356,7 @@ export function sampleFromMesh(bin: Uint8Array, w: number, h: number, mesh: Mesh
           count++;
         }
       }
-      rowCells.push({ x: cx, y: cy, bit: count > 0 && sum / count > 0.5 ? 1 : 0, valid: true });
+      rowCells.push({ x: cx, y: cy, bit: count > 0 && sum / count > 0.5 ? 1 : 0, valid: true, cornerCount });
     }
     cells.push(rowCells);
   }

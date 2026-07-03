@@ -218,7 +218,7 @@ function render() {
   const result = decodeFrame();
 
   if (result) {
-    const toVideo = (ax: number, ay: number) => alignedToVideo(ax, ay, result.theta, result.cropSx, result.cropSy, result.rawScale);
+    const toVideo = (ax: number, ay: number) => alignedToVideo(ax, ay, result);
     const confident = result.consistency >= CONFIDENCE_THRESHOLD;
 
     // Blue lines for the estimated grid edges (both line families), so you
@@ -226,16 +226,16 @@ function render() {
     const { px, py, pitchX, pitchY } = result.grid;
     ctx.strokeStyle = 'rgba(60,140,255,0.8)';
     ctx.lineWidth = Math.max(1, result.rawScale * 1.2);
-    const numCellsX = Math.floor((ALIGNED - px) / pitchX);
-    const numCellsY = Math.floor((ALIGNED - py) / pitchY);
+    const numCellsX = Math.floor((result.alignedW - px) / pitchX);
+    const numCellsY = Math.floor((result.alignedH - py) / pitchY);
     for (let k = 0; k <= numCellsX; k++) {
       const x = px + k * pitchX;
-      const a = toVideo(x, 0), b = toVideo(x, ALIGNED);
+      const a = toVideo(x, 0), b = toVideo(x, result.alignedH);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
     for (let k = 0; k <= numCellsY; k++) {
       const y = py + k * pitchY;
-      const a = toVideo(0, y), b = toVideo(ALIGNED, y);
+      const a = toVideo(0, y), b = toVideo(result.alignedW, y);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
 

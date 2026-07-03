@@ -129,6 +129,46 @@ export function detectGrid(bin: Uint8Array, w: number, h: number): GridDetection
   return detectGridInRegion(bin, w, 0, 0, w, h);
 }
 
+export interface LocalGridDetection extends GridDetection {
+  gradPitchX: number; // change in pitchX per pixel of X position
+  gradPitchY: number; // change in pitchY per pixel of Y position
+}
+
+// Stage 2's model (detectGrid) is a single rigid rotation + uniform scale
+// for the whole buffer — exactly right for a camera facing the mat
+// straight-on, but mild perspective/skew makes cell size vary smoothly
+// across the image (bigger on the near side, smaller on the far side),
+// which a single global pitch can't represent. Rather than full corner
+// detection or homography estimation, this fits a first-order (linear)
+// approximation: run pitch detection independently in the left/right and
+// top/bottom halves of the buffer, and use how much those regional
+// estimates differ as a local pitch GRADIENT — sampleFullGrid then
+// integrates that gradient (see buildBoundaries) instead of assuming
+// constant pitch. Falls back to zero gradient (identical to detectGrid's
+// plain constant-pitch behavior) if the regional estimates look unreliable,
+// rather than trust a wild value from an under-sized detection window.
+export function detectLocalGrid(bin: Uint8Array, w: number, h: number): LocalGridDetection {
+  const base = detectGrid(bin, w, h);
+
+  const margin = 0.1; // slight overlap between halves for a more reliable regional signal
+  const leftRegion = detectGridInRegion(bin, w, 0, 0, Math.round(w * (0.5 + margin)), h);
+  const rightRegion = detectGridInRegion(bin, w, Math.round(w * (0.5 - margin)), 0, w, h);
+  const topRegion = detectGridInRegion(bin, w, 0, 0, w, Math.round(h * (0.5 + margin)));
+  const bottomRegion = detectGridInRegion(bin, w, 0, Math.round(h * (0.5 - margin)), w, h);
+
+  let gradPitchX = (rightRegion.pitchX - leftRegion.pitchX) / (w / 2);
+  let gradPitchY = (bottomRegion.pitchY - topRegion.pitchY) / (h / 2);
+
+  // Sanity bound: reject implausibly large gradients (more likely a regional
+  // detection failure than real distortion) rather than trust them — total
+  // pitch variation across the buffer shouldn't plausibly exceed ~30% of the
+  // base pitch for the mild distortion this is meant to correct.
+  if (Math.abs(gradPitchX * w) > base.pitchX * 0.3) gradPitchX = 0;
+  if (Math.abs(gradPitchY * h) > base.pitchY * 0.3) gradPitchY = 0;
+
+  return { ...base, gradPitchX, gradPitchY };
+}
+
 // Estimates the grid's rotation, folded into [0, PI/2) radians, via a
 // gradient-orientation histogram. Edges at cell boundaries produce gradient
 // vectors perpendicular to the boundary line; a square grid's two line

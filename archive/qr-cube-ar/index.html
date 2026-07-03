@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>QR Cube AR</title>
+<style>
+  * { margin: 0; padding: 0; }
+  body { background: #000; overflow: hidden; }
+  canvas#c {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  /* Mirror only the front/user-facing camera, so it behaves like a mirror.
+     The rear camera shows the world as-is, unmirrored. */
+  canvas#c.mirror {
+    transform: translate(-50%, -50%) scaleX(-1);
+  }
+  #status { position: fixed; top: 10px; left: 10px; color: white; font-family: monospace; font-size: 14px; }
+  #switchCam {
+    position: fixed; bottom: 16px; right: 16px; z-index: 10;
+    padding: 10px 14px; border-radius: 999px; border: none;
+    background: rgba(255,255,255,0.15); color: white;
+    font-family: monospace; font-size: 14px; backdrop-filter: blur(4px);
+  }
+  #switchCam:active { background: rgba(255,255,255,0.3); }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div id="status">Starting camera...</div>
+<button id="switchCam" title="Switch camera">⟲ Flip camera</button>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

@@ -275,7 +275,7 @@ async function detectAll(detector: any) {
 }
 
 async function detectionLoop() {
-  if (!('BarcodeDetector' in window)) {
+  if (!barcodeSupported) {
     status.textContent = 'BarcodeDetector not supported — try Chrome';
     return;
   }

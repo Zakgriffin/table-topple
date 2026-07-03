@@ -125,6 +125,7 @@ const analyzeBtn = document.getElementById('analyzeBtn') as HTMLButtonElement;
 const toggleJunctions = document.getElementById('toggleJunctions') as HTMLInputElement;
 const toggleMesh = document.getElementById('toggleMesh') as HTMLInputElement;
 const toggleCells = document.getElementById('toggleCells') as HTMLInputElement;
+const toggleStage2 = document.getElementById('toggleStage2') as HTMLInputElement;
 
 const MESH_ANALYSIS_BUDGET = 320 * 320;
 const MESH_PATCH = 120; // small central patch, only for an accurate pitch seed under roll
@@ -219,17 +220,48 @@ function runMeshAnalysis() {
   ].join('\n');
 }
 
-analyzeBtn.addEventListener('click', () => {
+// Runs one analysis pass, painting "analyzing..." first since the pass
+// itself blocks the main thread for a while (double rAF: the DOM update is
+// guaranteed painted by the time the heavy synchronous work in the second
+// callback runs — a single rAF doesn't guarantee the paint has happened
+// yet). Calls `after` once done, whether or not anything was actually drawn.
+function triggerAnalysis(after: () => void) {
   analyzeBtn.disabled = true;
   meshStatus.textContent = 'analyzing...';
-  // Double rAF: the DOM update above is guaranteed painted by the time the
-  // heavy synchronous work in the second callback runs and blocks the
-  // thread — a single rAF doesn't guarantee the paint has happened yet.
   requestAnimationFrame(() => requestAnimationFrame(() => {
     try { runMeshAnalysis(); }
-    finally { analyzeBtn.disabled = false; }
+    finally { analyzeBtn.disabled = false; after(); }
   }));
-});
+}
+
+// Auto-refresh: junctions/mesh/cells are all derived from the same
+// runMeshAnalysis() pass, so one toggle being on is enough reason to keep
+// it current — otherwise checking "junctions" just shows an increasingly
+// stale single snapshot as you move the camera. Re-triggers itself only
+// after the PREVIOUS pass finishes (not a fixed-cadence interval), since a
+// pass can take a while and overlapping runs would just queue up jank.
+// Stops entirely once every layer is toggled off, so idle cost is zero.
+const MESH_REFRESH_DELAY_MS = 1200;
+let autoRefreshTimer: number | null = null;
+
+function anyMeshLayerVisible(): boolean {
+  return toggleJunctions.checked || toggleMesh.checked || toggleCells.checked;
+}
+
+function scheduleAutoRefresh() {
+  if (autoRefreshTimer !== null || !anyMeshLayerVisible()) return;
+  autoRefreshTimer = window.setTimeout(() => {
+    autoRefreshTimer = null;
+    if (!anyMeshLayerVisible()) return;
+    triggerAnalysis(scheduleAutoRefresh);
+  }, MESH_REFRESH_DELAY_MS);
+}
+
+for (const toggle of [toggleJunctions, toggleMesh, toggleCells]) {
+  toggle.addEventListener('change', scheduleAutoRefresh);
+}
+
+analyzeBtn.addEventListener('click', () => triggerAnalysis(scheduleAutoRefresh));
 
 // ── Grid decode pipeline (Stage 2: rotation + uniform scale) ───────────────────
 // See src/decode.ts's module header for the full algorithm writeup. Summary:
@@ -373,7 +405,7 @@ function render() {
 
   const result = decodeFrame();
 
-  if (result) {
+  if (result && toggleStage2.checked) {
     const toVideo = (ax: number, ay: number) => alignedToVideo(ax, ay, result);
     const confident = result.consistency >= CONFIDENCE_THRESHOLD;
 

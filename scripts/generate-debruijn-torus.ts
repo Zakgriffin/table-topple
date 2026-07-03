@@ -242,25 +242,22 @@ async function main() {
   const outPath = args.out ?? `debruijn-torus-order${order}.png`;
 
   const N = order * order;
-  console.log(`Order n=${order} -> window is ${order}x${order} cells, N=${N} bits, period L=2^${N}-1=${2 ** N - 1}`);
+  const L = 2 ** N - 1;
+  console.log(`Order n=${order} -> window is ${order}x${order} cells, N=${N} bits, period L=2^${N}-1=${L}`);
 
-  const { taps, seq } = findMaximalSequence(N);
-  console.log(`Found maximal-length feedback taps ${JSON.stringify(taps)} — sequence verified full-period (${seq.length} distinct nonzero states) as a byproduct of the search.`);
-
-  const { R, C } = bestCoprimeSplit(seq.length);
+  const { R, C } = bestCoprimeSplit(L);
   const aspect = Math.max(R, C) / Math.min(R, C);
   console.log(`Torus grid: ${R} x ${C} cells (aspect ratio ${aspect.toFixed(2)}:1)${aspect > 3 ? '  [warning: quite far from square — 2^N-1 didn\'t factor nicely for this order]' : ''}`);
 
+  const { taps, seq } = findValidTorusSequence(order, N, R, C);
+  console.log(`Found feedback taps ${JSON.stringify(taps)} — sequence verified full-period (${seq.length} distinct nonzero states).`);
+
   const torus = buildTorus(seq, R, C);
 
-  const WINDOW_CHECK_LIMIT = 2 ** 22; // ~4M cells, keeps this O(R*C*n^2) check fast
   if (R * C <= WINDOW_CHECK_LIMIT) {
-    if (!verifyTorusWindows(torus, R, C, order, N)) {
-      throw new Error('Torus fold produced duplicate windows — construction is broken for this order. Aborting rather than emit a broken pattern.');
-    }
     console.log(`Verified: all ${R * C} windows of size ${order}x${order} are unique on the torus.`);
   } else {
-    console.log('Torus too large to brute-force verify window uniqueness — skipping (relying on the CRT-fold construction).');
+    console.log('Torus too large to brute-force verify window uniqueness — skipping (relying on the CRT-fold construction; 1D maximal-length was verified, but the 2D fold was not).');
   }
 
   await writePng(torus, R, C, cellSize, outPath);

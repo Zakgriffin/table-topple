@@ -205,13 +205,13 @@ function decodeFrame(): DecodeResult | null {
   const residual = asSignedResidual(estimateRotationRad(previewGray, alignedW, alignedH));
   const theta0 = thetaCoarse + residual;
 
-  const grids: { px: number; py: number; pitchX: number; pitchY: number }[] = [];
+  const grids: LocalGridDetection[] = [];
   const sampledGrids = [0, 1, 2, 3].map(k => {
     const theta = theta0 + k * (Math.PI / 2);
     const alignedBin = binarize(derotateToGray(theta));
-    const grid = detectGrid(alignedBin, alignedW, alignedH);
+    const grid = detectLocalGrid(alignedBin, alignedW, alignedH);
     grids.push(grid);
-    return sampleFullGrid(alignedBin, alignedW, alignedH, grid);
+    return sampleFullGrid(alignedBin, alignedW, alignedH, grid, grid);
   });
 
   const best = pickBestCandidate(sampledGrids, ORDER, lookup, debruijn.torus, R, C);

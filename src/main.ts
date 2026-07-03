@@ -205,12 +205,10 @@ function decodeFrame(): DecodeResult | null {
     return sampleFullGrid(alignedBin, alignedW, alignedH, grid);
   });
 
-  const best = pickBestCandidate(sampledGrids, ORDER, lookup, R, C);
+  const best = pickBestCandidate(sampledGrids, ORDER, lookup, debruijn.torus, R, C);
   const theta = theta0 + best.candidateIndex * (Math.PI / 2);
   const grid = grids[best.candidateIndex];
-
-  const matched = best.patches.filter(p => p.match !== null);
-  const match = (best.consistency >= CONFIDENCE_THRESHOLD && matched.length > 0) ? matched[0].match : null;
+  const match = best.consistency >= CONFIDENCE_THRESHOLD ? best.match : null;
 
   return {
     match, patches: best.patches, consistency: best.consistency, theta, grid,

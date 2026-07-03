@@ -5,13 +5,17 @@
 //
 // Construction (classical LFSR + CRT fold, MacWilliams & Sloane 1976):
 //   1. N = n * n is the window's bit count. Generate a maximal-length LFSR
-//      ("m-sequence") of degree N using a known primitive polynomial. Its
-//      period is L = 2^N - 1, and — by definition of "maximal length" — every
-//      nonzero N-bit window appears in it exactly once as it cycles.
-//   2. Factor L into two coprime numbers R and C (R * C = L) as close to
-//      square as possible. By the Chinese Remainder Theorem, t -> (t mod R,
-//      t mod C) is a bijection from Z_L to Z_R x Z_C, so folding the sequence
-//      that way fills an R x C torus using every position exactly once.
+//      ("m-sequence") of degree N by searching for a feedback tap set that
+//      empirically produces a full-period (2^N - 1) cycle — rather than
+//      trusting a memorized table of "known primitive polynomials" (tap-list
+//      conventions vary by source and are an easy way to silently ship a
+//      broken, non-maximal sequence). Maximal length means every nonzero
+//      N-bit window appears in the sequence exactly once as it cycles.
+//   2. Factor L = 2^N - 1 into two coprime numbers R and C (R * C = L) as
+//      close to square as possible. By the Chinese Remainder Theorem, t ->
+//      (t mod R, t mod C) is a bijection from Z_L to Z_R x Z_C, so folding
+//      the sequence that way fills an R x C torus using every position
+//      exactly once.
 //   3. The 1D window-uniqueness property is known to carry over to n x n
 //      windows on the folded torus. Since getting this fold subtly wrong is
 //      an easy way to silently produce a *broken* pattern, this script also
@@ -23,29 +27,13 @@
 //
 //   --order  Window order n (window is n x n cells). Determines how many
 //            cells the camera must see to uniquely determine its position.
-//            Supported: 2-5, bounded by the primitive-polynomial table below
-//            (needs an entry for N = order^2, table goes up to degree 32) —
-//            order 5 alone is a 25-bit torus, ~33.5M cells, already a lot to
+//            Order 5 alone is a 25-bit torus, ~33.5M cells, already a lot to
 //            print, so in practice order 3 or 4 is the realistic range.
 //   --side   Output PNG width & height in pixels (square image).
 //   --out    Output file path (default: debruijn-torus-order<n>.png).
 
 import { PNG } from 'pngjs';
 import { createWriteStream } from 'node:fs';
-
-// Standard maximal-length (primitive polynomial) Fibonacci LFSR taps, degree -> tap
-// positions (1-indexed from the LSB). Widely published table (e.g. Xilinx XAPP052 /
-// Ward & Molteno). Correctness for each entry is re-verified at runtime below rather
-// than assumed, since a wrong tap silently produces a non-primitive (broken) sequence.
-const LFSR_TAPS: Record<number, number[]> = {
-  2: [2, 1], 3: [3, 2], 4: [4, 3], 5: [5, 3], 6: [6, 5], 7: [7, 6],
-  8: [8, 6, 5, 4], 9: [9, 5], 10: [10, 7], 11: [11, 9], 12: [12, 6, 4, 1],
-  13: [13, 4, 3, 1], 14: [14, 5, 3, 1], 15: [15, 14], 16: [16, 15, 13, 4],
-  17: [17, 14], 18: [18, 11], 19: [19, 6, 2, 1], 20: [20, 17], 21: [21, 19],
-  22: [22, 21], 23: [23, 18], 24: [24, 23, 22, 17], 25: [25, 22],
-  26: [26, 6, 2, 1], 27: [27, 5, 2, 1], 28: [28, 25], 29: [29, 27],
-  30: [30, 6, 4, 1], 31: [31, 28], 32: [32, 22, 2, 1],
-};
 
 function parseArgs(argv: string[]): Record<string, string> {
   const args: Record<string, string> = {};
@@ -59,15 +47,21 @@ function parseArgs(argv: string[]): Record<string, string> {
   return args;
 }
 
-// Generates the m-sequence: L = 2^N - 1 bits, every nonzero N-bit window
-// (read cyclically) appears exactly once.
-function generateMSequence(N: number): Uint8Array {
-  const taps = LFSR_TAPS[N];
-  if (!taps) throw new Error(`No primitive polynomial on file for degree ${N} (order^2). Supported N: 2-32.`);
+// Runs a Fibonacci LFSR of degree N for a candidate set of feedback taps
+// (1-indexed bit positions, XORed together each step to produce the bit fed
+// into the MSB after shifting right). Returns the L = 2^N - 1 length output
+// sequence if this tap set is maximal-length (every nonzero state visited
+// exactly once), or null otherwise. Exits on the first repeated state, so
+// non-primitive candidates are usually rejected in a handful of steps, not
+// the full period — that's what makes searching many candidates cheap.
+function tryTaps(taps: number[], N: number): Uint8Array | null {
   const L = 2 ** N - 1;
+  const seen = new Uint8Array(L + 1);
   const seq = new Uint8Array(L);
   let state = 1; // any nonzero seed
   for (let i = 0; i < L; i++) {
+    if (seen[state]) return null;
+    seen[state] = 1;
     seq[i] = state & 1;
     let feedback = 0;
     for (const t of taps) feedback ^= (state >>> (t - 1)) & 1;
@@ -76,20 +70,30 @@ function generateMSequence(N: number): Uint8Array {
   return seq;
 }
 
-// Verifies the LFSR actually is maximal-length: all L generated N-bit states
-// are distinct and nonzero. Catches a wrong/non-primitive table entry.
-function verifyMSequence(seq: Uint8Array, N: number): boolean {
-  const L = seq.length;
-  const seen = new Uint8Array(L + 1);
-  let state = 0;
-  for (let i = 0; i < N; i++) state = (state << 1) | seq[i]; // seed with first N bits
-  for (let i = 0; i < L; i++) {
-    if (state === 0 || seen[state]) return false;
-    seen[state] = 1;
-    const nextBit = seq[(i + N) % L];
-    state = ((state << 1) | nextBit) & ((1 << N) - 1);
+// Finds a maximal-length feedback tap set for degree N by trying sparse
+// candidates first (trinomial-style: taps = [N, k]), then falling back to
+// denser 4-tap and 6-tap searches. Primitive polynomials of every degree
+// exist, and in practice a match — usually a trinomial — turns up quickly.
+function findMaximalSequence(N: number): { taps: number[]; seq: Uint8Array } {
+  for (let k = 1; k < N; k++) {
+    const seq = tryTaps([N, k], N);
+    if (seq) return { taps: [N, k], seq };
   }
-  return true;
+  for (let a = 1; a < N; a++)
+    for (let b = a + 1; b < N; b++)
+      for (let c = b + 1; c < N; c++) {
+        const seq = tryTaps([N, a, b, c], N);
+        if (seq) return { taps: [N, a, b, c], seq };
+      }
+  for (let a = 1; a < N; a++)
+    for (let b = a + 1; b < N; b++)
+      for (let c = b + 1; c < N; c++)
+        for (let d = c + 1; d < N; d++)
+          for (let e = d + 1; e < N; e++) {
+            const seq = tryTaps([N, a, b, c, d, e], N);
+            if (seq) return { taps: [N, a, b, c, d, e], seq };
+          }
+  throw new Error(`Could not find a maximal-length LFSR for degree ${N} within search budget.`);
 }
 
 function primePowerFactors(nInput: number): number[] {

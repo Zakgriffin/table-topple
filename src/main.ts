@@ -138,7 +138,7 @@ interface DecodeResult {
   patches: Patch[];
   consistency: number;
   theta: number; // resolved full rotation angle (radians) for the winning candidate
-  grid: { px: number; py: number; pitchX: number; pitchY: number };
+  grid: LocalGridDetection;
   alignedW: number; alignedH: number;
   cropSx: number; cropSy: number; rawScale: number; rawSide: number; contentDx: number; contentDy: number;
 }

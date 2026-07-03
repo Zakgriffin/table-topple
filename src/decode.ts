@@ -326,18 +326,93 @@ export function decodePatches(sg: SampledGrid, order: number, lookup: Int32Array
   return best;
 }
 
+// Applies the same orientation-dependent rotation packPatchCells uses (see
+// its comment) to a (sampled-grid row shift, col shift) vector, giving the
+// torus (row shift, col shift) a correct decode should show between two
+// windows offset by that amount in sampled-grid space. Derived by tracking
+// how packPatchCells's per-orientation index mapping responds to shifting
+// its window's reference point by one cell in each sampled-grid direction —
+// same underlying rotation, just applied to a shift vector instead of a
+// cell index.
+function rotateShift(da: number, db: number, orientation: number): [number, number] {
+  if (orientation === 1) return [db, -da];
+  if (orientation === 2) return [-da, -db];
+  if (orientation === 3) return [-db, da];
+  return [da, db];
+}
+
+// Scores confidence using a DENSE sliding window (stride 1, heavily
+// overlapping) rather than the discrete non-overlapping patches decodePatches
+// tiles for display. A 30x30 sampled grid gives only 49 non-overlapping
+// order-4 tiles to cross-check, each pair a full 4 cells apart; the same
+// grid gives 729 overlapping stride-1 windows, each pair only 1 cell apart —
+// far more pairwise checks per visible cell, so a false match would need to
+// stay coincidentally consistent with many neighbors rather than just a
+// couple. It also still produces useful signal when the visible region is
+// too small to fit more than one discrete order x order tile (no neighbors
+// for the tile-based check), which is exactly the "camera very close to the
+// mat" case that motivated this. Reuses the orientation decodePatches
+// already resolved rather than re-resolving it (cheap orientation search,
+// expensive-ish dense scoring — no need to pay the dense cost 4x over).
+export function scoreDenseConsistency(sg: SampledGrid, order: number, lookup: Int32Array, R: number, C: number, orientation: number): number {
+  const windowsPerRow = sg.cols - order + 1;
+  const windowsPerCol = sg.rows - order + 1;
+  if (windowsPerRow < 1 || windowsPerCol < 1) return 0;
+
+  const matches: ({ row: number; col: number } | null)[][] = [];
+  for (let r = 0; r < windowsPerCol; r++) {
+    const rowMatches: ({ row: number; col: number } | null)[] = [];
+    for (let c = 0; c < windowsPerRow; c++) {
+      const cells: SampledCell[][] = [];
+      for (let i = 0; i < order; i++) cells.push(sg.cells[r + i].slice(c, c + order));
+      const packed = lookup[packPatchCells(cells, order, orientation)];
+      rowMatches.push(packed === -1 ? null : { row: Math.floor(packed / C), col: packed % C });
+    }
+    matches.push(rowMatches);
+  }
+
+  const wrapDist = (a: number, b: number, mod: number) => Math.min(Math.abs(a - b), mod - Math.abs(a - b));
+  let agree = 0, total = 0;
+  for (let r = 0; r < windowsPerCol; r++) {
+    for (let c = 0; c < windowsPerRow; c++) {
+      const m = matches[r][c];
+      if (!m) continue;
+      for (const [da, db] of [[1, 0], [0, 1]] as const) {
+        const nr = r + da, nc = c + db;
+        if (nr >= windowsPerCol || nc >= windowsPerRow) continue;
+        const n = matches[nr][nc];
+        if (!n) continue;
+        total++;
+        const [edr, edc] = rotateShift(da, db, orientation);
+        const expectedRow = ((m.row + edr) % R + R) % R;
+        const expectedCol = ((m.col + edc) % C + C) % C;
+        if (wrapDist(expectedRow, n.row, R) <= 1 && wrapDist(expectedCol, n.col, C) <= 1) agree++;
+      }
+    }
+  }
+  return total > 0 ? agree / total : 0;
+}
+
 // Runs decodePatches across several rotation candidates (typically the
 // gradient-histogram estimate plus 90/180/270-degree offsets of it — see
 // this module's header comment for why the full angle isn't pinned down by
-// edge orientation alone) and returns whichever candidate scores the most
-// self-consistent set of patches.
+// edge orientation alone). Candidate selection and the final confidence
+// score both use scoreDenseConsistency rather than decodePatches's own
+// (tile-based) consistency — the discrete patches are kept only for visual
+// display (see Patch/PatchDecodeResult), decoupled from what's actually
+// used to judge whether to trust the frame.
 export interface CandidateResult extends PatchDecodeResult { candidateIndex: number; }
 
 export function pickBestCandidate(sampledGrids: SampledGrid[], order: number, lookup: Int32Array, R: number, C: number): CandidateResult {
   let best: CandidateResult | null = null;
   for (let i = 0; i < sampledGrids.length; i++) {
-    const result = decodePatches(sampledGrids[i], order, lookup, R, C);
-    if (!best || result.consistency > best.consistency) best = { ...result, candidateIndex: i };
+    const tiled = decodePatches(sampledGrids[i], order, lookup, R, C);
+    const consistency = tiled.orientation === null
+      ? 0
+      : scoreDenseConsistency(sampledGrids[i], order, lookup, R, C, tiled.orientation);
+    if (!best || consistency > best.consistency) {
+      best = { patches: tiled.patches, orientation: tiled.orientation, consistency, candidateIndex: i };
+    }
   }
   return best!;
 }

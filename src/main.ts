@@ -1,6 +1,6 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
-import { detectLocalGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual, buildBoundaries } from './decode.ts';
-import type { LocalGridDetection } from './decode.ts';
+import { detectGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual, buildBoundaries } from './decode.ts';
+import type { GridDetection } from './decode.ts';
 import type { Patch } from './decode.ts';
 
 // ── Pattern setup ─────────────────────────────────────────────────────────────
@@ -138,7 +138,7 @@ interface DecodeResult {
   patches: Patch[];
   consistency: number;
   theta: number; // resolved full rotation angle (radians) for the winning candidate
-  grid: LocalGridDetection;
+  grid: GridDetection;
   alignedW: number; alignedH: number;
   cropSx: number; cropSy: number; rawScale: number; rawSide: number; contentDx: number; contentDy: number;
 }
@@ -205,13 +205,13 @@ function decodeFrame(): DecodeResult | null {
   const residual = asSignedResidual(estimateRotationRad(previewGray, alignedW, alignedH));
   const theta0 = thetaCoarse + residual;
 
-  const grids: LocalGridDetection[] = [];
+  const grids: GridDetection[] = [];
   const sampledGrids = [0, 1, 2, 3].map(k => {
     const theta = theta0 + k * (Math.PI / 2);
     const alignedBin = binarize(derotateToGray(theta));
-    const grid = detectLocalGrid(alignedBin, alignedW, alignedH);
+    const grid = detectGrid(alignedBin, alignedW, alignedH);
     grids.push(grid);
-    return sampleFullGrid(alignedBin, alignedW, alignedH, grid, grid);
+    return sampleFullGrid(alignedBin, alignedW, alignedH, grid);
   });
 
   const best = pickBestCandidate(sampledGrids, ORDER, lookup, debruijn.torus, R, C);
@@ -247,16 +247,13 @@ function render() {
 
     // Blue lines for the estimated grid edges (both line families), so you
     // can visually check the detected grid against the real one on screen.
-    // Uses the SAME buildBoundaries walk sampleFullGrid uses internally
-    // (rather than a plain constant-pitch formula), so the drawn lines stay
-    // truthful to what's actually being sampled — including bowing to
-    // reflect a detected local pitch gradient (see detectLocalGrid) when
-    // one was found, not just the common constant-pitch case.
-    const { px, py, pitchX, pitchY, gradPitchX, gradPitchY } = result.grid;
+    // Uses the SAME buildBoundaries walk sampleFullGrid uses internally,
+    // so the drawn lines stay truthful to what's actually being sampled.
+    const { px, py, pitchX, pitchY } = result.grid;
     ctx.strokeStyle = 'rgba(60,140,255,0.8)';
     ctx.lineWidth = Math.max(1, result.rawScale * 1.2);
-    const { boundaries: xB } = buildBoundaries(px, pitchX, gradPitchX, 0, result.alignedW);
-    const { boundaries: yB } = buildBoundaries(py, pitchY, gradPitchY, 0, result.alignedH);
+    const { boundaries: xB } = buildBoundaries(px, pitchX, 0, result.alignedW);
+    const { boundaries: yB } = buildBoundaries(py, pitchY, 0, result.alignedH);
     for (const x of xB) {
       const a = toVideo(x, 0), b = toVideo(x, result.alignedH);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();

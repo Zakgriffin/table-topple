@@ -12,7 +12,7 @@
 import { PNG } from 'pngjs';
 import { readFileSync } from 'node:fs';
 import { generateTorus, buildLookupTable } from '../src/debruijn.ts';
-import { detectLocalGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual } from '../src/decode.ts';
+import { detectGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual } from '../src/decode.ts';
 import type { SampledGrid } from '../src/decode.ts';
 
 const order = parseInt(process.argv[2] ?? '4', 10);
@@ -104,8 +104,8 @@ function decode(rgba: Uint8ClampedArray): { match: { row: number; col: number } 
     const theta = theta0 + k * (Math.PI / 2);
     const alignedGray = derotate(rawGray, theta);
     const alignedBin = binarize(alignedGray);
-    const grid = detectLocalGrid(alignedBin, ALIGNED, ALIGNED);
-    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid, grid);
+    const grid = detectGrid(alignedBin, ALIGNED, ALIGNED);
+    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid);
   });
 
   const { match, consistency } = pickBestCandidate(sampledGrids, order, lookup, debruijn.torus, R, C);
@@ -188,8 +188,8 @@ function buildSampledGrids(rgba: Uint8ClampedArray): SampledGrid[] {
   return [0, 1, 2, 3].map(k => {
     const theta = theta0 + k * (Math.PI / 2);
     const alignedBin = binarize(derotate(rawGray, theta));
-    const grid = detectLocalGrid(alignedBin, ALIGNED, ALIGNED);
-    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid, grid);
+    const grid = detectGrid(alignedBin, ALIGNED, ALIGNED);
+    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid);
   });
 }
 

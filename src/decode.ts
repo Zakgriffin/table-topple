@@ -86,8 +86,7 @@ export function findPhase(energy: Float64Array, pitch: number): number {
 
 // Runs pitch/phase detection restricted to the sub-rectangle [x0,x1) x
 // [y0,y1) of the buffer (still indexed in full-buffer coordinates in the
-// result). detectGrid is just this called on the whole buffer; the region
-// form also backs detectLocalGrid's per-half regional estimates.
+// result). detectGrid is just this called on the whole buffer.
 function detectGridInRegion(bin: Uint8Array, w: number, x0: number, y0: number, x1: number, y1: number): GridDetection {
   const rw = x1 - x0, rh = y1 - y0;
   const colEnergy = new Float64Array(rw);
@@ -127,46 +126,6 @@ function detectGridInRegion(bin: Uint8Array, w: number, x0: number, y0: number, 
 
 export function detectGrid(bin: Uint8Array, w: number, h: number): GridDetection {
   return detectGridInRegion(bin, w, 0, 0, w, h);
-}
-
-export interface LocalGridDetection extends GridDetection {
-  gradPitchX: number; // change in pitchX per pixel of X position
-  gradPitchY: number; // change in pitchY per pixel of Y position
-}
-
-// Stage 2's model (detectGrid) is a single rigid rotation + uniform scale
-// for the whole buffer — exactly right for a camera facing the mat
-// straight-on, but mild perspective/skew makes cell size vary smoothly
-// across the image (bigger on the near side, smaller on the far side),
-// which a single global pitch can't represent. Rather than full corner
-// detection or homography estimation, this fits a first-order (linear)
-// approximation: run pitch detection independently in the left/right and
-// top/bottom halves of the buffer, and use how much those regional
-// estimates differ as a local pitch GRADIENT — sampleFullGrid then
-// integrates that gradient (see buildBoundaries) instead of assuming
-// constant pitch. Falls back to zero gradient (identical to detectGrid's
-// plain constant-pitch behavior) if the regional estimates look unreliable,
-// rather than trust a wild value from an under-sized detection window.
-export function detectLocalGrid(bin: Uint8Array, w: number, h: number): LocalGridDetection {
-  const base = detectGrid(bin, w, h);
-
-  const margin = 0.1; // slight overlap between halves for a more reliable regional signal
-  const leftRegion = detectGridInRegion(bin, w, 0, 0, Math.round(w * (0.5 + margin)), h);
-  const rightRegion = detectGridInRegion(bin, w, Math.round(w * (0.5 - margin)), 0, w, h);
-  const topRegion = detectGridInRegion(bin, w, 0, 0, w, Math.round(h * (0.5 + margin)));
-  const bottomRegion = detectGridInRegion(bin, w, 0, Math.round(h * (0.5 - margin)), w, h);
-
-  let gradPitchX = (rightRegion.pitchX - leftRegion.pitchX) / (w / 2);
-  let gradPitchY = (bottomRegion.pitchY - topRegion.pitchY) / (h / 2);
-
-  // Sanity bound: reject implausibly large gradients (more likely a regional
-  // detection failure than real distortion) rather than trust them — total
-  // pitch variation across the buffer shouldn't plausibly exceed ~30% of the
-  // base pitch for the mild distortion this is meant to correct.
-  if (Math.abs(gradPitchX * w) > base.pitchX * 0.3) gradPitchX = 0;
-  if (Math.abs(gradPitchY * h) > base.pitchY * 0.3) gradPitchY = 0;
-
-  return { ...base, gradPitchX, gradPitchY };
 }
 
 // Estimates the grid's rotation, folded into [0, PI/2) radians, via a
@@ -246,26 +205,20 @@ export function asSignedResidual(angle: number): number {
 
 export interface SampledCell { x: number; y: number; bit: number; }
 
-// Walks outward from `anchor` in both directions, accumulating cell
-// boundary positions using a LOCALLY-interpolated pitch at each step
-// (basePitch + grad * distance-from-anchor) rather than a constant pitch —
-// this is how gradPitchX/Y (see detectLocalGrid) actually get applied. With
-// grad = 0 this reduces to exactly basePitch per step, i.e. identical
-// boundaries to the old constant-pitch formula (anchor + basePitch*k).
-export function buildBoundaries(anchor: number, basePitch: number, grad: number, minPos: number, maxPos: number): { boundaries: number[]; anchorIndex: number } {
-  const localPitch = (pos: number) => Math.max(1, basePitch + grad * (pos - anchor));
+// Walks outward from `anchor` in both directions at a constant `pitch`,
+// accumulating cell boundary positions.
+export function buildBoundaries(anchor: number, pitch: number, minPos: number, maxPos: number): { boundaries: number[]; anchorIndex: number } {
   const right: number[] = [anchor];
   let x = anchor;
-  while (x < maxPos) { x += localPitch(x); right.push(x); }
+  while (x < maxPos) { x += pitch; right.push(x); }
   const left: number[] = [];
   x = anchor;
-  while (x > minPos) { x -= localPitch(x); left.unshift(x); }
+  while (x > minPos) { x -= pitch; left.unshift(x); }
   return { boundaries: [...left, ...right], anchorIndex: left.length };
 }
 
-// Samples every fully-visible cell in the (assumed axis-aligned, but
-// possibly locally-varying-pitch — see detectLocalGrid) buffer into a 2D
-// grid, cells[row][col], row 0 = top. Extends in BOTH directions from
+// Samples every fully-visible cell in the (assumed axis-aligned) buffer into
+// a 2D grid, cells[row][col], row 0 = top. Extends in BOTH directions from
 // (px, py) — not just rightward/downward — since detectGrid re-anchors
 // (px, py) near the buffer's center rather than near index 0. originRow/
 // originCol give the array index of the cell whose top-left corner sits at
@@ -276,12 +229,11 @@ export interface SampledGrid {
   originRow: number; originCol: number;
 }
 
-export function sampleFullGrid(bin: Uint8Array, w: number, h: number, grid: GridDetection, gradients?: { gradPitchX: number; gradPitchY: number }): SampledGrid {
+export function sampleFullGrid(bin: Uint8Array, w: number, h: number, grid: GridDetection): SampledGrid {
   const { px, py, pitchX, pitchY } = grid;
-  const { gradPitchX, gradPitchY } = gradients ?? { gradPitchX: 0, gradPitchY: 0 };
 
-  const { boundaries: xB, anchorIndex: colsLeft } = buildBoundaries(px, pitchX, gradPitchX, 0, w);
-  const { boundaries: yB, anchorIndex: rowsUp } = buildBoundaries(py, pitchY, gradPitchY, 0, h);
+  const { boundaries: xB, anchorIndex: colsLeft } = buildBoundaries(px, pitchX, 0, w);
+  const { boundaries: yB, anchorIndex: rowsUp } = buildBoundaries(py, pitchY, 0, h);
   const cols = xB.length - 1, rows = yB.length - 1;
 
   const cells: SampledCell[][] = [];

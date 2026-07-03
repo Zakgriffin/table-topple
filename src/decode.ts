@@ -126,7 +126,7 @@ function detectGridInRegion(bin: Uint8Array, w: number, x0: number, y0: number, 
 }
 
 export function detectGrid(bin: Uint8Array, w: number, h: number): GridDetection {
-  return detectGridInRegion(bin, w, h, 0, 0, w, h);
+  return detectGridInRegion(bin, w, 0, 0, w, h);
 }
 
 // Estimates the grid's rotation, folded into [0, PI/2) radians, via a

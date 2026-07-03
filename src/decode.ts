@@ -341,80 +341,85 @@ function rotateShift(da: number, db: number, orientation: number): [number, numb
   return [da, db];
 }
 
-// Scores confidence using a DENSE sliding window (stride 1, heavily
-// overlapping) rather than the discrete non-overlapping patches decodePatches
-// tiles for display. A 30x30 sampled grid gives only 49 non-overlapping
-// order-4 tiles to cross-check, each pair a full 4 cells apart; the same
-// grid gives 729 overlapping stride-1 windows, each pair only 1 cell apart —
-// far more pairwise checks per visible cell, so a false match would need to
-// stay coincidentally consistent with many neighbors rather than just a
-// couple. It also still produces useful signal when the visible region is
-// too small to fit more than one discrete order x order tile (no neighbors
-// for the tile-based check), which is exactly the "camera very close to the
-// mat" case that motivated this. Reuses the orientation decodePatches
-// already resolved rather than re-resolving it (cheap orientation search,
-// expensive-ish dense scoring — no need to pay the dense cost 4x over).
-export function scoreDenseConsistency(sg: SampledGrid, order: number, lookup: Int32Array, R: number, C: number, orientation: number): number {
-  const windowsPerRow = sg.cols - order + 1;
-  const windowsPerCol = sg.rows - order + 1;
-  if (windowsPerRow < 1 || windowsPerCol < 1) return 0;
-
-  const matches: ({ row: number; col: number } | null)[][] = [];
-  for (let r = 0; r < windowsPerCol; r++) {
-    const rowMatches: ({ row: number; col: number } | null)[] = [];
-    for (let c = 0; c < windowsPerRow; c++) {
-      const cells: SampledCell[][] = [];
-      for (let i = 0; i < order; i++) cells.push(sg.cells[r + i].slice(c, c + order));
-      const packed = lookup[packPatchCells(cells, order, orientation)];
-      rowMatches.push(packed === -1 ? null : { row: Math.floor(packed / C), col: packed % C });
-    }
-    matches.push(rowMatches);
-  }
-
-  const wrapDist = (a: number, b: number, mod: number) => Math.min(Math.abs(a - b), mod - Math.abs(a - b));
-  let agree = 0, total = 0;
-  for (let r = 0; r < windowsPerCol; r++) {
-    for (let c = 0; c < windowsPerRow; c++) {
-      const m = matches[r][c];
-      if (!m) continue;
-      for (const [da, db] of [[1, 0], [0, 1]] as const) {
-        const nr = r + da, nc = c + db;
-        if (nr >= windowsPerCol || nc >= windowsPerRow) continue;
-        const n = matches[nr][nc];
-        if (!n) continue;
-        total++;
-        const [edr, edc] = rotateShift(da, db, orientation);
-        const expectedRow = ((m.row + edr) % R + R) % R;
-        const expectedCol = ((m.col + edc) % C + C) % C;
-        if (wrapDist(expectedRow, n.row, R) <= 1 && wrapDist(expectedCol, n.col, C) <= 1) agree++;
-      }
+// Scores a candidate torus anchor (the torus position implied for the
+// sampled grid's own cell (0,0), i.e. its top-left corner) by comparing
+// EVERY sampled cell — not just one patch, not just adjacent pairs — against
+// the actual torus content at the positions that anchor implies. This is a
+// strictly stronger signal than checking patches agree with EACH OTHER
+// (the previous approach, scoreDenseConsistency): it checks agreement with
+// the known pattern directly, so a genuinely correct anchor stays close to
+// 1.0 even with a handful of misread bits (graceful degradation, rather than
+// exact-match's all-or-nothing), while a wrong anchor — even one some patch
+// found via a "valid" exact-match lookup, which is weak evidence on its own
+// given only 16 bits of key space at order 4 (65535 of 65536 possible
+// windows are valid) — should sit close to 0.5 (uncorrelated with a random
+// binary pattern), giving much better separation than the old metric.
+function scoreCorrelation(sg: SampledGrid, torus: Uint8Array[], R: number, C: number, anchorRow: number, anchorCol: number, orientation: number): number {
+  let agree = 0;
+  const total = sg.rows * sg.cols;
+  if (total === 0) return 0;
+  for (let i = 0; i < sg.rows; i++) {
+    for (let j = 0; j < sg.cols; j++) {
+      const [dr, dc] = rotateShift(i, j, orientation);
+      const torusRow = ((anchorRow + dr) % R + R) % R;
+      const torusCol = ((anchorCol + dc) % C + C) % C;
+      if (sg.cells[i][j].bit === torus[torusRow][torusCol]) agree++;
     }
   }
-  return total > 0 ? agree / total : 0;
+  return agree / total;
 }
 
 // Runs decodePatches across several rotation candidates (typically the
 // gradient-histogram estimate plus 90/180/270-degree offsets of it — see
 // this module's header comment for why the full angle isn't pinned down by
-// edge orientation alone). Candidate selection and the final confidence
-// score both use scoreDenseConsistency rather than decodePatches's own
-// (tile-based) consistency — the discrete patches are kept only for visual
-// display (see Patch/PatchDecodeResult), decoupled from what's actually
-// used to judge whether to trust the frame.
-export interface CandidateResult extends PatchDecodeResult { candidateIndex: number; }
+// edge orientation alone). decodePatches's exact-match patches are used only
+// to generate candidate SEED anchor positions (fast, narrows the search from
+// "every torus position" down to a handful) and for visual display — the
+// actual confidence score and final decoded position come from
+// scoreCorrelation, checked against every distinct seed. match is the torus
+// position of the sampled grid's CENTER cell (roughly where the camera is
+// actually pointed), not (0,0), which could be anywhere depending on how far
+// the phase anchor extends in each direction (see detectGrid).
+export interface CandidateResult extends PatchDecodeResult { candidateIndex: number; match: { row: number; col: number } | null; }
 
-export function pickBestCandidate(sampledGrids: SampledGrid[], order: number, lookup: Int32Array, R: number, C: number): CandidateResult {
+export function pickBestCandidate(sampledGrids: SampledGrid[], order: number, lookup: Int32Array, torus: Uint8Array[], R: number, C: number): CandidateResult {
   let best: CandidateResult | null = null;
+
   for (let i = 0; i < sampledGrids.length; i++) {
-    const tiled = decodePatches(sampledGrids[i], order, lookup, R, C);
-    const consistency = tiled.orientation === null
-      ? 0
-      : scoreDenseConsistency(sampledGrids[i], order, lookup, R, C, tiled.orientation);
+    const sg = sampledGrids[i];
+    const tiled = decodePatches(sg, order, lookup, R, C);
+    if (tiled.orientation === null) continue;
+    const o = tiled.orientation;
+
+    const seenAnchors = new Set<string>();
+    let bestAnchor: { row: number; col: number } | null = null;
+    let bestScore = -1;
+    for (const patch of tiled.patches) {
+      if (!patch.match) continue;
+      const [dr, dc] = rotateShift(patch.tileRow * order, patch.tileCol * order, o);
+      const anchorRow = ((patch.match.row - dr) % R + R) % R;
+      const anchorCol = ((patch.match.col - dc) % C + C) % C;
+      const key = `${anchorRow},${anchorCol}`;
+      if (seenAnchors.has(key)) continue;
+      seenAnchors.add(key);
+      const score = scoreCorrelation(sg, torus, R, C, anchorRow, anchorCol, o);
+      if (score > bestScore) { bestScore = score; bestAnchor = { row: anchorRow, col: anchorCol }; }
+    }
+
+    const consistency = Math.max(0, bestScore);
+    let match: { row: number; col: number } | null = null;
+    if (bestAnchor) {
+      const centerI = Math.floor(sg.rows / 2), centerJ = Math.floor(sg.cols / 2);
+      const [dr, dc] = rotateShift(centerI, centerJ, o);
+      match = { row: ((bestAnchor.row + dr) % R + R) % R, col: ((bestAnchor.col + dc) % C + C) % C };
+    }
+
     if (!best || consistency > best.consistency) {
-      best = { patches: tiled.patches, orientation: tiled.orientation, consistency, candidateIndex: i };
+      best = { patches: tiled.patches, orientation: o, consistency, candidateIndex: i, match };
     }
   }
-  return best!;
+
+  return best ?? { patches: [], orientation: null, consistency: 0, candidateIndex: -1, match: null };
 }
 
 export function toGrayscale(rgba: Uint8ClampedArray | Uint8Array, w: number, h: number): Float64Array {

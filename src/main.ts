@@ -1,4 +1,5 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
+import { detectGrid, sampleWindow, binarizeRGBA } from './decode.ts';
 
 // ── Pattern setup ─────────────────────────────────────────────────────────────
 //

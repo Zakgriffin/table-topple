@@ -13,7 +13,7 @@ import { readFileSync } from 'node:fs';
 import { generateTorus, buildLookupTable } from '../src/debruijn.ts';
 import { toGrayscale, binarize, detectGrid, estimateRotationRad, sampleFromMesh, pickBestCandidate } from '../src/decode.ts';
 import { computeJunctionField, detectJunctions, refineJunctionSubPixel } from '../src/cornerdetect.ts';
-import { buildMesh } from '../src/mesh.ts';
+import { buildMesh, pruneInconsistentNodes } from '../src/mesh.ts';
 import { captureHomography } from './lib/synth-camera.ts';
 import type { CameraPose } from './lib/synth-camera.ts';
 
@@ -58,9 +58,16 @@ function decodeViaMesh(pose: CameraPose): { match: { row: number; col: number } 
   const patchBin = binarize(derotatePatch(gray, RAW, RAW, theta0));
   const coarseGrid = detectGrid(patchBin, PATCH, PATCH);
 
+  // apparentPitch/10 (the earlier guess, before this pipeline was wired all
+  // the way through to bit-sampling) turned out too aggressive at this
+  // pattern's 8px pitch — tensorRadius=1 is a very noisy 3x3 window.
+  // apparentPitch/4 (floor 2) was what actually improved per-hop mesh
+  // linking during debugging; minDistance follows the same ~2.5x ratio to
+  // tensorRadius established earlier. tolerance=0.45 (vs buildMesh's 0.35
+  // default) was also part of what got results here.
   const apparentPitch = (coarseGrid.pitchX + coarseGrid.pitchY) / 2;
-  const tensorRadius = Math.max(1, Math.round(apparentPitch / 10));
-  const minDistance = Math.max(2, Math.round(apparentPitch / 4));
+  const tensorRadius = Math.max(2, Math.round(apparentPitch / 4));
+  const minDistance = Math.max(5, Math.round(tensorRadius * 2.5));
 
   const field = computeJunctionField(gray, RAW, RAW, 1, tensorRadius);
   const coarseJ = detectJunctions(field, 0.15, minDistance);
@@ -70,7 +77,8 @@ function decodeViaMesh(pose: CameraPose): { match: { row: number; col: number } 
     return { x: r.x, y: r.y, type: j.type };
   });
 
-  const mesh = buildMesh(junctions, RAW / 2, RAW / 2, coarseGrid.pitchX, coarseGrid.pitchY, -theta0);
+  const rawMesh = buildMesh(junctions, RAW / 2, RAW / 2, coarseGrid.pitchX, coarseGrid.pitchY, -theta0, 3, 0.45);
+  const mesh = pruneInconsistentNodes(rawMesh, apparentPitch);
   if (mesh.nodes.length < order * order) return null;
 
   const sg = sampleFromMesh(bin, RAW, RAW, mesh);

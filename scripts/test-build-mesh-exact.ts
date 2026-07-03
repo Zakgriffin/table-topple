@@ -15,8 +15,8 @@
 //
 // Usage: node scripts/test-build-mesh-exact.ts
 
-import { buildMesh } from '../src/mesh.ts';
-import type { RawJunction } from '../src/mesh.ts';
+import { buildMesh, pruneInconsistentNodes } from '../src/mesh.ts';
+import type { RawJunction, Mesh } from '../src/mesh.ts';
 
 const CELL = 20;
 const N = 16; // NxN lattice points (0..N-1), all present — omission isn't
@@ -92,7 +92,31 @@ console.log(`\n${failures === 0 ? 'ALL PASS' : `${failures} FAILURES`}`);
 if (failures > 0) process.exit(1);
 
 console.log("\n=== with realistic position noise added ===");
-function runTrialNoisy(thetaDeg: number, noisePx: number): { mismatches: number; total: number; maxPosErr: number } {
+
+function checkConsistency(mesh: Mesh, junctions: RawJunction[], trueIndexByJunctionIdx: { i: number; j: number }[]): { mismatches: number; total: number } {
+  let seedTrue: { i: number; j: number } | null = null;
+  for (const node of mesh.nodes) {
+    if (node.row === 0 && node.col === 0) {
+      let best = Infinity, bi = -1;
+      for (let k = 0; k < junctions.length; k++) { const d = (junctions[k].x - node.x) ** 2 + (junctions[k].y - node.y) ** 2; if (d < best) { best = d; bi = k; } }
+      seedTrue = trueIndexByJunctionIdx[bi];
+    }
+  }
+  if (!seedTrue) return { mismatches: -1, total: 0 };
+
+  let mismatches = 0, total = 0;
+  for (const node of mesh.nodes) {
+    let best = Infinity, bi = -1;
+    for (let k = 0; k < junctions.length; k++) { const d = (junctions[k].x - node.x) ** 2 + (junctions[k].y - node.y) ** 2; if (d < best) { best = d; bi = k; } }
+    const trueIdx = trueIndexByJunctionIdx[bi];
+    const expectedRow = trueIdx.i - seedTrue.i, expectedCol = trueIdx.j - seedTrue.j;
+    total++;
+    if (node.row !== expectedRow || node.col !== expectedCol) mismatches++;
+  }
+  return { mismatches, total };
+}
+
+function buildNoisyMesh(thetaDeg: number, noisePx: number): { mesh: Mesh; junctions: RawJunction[]; trueIndexByJunctionIdx: { i: number; j: number }[] } {
   const theta = thetaDeg * Math.PI / 180;
   const cosT = Math.cos(theta), sinT = Math.sin(theta);
   const cx0 = (N * CELL) / 2, cy0 = (N * CELL) / 2;
@@ -110,34 +134,28 @@ function runTrialNoisy(thetaDeg: number, noisePx: number): { mismatches: number;
       trueIndexByJunctionIdx.push({ i, j });
     }
   }
-
   const mesh = buildMesh(junctions, cx0, cy0, CELL, CELL, theta);
-  let seedTrue: { i: number; j: number } | null = null;
-  for (const node of mesh.nodes) {
-    if (node.row === 0 && node.col === 0) {
-      let best = Infinity, bi = -1;
-      for (let k = 0; k < junctions.length; k++) { const d = (junctions[k].x-node.x)**2+(junctions[k].y-node.y)**2; if (d<best){best=d;bi=k;} }
-      seedTrue = trueIndexByJunctionIdx[bi];
-    }
-  }
-  if (!seedTrue) return { mismatches: -1, total: 0, maxPosErr: NaN };
-
-  let mismatches = 0, total = 0, maxPosErr = 0;
-  for (const node of mesh.nodes) {
-    let best = Infinity, bi = -1;
-    for (let k = 0; k < junctions.length; k++) { const d = (junctions[k].x-node.x)**2+(junctions[k].y-node.y)**2; if (d<best){best=d;bi=k;} }
-    maxPosErr = Math.max(maxPosErr, Math.sqrt(best));
-    const trueIdx = trueIndexByJunctionIdx[bi];
-    const expectedRow = trueIdx.i - seedTrue.i, expectedCol = trueIdx.j - seedTrue.j;
-    total++;
-    if (node.row !== expectedRow || node.col !== expectedCol) mismatches++;
-  }
-  return { mismatches, total, maxPosErr };
+  return { mesh, junctions, trueIndexByJunctionIdx };
 }
 
 for (const noisePx of [0.5, 1, 1.5, 2, 3]) {
   for (const thetaDeg of [0, 45, 90]) {
-    const r = runTrialNoisy(thetaDeg, noisePx);
-    console.log(`noise=${noisePx}px theta=${thetaDeg}deg: mismatches=${r.mismatches}/${r.total} maxPosErr=${r.maxPosErr.toFixed(2)}px`);
+    const { mesh, junctions, trueIndexByJunctionIdx } = buildNoisyMesh(thetaDeg, noisePx);
+    const before = checkConsistency(mesh, junctions, trueIndexByJunctionIdx);
+    console.log(`noise=${noisePx}px theta=${thetaDeg}deg: mismatches=${before.mismatches}/${before.total}`);
+  }
+}
+
+console.log("\n=== after pruneInconsistentNodes ===");
+for (const noisePx of [0.5, 1, 1.5, 2, 3]) {
+  for (const thetaDeg of [0, 45, 90]) {
+    const { mesh, junctions, trueIndexByJunctionIdx } = buildNoisyMesh(thetaDeg, noisePx);
+    const before = checkConsistency(mesh, junctions, trueIndexByJunctionIdx);
+    const pruned = pruneInconsistentNodes(mesh, CELL);
+    const after = checkConsistency(pruned, junctions, trueIndexByJunctionIdx);
+    const removed = before.total - after.total;
+    // false positives: nodes pruned that were ACTUALLY correct (not among the mismatched ones)
+    const beforeMismatchCount = before.mismatches;
+    console.log(`noise=${noisePx}px theta=${thetaDeg}deg: before mismatches=${beforeMismatchCount}/${before.total} -> after mismatches=${after.mismatches}/${after.total} (removed ${removed} nodes)`);
   }
 }

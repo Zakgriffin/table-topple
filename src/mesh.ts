@@ -159,3 +159,56 @@ export function buildMesh(
   }
   return { nodes, byCoord: outByCoord };
 }
+
+// Post-hoc consistency check: buildMesh's BFS commits a node's (row,col) the
+// moment one search from one parent succeeds, with no cross-check against
+// other paths that might reach the same physical point — fine at low
+// position noise (real detection is ~0.7-1.2px in isolated testing, see
+// scripts/test-subpixel.ts), but scripts/test-build-mesh-exact.ts's noise
+// sweep found row/col mislabeling starts appearing above ~2px, which real
+// captures can plausibly exceed.
+//
+// For each node, predicts its position from whichever of its neighbors are
+// available — the midpoint of an opposite pair (up+down, or left+right),
+// or parallelogram completion from a diagonal-adjacent triple (the same
+// principle sampleFromMesh's diagonal-pair cell sampling already relies
+// on) — and prunes it if it disagrees with the MEDIAN of those predictions
+// by more than toleranceFraction of the expected cell size. A node with no
+// available predictions (too few neighbors to check) is kept rather than
+// pruned — no positive evidence of being wrong, and pruning purely for low
+// connectivity would unfairly target legitimate mesh-edge nodes.
+export function pruneInconsistentNodes(mesh: Mesh, cellSize: number, toleranceFraction = 0.3): Mesh {
+  const { byCoord } = mesh;
+  const tolerance = cellSize * toleranceFraction;
+  const suspects = new Set<MeshNode>();
+
+  for (const node of mesh.nodes) {
+    const up = byCoord.get(key(node.row - 1, node.col));
+    const down = byCoord.get(key(node.row + 1, node.col));
+    const left = byCoord.get(key(node.row, node.col - 1));
+    const right = byCoord.get(key(node.row, node.col + 1));
+
+    const predictions: Vec[] = [];
+    if (up && down) predictions.push([(up.x + down.x) / 2, (up.y + down.y) / 2]);
+    if (left && right) predictions.push([(left.x + right.x) / 2, (left.y + right.y) / 2]);
+    for (const [a, b, diag] of [
+      [up, left, byCoord.get(key(node.row - 1, node.col - 1))],
+      [up, right, byCoord.get(key(node.row - 1, node.col + 1))],
+      [down, left, byCoord.get(key(node.row + 1, node.col - 1))],
+      [down, right, byCoord.get(key(node.row + 1, node.col + 1))],
+    ] as const) {
+      if (a && b && diag) predictions.push([a.x + b.x - diag.x, a.y + b.y - diag.y]);
+    }
+
+    if (predictions.length === 0) continue; // unverifiable — keep, not evidence of a problem
+    const errors = predictions.map(([px, py]) => Math.hypot(px - node.x, py - node.y)).sort((a, b) => a - b);
+    const medianError = errors[Math.floor(errors.length / 2)];
+    if (medianError > tolerance) suspects.add(node);
+  }
+
+  if (suspects.size === 0) return mesh;
+  const nodes = mesh.nodes.filter(n => !suspects.has(n));
+  const outByCoord = new Map<string, MeshNode>();
+  for (const n of nodes) outByCoord.set(key(n.row, n.col), n);
+  return { nodes, byCoord: outByCoord };
+}

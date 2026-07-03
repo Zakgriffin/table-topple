@@ -271,19 +271,29 @@ export function sampleFullGrid(bin: Uint8Array, w: number, h: number, grid: Grid
 
 // Samples cell-fill bits from a corner mesh (src/mesh.ts) instead of a
 // constant-pitch grid — each cell (row,col) is bounded by the 4 mesh nodes
-// at (row,col), (row,col+1), (row+1,col), (row+1,col+1); its bit is sampled
-// at the average of those 4 corners' actual detected positions, so cell size
-// and shape follow whatever local perspective distortion the mesh captured,
-// not an assumed constant pitch.
+// at (row,col), (row,col+1), (row+1,col), (row+1,col+1), and its bit is
+// sampled at the cell's actual detected center, so cell size and shape
+// follow whatever local perspective distortion the mesh captured, not an
+// assumed constant pitch.
 //
 // Only 5/8 of lattice points are ever directly detectable (see
-// src/cornerdetect.ts), so roughly a third of cells will be missing at
-// least one of their 4 corners — those are marked SampledCell.valid=false
-// rather than estimated, since guessing a position from partial corners
-// would silently reintroduce exactly the kind of assumption (locally
-// constant geometry) this whole mesh approach was built to avoid. Every
-// (row,col) slot within the mesh's bounding box still gets an entry either
-// way, since decodePatches's tiling needs a dense array.
+// src/cornerdetect.ts), so requiring all 4 corners is a much stricter bar
+// than it sounds: at a representative ~55% per-corner mesh-linking rate,
+// P(all 4 present) is only ~9%, which measured out as true on real captures
+// and left far too few valid cells for either decodePatches's tiling or
+// findSlidingSeeds's exhaustive search to find enough complete windows.
+//
+// The fix uses a property of the (locally-approximated) parallelogram each
+// cell forms: its center is the midpoint of EITHER diagonal, since both
+// diagonals of a parallelogram bisect each other. So only one complete
+// diagonal pair — {TL,BR} or {TR,BL} — is needed, not all 4 corners; a cell
+// with exactly 3 known corners always has one complete diagonal pair
+// automatically (whichever diagonal doesn't include the missing corner).
+// At the same ~55% per-corner rate this raises P(valid) to ~51% (2p^2-p^4
+// vs p^4) — order-of-magnitude more cells to work with. Genuinely
+// under-determined cells (0-2 corners known, or 2 known but ADJACENT rather
+// than diagonal) are still marked SampledCell.valid=false rather than
+// guessed at with a weaker assumption.
 export function sampleFromMesh(bin: Uint8Array, w: number, h: number, mesh: Mesh): SampledGrid {
   if (mesh.nodes.length === 0) return { rows: 0, cols: 0, cells: [], originRow: 0, originCol: 0 };
 
@@ -305,14 +315,29 @@ export function sampleFromMesh(bin: Uint8Array, w: number, h: number, mesh: Mesh
       const tr = mesh.byCoord.get(`${gridRow},${gridCol + 1}`);
       const bl = mesh.byCoord.get(`${gridRow + 1},${gridCol}`);
       const br = mesh.byCoord.get(`${gridRow + 1},${gridCol + 1}`);
-      if (!tl || !tr || !bl || !br) {
+
+      const diag1 = tl && br ? { ax: tl.x, ay: tl.y, bx: br.x, by: br.y } : null; // TL-BR
+      const diag2 = tr && bl ? { ax: tr.x, ay: tr.y, bx: bl.x, by: bl.y } : null; // TR-BL
+      if (!diag1 && !diag2) {
         rowCells.push({ x: NaN, y: NaN, bit: 0, valid: false });
         continue;
       }
-      const cx = (tl.x + tr.x + bl.x + br.x) / 4, cy = (tl.y + tr.y + bl.y + br.y) / 4;
-      const cellW = (Math.hypot(tr.x - tl.x, tr.y - tl.y) + Math.hypot(br.x - bl.x, br.y - bl.y)) / 2;
-      const cellH = (Math.hypot(bl.x - tl.x, bl.y - tl.y) + Math.hypot(br.x - tr.x, br.y - tr.y)) / 2;
-      const bx = Math.max(2, Math.floor(cellW * 0.2)), by = Math.max(2, Math.floor(cellH * 0.2));
+      // Average both diagonal midpoints when both happen to be known (all 4
+      // corners present) for slightly better precision; otherwise use
+      // whichever one is available.
+      const mids = [diag1, diag2].filter((d): d is NonNullable<typeof d> => d !== null)
+        .map(d => [(d.ax + d.bx) / 2, (d.ay + d.by) / 2]);
+      const cx = mids.reduce((s, m) => s + m[0], 0) / mids.length;
+      const cy = mids.reduce((s, m) => s + m[1], 0) / mids.length;
+      // Cell size: half of whichever diagonal(s) are known (a diagonal
+      // spans corner-to-corner, i.e. sqrt(2) side lengths for a square
+      // cell) — reasonable even without direct edge measurements.
+      const diagLen = mids.length === 2
+        ? (Math.hypot(diag1!.bx - diag1!.ax, diag1!.by - diag1!.ay) + Math.hypot(diag2!.bx - diag2!.ax, diag2!.by - diag2!.ay)) / 2
+        : Math.hypot((diag1 ?? diag2)!.bx - (diag1 ?? diag2)!.ax, (diag1 ?? diag2)!.by - (diag1 ?? diag2)!.ay);
+      const halfSide = diagLen / (2 * Math.SQRT2);
+      const bx = Math.max(2, Math.floor(halfSide * 0.4)), by = bx;
+
       let sum = 0, count = 0;
       for (let dy = -by; dy <= by; dy++) {
         const yy = Math.round(cy + dy);

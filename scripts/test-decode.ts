@@ -90,7 +90,14 @@ function derotate(gray: Float64Array, theta: number): Float64Array {
 // decide which one actually produces self-consistent patches.
 function decode(rgba: Uint8ClampedArray): { anyMatch: boolean; matches: { row: number; col: number }[]; consistency: number } {
   const rawGray = toGrayscale(rgba, RAW, RAW);
-  const theta0 = estimateRotationRad(rawGray, RAW, RAW);
+  const thetaCoarse = estimateRotationRad(rawGray, RAW, RAW);
+
+  // Coarse-to-fine refinement — see src/main.ts's decodeFrame for the same
+  // pattern in the browser (there via canvas ctx.rotate; here via the
+  // manual derotate() above).
+  const previewGray = derotate(rawGray, thetaCoarse);
+  const residual = asSignedResidual(estimateRotationRad(previewGray, ALIGNED, ALIGNED));
+  const theta0 = thetaCoarse + residual;
 
   const sampledGrids = [0, 1, 2, 3].map(k => {
     const theta = theta0 + k * (Math.PI / 2);

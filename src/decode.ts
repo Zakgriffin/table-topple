@@ -84,16 +84,43 @@ export function detectGrid(bin: Uint8Array, w: number, h: number): GridDetection
 // degrees collapses both families onto the same histogram peak, directly
 // giving the grid's rotation mod 90 in one shot (weighted by edge strength
 // so faint/noisy gradients don't skew the estimate).
-export function estimateRotationRad(bin: Uint8Array, w: number, h: number): number {
+//
+// Operates on blurred GRAYSCALE, not the binarized image: a rotated hard
+// edge in an already-thresholded binary image becomes a staircase, whose
+// micro-edges are biased toward 0/90 degrees rather than the true diagonal —
+// same reason edge detectors like Canny blur before computing gradients.
+function boxBlur(gray: Float64Array, w: number, h: number, radius: number): Float64Array {
+  const out = new Float64Array(w * h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      let sum = 0, count = 0;
+      for (let dy = -radius; dy <= radius; dy++) {
+        const yy = y + dy;
+        if (yy < 0 || yy >= h) continue;
+        for (let dx = -radius; dx <= radius; dx++) {
+          const xx = x + dx;
+          if (xx < 0 || xx >= w) continue;
+          sum += gray[yy * w + xx];
+          count++;
+        }
+      }
+      out[y * w + x] = sum / count;
+    }
+  }
+  return out;
+}
+
+export function estimateRotationRad(gray: Float64Array, w: number, h: number): number {
+  const blurred = boxBlur(gray, w, h, 2);
   const BINS = 180;
   const HALF_PI = Math.PI / 2;
   const hist = new Float64Array(BINS);
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
-      const gx = bin[y * w + x + 1] - bin[y * w + x - 1];
-      const gy = bin[(y + 1) * w + x] - bin[(y - 1) * w + x];
-      const mag = Math.abs(gx) + Math.abs(gy);
-      if (mag === 0) continue;
+      const gx = blurred[y * w + x + 1] - blurred[y * w + x - 1];
+      const gy = blurred[(y + 1) * w + x] - blurred[(y - 1) * w + x];
+      const mag = gx * gx + gy * gy; // squared magnitude — emphasizes strong edges
+      if (mag < 1) continue;
       const angle = Math.atan2(gy, gx); // -PI..PI
       const folded = ((angle % HALF_PI) + HALF_PI) % HALF_PI; // [0, PI/2)
       const idx = Math.min(BINS - 1, Math.floor((folded / HALF_PI) * BINS));

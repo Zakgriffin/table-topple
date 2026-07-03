@@ -250,33 +250,47 @@ function updateTracked(barcodes: any[]) {
 const _scanCanvas = document.createElement('canvas');
 const _scanCtx = _scanCanvas.getContext('2d')!;
 
-async function detectAll(detector: any) {
+interface DetectedCode { rawValue: string; cornerPoints: { x: number; y: number }[]; }
+
+// Blacks out a found code's region (with padding) directly in the ImageData
+// buffer so the next jsQR pass can find additional codes in the same frame —
+// jsQR, unlike BarcodeDetector, only returns a single match per call.
+function blackOutQuad(imageData: ImageData, corners: { x: number; y: number }[]) {
+  const xs = corners.map(p => p.x), ys = corners.map(p => p.y);
+  const x0 = Math.max(0, Math.floor(Math.min(...xs)) - 20);
+  const y0 = Math.max(0, Math.floor(Math.min(...ys)) - 20);
+  const x1 = Math.min(imageData.width, Math.ceil(Math.max(...xs)) + 20);
+  const y1 = Math.min(imageData.height, Math.ceil(Math.max(...ys)) + 20);
+  const { data, width } = imageData;
+  for (let y = y0; y < y1; y++) {
+    for (let x = x0; x < x1; x++) {
+      const i = (y * width + x) * 4;
+      data[i] = data[i + 1] = data[i + 2] = 0;
+    }
+  }
+}
+
+function detectAll(): DetectedCode[] {
   _scanCanvas.width = video.videoWidth;
   _scanCanvas.height = video.videoHeight;
   _scanCtx.drawImage(video, 0, 0);
-  const results = [];
+  const imageData = _scanCtx.getImageData(0, 0, _scanCanvas.width, _scanCanvas.height);
+  const results: DetectedCode[] = [];
   for (let i = 0; i < 8; i++) {
-    const found = await detector.detect(_scanCanvas);
-    if (!found.length) break;
-    results.push(...found);
-    _scanCtx.fillStyle = '#000';
-    for (const code of found) {
-      const { x, y, width, height } = code.boundingBox;
-      _scanCtx.fillRect(x - 20, y - 20, width + 40, height + 40);
-    }
+    const found = jsQR(imageData.data, imageData.width, imageData.height);
+    if (!found) break;
+    const { topLeftCorner, topRightCorner, bottomRightCorner, bottomLeftCorner } = found.location;
+    const cornerPoints = [topLeftCorner, topRightCorner, bottomRightCorner, bottomLeftCorner];
+    results.push({ rawValue: found.data, cornerPoints });
+    blackOutQuad(imageData, cornerPoints);
   }
   return results;
 }
 
 async function detectionLoop() {
-  if (!barcodeSupported) {
-    status.textContent = 'BarcodeDetector not supported — try Chrome';
-    return;
-  }
-  const detector = new (window as any).BarcodeDetector({ formats: ['qr_code'] });
   while (true) {
     if (video.readyState >= 2) {
-      try { updateTracked(await detectAll(detector)); } catch (_) {}
+      try { updateTracked(detectAll()); } catch (_) {}
     }
     await new Promise(r => setTimeout(r, 0));
   }

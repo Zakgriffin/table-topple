@@ -8,23 +8,34 @@
 //      threshold — the pattern is pure black/white, so this is robust as
 //      long as lighting is roughly even).
 //   2. Estimate the grid's rotation via a gradient-orientation histogram
-//      (see estimateRotationRad) on that raw (still-rotated) crop.
-//   3. The caller derotates the ORIGINAL grayscale/RGBA crop by that angle
-//      (browser: via canvas ctx.rotate + drawImage, for smooth resampling;
-//      Node test: via manual nearest-neighbor resampling) into a fresh
-//      "aligned" buffer, then re-binarizes that.
-//   4. Find the cell pitch + phase in the aligned buffer via autocorrelation
-//      of an "edge energy" profile (sum of adjacent-pixel differences) —
-//      periodic peaks in that profile land at cell boundaries. Since the
+//      (see estimateRotationRad) on that raw (still-rotated) crop. Edge
+//      orientation alone only pins the angle down modulo 90 degrees (a
+//      square grid looks the same rotated by any multiple of 90) — so this
+//      gives 4 candidate full angles: theta, theta+90, theta+180, theta+270.
+//   3. The caller derotates the ORIGINAL grayscale/RGBA crop by EACH of
+//      those 4 candidate angles (browser: via canvas ctx.rotate + drawImage,
+//      for smooth resampling; Node test: via manual resampling) into 4
+//      separate "aligned" buffers, then re-binarizes each.
+//   4. For each aligned buffer, find the cell pitch + phase via
+//      autocorrelation of an "edge energy" profile (sum of adjacent-pixel
+//      differences) — periodic peaks land at cell boundaries. Since the
 //      buffer is now (assumed) axis-aligned, this is the same detector as
 //      Stage 1, just running on rotation-corrected pixels.
-//   5. Sample every fully-visible cell into a grid, then tile that into
-//      discrete, non-overlapping order x order patches (see decodePatches).
-//   6. The gradient-histogram angle is only known modulo 90 degrees (a
-//      square grid's edges alone can't distinguish 0/90/180/270 rotation),
-//      so decodePatches resolves that by trying each patch in all 4 reading
-//      orientations against the lookup table until one hits, then reuses
-//      that orientation for the rest of the frame's patches.
+//   5. Sample every fully-visible cell in each candidate into a grid, tile
+//      into discrete, non-overlapping order x order patches, and decode
+//      each patch's bits (see decodePatches — which internally also tries
+//      all 4 *reading* orientations per candidate, since a wrong-by-90
+//      derotation angle shifts tile boundaries too, not just content, so
+//      reading-orientation and derotation-angle ambiguity must both be
+//      resolved together).
+//   6. Pick whichever of the 4 angle candidates gives the most *mutually
+//      consistent* patches (adjacent tiles decoding to nearby torus
+//      positions — see scoreConsistency and pickBestCandidate). This
+//      matters because with only 16 bits of key space at order 4, 65535 of
+//      65536 possible windows are valid, so a single patch finding "a"
+//      match is very weak evidence; only cross-patch agreement reliably
+//      distinguishes a correct decode from noise that happened to hash to
+//      some valid-but-wrong position.
 
 export interface GridDetection {
   px: number; py: number; // phase (px offset of first cell boundary)

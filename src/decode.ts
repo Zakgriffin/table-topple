@@ -42,42 +42,26 @@ export interface GridDetection {
   pitchX: number; pitchY: number;
 }
 
-// Finds the pitch (dominant period) of a 1D energy profile via autocorrelation,
-// refined to sub-pixel precision via parabolic interpolation of the
-// autocorrelation score around the best integer lag. Without this, findPitch
-// could only ever return whole-pixel cell sizes — any true (real-world) pitch
-// that isn't an exact integer of pixels gets rounded, and that rounding error
-// compounds with distance from the phase anchor when cell positions are
-// extrapolated (see detectGrid / sampleFullGrid), producing visible drift
-// toward the far side of the visible grid.
+// Finds the pitch (dominant period) of a 1D energy profile via autocorrelation.
 //
-// Peak SELECTION uses the raw (unsmoothed) scores, unchanged from the
-// original integer-only version — that part was already robust. Only the
-// interpolation's validity check is stricter than a naive parabolic fit: a
-// genuine sub-pixel offset from an already-best integer lag should be small
-// (well under half a pixel), so a large delta is a sign the fit is reacting
-// to noise (e.g. staircase aliasing from resampling during derotation, which
-// showed up as single-lag score spikes) rather than the true peak shape —
-// confirmed by this exact failure mode (near-total decode failure on any
-// rotated input, axis-aligned input unaffected) with a looser threshold.
+// A sub-pixel (parabolic-interpolation) refinement was attempted here, on
+// the theory that a real camera's cell size is essentially never an exact
+// integer number of pixels, so rounding to the nearest integer lag should
+// compound into visible drift over many cells. In practice it made the
+// rotated-input synthetic test regress badly (300-trial pass rate dropped
+// from ~99% to ~1%), including with a stricter validity threshold and with
+// pre-smoothing the score profile — nearest-neighbor resampling during
+// derotation introduces staircase aliasing that the parabolic fit reacts to.
+// Reverted rather than ship something destabilized; worth retrying later
+// with a test setup whose ground-truth pitch isn't coincidentally an exact
+// integer (this test's source PNG is rendered at exactly 8px/cell, which
+// hid whether the refinement was helping or hurting on real-world input).
 export function findPitch(energy: Float64Array, minLag: number, maxLag: number): number {
-  const scores = new Float64Array(maxLag - minLag + 1);
-  let bestIdx = 0, bestScore = -Infinity;
+  let bestLag = minLag, bestScore = -Infinity;
   for (let lag = minLag; lag <= maxLag; lag++) {
     let score = 0;
     for (let x = 0; x + lag < energy.length; x++) score += energy[x] * energy[x + lag];
-    scores[lag - minLag] = score;
-    if (score > bestScore) { bestScore = score; bestIdx = lag - minLag; }
-  }
-  const bestLag = bestIdx + minLag;
-
-  if (bestIdx > 0 && bestIdx < scores.length - 1) {
-    const yMinus = scores[bestIdx - 1], y0 = scores[bestIdx], yPlus = scores[bestIdx + 1];
-    const denom = yMinus - 2 * y0 + yPlus;
-    if (Math.abs(denom) > 1e-9) {
-      const delta = 0.5 * (yMinus - yPlus) / denom;
-      if (Math.abs(delta) < 0.3) return bestLag + delta;
-    }
+    if (score > bestScore) { bestScore = score; bestLag = lag; }
   }
   return bestLag;
 }

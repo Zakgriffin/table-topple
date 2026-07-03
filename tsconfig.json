@@ -4,6 +4,8 @@
         "sourceMap": true,
         "module": "ESNext",
         "target": "ESNext",
-        "moduleResolution": "bundler"
+        "moduleResolution": "bundler",
+        "allowImportingTsExtensions": true,
+        "noEmit": true
     }
 }

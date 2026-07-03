@@ -395,6 +395,7 @@ export interface CandidateResult extends PatchDecodeResult { candidateIndex: num
 
 export function pickBestCandidate(sampledGrids: SampledGrid[], order: number, lookup: Int32Array, torus: Uint8Array[], R: number, C: number): CandidateResult {
   let best: CandidateResult | null = null;
+  let winningAnchor: { row: number; col: number } | null = null;
 
   for (let i = 0; i < sampledGrids.length; i++) {
     const sg = sampledGrids[i];
@@ -427,10 +428,31 @@ export function pickBestCandidate(sampledGrids: SampledGrid[], order: number, lo
 
     if (!best || consistency > best.consistency) {
       best = { patches: tiled.patches, orientation: o, consistency, candidateIndex: i, match };
+      winningAnchor = bestAnchor;
     }
   }
 
-  return best ?? { patches: [], orientation: null, consistency: 0, candidateIndex: -1, match: null };
+  if (!best) return { patches: [], orientation: null, consistency: 0, candidateIndex: -1, match: null };
+
+  // Per-cell ground-truth correctness, computed only for the winning
+  // candidate (see the Patch.correct comment) — cheap enough (one pass over
+  // the sampled cells) to not bother gating behind whether a caller actually
+  // wants it for display.
+  if (winningAnchor && best.orientation !== null) {
+    const o = best.orientation, anchor = winningAnchor;
+    best.patches = best.patches.map(patch => ({
+      ...patch,
+      correct: patch.cells.map((row, i) => row.map((cell, j) => {
+        const globalI = patch.tileRow * order + i, globalJ = patch.tileCol * order + j;
+        const [dr, dc] = rotateShift(globalI, globalJ, o);
+        const torusRow = ((anchor.row + dr) % R + R) % R;
+        const torusCol = ((anchor.col + dc) % C + C) % C;
+        return cell.bit === torus[torusRow][torusCol];
+      })),
+    }));
+  }
+
+  return best;
 }
 
 export function toGrayscale(rgba: Uint8ClampedArray | Uint8Array, w: number, h: number): Float64Array {

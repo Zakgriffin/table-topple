@@ -139,3 +139,21 @@ console.log(`\n${hits}/${trials} correct, ${misses} no-lock, ${wrong} wrong.`);
 const wrongRate = wrong / trials;
 if (wrongRate > 0.1) { console.error(`FAIL: wrong-decode rate ${(wrongRate * 100).toFixed(1)}% is too high.`); process.exit(1); }
 console.log(`PASS (wrong-decode rate ${(wrongRate * 100).toFixed(1)}%).`);
+
+// Second pass: with the CONFIDENCE_THRESHOLD main.ts actually uses (0.85 —
+// well above the highest observed wrong-match score of ~0.6, comfortably
+// below what a correct decode should show even with real-world bit noise).
+const CONFIDENCE_THRESHOLD = 0.85;
+let gatedHits = 0, gatedMisses = 0, gatedWrong = 0;
+for (let t = 0; t < trials; t++) {
+  const testRow = Math.floor(Math.random() * R);
+  const testCol = Math.floor(Math.random() * C);
+  const phiDeg = testAngles[t % testAngles.length];
+  const rgba = cropAtRotated(testRow, testCol, phiDeg * Math.PI / 180);
+  const { match, consistency } = decode(rgba);
+  if (!match || consistency < CONFIDENCE_THRESHOLD) { gatedMisses++; continue; }
+  const correct = within(testRow, match.row, order, R) && within(testCol, match.col, order, C);
+  if (correct) gatedHits++; else gatedWrong++;
+}
+console.log(`\nWith CONFIDENCE_THRESHOLD=${CONFIDENCE_THRESHOLD}: ${gatedHits}/${trials} correct, ${gatedMisses} no-lock, ${gatedWrong} wrong.`);
+if (gatedWrong > 0) { console.error('FAIL: threshold did not eliminate wrong decodes.'); process.exit(1); }

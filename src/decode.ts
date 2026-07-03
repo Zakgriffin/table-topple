@@ -64,9 +64,14 @@ export function detectGrid(bin: Uint8Array, w: number, h: number): GridDetection
   return { px, py, pitchX, pitchY };
 }
 
+export interface SampledCell { x: number; y: number; bit: number; }
+export interface SampledWindow { key: number; cells: SampledCell[]; }
+
 // Samples the order x order cells nearest the crop center and packs them into
-// a window key, or returns null if not enough cells are visible.
-export function sampleWindow(bin: Uint8Array, w: number, h: number, grid: GridDetection, order: number): number | null {
+// a window key, or returns null if not enough cells are visible. Also
+// returns each sampled cell's center position and detected bit, so a caller
+// can overlay them for visual debugging.
+export function sampleWindow(bin: Uint8Array, w: number, h: number, grid: GridDetection, order: number): SampledWindow | null {
   const { px, py, pitchX, pitchY } = grid;
   const numCellsX = Math.floor((w - px) / pitchX);
   const numCellsY = Math.floor((h - py) / pitchY);
@@ -76,6 +81,7 @@ export function sampleWindow(bin: Uint8Array, w: number, h: number, grid: GridDe
   const startY = Math.floor((numCellsY - order) / 2);
 
   let key = 0;
+  const cells: SampledCell[] = [];
   for (let i = 0; i < order; i++) {
     const cy = py + pitchY * (startY + i + 0.5);
     for (let j = 0; j < order; j++) {
@@ -96,9 +102,10 @@ export function sampleWindow(bin: Uint8Array, w: number, h: number, grid: GridDe
       }
       const bit = count > 0 && sum / count > 0.5 ? 1 : 0;
       key = (key << 1) | bit;
+      cells.push({ x: cx, y: cy, bit });
     }
   }
-  return key >>> 0;
+  return { key: key >>> 0, cells };
 }
 
 // Converts an RGBA buffer to a binary (0/1, dark -> 1) array via global mean

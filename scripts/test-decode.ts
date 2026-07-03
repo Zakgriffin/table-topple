@@ -1,16 +1,18 @@
-// Synthetic self-test for the decode pipeline: crops a known region out of
-// the actual generated pattern PNG (simulating a camera capturing that
-// region), runs it through the exact same decodeFrame logic the browser app
-// uses, and checks the recovered (row, col) matches where the crop was
-// actually taken from. Catches pipeline bugs (bit order, threshold
-// direction, off-by-ones) without needing a live camera.
+// Synthetic self-test for the rotation-aware decode pipeline: crops a known,
+// ROTATED region out of the actual generated pattern PNG (simulating a
+// camera capturing that region at some angle), runs it through the exact
+// same decode.ts logic the browser app uses (rotation estimation, manual
+// derotation here in place of canvas's ctx.rotate, grid detection, patch
+// decoding), and checks that at least one patch recovers a position near
+// where the crop was actually taken from. Catches transform-math bugs
+// without needing a live camera.
 //
 // Usage: node scripts/test-decode.ts [order]
 
 import { PNG } from 'pngjs';
 import { readFileSync } from 'node:fs';
 import { generateTorus, buildLookupTable } from '../src/debruijn.ts';
-import { detectGrid, sampleWindow, binarizeRGBA } from '../src/decode.ts';
+import { detectGrid, sampleFullGrid, decodePatches, toGrayscale, binarize, estimateRotationRad } from '../src/decode.ts';
 
 const order = parseInt(process.argv[2] ?? '4', 10);
 const pngPath = `samples/order${order}.png`;
@@ -24,28 +26,35 @@ console.log(`Torus: ${R}x${C} cells.`);
 const png = PNG.sync.read(readFileSync(pngPath));
 console.log(`Loaded ${pngPath}: ${png.width}x${png.height}px`);
 
-// The PNG was rendered at a fixed cell size (see samples generation: 8px/cell).
 const cellPx = png.width / C;
 if (!Number.isInteger(cellPx) || png.width / C !== png.height / R) {
   throw new Error(`Unexpected PNG dimensions for order ${order}: ${png.width}x${png.height} vs ${R}x${C} cells`);
 }
 console.log(`Cell size in PNG: ${cellPx}px`);
 
-// Crops a CROP x CROP region starting at a given cell (testRow, testCol),
-// simulating a camera capture centered there, and returns an RGBA buffer
-// matching what cropCtx.getImageData would hand the browser decoder.
-const CROP = 200;
-function cropAt(testRow: number, testCol: number): Uint8ClampedArray {
-  // Leave margin so the ORDER x ORDER window comfortably fits mid-crop.
-  const srcX = ((testCol * cellPx) - CROP / 2 + cellPx / 2 + C * cellPx) % (C * cellPx);
-  const srcY = ((testRow * cellPx) - CROP / 2 + cellPx / 2 + R * cellPx) % (R * cellPx);
-  const out = new Uint8ClampedArray(CROP * CROP * 4);
-  for (let y = 0; y < CROP; y++) {
-    const sy = (Math.floor(srcY) + y) % png.height;
-    for (let x = 0; x < CROP; x++) {
-      const sx = (Math.floor(srcX) + x) % png.width;
-      const srcIdx = (png.width * sy + sx) << 2;
-      const dstIdx = (CROP * y + x) << 2;
+// RAW must be large enough that after any rotation, ALIGNED is fully covered
+// by real (derotated) content — RAW >= ALIGNED * sqrt(2) suffices, see
+// src/decode.ts's module comment for the transform this mirrors.
+const RAW = 360;
+const ALIGNED = 240;
+
+// Simulates capturing a RAW x RAW crop centered at (testRow, testCol) as if
+// photographed at rotation phi (radians) relative to the pattern.
+function cropAtRotated(testRow: number, testCol: number, phi: number): Uint8ClampedArray {
+  const cosP = Math.cos(phi), sinP = Math.sin(phi);
+  const centerX = testCol * cellPx + cellPx / 2;
+  const centerY = testRow * cellPx + cellPx / 2;
+  const out = new Uint8ClampedArray(RAW * RAW * 4);
+  for (let ry = 0; ry < RAW; ry++) {
+    const dy = ry - RAW / 2;
+    for (let rx = 0; rx < RAW; rx++) {
+      const dx = rx - RAW / 2;
+      const sx = Math.round(centerX + (dx * cosP - dy * sinP));
+      const sy = Math.round(centerY + (dx * sinP + dy * cosP));
+      const wx = ((sx % png.width) + png.width) % png.width;
+      const wy = ((sy % png.height) + png.height) % png.height;
+      const srcIdx = (png.width * wy + wx) << 2;
+      const dstIdx = (RAW * ry + rx) << 2;
       out[dstIdx] = png.data[srcIdx];
       out[dstIdx + 1] = png.data[srcIdx + 1];
       out[dstIdx + 2] = png.data[srcIdx + 2];
@@ -55,39 +64,66 @@ function cropAt(testRow: number, testCol: number): Uint8ClampedArray {
   return out;
 }
 
-function decode(rgba: Uint8ClampedArray): { row: number; col: number } | null {
-  const bin = binarizeRGBA(rgba, CROP, CROP);
-  const grid = detectGrid(bin, CROP, CROP);
-  const sampled = sampleWindow(bin, CROP, CROP, grid, order);
-  if (sampled === null) return null;
-  const packed = lookup[sampled.key];
-  if (packed === -1) return null;
-  return { row: Math.floor(packed / C), col: packed % C };
+// Manual nearest-neighbor derotation, standing in for the browser's
+// canvas ctx.rotate(-theta) + drawImage. Must match that transform exactly
+// (see src/decode.ts's module comment): a RAW-buffer point is mapped to
+// ALIGNED-buffer space by rotating by -theta around RAW's center and
+// re-centering on ALIGNED; this is the inverse of that map, used to pull
+// each ALIGNED pixel from its source RAW pixel.
+function derotate(gray: Float64Array, theta: number): Float64Array {
+  const out = new Float64Array(ALIGNED * ALIGNED);
+  const cosT = Math.cos(theta), sinT = Math.sin(theta);
+  for (let ay = 0; ay < ALIGNED; ay++) {
+    const relY = ay - ALIGNED / 2;
+    for (let ax = 0; ax < ALIGNED; ax++) {
+      const relX = ax - ALIGNED / 2;
+      const rx = Math.round(relX * cosT - relY * sinT + RAW / 2);
+      const ry = Math.round(relX * sinT + relY * cosT + RAW / 2);
+      out[ay * ALIGNED + ax] = (rx >= 0 && rx < RAW && ry >= 0 && ry < RAW) ? gray[ry * RAW + rx] : 255;
+    }
+  }
+  return out;
 }
 
-const trials = 200;
+function decode(rgba: Uint8ClampedArray): { anyMatch: boolean; matches: { row: number; col: number }[] } {
+  const rawGray = toGrayscale(rgba, RAW, RAW);
+  const rawBin = binarize(rawGray);
+  const theta = estimateRotationRad(rawBin, RAW, RAW);
+
+  const alignedGray = derotate(rawGray, theta);
+  const alignedBin = binarize(alignedGray);
+
+  const grid = detectGrid(alignedBin, ALIGNED, ALIGNED);
+  const sg = sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid);
+  const { patches } = decodePatches(sg, order, lookup, C);
+
+  const matches = patches.map(p => p.match).filter((m): m is { row: number; col: number } => m !== null);
+  return { anyMatch: matches.length > 0, matches };
+}
+
+function within(target: number, start: number, span: number, mod: number): boolean {
+  const rel = ((target - start) % mod + mod) % mod;
+  return rel <= span || rel >= mod - 1;
+}
+
+const trials = 60;
+const testAngles = [0, 15, 30, 45, -20, -40, 60, 80];
 let hits = 0, misses = 0, wrong = 0;
 for (let t = 0; t < trials; t++) {
   const testRow = Math.floor(Math.random() * R);
   const testCol = Math.floor(Math.random() * C);
-  const rgba = cropAt(testRow, testCol);
-  const result = decode(rgba);
-  if (!result) { misses++; console.log(`MISS at true (${testRow},${testCol}) — no lock`); continue; }
-  // decodeFrame reports the decoded window's TOP-LEFT cell (that's what the
-  // lookup table stores), not the crop's center — so the real correctness
-  // check is "does the window returned actually contain the crop-center
-  // cell", allowing a little slack (+-1) for phase-detection rounding.
-  const within = (target: number, start: number, span: number, mod: number) => {
-    const rel = ((target - start) % mod + mod) % mod;
-    return rel <= span - 1 + 1 || rel >= mod - 1; // window range, +-1 slack
-  };
-  if (within(testRow, result.row, order, R) && within(testCol, result.col, order, C)) hits++;
-  else { wrong++; console.log(`WRONG: true (${testRow},${testCol}) -> decoded window at (${result.row},${result.col})`); }
+  const phiDeg = testAngles[t % testAngles.length];
+  const rgba = cropAtRotated(testRow, testCol, phiDeg * Math.PI / 180);
+  const { anyMatch, matches } = decode(rgba);
+
+  if (!anyMatch) { misses++; console.log(`MISS at true (${testRow},${testCol}) angle ${phiDeg}deg — no patch matched`); continue; }
+
+  const anyCorrect = matches.some(m => within(testRow, m.row, order, R) && within(testCol, m.col, order, C));
+  if (anyCorrect) hits++;
+  else { wrong++; console.log(`WRONG at true (${testRow},${testCol}) angle ${phiDeg}deg — patches decoded: ${JSON.stringify(matches)}`); }
 }
+
 console.log(`\n${hits}/${trials} correct, ${misses} no-lock, ${wrong} wrong.`);
-// A small nonzero wrong-decode rate is expected from this simple axis-aligned
-// pitch/phase detector (occasional harmonic lock in unlucky alignments) —
-// not a systematic bug. Flag it as a real failure only if it's frequent.
 const wrongRate = wrong / trials;
 if (wrongRate > 0.1) { console.error(`FAIL: wrong-decode rate ${(wrongRate * 100).toFixed(1)}% is too high.`); process.exit(1); }
-console.log(`PASS (wrong-decode rate ${(wrongRate * 100).toFixed(1)}%, within expected range for Stage 1).`);
+console.log(`PASS (wrong-decode rate ${(wrongRate * 100).toFixed(1)}%).`);

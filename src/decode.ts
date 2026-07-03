@@ -101,8 +101,20 @@ export function detectGrid(bin: Uint8Array, w: number, h: number): GridDetection
   const minLag = 4, maxLagX = Math.floor(w / 4), maxLagY = Math.floor(h / 4);
   const pitchX = findPitch(colEnergy, minLag, maxLagX);
   const pitchY = findPitch(rowEnergy, minLag, maxLagY);
-  const px = findPhase(colEnergy, pitchX);
-  const py = findPhase(rowEnergy, pitchY);
+  let px = findPhase(colEnergy, pitchX);
+  let py = findPhase(rowEnergy, pitchY);
+
+  // Re-anchor the phase to the boundary nearest the buffer's center, rather
+  // than leaving it wherever findPhase's [0, pitch) search happened to land
+  // it (always near index 0). Cell positions are extrapolated outward from
+  // this anchor (see sampleFullGrid), so any residual pitch error compounds
+  // with distance from it — anchoring near one edge means the far edge
+  // carries the full accumulated error; anchoring near the center means
+  // every visible edge is at most half that distance away, roughly halving
+  // the worst-case drift and making it symmetric instead of one-sided.
+  px += pitchX * Math.round((w / 2 - px) / pitchX);
+  py += pitchY * Math.round((h / 2 - py) / pitchY);
+
   return { px, py, pitchX, pitchY };
 }
 

@@ -118,13 +118,13 @@ for (let t = 0; t < trials; t++) {
   const testCol = Math.floor(Math.random() * C);
   const phiDeg = testAngles[t % testAngles.length];
   const rgba = cropAtRotated(testRow, testCol, phiDeg * Math.PI / 180);
-  const { anyMatch, matches } = decode(rgba);
+  const { anyMatch, matches, consistency } = decode(rgba);
 
   if (!anyMatch) { misses++; console.log(`MISS at true (${testRow},${testCol}) angle ${phiDeg}deg — no patch matched`); continue; }
 
   const anyCorrect = matches.some(m => within(testRow, m.row, order, R) && within(testCol, m.col, order, C));
   if (anyCorrect) hits++;
-  else { wrong++; console.log(`WRONG at true (${testRow},${testCol}) angle ${phiDeg}deg — patches decoded: ${JSON.stringify(matches)}`); }
+  else { wrong++; console.log(`WRONG at true (${testRow},${testCol}) angle ${phiDeg}deg consistency=${consistency.toFixed(2)} — patches decoded: ${JSON.stringify(matches)}`); }
 }
 
 console.log(`\n${hits}/${trials} correct, ${misses} no-lock, ${wrong} wrong.`);

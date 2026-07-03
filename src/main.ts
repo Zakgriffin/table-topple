@@ -44,9 +44,6 @@ let zoomMin = 1, zoomMax = 1;
 function sliderToZoom(t: number): number {
   return zoomMin * Math.pow(zoomMax / zoomMin, t);
 }
-function zoomToSlider(z: number): number {
-  return Math.log(z / zoomMin) / Math.log(zoomMax / zoomMin);
-}
 
 function setupZoomControl() {
   const track = currentStream?.getVideoTracks()[0];

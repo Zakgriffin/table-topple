@@ -12,7 +12,7 @@
 import { PNG } from 'pngjs';
 import { readFileSync } from 'node:fs';
 import { generateTorus, buildLookupTable } from '../src/debruijn.ts';
-import { detectGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual } from '../src/decode.ts';
+import { detectLocalGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual } from '../src/decode.ts';
 import type { SampledGrid } from '../src/decode.ts';
 
 const order = parseInt(process.argv[2] ?? '4', 10);
@@ -88,8 +88,8 @@ function derotate(gray: Float64Array, theta: number): Float64Array {
 
 // Edge orientation alone only pins the grid angle down modulo 90 degrees, so
 // this derotates at all 4 candidate full angles and lets pickBestCandidate
-// decide which one actually produces self-consistent patches.
-function decode(rgba: Uint8ClampedArray): { anyMatch: boolean; matches: { row: number; col: number }[]; consistency: number } {
+// decide which one actually produces the best-correlated match.
+function decode(rgba: Uint8ClampedArray): { match: { row: number; col: number } | null; consistency: number } {
   const rawGray = toGrayscale(rgba, RAW, RAW);
   const thetaCoarse = estimateRotationRad(rawGray, RAW, RAW);
 
@@ -104,13 +104,12 @@ function decode(rgba: Uint8ClampedArray): { anyMatch: boolean; matches: { row: n
     const theta = theta0 + k * (Math.PI / 2);
     const alignedGray = derotate(rawGray, theta);
     const alignedBin = binarize(alignedGray);
-    const grid = detectGrid(alignedBin, ALIGNED, ALIGNED);
-    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid);
+    const grid = detectLocalGrid(alignedBin, ALIGNED, ALIGNED);
+    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid, grid);
   });
 
-  const { patches, consistency } = pickBestCandidate(sampledGrids, order, lookup, R, C);
-  const matches = patches.map(p => p.match).filter((m): m is { row: number; col: number } => m !== null);
-  return { anyMatch: matches.length > 0, matches, consistency };
+  const { match, consistency } = pickBestCandidate(sampledGrids, order, lookup, debruijn.torus, R, C);
+  return { match, consistency };
 }
 
 function within(target: number, start: number, span: number, mod: number): boolean {
@@ -118,25 +117,35 @@ function within(target: number, start: number, span: number, mod: number): boole
   return rel <= span || rel >= mod - 1;
 }
 
-const trials = 60;
+// First pass: no confidence threshold, just log raw scores split by
+// correct/incorrect, to empirically justify where to set the threshold
+// rather than guessing.
+const trials = 300;
 const testAngles = [0, 15, 30, 45, -20, -40, 60, 80];
+const correctScores: number[] = [], wrongScores: number[] = [];
 let hits = 0, misses = 0, wrong = 0;
 for (let t = 0; t < trials; t++) {
   const testRow = Math.floor(Math.random() * R);
   const testCol = Math.floor(Math.random() * C);
   const phiDeg = testAngles[t % testAngles.length];
   const rgba = cropAtRotated(testRow, testCol, phiDeg * Math.PI / 180);
-  const { anyMatch, matches, consistency } = decode(rgba);
+  const { match, consistency } = decode(rgba);
 
-  const CONFIDENCE_THRESHOLD = 0.5;
-  if (!anyMatch || consistency < CONFIDENCE_THRESHOLD) { misses++; continue; }
-
-  const anyCorrect = matches.some(m => within(testRow, m.row, order, R) && within(testCol, m.col, order, C));
-  if (anyCorrect) hits++;
-  else { wrong++; console.log(`WRONG at true (${testRow},${testCol}) angle ${phiDeg}deg consistency=${consistency.toFixed(2)} — patches decoded: ${JSON.stringify(matches)}`); }
+  if (!match) { misses++; continue; }
+  const correct = within(testRow, match.row, order, R) && within(testCol, match.col, order, C);
+  if (correct) { hits++; correctScores.push(consistency); }
+  else { wrong++; wrongScores.push(consistency); console.log(`WRONG at true (${testRow},${testCol}) angle ${phiDeg}deg consistency=${consistency.toFixed(3)} decoded=(${match.row},${match.col})`); }
 }
 
-console.log(`\n${hits}/${trials} correct, ${misses} no-lock, ${wrong} wrong.`);
+function stats(xs: number[]): string {
+  if (xs.length === 0) return 'n/a';
+  const min = Math.min(...xs), max = Math.max(...xs), mean = xs.reduce((a, b) => a + b, 0) / xs.length;
+  return `min=${min.toFixed(3)} mean=${mean.toFixed(3)} max=${max.toFixed(3)} n=${xs.length}`;
+}
+console.log(`\ncorrect-match consistency scores: ${stats(correctScores)}`);
+console.log(`wrong-match consistency scores: ${stats(wrongScores)}`);
+
+console.log(`\n${hits}/${trials} correct, ${misses} no-lock, ${wrong} wrong (before applying any confidence threshold).`);
 const wrongRate = wrong / trials;
 if (wrongRate > 0.1) { console.error(`FAIL: wrong-decode rate ${(wrongRate * 100).toFixed(1)}% is too high.`); process.exit(1); }
 console.log(`PASS (wrong-decode rate ${(wrongRate * 100).toFixed(1)}%).`);
@@ -179,8 +188,8 @@ function buildSampledGrids(rgba: Uint8ClampedArray): SampledGrid[] {
   return [0, 1, 2, 3].map(k => {
     const theta = theta0 + k * (Math.PI / 2);
     const alignedBin = binarize(derotate(rawGray, theta));
-    const grid = detectGrid(alignedBin, ALIGNED, ALIGNED);
-    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid);
+    const grid = detectLocalGrid(alignedBin, ALIGNED, ALIGNED);
+    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid, grid);
   });
 }
 

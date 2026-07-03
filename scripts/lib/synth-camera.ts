@@ -82,25 +82,47 @@ export function projectToImage(pose: CameraPose, rawW: number, rawH: number, wor
 
 export interface SourceImage { width: number; height: number; data: Uint8Array | Buffer; }
 
-// Renders a rawW x rawH RGBA capture by nearest-neighbor sampling `png`
-// through the pose's homography, wrapping at the pattern's tile edges (same
-// torus wraparound cropAtRotated uses) so the target is never clipped by
-// running off the image boundary.
-export function captureHomography(png: SourceImage, pose: CameraPose, rawW: number, rawH: number): Uint8ClampedArray {
+// Renders a rawW x rawH RGBA capture by sampling `png` through the pose's
+// homography, wrapping at the pattern's tile edges (same torus wraparound
+// cropAtRotated uses) so the target is never clipped by running off the
+// image boundary.
+//
+// supersampleN averages an NxN grid of sub-pixel samples per destination
+// pixel instead of a single nearest-neighbor lookup, closer to how a real
+// camera integrates light over each sensor pixel. Investigated as a
+// candidate fix for low junction-detection rates at this pattern's fine
+// 8px pitch, but an A/B test at matched settings showed it made no
+// measurable difference (N=1 vs 3 vs 5 all identical) — the real cause was
+// this pattern having real per-region variation in detection difficulty
+// (measured as low as 79% raw detection on a clean, unwarped crop of a
+// hard region, no capture pipeline involved at all), not resampling
+// aliasing. Left in as an opt-in capability, defaulting to 1 (off) since
+// its benefit is unproven and it costs N^2x the sampling work.
+export function captureHomography(png: SourceImage, pose: CameraPose, rawW: number, rawH: number, supersampleN = 1): Uint8ClampedArray {
   const sampler = makeHomographySampler(pose, rawW, rawH);
   const out = new Uint8ClampedArray(rawW * rawH * 4);
+  const offsets: number[] = [];
+  for (let s = 0; s < supersampleN; s++) offsets.push((s + 0.5) / supersampleN - 0.5);
   for (let v = 0; v < rawH; v++) {
     for (let u = 0; u < rawW; u++) {
       const dstIdx = (rawW * v + u) << 2;
-      const hit = sampler(u, v);
-      if (!hit) { out[dstIdx] = out[dstIdx + 1] = out[dstIdx + 2] = 255; out[dstIdx + 3] = 255; continue; }
-      const sx = Math.round(hit[0]), sy = Math.round(hit[1]);
-      const wx = ((sx % png.width) + png.width) % png.width;
-      const wy = ((sy % png.height) + png.height) % png.height;
-      const srcIdx = (png.width * wy + wx) << 2;
-      out[dstIdx] = png.data[srcIdx];
-      out[dstIdx + 1] = png.data[srcIdx + 1];
-      out[dstIdx + 2] = png.data[srcIdx + 2];
+      let sumR = 0, sumG = 0, sumB = 0, count = 0;
+      for (const dv of offsets) {
+        for (const du of offsets) {
+          const hit = sampler(u + du, v + dv);
+          if (!hit) continue;
+          const sx = Math.round(hit[0]), sy = Math.round(hit[1]);
+          const wx = ((sx % png.width) + png.width) % png.width;
+          const wy = ((sy % png.height) + png.height) % png.height;
+          const srcIdx = (png.width * wy + wx) << 2;
+          sumR += png.data[srcIdx]; sumG += png.data[srcIdx + 1]; sumB += png.data[srcIdx + 2];
+          count++;
+        }
+      }
+      if (count === 0) { out[dstIdx] = out[dstIdx + 1] = out[dstIdx + 2] = 255; out[dstIdx + 3] = 255; continue; }
+      out[dstIdx] = sumR / count;
+      out[dstIdx + 1] = sumG / count;
+      out[dstIdx + 2] = sumB / count;
       out[dstIdx + 3] = 255;
     }
   }

@@ -43,6 +43,8 @@
 //      binary pattern) — a much better-separated signal than checking
 //      patches only agree with each other.
 
+import type { Mesh } from './mesh.ts';
+
 export interface GridDetection {
   px: number; py: number; // phase (px offset of first cell boundary)
   pitchX: number; pitchY: number;
@@ -203,7 +205,12 @@ export function asSignedResidual(angle: number): number {
   return angle > Math.PI / 4 ? angle - Math.PI / 2 : angle;
 }
 
-export interface SampledCell { x: number; y: number; bit: number; }
+// valid is false when a cell couldn't actually be sampled — only relevant
+// for mesh-based sampling (see sampleFromMesh), where gaps exist because not
+// every grid lattice point is 2D-localizable (see src/cornerdetect.ts); x/y/
+// bit are meaningless placeholders in that case. sampleFullGrid's constant-
+// pitch model has no gaps, so valid is always true there.
+export interface SampledCell { x: number; y: number; bit: number; valid: boolean; }
 
 // Walks outward from `anchor` in both directions at a constant `pitch`,
 // accumulating cell boundary positions.
@@ -255,11 +262,73 @@ export function sampleFullGrid(bin: Uint8Array, w: number, h: number, grid: Grid
           count++;
         }
       }
-      rowCells.push({ x: cx, y: cy, bit: count > 0 && sum / count > 0.5 ? 1 : 0 });
+      rowCells.push({ x: cx, y: cy, bit: count > 0 && sum / count > 0.5 ? 1 : 0, valid: true });
     }
     cells.push(rowCells);
   }
   return { rows, cols, cells, originRow: rowsUp, originCol: colsLeft };
+}
+
+// Samples cell-fill bits from a corner mesh (src/mesh.ts) instead of a
+// constant-pitch grid — each cell (row,col) is bounded by the 4 mesh nodes
+// at (row,col), (row,col+1), (row+1,col), (row+1,col+1); its bit is sampled
+// at the average of those 4 corners' actual detected positions, so cell size
+// and shape follow whatever local perspective distortion the mesh captured,
+// not an assumed constant pitch.
+//
+// Only 5/8 of lattice points are ever directly detectable (see
+// src/cornerdetect.ts), so roughly a third of cells will be missing at
+// least one of their 4 corners — those are marked SampledCell.valid=false
+// rather than estimated, since guessing a position from partial corners
+// would silently reintroduce exactly the kind of assumption (locally
+// constant geometry) this whole mesh approach was built to avoid. Every
+// (row,col) slot within the mesh's bounding box still gets an entry either
+// way, since decodePatches's tiling needs a dense array.
+export function sampleFromMesh(bin: Uint8Array, w: number, h: number, mesh: Mesh): SampledGrid {
+  if (mesh.nodes.length === 0) return { rows: 0, cols: 0, cells: [], originRow: 0, originCol: 0 };
+
+  let minRow = Infinity, maxRow = -Infinity, minCol = Infinity, maxCol = -Infinity;
+  for (const n of mesh.nodes) {
+    minRow = Math.min(minRow, n.row); maxRow = Math.max(maxRow, n.row);
+    minCol = Math.min(minCol, n.col); maxCol = Math.max(maxCol, n.col);
+  }
+  const rows = maxRow - minRow, cols = maxCol - minCol; // one fewer cell than the node span, each direction
+  if (rows <= 0 || cols <= 0) return { rows: 0, cols: 0, cells: [], originRow: 0, originCol: 0 };
+
+  const cells: SampledCell[][] = [];
+  for (let i = 0; i < rows; i++) {
+    const gridRow = minRow + i;
+    const rowCells: SampledCell[] = [];
+    for (let j = 0; j < cols; j++) {
+      const gridCol = minCol + j;
+      const tl = mesh.byCoord.get(`${gridRow},${gridCol}`);
+      const tr = mesh.byCoord.get(`${gridRow},${gridCol + 1}`);
+      const bl = mesh.byCoord.get(`${gridRow + 1},${gridCol}`);
+      const br = mesh.byCoord.get(`${gridRow + 1},${gridCol + 1}`);
+      if (!tl || !tr || !bl || !br) {
+        rowCells.push({ x: NaN, y: NaN, bit: 0, valid: false });
+        continue;
+      }
+      const cx = (tl.x + tr.x + bl.x + br.x) / 4, cy = (tl.y + tr.y + bl.y + br.y) / 4;
+      const cellW = (Math.hypot(tr.x - tl.x, tr.y - tl.y) + Math.hypot(br.x - bl.x, br.y - bl.y)) / 2;
+      const cellH = (Math.hypot(bl.x - tl.x, bl.y - tl.y) + Math.hypot(br.x - tr.x, br.y - tr.y)) / 2;
+      const bx = Math.max(2, Math.floor(cellW * 0.2)), by = Math.max(2, Math.floor(cellH * 0.2));
+      let sum = 0, count = 0;
+      for (let dy = -by; dy <= by; dy++) {
+        const yy = Math.round(cy + dy);
+        if (yy < 0 || yy >= h) continue;
+        for (let dx = -bx; dx <= bx; dx++) {
+          const xx = Math.round(cx + dx);
+          if (xx < 0 || xx >= w) continue;
+          sum += bin[yy * w + xx];
+          count++;
+        }
+      }
+      rowCells.push({ x: cx, y: cy, bit: count > 0 && sum / count > 0.5 ? 1 : 0, valid: true });
+    }
+    cells.push(rowCells);
+  }
+  return { rows, cols, cells, originRow: -minRow, originCol: -minCol };
 }
 
 // Packs an order x order cell block into a lookup key, reading it under one
@@ -327,6 +396,37 @@ function scoreConsistency(patches: Patch[], order: number, R: number, C: number)
   return total > 0 ? agree / total : 0;
 }
 
+interface Tile { tileRow: number; tileCol: number; cells: SampledCell[][]; }
+
+function buildTiles(sg: SampledGrid, order: number): Tile[] {
+  const tileRows = Math.floor(sg.rows / order);
+  const tileCols = Math.floor(sg.cols / order);
+  const tiles: Tile[] = [];
+  for (let I = 0; I < tileRows; I++) {
+    for (let J = 0; J < tileCols; J++) {
+      const cells: SampledCell[][] = [];
+      for (let i = 0; i < order; i++) cells.push(sg.cells[I * order + i].slice(J * order, J * order + order));
+      tiles.push({ tileRow: I, tileCol: J, cells });
+    }
+  }
+  return tiles;
+}
+
+function patchesForOrientation(tiles: Tile[], order: number, lookup: Int32Array, C: number, o: number): Patch[] {
+  return tiles.map(tile => {
+    // A gap anywhere in the tile (see SampledCell.valid — only relevant for
+    // mesh-based sampling) means an exact-match lookup can't be trusted;
+    // skip straight to no-match rather than packing a bogus bit into the
+    // key. The tile still contributes to scoreCorrelation later via
+    // whichever of its cells ARE valid, just not as an exact-match seed
+    // candidate here.
+    const complete = tile.cells.every(row => row.every(c => c.valid));
+    const packed = complete ? lookup[packPatchCells(tile.cells, order, o)] : -1;
+    const match = packed === -1 ? null : { row: Math.floor(packed / C), col: packed % C };
+    return { tileRow: tile.tileRow, tileCol: tile.tileCol, cells: tile.cells, match, correct: null };
+  });
+}
+
 // Tiles the sampled grid into discrete, non-overlapping order x order
 // patches, resolves the shared 0/90/180/270 reading-orientation ambiguity
 // (the gradient-histogram rotation estimate only pins down the grid angle
@@ -335,25 +435,10 @@ function scoreConsistency(patches: Patch[], order: number, R: number, C: number)
 // picking the first orientation with any valid hit is NOT reliable here,
 // since almost any noise hashes to *some* valid window).
 export function decodePatches(sg: SampledGrid, order: number, lookup: Int32Array, R: number, C: number): PatchDecodeResult {
-  const tileRows = Math.floor(sg.rows / order);
-  const tileCols = Math.floor(sg.cols / order);
-
-  const tiles: { tileRow: number; tileCol: number; cells: SampledCell[][] }[] = [];
-  for (let I = 0; I < tileRows; I++) {
-    for (let J = 0; J < tileCols; J++) {
-      const cells: SampledCell[][] = [];
-      for (let i = 0; i < order; i++) cells.push(sg.cells[I * order + i].slice(J * order, J * order + order));
-      tiles.push({ tileRow: I, tileCol: J, cells });
-    }
-  }
-
+  const tiles = buildTiles(sg, order);
   let best: PatchDecodeResult = { patches: [], orientation: null, consistency: -1 };
   for (let o = 0; o < 4; o++) {
-    const patches: Patch[] = tiles.map(tile => {
-      const packed = lookup[packPatchCells(tile.cells, order, o)];
-      const match = packed === -1 ? null : { row: Math.floor(packed / C), col: packed % C };
-      return { tileRow: tile.tileRow, tileCol: tile.tileCol, cells: tile.cells, match, correct: null };
-    });
+    const patches = patchesForOrientation(tiles, order, lookup, C, o);
     const consistency = scoreConsistency(patches, order, R, C);
     if (consistency > best.consistency) best = { patches, orientation: o, consistency };
   }
@@ -375,6 +460,45 @@ function rotateShift(da: number, db: number, orientation: number): [number, numb
   return [da, db];
 }
 
+// Alternative seed generation to decodePatches's non-overlapping tiling —
+// needed for mesh-based sampling (see sampleFromMesh), where only 5/8 of
+// lattice points are ever detectable so a randomly-placed order x order
+// TILE landing on a fully-valid block of cells is rare even when plenty of
+// individually-valid cells exist scattered through the grid (a real
+// pattern's mesh coverage tested out around only ~5-10% of tiles being
+// fully valid — decodePatches found literally zero seeds there despite
+// ~10% of individual cells being valid). Sliding a window across EVERY
+// possible position, not just tile-aligned ones, finds a valid window far
+// more often. Only called when the grid actually has gaps (see
+// pickBestCandidate) — the old dense sampleFullGrid path never has any, so
+// its behavior and cost are completely unchanged.
+function findSlidingSeeds(sg: SampledGrid, order: number, lookup: Int32Array, R: number, C: number, orientation: number): { row: number; col: number }[] {
+  const seen = new Set<string>();
+  const anchors: { row: number; col: number }[] = [];
+  for (let i0 = 0; i0 + order <= sg.rows; i0++) {
+    for (let j0 = 0; j0 + order <= sg.cols; j0++) {
+      let complete = true;
+      for (let i = 0; i < order && complete; i++) {
+        for (let j = 0; j < order; j++) {
+          if (!sg.cells[i0 + i][j0 + j].valid) { complete = false; break; }
+        }
+      }
+      if (!complete) continue;
+      const window = sg.cells.slice(i0, i0 + order).map(row => row.slice(j0, j0 + order));
+      const packed = lookup[packPatchCells(window, order, orientation)];
+      if (packed === -1) continue;
+      const matchRow = Math.floor(packed / C), matchCol = packed % C;
+      const [dr, dc] = rotateShift(i0, j0, orientation);
+      const anchorRow = ((matchRow - dr) % R + R) % R, anchorCol = ((matchCol - dc) % C + C) % C;
+      const key = `${anchorRow},${anchorCol}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      anchors.push({ row: anchorRow, col: anchorCol });
+    }
+  }
+  return anchors;
+}
+
 // Scores a candidate torus anchor (the torus position implied for the
 // sampled grid's own cell (0,0), i.e. its top-left corner) by comparing
 // EVERY sampled cell — not just one patch, not just adjacent pairs — against
@@ -389,31 +513,46 @@ function rotateShift(da: number, db: number, orientation: number): [number, numb
 // windows are valid) — should sit close to 0.5 (uncorrelated with a random
 // binary pattern), giving much better separation than the old metric.
 function scoreCorrelation(sg: SampledGrid, torus: Uint8Array[], R: number, C: number, anchorRow: number, anchorCol: number, orientation: number): number {
-  let agree = 0;
-  const total = sg.rows * sg.cols;
-  if (total === 0) return 0;
+  let agree = 0, total = 0;
   for (let i = 0; i < sg.rows; i++) {
     for (let j = 0; j < sg.cols; j++) {
+      if (!sg.cells[i][j].valid) continue; // gap in mesh-based sampling — no data to compare
+      total++;
       const [dr, dc] = rotateShift(i, j, orientation);
       const torusRow = ((anchorRow + dr) % R + R) % R;
       const torusCol = ((anchorCol + dc) % C + C) % C;
       if (sg.cells[i][j].bit === torus[torusRow][torusCol]) agree++;
     }
   }
-  return agree / total;
+  return total === 0 ? 0 : agree / total;
 }
 
-// Runs decodePatches across several rotation candidates (typically the
-// gradient-histogram estimate plus 90/180/270-degree offsets of it — see
-// this module's header comment for why the full angle isn't pinned down by
-// edge orientation alone). decodePatches's exact-match patches are used only
-// to generate candidate SEED anchor positions (fast, narrows the search from
-// "every torus position" down to a handful) and for visual display — the
-// actual confidence score and final decoded position come from
-// scoreCorrelation, checked against every distinct seed. match is the torus
-// position of the sampled grid's CENTER cell (roughly where the camera is
-// actually pointed), not (0,0), which could be anywhere depending on how far
-// the phase anchor extends in each direction (see detectGrid).
+// Runs across several rotation candidates (typically the gradient-histogram
+// estimate plus 90/180/270-degree offsets of it — see this module's header
+// comment for why the full angle isn't pinned down by edge orientation
+// alone), and — unlike an earlier version of this function — across all 4
+// tile-reading orientations independently via scoreCorrelation directly,
+// rather than delegating orientation choice to decodePatches's own
+// scoreConsistency. That was fine for the dense sampleFullGrid case (patch
+// matches exist for scoreConsistency to compare), but for mesh-based
+// sampling (see sampleFromMesh), where the grid has gaps, scoreConsistency
+// has nothing to compare and returns 0 for every orientation identically —
+// it can't actually discriminate the right one. scoreCorrelation, the
+// stronger signal already used for anchor selection, does not have this
+// problem, so it now picks orientation too; this is a superset of the old
+// behavior for the dense case (never worse, since it tries everything the
+// old path did plus more).
+//
+// Seeds come from two sources: decodePatches's non-overlapping tiles (fast,
+// works well when most cells are valid) and, when the grid has any gaps,
+// findSlidingSeeds's exhaustive window search (needed because a randomly
+// tile-aligned window landing on an all-valid block is rare once a
+// meaningful fraction of cells are gaps — see findSlidingSeeds). Both feed
+// the same scoreCorrelation-based selection, so a mesh-sampled grid pays the
+// extra sliding-window cost only when it actually needs it. match is the
+// torus position of the sampled grid's CENTER cell (roughly where the
+// camera is actually pointed), not (0,0), which could be anywhere depending
+// on how far the phase anchor extends in each direction (see detectGrid).
 export interface CandidateResult extends PatchDecodeResult { candidateIndex: number; match: { row: number; col: number } | null; }
 
 export function pickBestCandidate(sampledGrids: SampledGrid[], order: number, lookup: Int32Array, torus: Uint8Array[], R: number, C: number): CandidateResult {
@@ -422,36 +561,49 @@ export function pickBestCandidate(sampledGrids: SampledGrid[], order: number, lo
 
   for (let i = 0; i < sampledGrids.length; i++) {
     const sg = sampledGrids[i];
-    const tiled = decodePatches(sg, order, lookup, R, C);
-    if (tiled.orientation === null) continue;
-    const o = tiled.orientation;
+    const tiles = buildTiles(sg, order);
+    const hasGaps = sg.cells.some(row => row.some(c => !c.valid));
 
-    const seenAnchors = new Set<string>();
-    let bestAnchor: { row: number; col: number } | null = null;
-    let bestScore = -1;
-    for (const patch of tiled.patches) {
-      if (!patch.match) continue;
-      const [dr, dc] = rotateShift(patch.tileRow * order, patch.tileCol * order, o);
-      const anchorRow = ((patch.match.row - dr) % R + R) % R;
-      const anchorCol = ((patch.match.col - dc) % C + C) % C;
-      const key = `${anchorRow},${anchorCol}`;
-      if (seenAnchors.has(key)) continue;
-      seenAnchors.add(key);
-      const score = scoreCorrelation(sg, torus, R, C, anchorRow, anchorCol, o);
-      if (score > bestScore) { bestScore = score; bestAnchor = { row: anchorRow, col: anchorCol }; }
-    }
+    for (let o = 0; o < 4; o++) {
+      const patches = patchesForOrientation(tiles, order, lookup, C, o);
+      const seenAnchors = new Set<string>();
+      let bestAnchor: { row: number; col: number } | null = null;
+      let bestScore = -1;
 
-    const consistency = Math.max(0, bestScore);
-    let match: { row: number; col: number } | null = null;
-    if (bestAnchor) {
-      const centerI = Math.floor(sg.rows / 2), centerJ = Math.floor(sg.cols / 2);
-      const [dr, dc] = rotateShift(centerI, centerJ, o);
-      match = { row: ((bestAnchor.row + dr) % R + R) % R, col: ((bestAnchor.col + dc) % C + C) % C };
-    }
+      for (const patch of patches) {
+        if (!patch.match) continue;
+        const [dr, dc] = rotateShift(patch.tileRow * order, patch.tileCol * order, o);
+        const anchorRow = ((patch.match.row - dr) % R + R) % R;
+        const anchorCol = ((patch.match.col - dc) % C + C) % C;
+        const key = `${anchorRow},${anchorCol}`;
+        if (seenAnchors.has(key)) continue;
+        seenAnchors.add(key);
+        const score = scoreCorrelation(sg, torus, R, C, anchorRow, anchorCol, o);
+        if (score > bestScore) { bestScore = score; bestAnchor = { row: anchorRow, col: anchorCol }; }
+      }
 
-    if (!best || consistency > best.consistency) {
-      best = { patches: tiled.patches, orientation: o, consistency, candidateIndex: i, match };
-      winningAnchor = bestAnchor;
+      if (hasGaps) {
+        for (const anchor of findSlidingSeeds(sg, order, lookup, R, C, o)) {
+          const key = `${anchor.row},${anchor.col}`;
+          if (seenAnchors.has(key)) continue;
+          seenAnchors.add(key);
+          const score = scoreCorrelation(sg, torus, R, C, anchor.row, anchor.col, o);
+          if (score > bestScore) { bestScore = score; bestAnchor = anchor; }
+        }
+      }
+
+      const consistency = Math.max(0, bestScore);
+      let match: { row: number; col: number } | null = null;
+      if (bestAnchor) {
+        const centerI = Math.floor(sg.rows / 2), centerJ = Math.floor(sg.cols / 2);
+        const [dr, dc] = rotateShift(centerI, centerJ, o);
+        match = { row: ((bestAnchor.row + dr) % R + R) % R, col: ((bestAnchor.col + dc) % C + C) % C };
+      }
+
+      if (!best || consistency > best.consistency) {
+        best = { patches, orientation: o, consistency, candidateIndex: i, match };
+        winningAnchor = bestAnchor;
+      }
     }
   }
 

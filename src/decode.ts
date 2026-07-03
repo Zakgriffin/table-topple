@@ -263,6 +263,11 @@ export interface Patch {
   tileRow: number; tileCol: number; // position in the tile grid (not torus coords)
   cells: SampledCell[][]; // order x order
   match: { row: number; col: number } | null;
+  // Per-cell ground-truth correctness (does this cell's bit match the actual
+  // known pattern at the position the frame's winning anchor implies?), for
+  // visual debugging — see pickBestCandidate, which populates this only for
+  // the winning candidate (needs a resolved anchor to compare against).
+  correct: boolean[][] | null;
 }
 
 export interface PatchDecodeResult {

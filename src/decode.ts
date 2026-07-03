@@ -110,11 +110,17 @@ function boxBlur(gray: Float64Array, w: number, h: number, radius: number): Floa
   return out;
 }
 
+// Uses a circular mean rather than a histogram peak search: orientation data
+// is periodic mod PI/2 (both edge families and the +-direction ambiguity of
+// each gradient all collapse together), so scaling each angle by 4 maps that
+// periodicity onto the full circle (4 * PI/2 = 2*PI). Averaging as vectors in
+// that scaled space, then dividing the result back down by 4, gives a
+// continuous estimate with no bin-quantization error — a histogram's ~0.5
+// degree bin width was enough residual error to visibly drift pixel sampling
+// across a couple hundred pixels of buffer.
 export function estimateRotationRad(gray: Float64Array, w: number, h: number): number {
   const blurred = boxBlur(gray, w, h, 2);
-  const BINS = 180;
-  const HALF_PI = Math.PI / 2;
-  const hist = new Float64Array(BINS);
+  let sumX = 0, sumY = 0;
   for (let y = 1; y < h - 1; y++) {
     for (let x = 1; x < w - 1; x++) {
       const gx = blurred[y * w + x + 1] - blurred[y * w + x - 1];
@@ -122,19 +128,14 @@ export function estimateRotationRad(gray: Float64Array, w: number, h: number): n
       const mag = gx * gx + gy * gy; // squared magnitude — emphasizes strong edges
       if (mag < 1) continue;
       const angle = Math.atan2(gy, gx); // -PI..PI
-      const folded = ((angle % HALF_PI) + HALF_PI) % HALF_PI; // [0, PI/2)
-      const idx = Math.min(BINS - 1, Math.floor((folded / HALF_PI) * BINS));
-      hist[idx] += mag;
+      sumX += mag * Math.cos(4 * angle);
+      sumY += mag * Math.sin(4 * angle);
     }
   }
-  // 3-bin smoothing (circular, since angle mod PI/2 wraps) to avoid locking
-  // onto a single noisy spike.
-  let bestIdx = 0, bestVal = -Infinity;
-  for (let i = 0; i < BINS; i++) {
-    const smoothed = hist[(i - 1 + BINS) % BINS] + hist[i] + hist[(i + 1) % BINS];
-    if (smoothed > bestVal) { bestVal = smoothed; bestIdx = i; }
-  }
-  return (bestIdx / BINS) * HALF_PI;
+  const meanAngle4 = Math.atan2(sumY, sumX); // -PI..PI
+  let theta = meanAngle4 / 4; // -PI/4..PI/4
+  if (theta < 0) theta += Math.PI / 2;
+  return theta; // [0, PI/2)
 }
 
 export interface SampledCell { x: number; y: number; bit: number; }

@@ -215,7 +215,7 @@ interface TrackedState {
 const HOLD_FRAMES = 20;
 const tracked = new Map<string, TrackedState>();
 
-function updateTracked(barcodes: any[]) {
+function updateTracked(barcodes: DetectedCode[]) {
   const seen = new Set<string>();
   for (const code of barcodes) {
     const id = code.rawValue;

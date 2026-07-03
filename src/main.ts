@@ -73,93 +73,6 @@ cropCanvas.width = CROP;
 cropCanvas.height = CROP;
 const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true })!;
 
-interface GridDetection {
-  px: number; py: number; // phase (px offset of first cell boundary)
-  pitchX: number; pitchY: number;
-}
-
-// Finds the pitch (dominant period) of a 1D energy profile via autocorrelation.
-function findPitch(energy: Float64Array, minLag: number, maxLag: number): number {
-  let bestLag = minLag, bestScore = -Infinity;
-  for (let lag = minLag; lag <= maxLag; lag++) {
-    let score = 0;
-    for (let x = 0; x + lag < energy.length; x++) score += energy[x] * energy[x + lag];
-    if (score > bestScore) { bestScore = score; bestLag = lag; }
-  }
-  return bestLag;
-}
-
-// Finds the phase in [0, pitch) whose boundary positions (phase, phase+pitch,
-// phase+2*pitch, ...) best align with peaks in the energy profile.
-function findPhase(energy: Float64Array, pitch: number): number {
-  let bestPhase = 0, bestScore = -Infinity;
-  for (let phase = 0; phase < pitch; phase++) {
-    let score = 0;
-    for (let x = phase; x < energy.length; x += pitch) score += energy[x];
-    if (score > bestScore) { bestScore = score; bestPhase = phase; }
-  }
-  return bestPhase;
-}
-
-function detectGrid(bin: Uint8Array, w: number, h: number): GridDetection {
-  const colEnergy = new Float64Array(w);
-  for (let x = 1; x < w; x++) {
-    let e = 0;
-    for (let y = 0; y < h; y++) e += Math.abs(bin[y * w + x] - bin[y * w + x - 1]);
-    colEnergy[x] = e;
-  }
-  const rowEnergy = new Float64Array(h);
-  for (let y = 1; y < h; y++) {
-    let e = 0;
-    for (let x = 0; x < w; x++) e += Math.abs(bin[y * w + x] - bin[(y - 1) * w + x]);
-    rowEnergy[y] = e;
-  }
-
-  const minLag = 4, maxLagX = Math.floor(w / 4), maxLagY = Math.floor(h / 4);
-  const pitchX = findPitch(colEnergy, minLag, maxLagX);
-  const pitchY = findPitch(rowEnergy, minLag, maxLagY);
-  const px = findPhase(colEnergy, pitchX);
-  const py = findPhase(rowEnergy, pitchY);
-  return { px, py, pitchX, pitchY };
-}
-
-// Samples the ORDER x ORDER cells nearest the crop center and packs them into
-// a window key, or returns null if not enough cells are visible.
-function sampleWindow(bin: Uint8Array, w: number, h: number, grid: GridDetection): number | null {
-  const { px, py, pitchX, pitchY } = grid;
-  const numCellsX = Math.floor((w - px) / pitchX);
-  const numCellsY = Math.floor((h - py) / pitchY);
-  if (numCellsX < ORDER || numCellsY < ORDER) return null;
-
-  const startX = Math.floor((numCellsX - ORDER) / 2);
-  const startY = Math.floor((numCellsY - ORDER) / 2);
-
-  let key = 0;
-  for (let i = 0; i < ORDER; i++) {
-    const cy = py + pitchY * (startY + i + 0.5);
-    for (let j = 0; j < ORDER; j++) {
-      const cx = px + pitchX * (startX + j + 0.5);
-      // Average a small box around the cell center to reduce edge noise.
-      const bx = Math.max(2, Math.floor(pitchX * 0.2));
-      const by = Math.max(2, Math.floor(pitchY * 0.2));
-      let sum = 0, count = 0;
-      for (let dy = -by; dy <= by; dy++) {
-        const yy = Math.round(cy + dy);
-        if (yy < 0 || yy >= h) continue;
-        for (let dx = -bx; dx <= bx; dx++) {
-          const xx = Math.round(cx + dx);
-          if (xx < 0 || xx >= w) continue;
-          sum += bin[yy * w + xx];
-          count++;
-        }
-      }
-      const bit = count > 0 && sum / count > 0.5 ? 1 : 0;
-      key = (key << 1) | bit;
-    }
-  }
-  return key >>> 0;
-}
-
 function decodeFrame(): { row: number; col: number } | null {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
@@ -168,19 +81,10 @@ function decodeFrame(): { row: number; col: number } | null {
   cropCtx.drawImage(video, sx, sy, cropSrc, cropSrc, 0, 0, CROP, CROP);
 
   const img = cropCtx.getImageData(0, 0, CROP, CROP).data;
-  const gray = new Float64Array(CROP * CROP);
-  let mean = 0;
-  for (let i = 0, p = 0; i < gray.length; i++, p += 4) {
-    const luma = 0.299 * img[p] + 0.587 * img[p + 1] + 0.114 * img[p + 2];
-    gray[i] = luma;
-    mean += luma;
-  }
-  mean /= gray.length;
-  const bin = new Uint8Array(CROP * CROP);
-  for (let i = 0; i < gray.length; i++) bin[i] = gray[i] < mean ? 1 : 0; // dark -> 1 (black cell)
+  const bin = binarizeRGBA(img, CROP, CROP);
 
   const grid = detectGrid(bin, CROP, CROP);
-  const key = sampleWindow(bin, CROP, CROP, grid);
+  const key = sampleWindow(bin, CROP, CROP, grid, ORDER);
   if (key === null) return null;
 
   const packed = lookup[key];

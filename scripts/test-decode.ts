@@ -87,8 +87,7 @@ function derotate(gray: Float64Array, theta: number): Float64Array {
 
 function decode(rgba: Uint8ClampedArray): { anyMatch: boolean; matches: { row: number; col: number }[] } {
   const rawGray = toGrayscale(rgba, RAW, RAW);
-  const rawBin = binarize(rawGray);
-  const theta = estimateRotationRad(rawBin, RAW, RAW);
+  const theta = estimateRotationRad(rawGray, RAW, RAW);
 
   const alignedGray = derotate(rawGray, theta);
   const alignedBin = binarize(alignedGray);

@@ -100,25 +100,28 @@ startCamera('environment')
 
 // ── Grid decode pipeline (Stage 2: rotation + uniform scale) ───────────────────
 // See src/decode.ts's module header for the full algorithm writeup. Summary:
-//   1. Crop a square RAW region from the video center.
+//   1. Crop nearly the WHOLE video viewport (not just a small centered
+//      square) — when the camera is close enough that only one patch's
+//      worth of cells is visible, cross-patch consistency has no neighbors
+//      to check, so every available cell matters. The capture rectangle
+//      matches the video's real aspect ratio rather than being limited to a
+//      square bounded by the shorter dimension.
 //   2. Estimate rotation mod 90 degrees via gradient-orientation histogram.
 //   3. Derotate at that angle plus 90/180/270-degree offsets (4 candidates —
 //      edge orientation alone can't tell which of the 4 is the true one).
+//      The square RAW buffer that rotation happens in is sized off the
+//      ALIGNED rectangle's diagonal (not a fixed side), since a wider or
+//      taller capture needs more rotation margin to stay fully covered.
 //   4. For each candidate: detect grid pitch/phase, sample every visible
 //      cell, tile into discrete order x order patches, decode each patch.
 //   5. Keep whichever candidate's patches are most mutually consistent.
 
-const RAW = 260; // pre-rotation capture buffer (working resolution, px)
-const ALIGNED = 180; // post-rotation analysis buffer — RAW >= ALIGNED*sqrt(2) so
-                      // the aligned buffer is fully covered after any rotation
 const CONFIDENCE_THRESHOLD = 0.5; // min fraction of agreeing adjacent patches to trust a frame
+const ANALYSIS_BUDGET = 190 * 190; // target ALIGNED_w * ALIGNED_h, keeps analysis cost roughly constant
 
 const rawCanvas = document.createElement('canvas');
-rawCanvas.width = RAW; rawCanvas.height = RAW;
 const rawCtx = rawCanvas.getContext('2d', { willReadFrequently: true })!;
-
 const alignedCanvas = document.createElement('canvas');
-alignedCanvas.width = ALIGNED; alignedCanvas.height = ALIGNED;
 const alignedCtx = alignedCanvas.getContext('2d', { willReadFrequently: true })!;
 
 interface DecodeResult {
@@ -127,49 +130,63 @@ interface DecodeResult {
   consistency: number;
   theta: number; // resolved full rotation angle (radians) for the winning candidate
   grid: { px: number; py: number; pitchX: number; pitchY: number };
-  cropSx: number; cropSy: number; rawScale: number; // maps RAW-buffer coords -> video coords
+  alignedW: number; alignedH: number;
+  cropSx: number; cropSy: number; rawScale: number; rawSide: number; contentDx: number; contentDy: number;
 }
 
 // Maps a point in the (winning candidate's) ALIGNED buffer back to video
 // coordinates, for overlay drawing: aligned -> raw (inverse of the
-// ctx.rotate(-theta) derotation, see src/decode.ts's header) -> video.
-function alignedToVideo(ax: number, ay: number, theta: number, cropSx: number, cropSy: number, rawScale: number): { x: number; y: number } {
-  const relX = ax - ALIGNED / 2, relY = ay - ALIGNED / 2;
-  const cosT = Math.cos(theta), sinT = Math.sin(theta);
-  const rx = relX * cosT - relY * sinT + RAW / 2;
-  const ry = relX * sinT + relY * cosT + RAW / 2;
-  return { x: cropSx + rx * rawScale, y: cropSy + ry * rawScale };
+// ctx.rotate(-theta) derotation, see src/decode.ts's header) -> video. RAW's
+// content is drawn centered with a padding margin (contentDx/Dy) since RAW
+// is sized for rotation coverage, not 1:1 with the real capture rectangle.
+function alignedToVideo(ax: number, ay: number, d: DecodeResult): { x: number; y: number } {
+  const relX = ax - d.alignedW / 2, relY = ay - d.alignedH / 2;
+  const cosT = Math.cos(d.theta), sinT = Math.sin(d.theta);
+  const rx = relX * cosT - relY * sinT + d.rawSide / 2;
+  const ry = relX * sinT + relY * cosT + d.rawSide / 2;
+  return { x: d.cropSx + (rx - d.contentDx) * d.rawScale, y: d.cropSy + (ry - d.contentDy) * d.rawScale };
 }
 
 function decodeFrame(): DecodeResult | null {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
-  const cropSrc = Math.min(vw, vh) * 0.7;
-  const cropSx = (vw - cropSrc) / 2, cropSy = (vh - cropSrc) / 2;
-  const rawScale = cropSrc / RAW;
-  rawCtx.drawImage(video, cropSx, cropSy, cropSrc, cropSrc, 0, 0, RAW, RAW);
 
-  const rawImg = rawCtx.getImageData(0, 0, RAW, RAW).data;
-  const rawGray = toGrayscale(rawImg, RAW, RAW);
-  const theta0 = estimateRotationRad(rawGray, RAW, RAW);
+  const cropW = vw * 0.95, cropH = vh * 0.95;
+  const cropSx = (vw - cropW) / 2, cropSy = (vh - cropH) / 2;
+
+  const aspect = cropW / cropH;
+  const alignedH = Math.round(Math.sqrt(ANALYSIS_BUDGET / aspect));
+  const alignedW = Math.round(alignedH * aspect);
+  const rawScale = cropW / alignedW; // == cropH / alignedH
+  const rawSide = Math.ceil(Math.sqrt(alignedW * alignedW + alignedH * alignedH)); // covers ALIGNED's diagonal at any rotation
+  const contentDx = (rawSide - alignedW) / 2, contentDy = (rawSide - alignedH) / 2;
+
+  rawCanvas.width = rawSide; rawCanvas.height = rawSide;
+  alignedCanvas.width = alignedW; alignedCanvas.height = alignedH;
+
+  rawCtx.fillStyle = '#fff';
+  rawCtx.fillRect(0, 0, rawSide, rawSide);
+  rawCtx.drawImage(video, cropSx, cropSy, cropW, cropH, contentDx, contentDy, alignedW, alignedH);
+
+  const rawImg = rawCtx.getImageData(0, 0, rawSide, rawSide).data;
+  const rawGray = toGrayscale(rawImg, rawSide, rawSide);
+  const theta0 = estimateRotationRad(rawGray, rawSide, rawSide);
 
   const grids: { px: number; py: number; pitchX: number; pitchY: number }[] = [];
   const sampledGrids = [0, 1, 2, 3].map(k => {
     const theta = theta0 + k * (Math.PI / 2);
     alignedCtx.save();
-    alignedCtx.translate(ALIGNED / 2, ALIGNED / 2);
+    alignedCtx.translate(alignedW / 2, alignedH / 2);
     alignedCtx.rotate(-theta);
-    alignedCtx.translate(-RAW / 2, -RAW / 2);
-    alignedCtx.fillStyle = '#fff';
-    alignedCtx.fillRect(0, 0, RAW, RAW);
+    alignedCtx.translate(-rawSide / 2, -rawSide / 2);
     alignedCtx.drawImage(rawCanvas, 0, 0);
     alignedCtx.restore();
 
-    const alignedImg = alignedCtx.getImageData(0, 0, ALIGNED, ALIGNED).data;
-    const alignedBin = binarize(toGrayscale(alignedImg, ALIGNED, ALIGNED));
-    const grid = detectGrid(alignedBin, ALIGNED, ALIGNED);
+    const alignedImg = alignedCtx.getImageData(0, 0, alignedW, alignedH).data;
+    const alignedBin = binarize(toGrayscale(alignedImg, alignedW, alignedH));
+    const grid = detectGrid(alignedBin, alignedW, alignedH);
     grids.push(grid);
-    return sampleFullGrid(alignedBin, ALIGNED, ALIGNED, grid);
+    return sampleFullGrid(alignedBin, alignedW, alignedH, grid);
   });
 
   const best = pickBestCandidate(sampledGrids, ORDER, lookup, R, C);

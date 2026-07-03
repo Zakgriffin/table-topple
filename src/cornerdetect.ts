@@ -179,3 +179,44 @@ export function detectJunctions(field: JunctionField, threshold = 0.15, minDista
   }
   return kept;
 }
+
+// Refines a coarse junction position to sub-pixel accuracy — needed for
+// L_CORNER points in particular, whose coarse cornerness peak sits a few
+// pixels off the true lattice point (see detectJunctions's caller-facing
+// docs and scripts/test-junctions.ts's positional offset numbers): unlike a
+// saddle, a plain corner lacks the 4-fold symmetry that keeps the coarse
+// peak centered.
+//
+// Uses the same iterative technique OpenCV's cornerSubPix (originally
+// Förstner's method) is built on, rather than a hand-tuned offset
+// correction: the true corner is the point q that best satisfies, for every
+// nearby edge pixel p with gradient g(p), that g(p) is perpendicular to
+// (p - q) — i.e. q lies along the tangent line implied by every edge pixel
+// in the window. That's a weighted least-squares linear system in q, so it
+// generalizes to L-corners (2 edge tangents) and saddles (4) alike without
+// needing separate per-type logic, unlike a fitted offset would.
+export function refineJunctionSubPixel(gray: Float64Array, w: number, h: number, cx: number, cy: number, windowRadius = 6, iterations = 3): { x: number; y: number } {
+  const blurred = boxBlur(gray, w, h, 1);
+  let qx = cx, qy = cy;
+  for (let iter = 0; iter < iterations; iter++) {
+    let Mxx = 0, Mxy = 0, Myy = 0, bx = 0, by = 0;
+    const x0 = Math.max(1, Math.round(qx - windowRadius)), x1 = Math.min(w - 2, Math.round(qx + windowRadius));
+    const y0 = Math.max(1, Math.round(qy - windowRadius)), y1 = Math.min(h - 2, Math.round(qy + windowRadius));
+    for (let y = y0; y <= y1; y++) {
+      for (let x = x0; x <= x1; x++) {
+        const gx = blurred[y * w + x + 1] - blurred[y * w + x - 1];
+        const gy = blurred[(y + 1) * w + x] - blurred[(y - 1) * w + x];
+        const mag2 = gx * gx + gy * gy;
+        if (mag2 < 1) continue; // skip near-flat pixels — uninformative, only adds noise
+        const dot = gx * x + gy * y;
+        Mxx += mag2 * gx * gx; Mxy += mag2 * gx * gy; Myy += mag2 * gy * gy;
+        bx += mag2 * gx * dot; by += mag2 * gy * dot;
+      }
+    }
+    const det = Mxx * Myy - Mxy * Mxy;
+    if (Math.abs(det) < 1e-9) break; // degenerate window (e.g. all gradients parallel) — keep current estimate
+    qx = (Myy * bx - Mxy * by) / det;
+    qy = (Mxx * by - Mxy * bx) / det;
+  }
+  return { x: qx, y: qy };
+}

@@ -114,9 +114,17 @@ startCamera('environment')
 //      taller capture needs more rotation margin to stay fully covered.
 //   4. For each candidate: detect grid pitch/phase, sample every visible
 //      cell, tile into discrete order x order patches, decode each patch.
-//   5. Keep whichever candidate's patches are most mutually consistent.
+//   5. Keep whichever candidate's exact-match patches yield the best-
+//      correlated position against the actual known pattern (see
+//      pickBestCandidate / scoreCorrelation in decode.ts) — this tolerates
+//      individual misread bits gracefully rather than exact-match's
+//      all-or-nothing, and gives a MUCH better-separated confidence score
+//      than checking patches only agree with each other: empirically,
+//      correct decodes score ~1.0 (degrading smoothly with real bit noise),
+//      wrong ones sit around ~0.55-0.6 (close to the 0.5 "uncorrelated"
+//      baseline) — see scripts/test-decode.ts's noise-injection test.
 
-const CONFIDENCE_THRESHOLD = 0.5; // min fraction of agreeing adjacent patches to trust a frame
+const CONFIDENCE_THRESHOLD = 0.85; // correlation score vs the known pattern; wrong matches empirically top out ~0.6
 const ANALYSIS_BUDGET = 190 * 190; // target ALIGNED_w * ALIGNED_h, keeps analysis cost roughly constant
 
 const rawCanvas = document.createElement('canvas');

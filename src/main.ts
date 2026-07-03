@@ -264,8 +264,13 @@ function render() {
     // a lookup hit but overall confidence is low, red if no hit), containing
     // its own black/white dots so patches are visually distinguishable.
     for (const patch of result.patches) {
-      const x0 = px + patch.tileCol * ORDER * pitchX, x1 = x0 + ORDER * pitchX;
-      const y0 = py + patch.tileRow * ORDER * pitchY, y1 = y0 + ORDER * pitchY;
+      // Derived from the patch's own sampled cell positions (always correct)
+      // rather than px + tileCol*order*pitchX — that formula assumed tile 0
+      // starts AT px, which broke once px was anchored near the buffer
+      // center with tiles extending both directions from it (same root
+      // cause as the blue-line fix above).
+      const x0 = patch.cells[0][0].x - pitchX / 2, x1 = patch.cells[0][ORDER - 1].x + pitchX / 2;
+      const y0 = patch.cells[0][0].y - pitchY / 2, y1 = patch.cells[ORDER - 1][0].y + pitchY / 2;
       const corners = [toVideo(x0, y0), toVideo(x1, y0), toVideo(x1, y1), toVideo(x0, y1)];
       ctx.strokeStyle = patch.match ? (confident ? '#0f0' : '#fa0') : '#f00';
       ctx.lineWidth = Math.max(1, result.rawScale);

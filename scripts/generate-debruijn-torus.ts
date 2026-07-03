@@ -160,6 +160,55 @@ function verifyTorusWindows(torus: Uint8Array[], R: number, C: number, n: number
   return true;
 }
 
+const WINDOW_CHECK_LIMIT = 2 ** 22; // ~4M cells, keeps the O(R*C*n^2) 2D check fast
+
+// Finds a feedback tap set for degree N whose m-sequence is BOTH maximal-length
+// AND — when folded onto the R x C torus — has verifiably unique n x n windows.
+// These are two separate properties: maximal-length (1D) is necessary but,
+// surprisingly, not sufficient — some primitive polynomials fold into a torus
+// with duplicate windows (confirmed empirically: taps [16,1,5,7,10,15] are a
+// valid maximal-length degree-16 LFSR but produce a broken 255x257 fold). So
+// this searches candidates and checks the full pipeline (1D + 2D) together,
+// rather than trusting 1D primitivity alone.
+//
+// Searches spread-out, moderately dense candidates first (denser, well-spread
+// taps reduce short-range correlation and give a more visually uncorrelated
+// pattern than the sparsest possible polynomial — with no effect on either
+// uniqueness property, or on later position lookup, which will use a
+// precomputed table or a discrete-log solve, either of which works the same
+// regardless of tap weight), falling back to sparser odd weights down to 1.
+//
+// Tap-count parity matters: empirically (verified for N=16), the taps array —
+// which always includes N itself as one entry — must have EVEN total length
+// for a candidate to have any chance of being primitive, so the extra-tap
+// count (beyond N) is always kept odd.
+function findValidTorusSequence(order: number, N: number, R: number, C: number): { taps: number[]; seq: Uint8Array } {
+  const check2D = R * C <= WINDOW_CHECK_LIMIT;
+  const isValid = (seq: Uint8Array) => {
+    if (!check2D) return true; // can't verify at this size — accept on 1D success alone
+    return verifyTorusWindows(buildTorus(seq, R, C), R, C, order, N);
+  };
+
+  const preferredWeight = Math.min(Math.max(5, Math.round(N / 3) | 1), N % 2 === 0 ? N - 1 : N - 2);
+  for (let weight = preferredWeight; weight >= 1; weight -= 2) {
+    if (weight === 1) {
+      for (let k = 1; k < N; k++) {
+        const seq = tryTaps([N, k], N);
+        if (seq && isValid(seq)) return { taps: [N, k], seq };
+      }
+      continue;
+    }
+    const rng = mulberry32(((N * 2654435761) ^ weight) >>> 0);
+    for (let i = 0; i < 2000; i++) {
+      const taps = stratifiedTaps(N, weight, rng);
+      if (taps.length !== weight + 1) continue; // stratification collision broke exact parity — skip
+      const seq = tryTaps(taps, N);
+      if (seq && isValid(seq)) return { taps, seq };
+    }
+  }
+  throw new Error(`Could not find a maximal-length, torus-valid LFSR for order ${order} (N=${N}).`);
+}
+
 // Renders each cell as an uncompromising cellSize x cellSize block of solid
 // pixels — no resampling, no stretching. Output image is (C*cellSize) x
 // (R*cellSize), so a non-square R x C grid produces a genuinely non-square

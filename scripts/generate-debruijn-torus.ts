@@ -156,14 +156,20 @@ function verifyTorusWindows(torus: Uint8Array[], R: number, C: number, n: number
   return true;
 }
 
-function writePng(torus: Uint8Array[], R: number, C: number, side: number, outPath: string): Promise<void> {
-  const png = new PNG({ width: side, height: side });
-  for (let y = 0; y < side; y++) {
-    const row = torus[Math.floor((y * R) / side)];
-    for (let x = 0; x < side; x++) {
-      const cell = row[Math.floor((x * C) / side)];
+// Renders each cell as an uncompromising cellSize x cellSize block of solid
+// pixels — no resampling, no stretching. Output image is (C*cellSize) x
+// (R*cellSize), so a non-square R x C grid produces a genuinely non-square
+// image rather than being distorted to fit a fixed canvas.
+function writePng(torus: Uint8Array[], R: number, C: number, cellSize: number, outPath: string): Promise<void> {
+  const width = C * cellSize;
+  const height = R * cellSize;
+  const png = new PNG({ width, height });
+  for (let y = 0; y < height; y++) {
+    const row = torus[Math.floor(y / cellSize)];
+    for (let x = 0; x < width; x++) {
+      const cell = row[Math.floor(x / cellSize)];
       const shade = cell ? 0 : 255; // 1 -> black, 0 -> white
-      const idx = (side * y + x) << 2;
+      const idx = (width * y + x) << 2;
       png.data[idx] = png.data[idx + 1] = png.data[idx + 2] = shade;
       png.data[idx + 3] = 255;
     }
@@ -179,7 +185,7 @@ function writePng(torus: Uint8Array[], R: number, C: number, side: number, outPa
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   const order = parseInt(args.order ?? '4', 10);
-  const side = parseInt(args.side ?? '2048', 10);
+  const cellSize = parseInt(args['cell-size'] ?? '8', 10);
   const outPath = args.out ?? `debruijn-torus-order${order}.png`;
 
   const N = order * order;

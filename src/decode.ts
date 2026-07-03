@@ -88,7 +88,7 @@ export function findPhase(energy: Float64Array, pitch: number): number {
 // [y0,y1) of the buffer (still indexed in full-buffer coordinates in the
 // result). detectGrid is just this called on the whole buffer; the region
 // form also backs detectLocalGrid's per-half regional estimates.
-function detectGridInRegion(bin: Uint8Array, w: number, h: number, x0: number, y0: number, x1: number, y1: number): GridDetection {
+function detectGridInRegion(bin: Uint8Array, w: number, x0: number, y0: number, x1: number, y1: number): GridDetection {
   const rw = x1 - x0, rh = y1 - y0;
   const colEnergy = new Float64Array(rw);
   for (let x = 1; x < rw; x++) {

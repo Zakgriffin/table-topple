@@ -73,23 +73,29 @@ cropCanvas.width = CROP;
 cropCanvas.height = CROP;
 const cropCtx = cropCanvas.getContext('2d', { willReadFrequently: true })!;
 
-function decodeFrame(): { row: number; col: number } | null {
+interface DecodeResult {
+  match: { row: number; col: number } | null;
+  cells: { x: number; y: number; bit: number }[]; // crop-local (0..CROP) coords
+  cropSx: number; cropSy: number; cropSrc: number; // maps crop-local -> video coords
+}
+
+function decodeFrame(): DecodeResult | null {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return null;
   const cropSrc = Math.min(vw, vh) * 0.6;
-  const sx = (vw - cropSrc) / 2, sy = (vh - cropSrc) / 2;
-  cropCtx.drawImage(video, sx, sy, cropSrc, cropSrc, 0, 0, CROP, CROP);
+  const cropSx = (vw - cropSrc) / 2, cropSy = (vh - cropSrc) / 2;
+  cropCtx.drawImage(video, cropSx, cropSy, cropSrc, cropSrc, 0, 0, CROP, CROP);
 
   const img = cropCtx.getImageData(0, 0, CROP, CROP).data;
   const bin = binarizeRGBA(img, CROP, CROP);
 
   const grid = detectGrid(bin, CROP, CROP);
-  const key = sampleWindow(bin, CROP, CROP, grid, ORDER);
-  if (key === null) return null;
+  const sampled = sampleWindow(bin, CROP, CROP, grid, ORDER);
+  if (sampled === null) return { match: null, cells: [], cropSx, cropSy, cropSrc };
 
-  const packed = lookup[key];
-  if (packed === -1) return null;
-  return { row: Math.floor(packed / C), col: packed % C };
+  const packed = lookup[sampled.key];
+  const match = packed === -1 ? null : { row: Math.floor(packed / C), col: packed % C };
+  return { match, cells: sampled.cells, cropSx, cropSy, cropSrc };
 }
 
 // ── Render loop ───────────────────────────────────────────────────────────────

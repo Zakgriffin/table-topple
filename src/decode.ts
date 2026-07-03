@@ -329,7 +329,7 @@ export function decodePatches(sg: SampledGrid, order: number, lookup: Int32Array
     const patches: Patch[] = tiles.map(tile => {
       const packed = lookup[packPatchCells(tile.cells, order, o)];
       const match = packed === -1 ? null : { row: Math.floor(packed / C), col: packed % C };
-      return { tileRow: tile.tileRow, tileCol: tile.tileCol, cells: tile.cells, match };
+      return { tileRow: tile.tileRow, tileCol: tile.tileCol, cells: tile.cells, match, correct: null };
     });
     const consistency = scoreConsistency(patches, order, R, C);
     if (consistency > best.consistency) best = { patches, orientation: o, consistency };

@@ -120,7 +120,28 @@ function render() {
   ctx.strokeRect(sx, sy, cropSrc, cropSrc);
 
   const result = decodeFrame();
-  status.textContent = result
-    ? `order ${ORDER}  torus ${R}x${C}\nrow ${result.row}  col ${result.col}`
+
+  // Overlay a circle on every sampled cell: filled with the bit this pipeline
+  // detected (black/white), with a bright outline so it's visible regardless
+  // of the cell's own color. Lets you visually cross-check detected bits
+  // against what's actually on screen, cell by cell.
+  if (result) {
+    const scale = result.cropSrc / CROP;
+    const radius = Math.max(3, scale * 3);
+    for (const cell of result.cells) {
+      const vx = result.cropSx + cell.x * scale;
+      const vy = result.cropSy + cell.y * scale;
+      ctx.beginPath();
+      ctx.arc(vx, vy, radius, 0, Math.PI * 2);
+      ctx.fillStyle = cell.bit ? '#000' : '#fff';
+      ctx.fill();
+      ctx.lineWidth = Math.max(1, radius * 0.3);
+      ctx.strokeStyle = result.match ? '#0f0' : '#f00';
+      ctx.stroke();
+    }
+  }
+
+  status.textContent = result?.match
+    ? `order ${ORDER}  torus ${R}x${C}\nrow ${result.match.row}  col ${result.match.col}`
     : `order ${ORDER}  torus ${R}x${C}\nno lock — move closer / center the pattern`;
 }

@@ -61,8 +61,8 @@ function setupZoomControl() {
     zoomSlider.min = '0';
     zoomSlider.max = '1';
     zoomSlider.step = '0.001';
-    const settings: any = track!.getSettings();
-    zoomSlider.value = String(zoomToSlider(settings.zoom ?? zoomMin));
+    zoomSlider.value = '0'; // default to fully zoomed out
+    track!.applyConstraints({ advanced: [{ zoom: zoomMin } as any] }).catch(() => {});
   } else {
     zoomSlider.disabled = true;
   }

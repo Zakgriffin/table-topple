@@ -26,11 +26,24 @@
     font-family: monospace; font-size: 14px; backdrop-filter: blur(4px);
   }
   #switchCam:active { background: rgba(255,255,255,0.3); }
+  #zoomBox {
+    position: fixed; bottom: 16px; left: 16px; right: 90px; z-index: 10;
+    display: flex; align-items: center; gap: 8px;
+    background: rgba(255,255,255,0.15); backdrop-filter: blur(4px);
+    border-radius: 999px; padding: 6px 14px;
+  }
+  #zoomLabel { color: white; font-family: monospace; font-size: 12px; white-space: nowrap; }
+  #zoom { flex: 1; accent-color: #0f0; }
+  #zoom:disabled { accent-color: #f00; opacity: 0.5; }
 </style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <div id="status">Starting camera...</div>
+<div id="zoomBox">
+  <span id="zoomLabel">Zoom</span>
+  <input type="range" id="zoom" min="0" max="1" step="0.01" value="0" disabled>
+</div>
 <button id="switchCam" title="Switch camera">⟲ Flip camera</button>
 <script type="module" src="/src/main.ts"></script>
 </body>

@@ -80,6 +80,31 @@ export function projectToImage(pose: CameraPose, rawW: number, rawH: number, wor
   return [rawW / 2 + (f * xCam) / zCam, rawH / 2 + (f * yCam) / zCam];
 }
 
+export interface VPGroundTruth {
+  finite: boolean;
+  x: number; y: number; // meaningful only if finite
+  angle: number;        // meaningful only if !finite — image-space direction, radians
+}
+
+// Exact vanishing point (or direction, if the world direction never
+// converges within the image) for a world-plane direction (dx,dy,0) under
+// this pose — derived in closed form from the pinhole projection rather
+// than by projecting an increasingly-far point, since forward.d can be
+// EXACTLY zero (a genuine direction-at-infinity, e.g. near-fronto-parallel
+// views) where a numerical limit would just get more ill-conditioned rather
+// than give an exact answer.
+export function vanishingPointForDirection(pose: CameraPose, rawW: number, rawH: number, dx: number, dy: number): VPGroundTruth {
+  const { right, up, forward } = buildCamera(pose);
+  const fwdDot = forward[0] * dx + forward[1] * dy;
+  const rightDot = right[0] * dx + right[1] * dy;
+  const upDot = up[0] * dx + up[1] * dy;
+  const f = pose.focal;
+  if (Math.abs(fwdDot) < 1e-9) {
+    return { finite: false, x: 0, y: 0, angle: Math.atan2(upDot, rightDot) };
+  }
+  return { finite: true, x: rawW / 2 + (f * rightDot) / fwdDot, y: rawH / 2 + (f * upDot) / fwdDot, angle: 0 };
+}
+
 export interface SourceImage { width: number; height: number; data: Uint8Array | Buffer; }
 
 // Renders a rawW x rawH RGBA capture by sampling `png` through the pose's

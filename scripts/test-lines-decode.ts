@@ -123,8 +123,16 @@ function decodeViaLines(pose: CameraPose): DecodeOutcome | 'nolines' | 'nosplit'
   const gridPos = applyHomography(Hinv, RAW / 2, RAW / 2);
   if (!gridPos) return result;
   let targetGridI = gridPos[0], targetGridJ = gridPos[1];
-  if (result.candidateIndex === 1) targetGridI = rows - targetGridI; // undo mirrorRows for this lookup
-  const [dI, dJ] = rotateShift(Math.round(targetGridI - rows / 2), Math.round(targetGridJ - cols / 2), result.orientation ?? 0);
+  // mirrorRows is .slice().reverse() on a length-`rows` array, which maps
+  // index k -> (rows-1)-k, NOT rows-k -- the same off-by-one already found
+  // and fixed elsewhere this session, just never applied to this spot.
+  if (result.candidateIndex === 1) targetGridI = (rows - 1) - targetGridI;
+  // Must subtract the SAME reference pickBestCandidate itself used
+  // (Math.floor(sg.rows/2), see its centerI/centerJ) -- subtracting the raw
+  // rows/2 instead is off by 0.5 whenever rows is odd, which can round to a
+  // different integer than intended depending on targetGridI's fractional
+  // part, silently mislabeling an otherwise-correct decode as "wrong".
+  const [dI, dJ] = rotateShift(Math.round(targetGridI - Math.floor(rows / 2)), Math.round(targetGridJ - Math.floor(cols / 2)), result.orientation ?? 0);
   return {
     ...result,
     match: { row: ((result.match.row + dI) % R + R) % R, col: ((result.match.col + dJ) % C + C) % C },

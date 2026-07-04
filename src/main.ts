@@ -1,7 +1,7 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
 import { pickBestCandidate, toGrayscale, binarize } from './decode.ts';
 import type { SampledGrid, SampledCell, CandidateResult } from './decode.ts';
-import { buildLineAccumulator, findLinePeaks } from './lines.ts';
+import { buildLineAccumulator, findLinePeaksTiered } from './lines.ts';
 import type { LineCandidate } from './lines.ts';
 import { splitIntoTwoFamilies, vpIsFinite, vpToPoint } from './vp.ts';
 import type { LineFamily, VanishingPoint as LineVP } from './vp.ts';
@@ -182,6 +182,21 @@ const tMinFamily = bindSlider('tMinFamily');
 const HOUGH_RHO_BIN_PX = 1.5;
 const HOUGH_THETA_BINS = Math.round(360 / HOUGH_RHO_BIN_PX);
 
+// A real camera's two grid-line families are not always comparably strong
+// (lighting, focus, or a camera's own directional sharpening can make one
+// family's edges systematically weaker for reasons that have nothing to do
+// with the grid or the algorithm — confirmed via live-device testing to
+// sometimes be a near-total imbalance, yet not reproducible from a
+// controlled synthetic capture at any roll angle, pointing at a real-capture
+// artifact rather than a detection bug). RESCUE_THRESHOLD_FRACTION reaches
+// further down into the accumulator than the confident tPeakThreshold does,
+// giving a weak-but-real family's members a second chance to be checked
+// against a vanishing point the STRONG peaks already established (see
+// splitIntoTwoFamilies' extraLines) — never used to seed or seriously
+// influence which VP gets proposed in the first place, so this can't turn
+// pure noise into a phantom family on its own.
+const RESCUE_THRESHOLD_FRACTION = 0.3;
+
 const analysisCanvas = document.createElement('canvas');
 const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true })!;
 const binCanvas = document.createElement('canvas');
@@ -250,7 +265,10 @@ function runPipeline() {
   const bin = binarize(gray);
 
   const field = buildLineAccumulator(gray, rawW, rawH, HOUGH_THETA_BINS, HOUGH_RHO_BIN_PX, Math.round(tBlurRadius.get()), tMinMag.get());
-  const peaks = findLinePeaks(field, tPeakThreshold.get(), Math.round(tNmsTheta.get()), Math.round(tNmsRho.get()));
+  const { strong: peaks, weak: rescuePeaks } = findLinePeaksTiered(
+    field, tPeakThreshold.get(), tPeakThreshold.get() * RESCUE_THRESHOLD_FRACTION,
+    Math.round(tNmsTheta.get()), Math.round(tNmsRho.get()),
+  );
 
   let familyA: LineFamily | null = null, familyB: LineFamily | null = null, unassigned: LineCandidate[] = [];
   let rowIndexed: IndexedLine[] = [], colIndexed: IndexedLine[] = [];
@@ -261,7 +279,7 @@ function runPipeline() {
 
   if (peaks.length >= 8) {
     try {
-      const split = splitIntoTwoFamilies(peaks, rawW, rawH, tSplitInlierPx.get(), Math.round(tMaxCandidates.get()));
+      const split = splitIntoTwoFamilies(peaks, rawW, rawH, tSplitInlierPx.get(), Math.round(tMaxCandidates.get()), rescuePeaks);
       familyA = split.familyA; familyB = split.familyB; unassigned = split.unassigned;
     } catch { /* fewer than 2 usable lines — leave families null */ }
   }
@@ -302,7 +320,7 @@ function runPipeline() {
 
   const locked = !!decodeResult?.match && decodeResult.consistency >= tConfidence.get();
   pipelineStatus.textContent = [
-    `lines: ${peaks.length} peaks, ${unassigned.length} unassigned`,
+    `lines: ${peaks.length} peaks (+${rescuePeaks.length} rescue candidates), ${unassigned.length} unassigned`,
     `families: A=${familyA?.lines.length ?? 0} B=${familyB?.lines.length ?? 0}`,
     `indexed: rows 0..${rows} (${rowIndexed.length} lines), cols 0..${cols} (${colIndexed.length} lines)`,
     H ? `homography: fit ok, sampled ${sampledGrid?.rows}x${sampledGrid?.cols}` : 'homography: n/a',

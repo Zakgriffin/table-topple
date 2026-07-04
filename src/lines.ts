@@ -93,21 +93,17 @@ export function buildLineAccumulator(
   return { w, h, thetaBins, rhoBins, rhoMin, rhoBinSize, acc };
 }
 
-// Non-max suppression over the accumulator, then sub-bin refinement (weighted
-// centroid within the peak's local window) for better-than-bin-width
-// accuracy. theta is treated as CIRCULAR with period thetaBins (folding by PI
-// already makes it a genuine circle: theta=0 and theta=PI-epsilon are
-// adjacent lines, not opposite ends of a flat range) — NMS and the centroid
-// window both wrap across that seam.
-export function findLinePeaks(
-  field: HoughField, threshold = 0.15, nmsThetaRadius = 4, nmsRhoRadius = 3,
-): LineCandidate[] {
-  const { thetaBins, rhoBins, rhoMin, rhoBinSize, acc } = field;
-  let maxVal = 0;
-  for (let i = 0; i < acc.length; i++) if (acc[i] > maxVal) maxVal = acc[i];
-  if (maxVal === 0) return [];
-  const minVal = threshold * maxVal;
-
+// Non-max suppression over the accumulator down to `minVal` (an ABSOLUTE
+// vote value, not a threshold fraction — callers needing a rescue tier want
+// the search to reach below their real reporting threshold without running
+// NMS twice), returning deduped bin-level candidates with their raw vote
+// value still attached (refinement into an actual LineCandidate happens in
+// the two exported wrappers below, since which candidates end up in which
+// output tier needs to see `v` first).
+function findPeakBins(
+  field: HoughField, minVal: number, nmsThetaRadius: number, nmsRhoRadius: number,
+): { tb: number; rb: number; v: number }[] {
+  const { thetaBins, rhoBins, acc } = field;
   const wrapTheta = (t: number) => ((t % thetaBins) + thetaBins) % thetaBins;
 
   const candidates: { tb: number; rb: number; v: number }[] = [];
@@ -141,29 +137,71 @@ export function findLinePeaks(
     })) continue;
     kept.push(c);
   }
+  return kept;
+}
 
-  return kept.map(({ tb, rb }) => {
-    // Weighted centroid over a small window around the peak bin, using
-    // circular differences on theta so the centroid doesn't get pulled the
-    // wrong way for a peak that sits right at the wrap seam.
-    let sumW = 0, sumDT = 0, sumR = 0;
-    for (let dt = -nmsThetaRadius; dt <= nmsThetaRadius; dt++) {
-      const ttb = wrapTheta(tb + dt);
-      for (let dr = -nmsRhoRadius; dr <= nmsRhoRadius; dr++) {
-        const rrb = rb + dr;
-        if (rrb < 0 || rrb >= rhoBins) continue;
-        const v = acc[ttb * rhoBins + rrb];
-        sumW += v;
-        sumDT += v * dt;
-        sumR += v * (rrb + 0.5);
-      }
+// Sub-bin refinement (weighted centroid within the peak's local window) for
+// better-than-bin-width accuracy. theta is treated as CIRCULAR with period
+// thetaBins (folding by PI already makes it a genuine circle: theta=0 and
+// theta=PI-epsilon are adjacent lines, not opposite ends of a flat range) —
+// the centroid window wraps across that seam.
+function refinePeak(field: HoughField, tb: number, rb: number, nmsThetaRadius: number, nmsRhoRadius: number): LineCandidate {
+  const { thetaBins, rhoBins, rhoMin, rhoBinSize, acc } = field;
+  const wrapTheta = (t: number) => ((t % thetaBins) + thetaBins) % thetaBins;
+  let sumW = 0, sumDT = 0, sumR = 0;
+  for (let dt = -nmsThetaRadius; dt <= nmsThetaRadius; dt++) {
+    const ttb = wrapTheta(tb + dt);
+    for (let dr = -nmsRhoRadius; dr <= nmsRhoRadius; dr++) {
+      const rrb = rb + dr;
+      if (rrb < 0 || rrb >= rhoBins) continue;
+      const v = acc[ttb * rhoBins + rrb];
+      sumW += v;
+      sumDT += v * dt;
+      sumR += v * (rrb + 0.5);
     }
-    const tbRefined = wrapTheta(tb + (sumW > 0 ? sumDT / sumW : 0) + 0.5);
-    const rbRefined = sumW > 0 ? sumR / sumW : rb + 0.5;
-    return {
-      theta: (tbRefined / field.thetaBins) * Math.PI,
-      rho: rhoMin + rbRefined * rhoBinSize,
-      weight: acc[tb * rhoBins + rb],
-    };
-  });
+  }
+  const tbRefined = wrapTheta(tb + (sumW > 0 ? sumDT / sumW : 0) + 0.5);
+  const rbRefined = sumW > 0 ? sumR / sumW : rb + 0.5;
+  return {
+    theta: (tbRefined / thetaBins) * Math.PI,
+    rho: rhoMin + rbRefined * rhoBinSize,
+    weight: acc[tb * rhoBins + rb],
+  };
+}
+
+export function findLinePeaks(
+  field: HoughField, threshold = 0.15, nmsThetaRadius = 4, nmsRhoRadius = 3,
+): LineCandidate[] {
+  let maxVal = 0;
+  for (let i = 0; i < field.acc.length; i++) if (field.acc[i] > maxVal) maxVal = field.acc[i];
+  if (maxVal === 0) return [];
+  const bins = findPeakBins(field, threshold * maxVal, nmsThetaRadius, nmsRhoRadius);
+  return bins.map(({ tb, rb }) => refinePeak(field, tb, rb, nmsThetaRadius, nmsRhoRadius));
+}
+
+// Same NMS search as findLinePeaks, but run ONCE down to the lower of the
+// two thresholds and partitioned by vote strength into two tiers, rather
+// than calling findLinePeaks twice (which would find the strong peaks
+// TWICE — once in each call — needing a fuzzy dedup step to avoid double-
+// counting the same physical line in both outputs). `weak` is for
+// src/vp.ts's splitIntoTwoFamilies extraLines rescue mechanism: a real
+// camera's two grid-line families are not always comparably strong
+// (lighting, focus, or a camera's own directional sharpening can make one
+// family's edges systematically weaker for reasons that have nothing to do
+// with the grid or the algorithm), and that family's true members may
+// mostly sit below `threshold` without being pure noise — `rescueThreshold`
+// gives them a second, lower bar, still checked against an actual estimated
+// vanishing point before being trusted, not just taken on faith.
+export function findLinePeaksTiered(
+  field: HoughField, threshold: number, rescueThreshold: number, nmsThetaRadius = 4, nmsRhoRadius = 3,
+): { strong: LineCandidate[]; weak: LineCandidate[] } {
+  let maxVal = 0;
+  for (let i = 0; i < field.acc.length; i++) if (field.acc[i] > maxVal) maxVal = field.acc[i];
+  if (maxVal === 0) return { strong: [], weak: [] };
+  const lowVal = Math.min(threshold, rescueThreshold) * maxVal;
+  const highVal = Math.max(threshold, rescueThreshold) * maxVal;
+  const bins = findPeakBins(field, lowVal, nmsThetaRadius, nmsRhoRadius);
+  const strong: LineCandidate[] = [], weak: LineCandidate[] = [];
+  for (const b of bins) (b.v >= highVal ? strong : weak).push(refinePeak(field, b.tb, b.rb, nmsThetaRadius, nmsRhoRadius));
+  return { strong, weak };
 }

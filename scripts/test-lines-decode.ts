@@ -1,5 +1,5 @@
 // End-to-end validation of the NEW line-based rectification pipeline
-// (buildLineAccumulator -> findLinePeaks -> splitIntoTwoFamilies ->
+// (buildLineAccumulator -> findLinePeaksTiered -> splitIntoTwoFamilies ->
 // indexFamilyLines -> buildLatticeCorrespondences -> fitHomographyRobust ->
 // sample -> pickBestCandidate) against real perspective tilt — directly
 // comparable to scripts/test-homography-decode.ts (the OLD corner+VP+mesh
@@ -16,7 +16,7 @@ import { PNG } from 'pngjs';
 import { readFileSync } from 'node:fs';
 import { generateTorus, buildLookupTable } from '../src/debruijn.ts';
 import { toGrayscale, binarize, pickBestCandidate, rotateShift, type SampledGrid, type SampledCell } from '../src/decode.ts';
-import { buildLineAccumulator, findLinePeaks } from '../src/lines.ts';
+import { buildLineAccumulator, findLinePeaksTiered } from '../src/lines.ts';
 import { splitIntoTwoFamilies } from '../src/vp.ts';
 import { indexFamilyLines, buildLatticeCorrespondences } from '../src/lattice.ts';
 import { fitHomographyRobust, applyHomography, invertHomography, type Mat3 } from '../src/homography.ts';
@@ -67,6 +67,7 @@ function mirrorRows(sg: SampledGrid): SampledGrid {
 // indexing) over merged real lines (an unrecoverable information loss).
 const HOUGH_RHO_BIN_PX = 1.5;
 const HOUGH_THETA_BINS = Math.round(360 / HOUGH_RHO_BIN_PX);
+const RESCUE_THRESHOLD_FRACTION = 0.3; // matches src/main.ts's -- see its comment for why
 
 interface DecodeOutcome { match: { row: number; col: number } | null; consistency: number; }
 
@@ -76,11 +77,11 @@ function decodeViaLines(pose: CameraPose): DecodeOutcome | 'nolines' | 'nosplit'
   const bin = binarize(gray);
 
   const field = buildLineAccumulator(gray, RAW, RAW, HOUGH_THETA_BINS, HOUGH_RHO_BIN_PX);
-  const peaks = findLinePeaks(field, 0.15, 4, 3);
+  const { strong: peaks, weak: rescuePeaks } = findLinePeaksTiered(field, 0.15, 0.15 * RESCUE_THRESHOLD_FRACTION, 4, 3);
   if (peaks.length < 8) return 'nolines';
 
   let split;
-  try { split = splitIntoTwoFamilies(peaks, RAW, RAW); } catch { return 'nosplit'; }
+  try { split = splitIntoTwoFamilies(peaks, RAW, RAW, 6, 60, rescuePeaks); } catch { return 'nosplit'; }
   const { familyA, familyB } = split;
   if (familyA.lines.length < 3 || familyB.lines.length < 3) return 'nosplit';
 
@@ -144,17 +145,31 @@ function within(target: number, start: number, span: number, mod: number): boole
   return rel <= span || rel >= mod - 1;
 }
 
+// Seeded (not Math.random()) so runs are reproducible -- this is THE test
+// that measures whether a pipeline change actually helps or hurts on real
+// end-to-end behavior, which is meaningless to compare across runs if every
+// invocation samples different random camera poses.
+function mulberry32(seed: number) {
+  return () => {
+    seed |= 0; seed = (seed + 0x6D2B79F5) | 0;
+    let t = Math.imul(seed ^ (seed >>> 15), 1 | seed);
+    t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
 console.log(`\nEnd-to-end line-based decode vs perspective tilt (${TRIALS} trials/tilt):`);
 for (const tiltDeg of [0, 10, 20, 30, 40, 50, 60]) {
   let hits = 0, misses = 0, wrong = 0, nolines = 0, nosplit = 0, nogrid = 0, nohomography = 0;
   const scores: number[] = [];
+  const rnd = mulberry32(tiltDeg * 1000 + 7);
   for (let t = 0; t < TRIALS; t++) {
-    const testRow = Math.floor(Math.random() * R);
-    const testCol = Math.floor(Math.random() * C);
+    const testRow = Math.floor(rnd() * R);
+    const testCol = Math.floor(rnd() * C);
     const pose: CameraPose = {
       targetX: testCol * cellPx + cellPx / 2, targetY: testRow * cellPx + cellPx / 2,
       dist: DIST, focal: FOCAL, tilt: tiltDeg * Math.PI / 180,
-      azimuth: Math.random() * 2 * Math.PI, roll: Math.random() * 2 * Math.PI,
+      azimuth: rnd() * 2 * Math.PI, roll: rnd() * 2 * Math.PI,
     };
     const result = decodeViaLines(pose);
     if (result === 'nolines') { nolines++; continue; }

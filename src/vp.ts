@@ -127,8 +127,25 @@ export function crossLines(l1: [number, number, number], l2: [number, number, nu
 // strongest responses; weak/spurious peaks are unlikely to be needed as a
 // pairing seed) without discarding any line from the final scoring/
 // assignment pass below, which stays O(lines) per hypothesis regardless.
+// extraLines is an optional second, lower-confidence candidate pool (e.g. a
+// second findLinePeaks pass at a much lower vote threshold) that's checked
+// against the two VPs during FINAL assignment only -- never used to seed or
+// score the RANSAC hypothesis search above, which stays exactly as robust
+// and cheap as before. This exists because a real camera's two line
+// families are NOT always comparably strong: lighting, focus, or a camera's
+// own directional sharpening can make one family's edges systematically
+// weaker without there being anything wrong with the grid or the algorithm
+// (confirmed via live-device testing to sometimes be a near-total imbalance,
+// yet not reproducible from a clean synthetic capture at any roll angle —
+// pointing at a real-capture artifact, not a detection bug). Once a
+// systematically weak family's VP is known (even from just its strongest
+// few peaks), MOST of its true members likely never even cleared Level 1's
+// single global vote threshold in the first place — extraLines lets them
+// back in without lowering that threshold for everyone (which would just
+// flood the RANSAC seeding step with more noise instead).
 export function splitIntoTwoFamilies(
   lines: LineCandidate[], w: number, h: number, inlierPx = 6, maxCandidates = 60,
+  extraLines: LineCandidate[] = [],
 ): { familyA: LineFamily; familyB: LineFamily; unassigned: LineCandidate[] } {
   function scoreHypothesis(vp: VanishingPoint, exclude: Set<number>): { support: number; inliers: number[] } {
     let support = 0;
@@ -188,6 +205,10 @@ export function splitIntoTwoFamilies(
   let vpA = refit(bestA.inliers);
   let vpB = refit(bestB.inliers);
 
+  // Final assignment scans `lines` PLUS extraLines -- the low-confidence
+  // rescue pool only ever gets a chance here, against VPs already
+  // established from the strong pool, never influencing which VPs get
+  // proposed in the first place.
   const assignedA: number[] = [], assignedB: number[] = [], unassigned: number[] = [];
   for (let i = 0; i < lines.length; i++) {
     const dA = lineResidualPx(lines[i], vpA, w, h);
@@ -195,12 +216,22 @@ export function splitIntoTwoFamilies(
     if (dA >= inlierPx * 2 && dB >= inlierPx * 2) { unassigned.push(i); continue; }
     if (dA <= dB) assignedA.push(i); else assignedB.push(i);
   }
-  if (assignedA.length >= 2) vpA = refit(assignedA);
-  if (assignedB.length >= 2) vpB = refit(assignedB);
+  const rescuedA: LineCandidate[] = [], rescuedB: LineCandidate[] = [];
+  for (const line of extraLines) {
+    const dA = lineResidualPx(line, vpA, w, h);
+    const dB = lineResidualPx(line, vpB, w, h);
+    if (dA >= inlierPx * 2 && dB >= inlierPx * 2) continue; // still doesn't belong to either -- drop, not "unassigned" (it never cleared Level 1 as a confident detection at all)
+    if (dA <= dB) rescuedA.push(line); else rescuedB.push(line);
+  }
+
+  const finalA = [...assignedA.map(i => lines[i]), ...rescuedA];
+  const finalB = [...assignedB.map(i => lines[i]), ...rescuedB];
+  if (finalA.length >= 2) vpA = estimateVanishingPoint(finalA, w, h);
+  if (finalB.length >= 2) vpB = estimateVanishingPoint(finalB, w, h);
 
   return {
-    familyA: { vp: vpA, lines: assignedA.map(i => lines[i]) },
-    familyB: { vp: vpB, lines: assignedB.map(i => lines[i]) },
+    familyA: { vp: vpA, lines: finalA },
+    familyB: { vp: vpB, lines: finalB },
     unassigned: unassigned.map(i => lines[i]),
   };
 }

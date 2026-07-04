@@ -69,6 +69,8 @@ import { buildLineAccumulator, findLinePeaksTiered } from '../../src/lines.ts';
 import type { LineCandidate, HoughField } from '../../src/lines.ts';
 import { splitIntoTwoFamilies, vpIsFinite } from '../../src/vp.ts';
 import type { VanishingPoint } from '../../src/vp.ts';
+import { searchOrthogonalVPs as searchOrthogonalVPsImpl } from '../../src/orthogonalVp.ts';
+import type { Vec3, OrthogonalVpResult } from '../../src/orthogonalVp.ts';
 import { captureHomography, buildCamera } from '../lib/synth-camera.ts';
 import type { CameraPose } from '../lib/synth-camera.ts';
 
@@ -81,136 +83,15 @@ const HOUGH_RHO_BIN_PX = 1.5;
 const HOUGH_THETA_BINS = Math.round(360 / HOUGH_RHO_BIN_PX);
 const RESCUE_THRESHOLD_FRACTION = 0.3;
 
-type Vec3 = [number, number, number];
 const dot3 = (a: Vec3, b: Vec3) => a[0] * b[0] + a[1] * b[1] + a[2] * b[2];
 const cross3 = (a: Vec3, b: Vec3): Vec3 => [a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2], a[0] * b[1] - a[1] * b[0]];
 const normalize3 = (a: Vec3): Vec3 => { const l = Math.hypot(a[0], a[1], a[2]) || 1; return [a[0] / l, a[1] / l, a[2] / l]; };
-const scale3 = (a: Vec3, s: number): Vec3 => [a[0] * s, a[1] * s, a[2] * s];
-const add3 = (a: Vec3, b: Vec3): Vec3 => [a[0] + b[0], a[1] + b[1], a[2] + b[2]];
 
-// Plane normal of a Hough line's back-projection, given an ASSUMED focal
-// length f (in the same centered-pixel units as line.rho) -- see header.
-function lineToNormal(line: LineCandidate, f: number): Vec3 {
-  const a = Math.cos(line.theta), b = Math.sin(line.theta);
-  return normalize3([a, b, -line.rho / f]);
-}
-
-function angularResidual(n: Vec3, D: Vec3): number {
-  return Math.asin(Math.min(1, Math.abs(dot3(n, D))));
-}
-
-// Standard Fibonacci-sphere point set, folded into the z>=0 hemisphere
-// (antipodal fold: negate any point with z<0) -- valid because D and -D are
-// indistinguishable to angularResidual, so the real search space is RP^2,
-// not the full sphere. Folding instead of generating half as many points
-// directly keeps the even-spacing property of the original construction.
-function fibonacciHemisphere(n: number): Vec3[] {
-  const pts: Vec3[] = [];
-  const golden = Math.PI * (3 - Math.sqrt(5));
-  for (let i = 0; i < n; i++) {
-    const y = 1 - (i / Math.max(1, n - 1)) * 2;
-    const radius = Math.sqrt(Math.max(0, 1 - y * y));
-    const theta = golden * i;
-    const p: Vec3 = [Math.cos(theta) * radius, y, Math.sin(theta) * radius];
-    pts.push(p[2] < 0 ? scale3(p, -1) : p);
-  }
-  return pts;
-}
-
-// Orthonormal basis spanning the plane perpendicular to D.
-function perpBasis(D: Vec3): [Vec3, Vec3] {
-  const ref: Vec3 = Math.abs(D[2]) < 0.9 ? [0, 0, 1] : [1, 0, 0];
-  const e1 = normalize3(cross3(ref, D));
-  const e2 = cross3(D, e1);
-  return [e1, e2];
-}
-
-const dirAtRoll = (e1: Vec3, e2: Vec3, psi: number): Vec3 =>
-  normalize3(add3(scale3(e1, Math.cos(psi)), scale3(e2, Math.sin(psi))));
-
-// Rotates D toward `tangent` (must be perpendicular to D, unit length) by a
-// small angle along their shared great circle.
-const rotateToward = (D: Vec3, tangent: Vec3, angle: number): Vec3 =>
-  normalize3(add3(scale3(D, Math.cos(angle)), scale3(tangent, Math.sin(angle))));
-
-interface Cells { nx: Float64Array; ny: Float64Array; nz: Float64Array; weight: Float64Array; }
-
-function toCells(lines: LineCandidate[], f: number): Cells {
-  const n = lines.length;
-  const nx = new Float64Array(n), ny = new Float64Array(n), nz = new Float64Array(n), weight = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    const [x, y, z] = lineToNormal(lines[i], f);
-    nx[i] = x; ny[i] = y; nz[i] = z; weight[i] = lines[i].weight;
-  }
-  return { nx, ny, nz, weight };
-}
-
-// Truncated squared angular loss, weighted by each line's Hough vote mass --
-// robust to outliers the same way fitHomographyRobust's threshold is, just
-// expressed in radians (deltaRad) instead of pixels, since this whole
-// formulation is angle-native throughout.
-function totalCost(cells: Cells, Drow: Vec3, Dcol: Vec3, deltaRad: number): number {
-  const { nx, ny, nz, weight } = cells;
-  const delta2 = deltaRad * deltaRad;
-  const [ax, ay, az] = Drow, [bx, by, bz] = Dcol;
-  let cost = 0;
-  for (let i = 0; i < weight.length; i++) {
-    const dotA = Math.abs(nx[i] * ax + ny[i] * ay + nz[i] * az);
-    const dotB = Math.abs(nx[i] * bx + ny[i] * by + nz[i] * bz);
-    const rA = Math.asin(Math.min(1, dotA));
-    const rB = Math.asin(Math.min(1, dotB));
-    const r2 = Math.min(rA * rA, rB * rB, delta2);
-    cost += weight[i] * r2;
-  }
-  return cost;
-}
-
-interface SearchResult { Drow: Vec3; Dcol: Vec3; Dnormal: Vec3; cost: number; }
-
-function searchOrthogonalVPs(
-  lines: LineCandidate[], f: number,
-  deltaPx = 6, nRowDirs = 150, nPsiSteps = 36, refineRounds = 24,
-): SearchResult {
-  const cells = toCells(lines, f);
-  const deltaRad = deltaPx / f;
-
-  // --- coarse global search over the compact 3-parameter space ---
-  const rowDirs = fibonacciHemisphere(nRowDirs);
-  let bestCost = Infinity, bestDrow: Vec3 = rowDirs[0], bestPsi = 0;
-  for (const Drow of rowDirs) {
-    const [e1, e2] = perpBasis(Drow);
-    for (let k = 0; k < nPsiSteps; k++) {
-      const psi = (k / nPsiSteps) * Math.PI; // [0,PI): Dcol's sign is equally irrelevant
-      const Dcol = dirAtRoll(e1, e2, psi);
-      const cost = totalCost(cells, Drow, Dcol, deltaRad);
-      if (cost < bestCost) { bestCost = cost; bestDrow = Drow; bestPsi = psi; }
-    }
-  }
-
-  // --- local coordinate-descent refinement, shrinking step size ---
-  let Drow = bestDrow, psi = bestPsi, cost = bestCost;
-  let [e1, e2] = perpBasis(Drow);
-  let Dcol = dirAtRoll(e1, e2, psi);
-  let step = (Math.PI / nRowDirs) * 1.5; // start near the coarse grid's own spacing
-  for (let round = 0; round < refineRounds; round++) {
-    let improved = false;
-    for (const tangent of [e1, scale3(e1, -1), e2, scale3(e2, -1)]) {
-      const cand = rotateToward(Drow, tangent, step);
-      const [ce1, ce2] = perpBasis(cand);
-      const candDcol = dirAtRoll(ce1, ce2, psi);
-      const c = totalCost(cells, cand, candDcol, deltaRad);
-      if (c < cost) { cost = c; Drow = cand; e1 = ce1; e2 = ce2; Dcol = candDcol; improved = true; }
-    }
-    for (const dpsi of [step, -step]) {
-      const candDcol = dirAtRoll(e1, e2, psi + dpsi);
-      const c = totalCost(cells, Drow, candDcol, deltaRad);
-      if (c < cost) { cost = c; psi += dpsi; Dcol = candDcol; improved = true; }
-    }
-    step *= improved ? 0.85 : 0.5;
-  }
-
-  return { Drow, Dcol, Dnormal: cross3(Drow, Dcol), cost };
-}
+// searchOrthogonalVPs itself now lives in src/orthogonalVp.ts (so the app's
+// live pipeline and this validation harness are guaranteed to run the exact
+// same code, not a copy that can drift) -- see that file for the math.
+const searchOrthogonalVPs = (lines: LineCandidate[], f: number, deltaPx?: number, nRowDirs?: number, nPsiSteps?: number, refineRounds?: number): OrthogonalVpResult =>
+  searchOrthogonalVPsImpl(lines, f, deltaPx, nRowDirs, nPsiSteps, refineRounds);
 
 // --- ground truth: the row/col axes' true 3D directions in camera space,
 // derived directly from the pose's own rotation basis (right,up,forward),
@@ -291,7 +172,7 @@ function runScenario(name: string, pose: CameraPose) {
   const rawResult = searchOrthogonalVPs(allCells, f, 6, 60, 24, 24); // fewer coarse dirs -- O(n) cost per hypothesis is much larger here
   const t3 = performance.now();
 
-  function report(label: string, res: SearchResult, ms: number) {
+  function report(label: string, res: OrthogonalVpResult, ms: number) {
     const errRow = Math.min(angleBetweenDeg(res.Drow, trueRow), angleBetweenDeg(res.Dcol, trueRow));
     const errCol = Math.min(angleBetweenDeg(res.Drow, trueCol), angleBetweenDeg(res.Dcol, trueCol));
     const errNormal = angleBetweenDeg(res.Dnormal, trueNormal);

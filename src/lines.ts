@@ -54,10 +54,19 @@ export function boxBlur(src: Float64Array, w: number, h: number, radius: number)
 // resolution (PI/thetaBins radians per bin); rhoBinSize is in pixels.
 // minMag is a noise floor below which a pixel's gradient is too weak/noisy
 // to trust its orientation — skip it rather than let it cast a vote at a
-// near-arbitrary angle.
+// near-arbitrary angle. gradientRadius is the central-difference offset (in
+// pixels) used to estimate fx/fy — 1 (the default, matching all prior
+// behavior exactly: fx = blurred[i+1]-blurred[i-1], unnormalized) is a
+// standard 3-tap derivative. A larger radius widens the baseline, trading
+// sensitivity to fine per-pixel noise for sensitivity to genuine edges
+// spread over more than 1px (e.g. from capture blur or downsampling) — NOT
+// normalized by the radius, so raw magnitude (and therefore minMag's
+// effective threshold) shifts with it; that's an expected side effect of
+// changing the kernel, not a bug, and worth re-tuning minMag/peak threshold
+// alongside it.
 export function buildLineAccumulator(
   gray: Float64Array, w: number, h: number,
-  thetaBins = 180, rhoBinSize = 2, blurRadius = 1, minMag = 4,
+  thetaBins = 180, rhoBinSize = 2, blurRadius = 1, minMag = 4, gradientRadius = 1,
 ): HoughField {
   const blurred = boxBlur(gray, w, h, blurRadius);
   const cx = w / 2, cy = h / 2;
@@ -65,12 +74,13 @@ export function buildLineAccumulator(
   const rhoBins = Math.ceil((2 * rhoMax) / rhoBinSize) + 1;
   const rhoMin = -rhoMax;
   const acc = new Float64Array(thetaBins * rhoBins);
+  const r = gradientRadius;
 
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
+  for (let y = r; y < h - r; y++) {
+    for (let x = r; x < w - r; x++) {
       const i = y * w + x;
-      const fx = blurred[i + 1] - blurred[i - 1];
-      const fy = blurred[i + w] - blurred[i - w];
+      const fx = blurred[i + r] - blurred[i - r];
+      const fy = blurred[i + r * w] - blurred[i - r * w];
       const mag = Math.hypot(fx, fy);
       if (mag < minMag) continue;
 

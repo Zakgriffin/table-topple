@@ -138,6 +138,7 @@ startCamera('environment')
 
 const pipelineStatus = document.getElementById('pipelineStatus')!;
 const analyzeBtn = document.getElementById('analyzeBtn') as HTMLButtonElement;
+const toggleGrayscale = document.getElementById('toggleGrayscale') as HTMLInputElement;
 const toggleBinarized = document.getElementById('toggleBinarized') as HTMLInputElement;
 const toggleGradientField = document.getElementById('toggleGradientField') as HTMLInputElement;
 // toggleHoughLines (per-line family-colored overlay) retired along with the
@@ -164,6 +165,7 @@ function bindSlider(id: string): { get: () => number } {
 
 // Level 1 — hough lines (src/lines.ts)
 const tBlurRadius = bindSlider('tBlurRadius');
+const tGradientRadius = bindSlider('tGradientRadius');
 const tMinMag = bindSlider('tMinMag');
 const tPeakThreshold = bindSlider('tPeakThreshold');
 const tNmsTheta = bindSlider('tNmsTheta');
@@ -213,6 +215,8 @@ const RESCUE_THRESHOLD_FRACTION = 0.3;
 
 const analysisCanvas = document.createElement('canvas');
 const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true })!;
+const grayCanvas = document.createElement('canvas');
+const grayCtx = grayCanvas.getContext('2d')!;
 const binCanvas = document.createElement('canvas');
 const binCtx = binCanvas.getContext('2d')!;
 const gradientCanvas = document.createElement('canvas');
@@ -351,7 +355,7 @@ function runPipeline() {
   const gray = toGrayscale(rawRgba, rawW, rawH);
   const bin = binarize(gray);
 
-  const field = buildLineAccumulator(gray, rawW, rawH, HOUGH_THETA_BINS, HOUGH_RHO_BIN_PX, Math.round(tBlurRadius.get()), tMinMag.get());
+  const field = buildLineAccumulator(gray, rawW, rawH, HOUGH_THETA_BINS, HOUGH_RHO_BIN_PX, Math.round(tBlurRadius.get()), tMinMag.get(), Math.round(tGradientRadius.get()));
   const { strong: peaks, weak: rescuePeaks } = findLinePeaksTiered(
     field, tPeakThreshold.get(), tPeakThreshold.get() * RESCUE_THRESHOLD_FRACTION,
     Math.round(tNmsTheta.get()), Math.round(tNmsRho.get()),
@@ -430,6 +434,7 @@ function runPipeline() {
 
   const locked = !!decodeResult?.match && decodeResult.consistency >= tConfidence.get();
   pipelineStatus.textContent = [
+    `analysis: ${rawW}x${rawH} (${rawScale.toFixed(2)}x downsampled from ${Math.round(cropW)}x${Math.round(cropH)} crop)`,
     `lines: ${peaks.length} peaks (+${rescuePeaks.length} rescue candidates), ${unassigned.length} unassigned`,
     `families: A=${familyA?.lines.length ?? 0} B=${familyB?.lines.length ?? 0}`,
     `indexed: rows 0..${rows} (${rowIndexed.length} lines), cols 0..${cols} (${colIndexed.length} lines)`,
@@ -495,6 +500,20 @@ function drawDebugOverlays(d: PipelineResult) {
   const toVideo = (rx: number, ry: number) => rawToVideo(rx, ry, d);
   const dotR = Math.max(2, d.rawScale * 4);
 
+  if (toggleGrayscale.checked) {
+    // The exact buffer toGrayscale produces, before binarize/blur/gradient
+    // touch it at all — the rawest possible look at what the pipeline is
+    // working from, at whatever the current downsample (analysis res.) is.
+    grayCanvas.width = d.rawW; grayCanvas.height = d.rawH;
+    const imgData = grayCtx.createImageData(d.rawW, d.rawH);
+    for (let i = 0; i < d.gray.length; i++) {
+      const v = d.gray[i];
+      imgData.data[i * 4] = v; imgData.data[i * 4 + 1] = v; imgData.data[i * 4 + 2] = v; imgData.data[i * 4 + 3] = 255;
+    }
+    grayCtx.putImageData(imgData, 0, 0);
+    ctx.drawImage(grayCanvas, d.cropSx, d.cropSy, d.rawW * d.rawScale, d.rawH * d.rawScale);
+  }
+
   if (toggleBinarized.checked) {
     // Renders the same bit array the pipeline reads bits from, so you can
     // see exactly what it's working with — drawn as a plain image
@@ -545,26 +564,27 @@ function drawDebugOverlays(d: PipelineResult) {
   // visual feedback without waiting for the next scheduled pass.
   if (toggleGradientField.checked) {
     const blurRadius = Math.round(tBlurRadius.get());
+    const gradR = Math.round(tGradientRadius.get());
     const blurred = boxBlur(d.gray, d.rawW, d.rawH, blurRadius);
     gradientCanvas.width = d.rawW; gradientCanvas.height = d.rawH;
     const imgData = gradientCtx.createImageData(d.rawW, d.rawH);
     let maxMag = 0;
     const mags = new Float64Array(d.rawW * d.rawH);
-    for (let y = 1; y < d.rawH - 1; y++) {
-      for (let x = 1; x < d.rawW - 1; x++) {
+    for (let y = gradR; y < d.rawH - gradR; y++) {
+      for (let x = gradR; x < d.rawW - gradR; x++) {
         const i = y * d.rawW + x;
-        const fx = blurred[i + 1] - blurred[i - 1];
-        const fy = blurred[i + d.rawW] - blurred[i - d.rawW];
+        const fx = blurred[i + gradR] - blurred[i - gradR];
+        const fy = blurred[i + gradR * d.rawW] - blurred[i - gradR * d.rawW];
         const mag = Math.hypot(fx, fy);
         mags[i] = mag;
         if (mag > maxMag) maxMag = mag;
       }
     }
-    for (let y = 1; y < d.rawH - 1; y++) {
-      for (let x = 1; x < d.rawW - 1; x++) {
+    for (let y = gradR; y < d.rawH - gradR; y++) {
+      for (let x = gradR; x < d.rawW - gradR; x++) {
         const i = y * d.rawW + x;
-        const fx = blurred[i + 1] - blurred[i - 1];
-        const fy = blurred[i + d.rawW] - blurred[i - d.rawW];
+        const fx = blurred[i + gradR] - blurred[i - gradR];
+        const fy = blurred[i + gradR * d.rawW] - blurred[i - gradR * d.rawW];
         let theta = Math.atan2(fy, fx);
         if (theta < 0) theta += Math.PI;
         if (theta >= Math.PI) theta -= Math.PI;

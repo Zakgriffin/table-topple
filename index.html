@@ -96,6 +96,7 @@
 <div id="pipelineStatus"></div>
 <div id="debugPanel">
   <button id="analyzeBtn">🔍 Analyze</button>
+  <label><input type="checkbox" id="toggleGrayscale"> grayscale</label>
   <label><input type="checkbox" id="toggleBinarized"> binarized</label>
   <label><input type="checkbox" id="toggleGradientField"> gradient field</label>
   <hr style="width:100%; border-color: rgba(255,255,255,0.3);">
@@ -112,6 +113,7 @@
     <div id="tuningGroup">
       <div class="tuningHeader">Level 1 — hough lines</div>
       <label class="tuningRow"><span class="tName">blur radius</span><input type="range" id="tBlurRadius" min="0" max="4" step="1" value="1"><span class="tVal" id="tBlurRadiusVal">1</span></label>
+      <label class="tuningRow"><span class="tName">gradient radius</span><input type="range" id="tGradientRadius" min="1" max="6" step="1" value="1"><span class="tVal" id="tGradientRadiusVal">1</span></label>
       <label class="tuningRow"><span class="tName">noise floor</span><input type="range" id="tMinMag" min="0" max="30" step="0.5" value="4"><span class="tVal" id="tMinMagVal">4</span></label>
       <label class="tuningRow"><span class="tName">peak thresh.</span><input type="range" id="tPeakThreshold" min="0.02" max="0.5" step="0.01" value="0.15"><span class="tVal" id="tPeakThresholdVal">0.15</span></label>
       <label class="tuningRow"><span class="tName">NMS &theta; radius</span><input type="range" id="tNmsTheta" min="1" max="10" step="1" value="4"><span class="tVal" id="tNmsThetaVal">4</span></label>

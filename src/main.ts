@@ -148,6 +148,7 @@ const toggleLineVPs = document.getElementById('toggleLineVPs') as HTMLInputEleme
 const toggleLineHomography = document.getElementById('toggleLineHomography') as HTMLInputElement;
 const togglePatches = document.getElementById('togglePatches') as HTMLInputElement;
 const toggleHoughSpace = document.getElementById('toggleHoughSpace') as HTMLInputElement;
+const toggleHoughSpacePeaks = document.getElementById('toggleHoughSpacePeaks') as HTMLInputElement;
 
 // Live-tunable pipeline parameters — each backed by a <input type=range> in
 // the "tuning" details panel (index.html). Reads the slider's CURRENT value
@@ -300,16 +301,23 @@ function drawHoughSpace(field: HoughField, strong: LineCandidate[], weak: LineCa
   }
   houghSpaceCtx.putImageData(imgData, 0, 0);
 
-  const markPeak = (line: LineCandidate, color: string) => {
-    const tb = (line.theta / Math.PI) * thetaBins;
-    const rb = (line.rho - rhoMin) / rhoBinSize;
-    houghSpaceCtx.beginPath();
-    houghSpaceCtx.arc(tb, rb, 1.5, 0, Math.PI * 2);
-    houghSpaceCtx.fillStyle = color;
-    houghSpaceCtx.fill();
-  };
-  for (const line of weak) markPeak(line, 'rgba(255,150,0,0.8)');
-  for (const line of strong) markPeak(line, 'rgba(0,255,120,0.9)');
+  // strong peaks (green) cleared Level 1's main vote threshold outright;
+  // rescue/weak peaks (orange) only cleared the lower rescue threshold and
+  // get a second chance later, checked against the row/col directions the
+  // strong peaks already established (src/orthogonalVp.ts's
+  // assignLinesToFamilies) rather than being used to seed them.
+  if (toggleHoughSpacePeaks.checked) {
+    const markPeak = (line: LineCandidate, color: string) => {
+      const tb = (line.theta / Math.PI) * thetaBins;
+      const rb = (line.rho - rhoMin) / rhoBinSize;
+      houghSpaceCtx.beginPath();
+      houghSpaceCtx.arc(tb, rb, 1.5, 0, Math.PI * 2);
+      houghSpaceCtx.fillStyle = color;
+      houghSpaceCtx.fill();
+    };
+    for (const line of weak) markPeak(line, 'rgba(255,150,0,0.8)');
+    for (const line of strong) markPeak(line, 'rgba(0,255,120,0.9)');
+  }
 }
 
 // Maps an HSV color (h in [0,360), s,v in [0,1]) to 0-255 RGB, for the

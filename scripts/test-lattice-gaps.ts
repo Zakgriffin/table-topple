@@ -15,7 +15,7 @@ import type { LineCandidate } from '../src/lines.ts';
 import type { LineFamily } from '../src/vp.ts';
 import { estimateVanishingPoint } from '../src/vp.ts';
 import { indexFamilyLines, buildLatticeCorrespondences } from '../src/lattice.ts';
-import { fitHomographyDLT, applyHomography } from '../src/homography.ts';
+import { fitHomographyRobust, applyHomography } from '../src/homography.ts';
 import { projectToImage, type CameraPose } from './lib/synth-camera.ts';
 
 const W = 640, H = 480;
@@ -96,7 +96,7 @@ function runScenario(name: string, pose: CameraPose, droppedRowIndices: Set<numb
   // End-to-end: does the resulting (gappy) correspondence set still fit a
   // homography that extrapolates correctly to a held-out point?
   const correspondences = buildLatticeCorrespondences(rowIndexed, colIndexed, W, H);
-  const H_fit = fitHomographyDLT(correspondences);
+  const H_fit = fitHomographyRobust(correspondences);
   let extrapOk = false, extrapDetail = 'no fit';
   if (H_fit) {
     const rowMap = (() => {

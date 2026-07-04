@@ -7,7 +7,7 @@ import { splitIntoTwoFamilies, vpIsFinite, vpToPoint } from './vp.ts';
 import type { LineFamily, VanishingPoint as LineVP } from './vp.ts';
 import { indexFamilyLines, buildLatticeCorrespondences } from './lattice.ts';
 import type { IndexedLine } from './lattice.ts';
-import { fitHomographyDLT, applyHomography } from './homography.ts';
+import { fitHomographyRobust, applyHomography } from './homography.ts';
 import type { Mat3 } from './homography.ts';
 
 // ── Pattern setup ─────────────────────────────────────────────────────────────
@@ -111,8 +111,9 @@ startCamera('environment')
 // (src/lines.ts), split them into the two row/col families by their
 // vanishing points (src/vp.ts), recover each line's true gap-tolerant
 // integer index via a Mobius-model fit (src/lattice.ts), then treat every
-// row-line x col-line crossing as a correspondence for a single DLT
-// homography fit (src/homography.ts). Sampling every lattice cell through
+// row-line x col-line crossing as a correspondence for a single weighted,
+// outlier-rejecting homography fit (src/homography.ts's fitHomographyRobust).
+// Sampling every lattice cell through
 // that homography and decoding via src/decode.ts's pickBestCandidate gives
 // this app's actual reported position — this is the only pipeline left; an
 // earlier corner/mesh/vanishing-point approach (retired) needed to chain
@@ -278,7 +279,7 @@ function runPipeline() {
     rowIndexed = indexFamilyLines(familyA, familyB.vp, rawW, rawH, tIndexInlierPx.get(), Math.round(tMaxGap.get()), Math.round(tSpanCap.get()));
     colIndexed = indexFamilyLines(familyB, familyA.vp, rawW, rawH, tIndexInlierPx.get(), Math.round(tMaxGap.get()), Math.round(tSpanCap.get()));
     const correspondences = buildLatticeCorrespondences(rowIndexed, colIndexed, rawW, rawH);
-    H = fitHomographyDLT(correspondences);
+    H = fitHomographyRobust(correspondences);
     if (H) {
       rows = rowIndexed.length ? Math.max(...rowIndexed.map(r => r.index)) : 0;
       cols = colIndexed.length ? Math.max(...colIndexed.map(c => c.index)) : 0;

@@ -1,6 +1,6 @@
 // End-to-end validation of the NEW line-based rectification pipeline
 // (buildLineAccumulator -> findLinePeaks -> splitIntoTwoFamilies ->
-// indexFamilyLines -> buildLatticeCorrespondences -> fitHomographyDLT ->
+// indexFamilyLines -> buildLatticeCorrespondences -> fitHomographyRobust ->
 // sample -> pickBestCandidate) against real perspective tilt — directly
 // comparable to scripts/test-homography-decode.ts (the OLD corner+VP+mesh
 // pipeline, which measured 0/8 correct at every tilt) and
@@ -19,7 +19,7 @@ import { toGrayscale, binarize, pickBestCandidate, rotateShift, type SampledGrid
 import { buildLineAccumulator, findLinePeaks } from '../src/lines.ts';
 import { splitIntoTwoFamilies } from '../src/vp.ts';
 import { indexFamilyLines, buildLatticeCorrespondences } from '../src/lattice.ts';
-import { fitHomographyDLT, applyHomography, invertHomography, type Mat3 } from '../src/homography.ts';
+import { fitHomographyRobust, applyHomography, invertHomography, type Mat3 } from '../src/homography.ts';
 import { captureHomography } from './lib/synth-camera.ts';
 import type { CameraPose } from './lib/synth-camera.ts';
 
@@ -87,7 +87,7 @@ function decodeViaLines(pose: CameraPose): DecodeOutcome | 'nolines' | 'nosplit'
   const rowIndexed = indexFamilyLines(familyA, familyB.vp, RAW, RAW);
   const colIndexed = indexFamilyLines(familyB, familyA.vp, RAW, RAW);
   const correspondences = buildLatticeCorrespondences(rowIndexed, colIndexed, RAW, RAW);
-  const H = fitHomographyDLT(correspondences);
+  const H = fitHomographyRobust(correspondences);
   if (!H) return 'nohomography';
 
   const rows = rowIndexed.length - 1, cols = colIndexed.length - 1;

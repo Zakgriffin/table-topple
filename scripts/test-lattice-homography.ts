@@ -1,5 +1,5 @@
 // Validates src/lattice.ts (indexFamilyLines + buildLatticeCorrespondences)
-// feeding src/homography.ts's EXISTING fitHomographyDLT, under a REAL
+// feeding src/homography.ts's fitHomographyRobust, under a REAL
 // pinhole camera pose (scripts/lib/synth-camera.ts — same ground-truth
 // projection this repo's other perspective tests use), rather than a
 // hand-built homography matrix.
@@ -17,7 +17,7 @@ import type { LineCandidate } from '../src/lines.ts';
 import type { LineFamily } from '../src/vp.ts';
 import { estimateVanishingPoint } from '../src/vp.ts';
 import { indexFamilyLines, buildLatticeCorrespondences } from '../src/lattice.ts';
-import { fitHomographyDLT, applyHomography } from '../src/homography.ts';
+import { fitHomographyRobust, applyHomography } from '../src/homography.ts';
 import { projectToImage, type CameraPose } from './lib/synth-camera.ts';
 
 const W = 640, H = 480;
@@ -101,8 +101,8 @@ function runScenario(name: string, pose: CameraPose, noisePx: number, toleranceP
   const colMap = fitAffineIndexMap(colIndexed.map(c => ({ rec: c.index, truth: colTrueIdx.get(c.line)! })));
 
   const correspondences = buildLatticeCorrespondences(rowIndexed, colIndexed, W, H);
-  const H_fit = fitHomographyDLT(correspondences);
-  if (!H_fit) { check(name, false, 'fitHomographyDLT returned null'); return; }
+  const H_fit = fitHomographyRobust(correspondences);
+  if (!H_fit) { check(name, false, 'fitHomographyRobust returned null'); return; }
 
   // Held-out lattice point NOT among the lines used to fit — real
   // extrapolation, not just re-fitting the training points.

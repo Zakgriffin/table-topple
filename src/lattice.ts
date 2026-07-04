@@ -47,13 +47,19 @@ function invertMobius(m: Mobius, t: number): number {
 // (p,q,r,s), so each correspondence contributes one row [v,1,-t*v,-t] to a
 // 4-unknown homogeneous system. Needs at least 3 correspondences (matches
 // the transform's 3 DOF); more just makes it a least-squares fit instead of
-// exact.
-function fitMobius(pairs: { v: number; t: number }[]): Mobius | null {
+// exact, at which point an optional per-pair weight (the source line's Hough
+// vote mass, same idea as buildLatticeCorrespondences') lets confidently-
+// detected lines count more than marginal ones -- irrelevant for the
+// exactly-4-point seed-window search below (an exact, zero-residual solution
+// satisfies every row regardless of how each row is scaled), but meaningful
+// for the FINAL refit over all inliers, which is genuinely overdetermined.
+function fitMobius(pairs: { v: number; t: number; weight?: number }[]): Mobius | null {
   if (pairs.length < 3) return null;
   const M = [[0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0], [0, 0, 0, 0]];
-  for (const { v, t } of pairs) {
+  for (const { v, t, weight } of pairs) {
+    const w = weight ?? 1;
     const row = [v, 1, -t * v, -t];
-    for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) M[i][j] += row[i] * row[j];
+    for (let i = 0; i < 4; i++) for (let j = 0; j < 4; j++) M[i][j] += w * row[i] * row[j];
   }
   const [p, q, r, s] = smallestEigenvector(M);
   if (Math.abs(p * s - q * r) < 1e-9) return null; // degenerate (singular Mobius)
@@ -212,12 +218,13 @@ function recoverIndicesFromTransversal(
   if (!best) return scored.map((s, i) => ({ line: s.line, index: i })); // degenerate fallback
 
   // Refit using ALL inliers under the winning model (not just its 4-line
-  // seed) for a more accurate final model, then assign final indices.
+  // seed) for a more accurate final model, weighted by each line's own Hough
+  // vote confidence, then assign final indices.
   const { inliers } = scoreModel(best.model);
   const inlierPairs = scored
     .map((s, i) => ({ s, i }))
     .filter(({ i }) => inliers[i])
-    .map(({ s }) => ({ v: Math.round(invertMobius(best!.model, s.t)), t: s.t }));
+    .map(({ s }) => ({ v: Math.round(invertMobius(best!.model, s.t)), t: s.t, weight: s.line.weight }));
   const finalModel = fitMobius(inlierPairs) ?? best.model;
 
   const withIndex = scored
@@ -272,7 +279,10 @@ export function indexFamilyLines(
 
 // Every (row-line, col-line) crossing is a lattice corner with a known
 // (relative) integer address — builds the full correspondence set for
-// fitHomographyDLT.
+// fitHomographyDLT/fitHomographyRobust. Each crossing's weight is the
+// WEAKER of its two source lines' Hough vote mass (see LineCandidate.weight)
+// -- a corner is only as trustworthy as its worst-detected edge -- so a
+// weighted fit leans on confidently-detected lines over marginal ones.
 export function buildLatticeCorrespondences(
   rows: IndexedLine[], cols: IndexedLine[], w: number, h: number,
 ): PointCorrespondence[] {
@@ -284,7 +294,7 @@ export function buildLatticeCorrespondences(
       const lc = toAbsoluteLine(c.line, cx, cy);
       const p = crossLines(lr, lc);
       if (Math.abs(p.w) < 1e-9) continue; // parallel (degenerate) — skip
-      out.push({ u: r.index, v: c.index, x: p.x / p.w, y: p.y / p.w });
+      out.push({ u: r.index, v: c.index, x: p.x / p.w, y: p.y / p.w, weight: Math.min(r.line.weight, c.line.weight) });
     }
   }
   return out;

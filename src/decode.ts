@@ -1,12 +1,10 @@
 // Grid decode primitives shared by the line-based rectification pipeline
 // (src/lines.ts -> src/vp.ts -> src/lattice.ts -> src/homography.ts,
-// orchestrated in src/main.ts): grayscale/binarize conversion, the
-// rotation-mod-90 estimator, autocorrelation-based pitch/phase detection
-// (used only as an adaptive-resolution hint for the Hough transform, not as
-// the geometry solution), and pickBestCandidate's patch-tiling + correlation
-// scoring, which the line pipeline reuses to decode whatever grid it samples
-// via its fitted homography. Pure logic, no DOM/camera dependency, so it can
-// run both in the browser and under Node for testing.
+// orchestrated in src/main.ts): grayscale/binarize conversion, and
+// pickBestCandidate's patch-tiling + correlation scoring, which the line
+// pipeline reuses to decode whatever grid it samples via its fitted
+// homography. Pure logic, no DOM/camera dependency, so it can run both in
+// the browser and under Node for testing.
 //
 // pickBestCandidate picks among candidate sampled grids (the line pipeline
 // passes exactly 2: the sampled grid and its row-mirrored twin, to cover the
@@ -22,150 +20,18 @@
 // single patch's exact-match hit alone is weak evidence; this correlation
 // check is what actually distinguishes a correct decode from noise that
 // happened to hash to *some* valid-but-wrong position.
-
-export interface GridDetection {
-  px: number; py: number; // phase (px offset of first cell boundary)
-  pitchX: number; pitchY: number;
-}
-
-// Finds the pitch (dominant period) of a 1D energy profile via autocorrelation.
 //
-// A sub-pixel (parabolic-interpolation) refinement was attempted here, on
-// the theory that a real camera's cell size is essentially never an exact
-// integer number of pixels, so rounding to the nearest integer lag should
-// compound into visible drift over many cells. In practice it made the
-// rotated-input synthetic test regress badly (300-trial pass rate dropped
-// from ~99% to ~1%), including with a stricter validity threshold and with
-// pre-smoothing the score profile — nearest-neighbor resampling during
-// derotation introduces staircase aliasing that the parabolic fit reacts to.
-// Reverted rather than ship something destabilized; worth retrying later
-// with a test setup whose ground-truth pitch isn't coincidentally an exact
-// integer (this test's source PNG is rendered at exactly 8px/cell, which
-// hid whether the refinement was helping or hurting on real-world input).
-export function findPitch(energy: Float64Array, minLag: number, maxLag: number): number {
-  let bestLag = minLag, bestScore = -Infinity;
-  for (let lag = minLag; lag <= maxLag; lag++) {
-    let score = 0;
-    for (let x = 0; x + lag < energy.length; x++) score += energy[x] * energy[x + lag];
-    if (score > bestScore) { bestScore = score; bestLag = lag; }
-  }
-  return bestLag;
-}
-
-// Finds the phase in [0, pitch) whose boundary positions (phase, phase+pitch,
-// phase+2*pitch, ...) best align with peaks in the energy profile.
-export function findPhase(energy: Float64Array, pitch: number): number {
-  let bestPhase = 0, bestScore = -Infinity;
-  for (let phase = 0; phase < pitch; phase++) {
-    let score = 0;
-    for (let x = phase; x < energy.length; x += pitch) score += energy[x];
-    if (score > bestScore) { bestScore = score; bestPhase = phase; }
-  }
-  return bestPhase;
-}
-
-// Runs pitch/phase detection restricted to the sub-rectangle [x0,x1) x
-// [y0,y1) of the buffer (still indexed in full-buffer coordinates in the
-// result). detectGrid is just this called on the whole buffer.
-function detectGridInRegion(bin: Uint8Array, w: number, x0: number, y0: number, x1: number, y1: number): GridDetection {
-  const rw = x1 - x0, rh = y1 - y0;
-  const colEnergy = new Float64Array(rw);
-  for (let x = 1; x < rw; x++) {
-    let e = 0;
-    for (let y = y0; y < y1; y++) e += Math.abs(bin[y * w + (x0 + x)] - bin[y * w + (x0 + x - 1)]);
-    colEnergy[x] = e;
-  }
-  const rowEnergy = new Float64Array(rh);
-  for (let y = 1; y < rh; y++) {
-    let e = 0;
-    for (let x = x0; x < x1; x++) e += Math.abs(bin[(y0 + y) * w + x] - bin[(y0 + y - 1) * w + x]);
-    rowEnergy[y] = e;
-  }
-
-  const minLag = 4, maxLagX = Math.floor(rw / 4), maxLagY = Math.floor(rh / 4);
-  const pitchX = findPitch(colEnergy, minLag, maxLagX);
-  const pitchY = findPitch(rowEnergy, minLag, maxLagY);
-  let px = findPhase(colEnergy, pitchX) + x0;
-  let py = findPhase(rowEnergy, pitchY) + y0;
-
-  // Re-anchor the phase to the boundary nearest the REGION's center, rather
-  // than leaving it wherever findPhase's [0, pitch) search happened to land
-  // it (always near the region's own index 0) — anchoring near the center
-  // keeps this estimate more stable when only used as a coarse pitch HINT
-  // (see src/main.ts's apparentPitch), rather than as a basis for
-  // extrapolating cell positions outward.
-  const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
-  px += pitchX * Math.round((cx - px) / pitchX);
-  py += pitchY * Math.round((cy - py) / pitchY);
-
-  return { px, py, pitchX, pitchY };
-}
-
-export function detectGrid(bin: Uint8Array, w: number, h: number): GridDetection {
-  return detectGridInRegion(bin, w, 0, 0, w, h);
-}
-
-// Estimates the grid's rotation, folded into [0, PI/2) radians, via a
-// gradient-orientation histogram. Edges at cell boundaries produce gradient
-// vectors perpendicular to the boundary line; a square grid's two line
-// families (rows, columns) are perpendicular to each other, so their
-// gradient directions are too — folding all edge orientations modulo 90
-// degrees collapses both families onto the same histogram peak, directly
-// giving the grid's rotation mod 90 in one shot (weighted by edge strength
-// so faint/noisy gradients don't skew the estimate).
-//
-// Operates on blurred GRAYSCALE, not the binarized image: a rotated hard
-// edge in an already-thresholded binary image becomes a staircase, whose
-// micro-edges are biased toward 0/90 degrees rather than the true diagonal —
-// same reason edge detectors like Canny blur before computing gradients.
-function boxBlur(gray: Float64Array, w: number, h: number, radius: number): Float64Array {
-  const out = new Float64Array(w * h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      let sum = 0, count = 0;
-      for (let dy = -radius; dy <= radius; dy++) {
-        const yy = y + dy;
-        if (yy < 0 || yy >= h) continue;
-        for (let dx = -radius; dx <= radius; dx++) {
-          const xx = x + dx;
-          if (xx < 0 || xx >= w) continue;
-          sum += gray[yy * w + xx];
-          count++;
-        }
-      }
-      out[y * w + x] = sum / count;
-    }
-  }
-  return out;
-}
-
-// Uses a circular mean rather than a histogram peak search: orientation data
-// is periodic mod PI/2 (both edge families and the +-direction ambiguity of
-// each gradient all collapse together), so scaling each angle by 4 maps that
-// periodicity onto the full circle (4 * PI/2 = 2*PI). Averaging as vectors in
-// that scaled space, then dividing the result back down by 4, gives a
-// continuous estimate with no bin-quantization error — a histogram's ~0.5
-// degree bin width was enough residual error to visibly drift pixel sampling
-// across a couple hundred pixels of buffer.
-export function estimateRotationRad(gray: Float64Array, w: number, h: number): number {
-  const blurred = boxBlur(gray, w, h, 2);
-  let sumX = 0, sumY = 0;
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const gx = blurred[y * w + x + 1] - blurred[y * w + x - 1];
-      const gy = blurred[(y + 1) * w + x] - blurred[(y - 1) * w + x];
-      const mag = gx * gx + gy * gy; // squared magnitude — emphasizes strong edges
-      if (mag < 1) continue;
-      const angle = Math.atan2(gy, gx); // -PI..PI
-      sumX += mag * Math.cos(4 * angle);
-      sumY += mag * Math.sin(4 * angle);
-    }
-  }
-  const meanAngle4 = Math.atan2(sumY, sumX); // -PI..PI
-  let theta = meanAngle4 / 4; // -PI/4..PI/4
-  if (theta < 0) theta += Math.PI / 2;
-  return theta; // [0, PI/2)
-}
+// This module previously also had an autocorrelation-based pitch/phase
+// estimator (detectGrid) and a gradient-orientation rotation estimator
+// (estimateRotationRad), used only to manufacture a single GLOBAL apparent
+// cell-pitch number as a resolution hint for src/lines.ts's Hough transform
+// and an alias-check reference for src/lattice.ts. Both were removed: a
+// single global scalar is systematically wrong under real perspective for
+// content far from wherever it was measured, and both of its consumers now
+// derive what they need locally instead — src/lattice.ts's
+// estimateLocalSpacing measures real neighboring detections directly, and
+// src/main.ts's Hough resolution is now a small fixed constant rather than
+// adaptive (see its HOUGH_RHO_BIN_PX comment for why fixed-fine is safe).
 
 // valid is false when a cell couldn't actually be sampled (the homography
 // mapped it outside the image, see src/main.ts's sampleFromHomography) — x/

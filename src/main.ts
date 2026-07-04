@@ -1,5 +1,5 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
-import { detectGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad } from './decode.ts';
+import { pickBestCandidate, toGrayscale, binarize } from './decode.ts';
 import type { SampledGrid, SampledCell, CandidateResult } from './decode.ts';
 import { buildLineAccumulator, findLinePeaks } from './lines.ts';
 import type { LineCandidate } from './lines.ts';
@@ -151,7 +151,6 @@ function bindSlider(id: string): { get: () => number } {
 // Level 1 — hough lines (src/lines.ts)
 const tBlurRadius = bindSlider('tBlurRadius');
 const tMinMag = bindSlider('tMinMag');
-const tRhoDivisor = bindSlider('tRhoDivisor');
 const tPeakThreshold = bindSlider('tPeakThreshold');
 const tNmsTheta = bindSlider('tNmsTheta');
 const tNmsRho = bindSlider('tNmsRho');
@@ -160,20 +159,30 @@ const tSplitInlierPx = bindSlider('tSplitInlierPx');
 const tMaxCandidates = bindSlider('tMaxCandidates');
 // Level 3 — index recovery (src/lattice.ts)
 const tIndexInlierPx = bindSlider('tIndexInlierPx');
-const tScaleTolerance = bindSlider('tScaleTolerance');
 const tMaxGap = bindSlider('tMaxGap');
 const tSpanCap = bindSlider('tSpanCap');
 // Orchestration
 const tAnalysisRes = bindSlider('tAnalysisRes');
-const tPatchSize = bindSlider('tPatchSize');
 const tConfidence = bindSlider('tConfidence');
 const tRefreshDelay = bindSlider('tRefreshDelay');
 const tMinFamily = bindSlider('tMinFamily');
 
+// Level 1's Hough resolution is fixed rather than adaptive: at the point
+// this is needed, no lines have been detected yet, so there's nothing real
+// to measure a "local" pitch from — any adaptive estimate here could only
+// ever be a GLOBAL proxy (an earlier version derotated a small patch near
+// the image center and autocorrelated it), which is systematically wrong
+// under perspective for lines anywhere else in the frame. A small fixed bin
+// size is the safer default because the two failure modes aren't symmetric:
+// too FINE a resolution just duplicates a peak into two close detections,
+// which Level 3's gap-tolerant indexing absorbs as harmless noise (both
+// round to the same integer index); too COARSE a resolution merges distinct
+// real lines into one, an unrecoverable loss of information downstream.
+const HOUGH_RHO_BIN_PX = 1.5;
+const HOUGH_THETA_BINS = Math.round(360 / HOUGH_RHO_BIN_PX);
+
 const analysisCanvas = document.createElement('canvas');
 const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true })!;
-const rotationPatchCanvas = document.createElement('canvas');
-const rotationPatchCtx = rotationPatchCanvas.getContext('2d', { willReadFrequently: true })!;
 const binCanvas = document.createElement('canvas');
 const binCtx = binCanvas.getContext('2d')!;
 
@@ -239,33 +248,7 @@ function runPipeline() {
   const gray = toGrayscale(rawRgba, rawW, rawH);
   const bin = binarize(gray);
 
-  // Level 1's Hough bin/NMS resolution can't be fixed globally — real
-  // adjacent grid lines can be a few px (well under a degree) apart in Hough
-  // space depending on zoom/tilt, and a fixed resolution either merges
-  // distinct lines (too coarse) or splits one line into duplicate peaks (too
-  // fine): confirmed via scripts/test-lines-decode.ts, fixed defaults merged
-  // real lines down to ~40% of the true count. Estimating rotation + pitch on
-  // a small derotated patch is used only as a scale HINT for tuning here —
-  // not as the geometry solution itself, which remains fully rotation-general.
-  const theta0 = estimateRotationRad(gray, rawW, rawH);
-  const patchSize = Math.round(tPatchSize.get());
-  rotationPatchCanvas.width = patchSize; rotationPatchCanvas.height = patchSize;
-  rotationPatchCtx.fillStyle = '#fff';
-  rotationPatchCtx.fillRect(0, 0, patchSize, patchSize);
-  rotationPatchCtx.save();
-  rotationPatchCtx.translate(patchSize / 2, patchSize / 2);
-  rotationPatchCtx.rotate(-theta0);
-  rotationPatchCtx.translate(-rawW / 2, -rawH / 2);
-  rotationPatchCtx.drawImage(analysisCanvas, 0, 0);
-  rotationPatchCtx.restore();
-  const patchGray = toGrayscale(rotationPatchCtx.getImageData(0, 0, patchSize, patchSize).data, patchSize, patchSize);
-  const patchBin = binarize(patchGray);
-  const coarseGrid = detectGrid(patchBin, patchSize, patchSize);
-  const apparentPitch = (coarseGrid.pitchX + coarseGrid.pitchY) / 2;
-  const rhoBinSize = Math.max(0.5, Math.min(4, apparentPitch / tRhoDivisor.get()));
-  const thetaBins = Math.max(90, Math.min(1440, Math.round(360 / rhoBinSize)));
-
-  const field = buildLineAccumulator(gray, rawW, rawH, thetaBins, rhoBinSize, Math.round(tBlurRadius.get()), tMinMag.get());
+  const field = buildLineAccumulator(gray, rawW, rawH, HOUGH_THETA_BINS, HOUGH_RHO_BIN_PX, Math.round(tBlurRadius.get()), tMinMag.get());
   const peaks = findLinePeaks(field, tPeakThreshold.get(), Math.round(tNmsTheta.get()), Math.round(tNmsRho.get()));
 
   let familyA: LineFamily | null = null, familyB: LineFamily | null = null, unassigned: LineCandidate[] = [];
@@ -284,15 +267,16 @@ function runPipeline() {
 
   const minFamilySize = Math.round(tMinFamily.get());
   if (familyA && familyB && familyA.lines.length >= minFamilySize && familyB.lines.length >= minFamilySize) {
-    // expectedSpacingPx (the same apparentPitch used above for Hough bin
-    // sizing) resolves a real ambiguity found via live testing: from line
-    // positions alone, "no gaps" and "a uniform pattern of missing lines"
-    // are indistinguishable, and under real noise this caused genuinely
-    // gap-free lines to occasionally be mis-indexed as 2x/3x sparser,
-    // splitting real cells into phantom half-cells in the rectified-grid
-    // overlay (see src/lattice.ts's recoverIndicesFromTransversal doc).
-    rowIndexed = indexFamilyLines(familyA, familyB.vp, rawW, rawH, tIndexInlierPx.get(), apparentPitch, Math.round(tMaxGap.get()), tScaleTolerance.get(), Math.round(tSpanCap.get()));
-    colIndexed = indexFamilyLines(familyB, familyA.vp, rawW, rawH, tIndexInlierPx.get(), apparentPitch, Math.round(tMaxGap.get()), tScaleTolerance.get(), Math.round(tSpanCap.get()));
+    // indexFamilyLines resolves a real ambiguity found via live testing: from
+    // line positions alone, "no gaps" and "a uniform pattern of missing
+    // lines" are indistinguishable, and under real noise this caused
+    // genuinely gap-free lines to occasionally be mis-indexed as 2x/3x
+    // sparser, splitting real cells into phantom half-cells in the
+    // rectified-grid overlay. It resolves this using each family's OWN
+    // locally-measured real line spacing (see src/lattice.ts's
+    // estimateLocalSpacing) — no external pitch estimate needed here.
+    rowIndexed = indexFamilyLines(familyA, familyB.vp, rawW, rawH, tIndexInlierPx.get(), Math.round(tMaxGap.get()), Math.round(tSpanCap.get()));
+    colIndexed = indexFamilyLines(familyB, familyA.vp, rawW, rawH, tIndexInlierPx.get(), Math.round(tMaxGap.get()), Math.round(tSpanCap.get()));
     const correspondences = buildLatticeCorrespondences(rowIndexed, colIndexed, rawW, rawH);
     H = fitHomographyDLT(correspondences);
     if (H) {

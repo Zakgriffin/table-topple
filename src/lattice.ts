@@ -103,22 +103,40 @@ function fitMobius(pairs: { v: number; t: number }[]): Mobius | null {
 // This isn't a tunable-away edge case: from relative line positions ALONE,
 // "1 step apart" and "2 steps apart with one missed" are mathematically
 // indistinguishable — same Mobius shape, different assumed multiplier.
-// Nothing in the (v,t) data itself can settle that.
+// Nothing in a single window's (v,t) data by itself can settle that.
 //
-// The fix needs INDEPENDENT information outside this family's own point
-// positions: expectedSpacingPx (the coarse apparent-pitch estimate already
-// computed for Hough bin-sizing, see src/main.ts) measures roughly how many
-// pixels one real cell spans, via a totally different method (autocorrelation)
-// that doesn't depend on which lines Level 1 happened to detect. A candidate
-// model's IMPLIED per-step pixel spacing (measured directly from its seed
-// window's own real data: total pixel span / total assumed index span)
-// should roughly match that — an aliased "believes there's a missing line"
-// model has an implied spacing that's a FRACTION (half,
-// a third, ...) of the true cell size, which is directly checkable and
-// rejected before it ever gets to compete on inlier count.
+// The fix needs independent information beyond just the seed window's own 4
+// points — but it does NOT need to come from outside this family at all. An
+// earlier version of this fix borrowed a single GLOBAL apparent-pitch
+// estimate from a totally different subsystem (derotate a small patch near
+// the image center, autocorrelate) — but that estimate is only accurate
+// near wherever that patch happened to sit; under real perspective, pixel
+// spacing shrinks smoothly toward the vanishing point, so a single global
+// number is systematically wrong for windows elsewhere in the image. This
+// family's OWN already-sorted real detections carry that same information
+// locally, for free: estimateLocalSpacing looks at a small neighborhood of
+// ACTUAL adjacent-line gaps around the window and takes their MINIMUM — a
+// genuinely un-aliased adjacent pair always measures the true local pitch
+// cleanly, while a real multi-line gap landing in that same neighborhood can
+// only ever inflate a gap's measured size, never shrink it below the truth.
+// So the minimum self-corrects for an occasional real gap nearby without
+// needing to know in advance which specific pairs are aliased, and it
+// automatically tracks the true LOCAL spacing wherever the window sits.
+const LOCAL_SPACING_RADIUS = 2; // extra real adjacent-line gaps considered on each side of a window
+const SCALE_TOLERANCE = 1.6; // accept implied spacing within [1/1.6, 1.6] of the local estimate
+
+function estimateLocalSpacing(scored: { line: LineCandidate; t: number }[], start: number, windowSize: number): number {
+  const n = scored.length;
+  const i0 = Math.max(0, start - LOCAL_SPACING_RADIUS);
+  const i1 = Math.min(n - 2, start + windowSize - 2 + LOCAL_SPACING_RADIUS);
+  let minGap = Infinity;
+  for (let i = i0; i <= i1; i++) minGap = Math.min(minGap, scored[i + 1].t - scored[i].t);
+  return minGap;
+}
+
 function recoverIndicesFromTransversal(
-  scored: { line: LineCandidate; t: number }[], inlierPx: number, expectedSpacingPx?: number,
-  maxGap = 3, scaleTolerance = 1.6, spanCapMultiplier = 3,
+  scored: { line: LineCandidate; t: number }[], inlierPx: number,
+  maxGap = 3, spanCapMultiplier = 3,
 ): { line: LineCandidate; index: number }[] {
   const n = scored.length;
   const WINDOW = 4;
@@ -152,11 +170,15 @@ function recoverIndicesFromTransversal(
   let best: { model: Mobius; count: number; totalResidual: number; span: number } | null = null;
   for (let start = 0; start + WINDOW <= n; start++) {
     const window = scored.slice(start, start + WINDOW);
+    // Computed once per window (not per gap-choice) — it depends only on
+    // this family's own real neighboring detections, never on which gap
+    // hypothesis is currently being tried.
+    const localSpacing = estimateLocalSpacing(scored, start, WINDOW);
     for (const g1 of GAP_CHOICES) for (const g2 of GAP_CHOICES) for (const g3 of GAP_CHOICES) {
       const vs = [0, g1, g1 + g2, g1 + g2 + g3];
       const model = fitMobius(window.map((s, i) => ({ v: vs[i], t: s.t })));
       if (!model) continue;
-      if (expectedSpacingPx !== undefined) {
+      if (Number.isFinite(localSpacing)) {
         // Average spacing directly from the window's own REAL measured
         // positions (total pixel span / total assumed index span), not the
         // fitted model's analytic derivative — the latter trusts the tiny
@@ -166,8 +188,8 @@ function recoverIndicesFromTransversal(
         // guess. This average is cruder but numerically robust, and the
         // tolerance band below is already loose enough not to need more.
         const impliedSpacing = Math.abs(window[3].t - window[0].t) / (vs[3] - vs[0]);
-        const ratio = impliedSpacing / expectedSpacingPx;
-        if (ratio < 1 / scaleTolerance || ratio > scaleTolerance) continue; // implausible scale -- almost certainly a step-size alias, not a real fit
+        const ratio = impliedSpacing / localSpacing;
+        if (ratio < 1 / SCALE_TOLERANCE || ratio > SCALE_TOLERANCE) continue; // implausible scale -- almost certainly a step-size alias, not a real fit
       }
       const { count, totalResidual, span } = scoreModel(model);
       // A tiny 4-point fit can be near-degenerate (r close to 0, an almost-
@@ -218,8 +240,8 @@ function recoverIndicesFromTransversal(
 // close to parallel with THIS family's own lines, which would make
 // intersections numerically unstable (or, exactly parallel, nonexistent).
 export function indexFamilyLines(
-  family: LineFamily, otherVp: VanishingPoint, w: number, h: number, inlierPx = 4, expectedSpacingPx?: number,
-  maxGap = 3, scaleTolerance = 1.6, spanCapMultiplier = 3,
+  family: LineFamily, otherVp: VanishingPoint, w: number, h: number, inlierPx = 4,
+  maxGap = 3, spanCapMultiplier = 3,
 ): IndexedLine[] {
   const cx = w / 2, cy = h / 2;
   let dx: number, dy: number;
@@ -245,7 +267,7 @@ export function indexFamilyLines(
   });
   scored.sort((a, b) => a.t - b.t);
 
-  return recoverIndicesFromTransversal(scored, inlierPx, expectedSpacingPx, maxGap, scaleTolerance, spanCapMultiplier);
+  return recoverIndicesFromTransversal(scored, inlierPx, maxGap, spanCapMultiplier);
 }
 
 // Every (row-line, col-line) crossing is a lattice corner with a known

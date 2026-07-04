@@ -15,7 +15,7 @@
 import { PNG } from 'pngjs';
 import { readFileSync } from 'node:fs';
 import { generateTorus, buildLookupTable } from '../src/debruijn.ts';
-import { toGrayscale, binarize, detectGrid, estimateRotationRad, pickBestCandidate, rotateShift, type SampledGrid, type SampledCell } from '../src/decode.ts';
+import { toGrayscale, binarize, pickBestCandidate, rotateShift, type SampledGrid, type SampledCell } from '../src/decode.ts';
 import { buildLineAccumulator, findLinePeaks } from '../src/lines.ts';
 import { splitIntoTwoFamilies } from '../src/vp.ts';
 import { indexFamilyLines, buildLatticeCorrespondences } from '../src/lattice.ts';
@@ -58,21 +58,15 @@ function mirrorRows(sg: SampledGrid): SampledGrid {
   return { ...sg, cells: sg.cells.slice().reverse() };
 }
 
-const PATCH = 120;
-function derotatePatch(gray: Float64Array, w: number, h: number, theta: number): Float64Array {
-  const out = new Float64Array(PATCH * PATCH);
-  const cosT = Math.cos(theta), sinT = Math.sin(theta), cx = w / 2, cy = h / 2;
-  for (let ay = 0; ay < PATCH; ay++) {
-    const relY = ay - PATCH / 2;
-    for (let ax = 0; ax < PATCH; ax++) {
-      const relX = ax - PATCH / 2;
-      const sx = Math.round(relX * cosT - relY * sinT + cx);
-      const sy = Math.round(relX * sinT + relY * cosT + cy);
-      out[ay * PATCH + ax] = (sx >= 0 && sx < w && sy >= 0 && sy < h) ? gray[sy * w + sx] : 255;
-    }
-  }
-  return out;
-}
+// Fixed rather than adaptive, matching src/main.ts's HOUGH_RHO_BIN_PX: no
+// lines exist yet at this point to measure a real local pitch from, and an
+// earlier adaptive version (derotate a small patch near the image center,
+// autocorrelate) was only ever a GLOBAL proxy that's systematically wrong
+// elsewhere in the frame under perspective. A small fixed size favors
+// occasional harmless duplicate peaks (absorbed by Level 3's gap-tolerant
+// indexing) over merged real lines (an unrecoverable information loss).
+const HOUGH_RHO_BIN_PX = 1.5;
+const HOUGH_THETA_BINS = Math.round(360 / HOUGH_RHO_BIN_PX);
 
 interface DecodeOutcome { match: { row: number; col: number } | null; consistency: number; }
 
@@ -81,26 +75,7 @@ function decodeViaLines(pose: CameraPose): DecodeOutcome | 'nolines' | 'nosplit'
   const gray = toGrayscale(rgba, RAW, RAW);
   const bin = binarize(gray);
 
-  // Level 1's bin/NMS resolution can't be fixed globally: real adjacent grid
-  // lines can be as little as a few px (and well under a degree) apart in
-  // Hough space depending on zoom/tilt, and a fixed resolution either merges
-  // distinct real lines (too coarse) or splits one real line into redundant
-  // duplicate peaks (too fine) — confirmed directly: at this pattern's scale,
-  // fixed defaults merged real lines into just 13-16 detections per family
-  // out of 30-40 true ones, corrupting the whole downstream fit even with
-  // gap-tolerant indexing. Seeding the resolution from the OLD pipeline's
-  // apparent-pitch estimator (derotate a small patch, autocorrelate) is only
-  // used here as a scale HINT for tuning Hough bins/NMS — not as the
-  // geometry solution itself (which remains fully rotation-general) — same
-  // role tensorRadius already had for the old corner detector.
-  const theta0 = estimateRotationRad(gray, RAW, RAW);
-  const patchBin = binarize(derotatePatch(gray, RAW, RAW, theta0));
-  const coarseGrid = detectGrid(patchBin, PATCH, PATCH);
-  const apparentPitch = (coarseGrid.pitchX + coarseGrid.pitchY) / 2;
-  const rhoBinSize = Math.max(0.5, Math.min(4, apparentPitch / 8));
-  const thetaBins = Math.max(90, Math.min(1440, Math.round(360 / rhoBinSize)));
-
-  const field = buildLineAccumulator(gray, RAW, RAW, thetaBins, rhoBinSize);
+  const field = buildLineAccumulator(gray, RAW, RAW, HOUGH_THETA_BINS, HOUGH_RHO_BIN_PX);
   const peaks = findLinePeaks(field, 0.15, 4, 3);
   if (peaks.length < 8) return 'nolines';
 

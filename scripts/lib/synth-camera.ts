@@ -26,7 +26,7 @@ const norm = (a: Vec3): Vec3 => { const l = Math.hypot(a[0], a[1], a[2]); return
 // tilt=0 places the camera directly above target, looking straight down —
 // the degenerate case that matches the old rotation-only harness exactly
 // (azimuth becomes meaningless, roll alone reproduces the old theta param).
-function buildCamera(pose: CameraPose) {
+export function buildCamera(pose: CameraPose) {
   const { targetX, targetY, dist, tilt, azimuth, roll } = pose;
   const target: Vec3 = [targetX, targetY, 0];
   const camPos: Vec3 = add(target, [

@@ -70,11 +70,22 @@
 <div id="meshStatus"></div>
 <div id="meshPanel">
   <button id="analyzeBtn">🔍 Analyze</button>
-  <label><input type="checkbox" id="toggleJunctions" checked> junctions</label>
-  <label><input type="checkbox" id="toggleMesh" checked> mesh</label>
-  <label><input type="checkbox" id="toggleCells" checked> cells</label>
+  <label><input type="checkbox" id="toggleBinarized"> binarized</label>
+  <!-- Old corner/mesh/VP/homography-mesh overlay toggles — retired
+       alongside the pipeline they drove (src/main.ts). Left commented, not
+       deleted, since this repo is a testbed.
+  <label><input type="checkbox" id="toggleJunctions"> junctions</label>
+  <label><input type="checkbox" id="toggleMesh"> mesh</label>
+  <label><input type="checkbox" id="toggleCells"> cells</label>
+  <label><input type="checkbox" id="toggleVP"> vanishing pts</label>
+  <label><input type="checkbox" id="toggleHomography"> homography mesh</label>
+  -->
   <hr style="width:100%; border-color: rgba(255,255,255,0.3);">
-  <label><input type="checkbox" id="toggleStage2" checked> stage2 lines</label>
+  <label><input type="checkbox" id="toggleHoughLines"> hough lines</label>
+  <label><input type="checkbox" id="toggleLineVPs"> line VPs</label>
+  <label><input type="checkbox" id="toggleLineHomography"> rectified grid</label>
+  <hr style="width:100%; border-color: rgba(255,255,255,0.3);">
+  <label><input type="checkbox" id="toggleStage2"> stage2 lines</label>
 </div>
 <div id="zoomBox">
   <span id="zoomLabel">Zoom</span>

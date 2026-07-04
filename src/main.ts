@@ -1,11 +1,27 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
-import { detectGrid, sampleFullGrid, sampleFromMesh, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual, buildBoundaries } from './decode.ts';
-import type { GridDetection, SampledGrid, CandidateResult } from './decode.ts';
+import { detectGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual, buildBoundaries } from './decode.ts';
+import type { GridDetection, SampledGrid, SampledCell, CandidateResult } from './decode.ts';
 import type { Patch } from './decode.ts';
-import { computeJunctionField, detectJunctions, refineJunctionSubPixel } from './cornerdetect.ts';
-import type { JunctionType } from './cornerdetect.ts';
-import { buildMesh, pruneInconsistentNodes } from './mesh.ts';
-import type { Mesh } from './mesh.ts';
+// Old corner/mesh/VP/homography-mesh geometry pipeline (Option B) — retired
+// in favor of the line-based redesign below (src/lines.ts, src/vp.ts,
+// src/lattice.ts). Left commented rather than deleted since this repo is a
+// testbed and the old approach's own source files are untouched, just
+// unused here now.
+// import { computeJunctionField, detectJunctions, refineJunctionSubPixel, computeAxisDirections } from './cornerdetect.ts';
+// import type { JunctionType } from './cornerdetect.ts';
+// import { buildMesh, pruneInconsistentNodes } from './mesh.ts';
+// import type { Mesh } from './mesh.ts';
+// import { estimateVanishingPoints } from './vanishing.ts';
+// import type { VanishingPoint } from './vanishing.ts';
+// import { buildMeshViaHomography } from './rectify.ts';
+import { buildLineAccumulator, findLinePeaks } from './lines.ts';
+import type { LineCandidate } from './lines.ts';
+import { splitIntoTwoFamilies, vpIsFinite, vpToPoint } from './vp.ts';
+import type { LineFamily, VanishingPoint as LineVP } from './vp.ts';
+import { indexFamilyLines, buildLatticeCorrespondences } from './lattice.ts';
+import type { IndexedLine } from './lattice.ts';
+import { fitHomographyDLT, applyHomography } from './homography.ts';
+import type { Mat3 } from './homography.ts';
 
 // ── Pattern setup ─────────────────────────────────────────────────────────────
 //
@@ -122,10 +138,19 @@ startCamera('environment')
 
 const meshStatus = document.getElementById('meshStatus')!;
 const analyzeBtn = document.getElementById('analyzeBtn') as HTMLButtonElement;
-const toggleJunctions = document.getElementById('toggleJunctions') as HTMLInputElement;
-const toggleMesh = document.getElementById('toggleMesh') as HTMLInputElement;
-const toggleCells = document.getElementById('toggleCells') as HTMLInputElement;
+const toggleBinarized = document.getElementById('toggleBinarized') as HTMLInputElement;
+// Old corner/mesh/VP/homography-mesh toggles — retired alongside the
+// pipeline they drove (see the import comment above). Element refs kept
+// commented so this section is easy to diff against if resurrected.
+// const toggleJunctions = document.getElementById('toggleJunctions') as HTMLInputElement;
+// const toggleMesh = document.getElementById('toggleMesh') as HTMLInputElement;
+// const toggleCells = document.getElementById('toggleCells') as HTMLInputElement;
+// const toggleVP = document.getElementById('toggleVP') as HTMLInputElement;
+// const toggleHomography = document.getElementById('toggleHomography') as HTMLInputElement;
 const toggleStage2 = document.getElementById('toggleStage2') as HTMLInputElement;
+const toggleHoughLines = document.getElementById('toggleHoughLines') as HTMLInputElement;
+const toggleLineVPs = document.getElementById('toggleLineVPs') as HTMLInputElement;
+const toggleLineHomography = document.getElementById('toggleLineHomography') as HTMLInputElement;
 
 const MESH_ANALYSIS_BUDGET = 320 * 320;
 const MESH_PATCH = 120; // small central patch, only for an accurate pitch seed under roll
@@ -133,13 +158,27 @@ const meshRawCanvas = document.createElement('canvas');
 const meshRawCtx = meshRawCanvas.getContext('2d', { willReadFrequently: true })!;
 const meshPatchCanvas = document.createElement('canvas');
 const meshPatchCtx = meshPatchCanvas.getContext('2d', { willReadFrequently: true })!;
+const binCanvas = document.createElement('canvas');
+const binCtx = binCanvas.getContext('2d')!;
 
 interface MeshAnalysisResult {
   cropSx: number; cropSy: number; rawScale: number; rawW: number; rawH: number;
-  theta0: number;
-  refinedJunctions: { x: number; y: number; type: JunctionType }[];
-  rawMesh: Mesh;
-  prunedMesh: Mesh;
+  bin: Uint8Array;
+  // Line-based rectification pipeline (src/lines.ts -> src/vp.ts ->
+  // src/lattice.ts -> src/homography.ts), replacing the old corner/mesh/VP
+  // geometry above: detect grid lines directly via a gradient-oriented Hough
+  // transform, split into the two row/col families by their vanishing
+  // points, recover each line's true (gap-tolerant) integer index via a
+  // Mobius-model fit, then treat every row-line x col-line crossing as a
+  // lattice correspondence for a single DLT homography fit.
+  peaks: LineCandidate[];
+  familyA: LineFamily | null;
+  familyB: LineFamily | null;
+  unassigned: LineCandidate[];
+  rowIndexed: IndexedLine[];
+  colIndexed: IndexedLine[];
+  H: Mat3 | null;
+  rows: number; cols: number;
   sampledGrid: SampledGrid | null;
   decodeResult: CandidateResult | null;
 }
@@ -148,6 +187,29 @@ let meshResult: MeshAnalysisResult | null = null;
 
 function rawToVideo(rx: number, ry: number, d: MeshAnalysisResult): { x: number; y: number } {
   return { x: d.cropSx + rx * d.rawScale, y: d.cropSy + ry * d.rawScale };
+}
+
+// Samples one bit per lattice cell (its center, the midpoint of its 4
+// corners) directly from H — see scripts/test-lines-decode.ts, where this
+// was validated end-to-end against real perspective tilt.
+function sampleFromHomography(bin: Uint8Array, w: number, h: number, H: Mat3, rowCount: number, colCount: number): SampledGrid {
+  const cells: SampledCell[][] = [];
+  for (let i = 0; i < rowCount; i++) {
+    const rowCells: SampledCell[] = [];
+    for (let j = 0; j < colCount; j++) {
+      const p = applyHomography(H, i + 0.5, j + 0.5);
+      if (!p) { rowCells.push({ x: NaN, y: NaN, bit: 0, valid: false, cornerCount: 0 }); continue; }
+      const [px, py] = p;
+      const xx = Math.round(px), yy = Math.round(py);
+      if (xx < 0 || xx >= w || yy < 0 || yy >= h) { rowCells.push({ x: px, y: py, bit: 0, valid: false, cornerCount: 0 }); continue; }
+      rowCells.push({ x: px, y: py, bit: bin[yy * w + xx], valid: true, cornerCount: 4 });
+    }
+    cells.push(rowCells);
+  }
+  return { rows: rowCount, cols: colCount, cells, originRow: 0, originCol: 0 };
+}
+function mirrorRowsGrid(sg: SampledGrid): SampledGrid {
+  return { ...sg, cells: sg.cells.slice().reverse() };
 }
 
 function runMeshAnalysis() {
@@ -167,11 +229,16 @@ function runMeshAnalysis() {
   const gray = toGrayscale(rawRgba, rawW, rawH);
   const bin = binarize(gray);
 
+  // Level 1's Hough bin/NMS resolution can't be fixed globally — real
+  // adjacent grid lines can be a few px (well under a degree) apart in Hough
+  // space depending on zoom/tilt, and a fixed resolution either merges
+  // distinct lines (too coarse) or splits one line into duplicate peaks (too
+  // fine): confirmed via scripts/test-lines-decode.ts, fixed defaults merged
+  // real lines down to ~40% of the true count. Seeding resolution from the
+  // OLD pipeline's apparent-pitch estimator (derotate a small patch,
+  // autocorrelate) is used only as a scale HINT for tuning here — not as the
+  // geometry solution itself, which remains fully rotation-general.
   const theta0 = estimateRotationRad(gray, rawW, rawH);
-
-  // Pitch estimate needs derotating first to be accurate under roll (it
-  // assumes axis-aligned grid lines to measure pitch, which roll breaks) —
-  // a small central patch only, via canvas rotate.
   meshPatchCanvas.width = MESH_PATCH; meshPatchCanvas.height = MESH_PATCH;
   meshPatchCtx.fillStyle = '#fff';
   meshPatchCtx.fillRect(0, 0, MESH_PATCH, MESH_PATCH);
@@ -184,38 +251,65 @@ function runMeshAnalysis() {
   const patchGray = toGrayscale(meshPatchCtx.getImageData(0, 0, MESH_PATCH, MESH_PATCH).data, MESH_PATCH, MESH_PATCH);
   const patchBin = binarize(patchGray);
   const coarseGrid = detectGrid(patchBin, MESH_PATCH, MESH_PATCH);
-
-  // tensorRadius/minDistance scale with the actual apparent pitch — a fixed
-  // default doesn't transfer across different capture distances/zoom.
   const apparentPitch = (coarseGrid.pitchX + coarseGrid.pitchY) / 2;
-  const tensorRadius = Math.max(2, Math.round(apparentPitch / 4));
-  const minDistance = Math.max(5, Math.round(tensorRadius * 2.5));
+  const rhoBinSize = Math.max(0.5, Math.min(4, apparentPitch / 8));
+  const thetaBins = Math.max(90, Math.min(1440, Math.round(360 / rhoBinSize)));
 
-  const field = computeJunctionField(gray, rawW, rawH, 1, tensorRadius);
-  const coarseJ = detectJunctions(field, 0.15, minDistance);
-  const refinedJunctions = coarseJ.map(j => {
-    const r = refineJunctionSubPixel(gray, rawW, rawH, j.x, j.y);
-    return { x: r.x, y: r.y, type: j.type };
-  });
+  const field = buildLineAccumulator(gray, rawW, rawH, thetaBins, rhoBinSize);
+  const peaks = findLinePeaks(field, 0.15, 4, 3);
 
-  const rawMesh = buildMesh(refinedJunctions, rawW / 2, rawH / 2, coarseGrid.pitchX, coarseGrid.pitchY, -theta0, 3, 0.45);
-  const prunedMesh = pruneInconsistentNodes(rawMesh, apparentPitch);
-
+  let familyA: LineFamily | null = null, familyB: LineFamily | null = null, unassigned: LineCandidate[] = [];
+  let rowIndexed: IndexedLine[] = [], colIndexed: IndexedLine[] = [];
+  let H: Mat3 | null = null;
+  let rows = 0, cols = 0;
   let sampledGrid: SampledGrid | null = null;
   let decodeResult: CandidateResult | null = null;
-  if (prunedMesh.nodes.length >= ORDER * ORDER) {
-    sampledGrid = sampleFromMesh(bin, rawW, rawH, prunedMesh);
-    if (sampledGrid.rows >= ORDER && sampledGrid.cols >= ORDER) {
-      decodeResult = pickBestCandidate([sampledGrid], ORDER, lookup, debruijn.torus, R, C);
+
+  if (peaks.length >= 8) {
+    try {
+      const split = splitIntoTwoFamilies(peaks, rawW, rawH);
+      familyA = split.familyA; familyB = split.familyB; unassigned = split.unassigned;
+    } catch { /* fewer than 2 usable lines — leave families null */ }
+  }
+
+  if (familyA && familyB && familyA.lines.length >= 3 && familyB.lines.length >= 3) {
+    // expectedSpacingPx (the same apparentPitch used above for Hough bin
+    // sizing) resolves a real ambiguity found via live testing: from line
+    // positions alone, "no gaps" and "a uniform pattern of missing lines"
+    // are indistinguishable, and under real noise this caused genuinely
+    // gap-free lines to occasionally be mis-indexed as 2x/3x sparser,
+    // splitting real cells into phantom half-cells in the rectified-grid
+    // overlay (see src/lattice.ts's recoverIndicesFromTransversal doc).
+    rowIndexed = indexFamilyLines(familyA, familyB.vp, rawW, rawH, 4, apparentPitch);
+    colIndexed = indexFamilyLines(familyB, familyA.vp, rawW, rawH, 4, apparentPitch);
+    const correspondences = buildLatticeCorrespondences(rowIndexed, colIndexed, rawW, rawH);
+    H = fitHomographyDLT(correspondences);
+    if (H) {
+      rows = rowIndexed.length ? Math.max(...rowIndexed.map(r => r.index)) : 0;
+      cols = colIndexed.length ? Math.max(...colIndexed.map(c => c.index)) : 0;
+      if (rows >= ORDER && cols >= ORDER) {
+        sampledGrid = sampleFromHomography(bin, rawW, rawH, H, rows, cols);
+        // indexFamilyLines' sort direction per family is arbitrary, so a
+        // single-axis mirror is possible alongside the 0/90/180/270 rotation
+        // ambiguity pickBestCandidate already searches — see
+        // scripts/test-lines-decode.ts's comment on why both candidates are
+        // needed to cover all 8 dihedral symmetries.
+        decodeResult = pickBestCandidate([sampledGrid, mirrorRowsGrid(sampledGrid)], ORDER, lookup, debruijn.torus, R, C);
+      }
     }
   }
 
-  meshResult = { cropSx, cropSy, rawScale, rawW, rawH, theta0, refinedJunctions, rawMesh, prunedMesh, sampledGrid, decodeResult };
+  meshResult = {
+    cropSx, cropSy, rawScale, rawW, rawH, bin,
+    peaks, familyA, familyB, unassigned, rowIndexed, colIndexed, H, rows, cols, sampledGrid, decodeResult,
+  };
 
   const locked = !!decodeResult?.match && decodeResult.consistency >= CONFIDENCE_THRESHOLD;
   meshStatus.textContent = [
-    `mesh: ${refinedJunctions.length} junctions, ${rawMesh.nodes.length}->${prunedMesh.nodes.length} nodes (pruned)`,
-    sampledGrid ? `sampled ${sampledGrid.rows}x${sampledGrid.cols}` : 'sampled: n/a',
+    `lines: ${peaks.length} peaks, ${unassigned.length} unassigned`,
+    `families: A=${familyA?.lines.length ?? 0} B=${familyB?.lines.length ?? 0}`,
+    `indexed: rows 0..${rows} (${rowIndexed.length} lines), cols 0..${cols} (${colIndexed.length} lines)`,
+    H ? `homography: fit ok, sampled ${sampledGrid?.rows}x${sampledGrid?.cols}` : 'homography: n/a',
     decodeResult ? `score ${(decodeResult.consistency * 100).toFixed(0)}%${locked ? ` -> row ${decodeResult.match!.row} col ${decodeResult.match!.col}` : ' (no lock)'}` : 'decode: n/a',
   ].join('\n');
 }
@@ -245,7 +339,7 @@ const MESH_REFRESH_DELAY_MS = 1200;
 let autoRefreshTimer: number | null = null;
 
 function anyMeshLayerVisible(): boolean {
-  return toggleJunctions.checked || toggleMesh.checked || toggleCells.checked;
+  return toggleBinarized.checked || toggleHoughLines.checked || toggleLineVPs.checked || toggleLineHomography.checked;
 }
 
 function scheduleAutoRefresh() {
@@ -257,7 +351,7 @@ function scheduleAutoRefresh() {
   }, MESH_REFRESH_DELAY_MS);
 }
 
-for (const toggle of [toggleJunctions, toggleMesh, toggleCells]) {
+for (const toggle of [toggleBinarized, toggleHoughLines, toggleLineVPs, toggleLineHomography]) {
   toggle.addEventListener('change', scheduleAutoRefresh);
 }
 
@@ -484,75 +578,103 @@ function drawMeshDebug(d: MeshAnalysisResult) {
   const toVideo = (rx: number, ry: number) => rawToVideo(rx, ry, d);
   const dotR = Math.max(2, d.rawScale * 4);
 
-  if (toggleJunctions.checked) {
-    for (const j of d.refinedJunctions) {
-      const p = toVideo(j.x, j.y);
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, dotR, 0, Math.PI * 2);
-      ctx.fillStyle = j.type === 'saddle' ? '#0ff' : '#fa0'; // saddle=cyan (precise), lcorner=amber (majority, less precise)
-      ctx.fill();
+  if (toggleBinarized.checked) {
+    // Renders the same bit array sampleFromMesh reads bits from, so you can
+    // see exactly what the rest of the pipeline is working with — drawn as
+    // a plain image (nearest-neighbor, no smoothing) rather than per-pixel
+    // canvas calls, since that'd be tens of thousands of draw calls/frame.
+    binCanvas.width = d.rawW; binCanvas.height = d.rawH;
+    const imgData = binCtx.createImageData(d.rawW, d.rawH);
+    for (let i = 0; i < d.bin.length; i++) {
+      const v = d.bin[i] ? 0 : 255;
+      imgData.data[i * 4] = v; imgData.data[i * 4 + 1] = v; imgData.data[i * 4 + 2] = v; imgData.data[i * 4 + 3] = 255;
     }
+    binCtx.putImageData(imgData, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(binCanvas, d.cropSx, d.cropSy, d.rawW * d.rawScale, d.rawH * d.rawScale);
+    ctx.imageSmoothingEnabled = true;
   }
 
-  if (toggleMesh.checked) {
-    const kept = d.prunedMesh.byCoord;
-    // Links between adjacent surviving nodes, so the mesh reads as a graph
-    // rather than a scatter of dots.
-    ctx.strokeStyle = 'rgba(0,255,0,0.6)';
+  // Every detected Hough line (src/lines.ts), drawn full-length across the
+  // frame (a line has no endpoints of its own, just a theta/rho) — colored
+  // by which family it ended up in, so the split (src/vp.ts) is visually
+  // checkable against the real grid: family A / family B / unassigned
+  // (neither VP's inlier — noise, or a genuine line the split couldn't
+  // place) each get a distinct color.
+  if (toggleHoughLines.checked) {
+    const cx = d.rawW / 2, cy = d.rawH / 2;
+    const big = 2 * Math.max(d.rawW, d.rawH);
+    const drawLine = (line: LineCandidate, color: string, width: number) => {
+      const a = Math.cos(line.theta), b = Math.sin(line.theta);
+      const px = cx + line.rho * a, py = cy + line.rho * b;
+      const tx = -b, ty = a; // direction along the line (perpendicular to its normal)
+      const p1 = toVideo(px - tx * big, py - ty * big);
+      const p2 = toVideo(px + tx * big, py + ty * big);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(1, d.rawScale * width);
+      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+    };
+    for (const line of d.unassigned) drawLine(line, 'rgba(150,150,150,0.4)', 0.75);
+    for (const line of d.familyA?.lines ?? []) drawLine(line, 'rgba(0,255,255,0.7)', 1);
+    for (const line of d.familyB?.lines ?? []) drawLine(line, 'rgba(255,0,255,0.7)', 1);
+  }
+
+  // The two families' vanishing points (src/vp.ts) — drawn as full lines
+  // through the raw capture's center rather than segments toward the VP
+  // itself, since it's very often off-screen (or, for a near-fronto-parallel
+  // family, has no position at all — only a direction, the homogeneous w~0
+  // case). A finite VP additionally gets a marker dot at its actual
+  // position when that's within the drawable area.
+  if (toggleLineVPs.checked && d.familyA && d.familyB) {
+    const cx = d.rawW / 2, cy = d.rawH / 2;
+    const big = 2 * Math.max(d.rawW, d.rawH);
+    const drawVPLine = (vp: LineVP, color: string) => {
+      let dx: number, dy: number;
+      if (vpIsFinite(vp)) {
+        const p = vpToPoint(vp);
+        dx = p.x - cx; dy = p.y - cy;
+        const n = Math.hypot(dx, dy) || 1;
+        dx /= n; dy /= n;
+      } else {
+        const n = Math.hypot(vp.x, vp.y) || 1;
+        dx = vp.x / n; dy = vp.y / n;
+      }
+      const p1 = toVideo(cx - dx * big, cy - dy * big);
+      const p2 = toVideo(cx + dx * big, cy + dy * big);
+      ctx.strokeStyle = color;
+      ctx.lineWidth = Math.max(1, d.rawScale * 1.5);
+      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+      if (vpIsFinite(vp)) {
+        const p = vpToPoint(vp);
+        const pv = toVideo(p.x, p.y);
+        ctx.beginPath(); ctx.arc(pv.x, pv.y, dotR * 1.2, 0, Math.PI * 2);
+        ctx.fillStyle = color; ctx.fill();
+      }
+    };
+    drawVPLine(d.familyA.vp, 'rgba(255,60,60,0.85)');
+    drawVPLine(d.familyB.vp, 'rgba(255,60,255,0.85)');
+  }
+
+  // The fitted homography's implied grid (src/homography.ts) — every
+  // integer row/col lattice line projected back into the image, so the
+  // rectification can be visually checked against the real grid on screen:
+  // if H is right, these lines should sit exactly on the real cell
+  // boundaries even in regions with no detected Hough line at all (a gap
+  // indexFamilyLines' Mobius fit bridged).
+  if (toggleLineHomography.checked && d.H) {
+    ctx.strokeStyle = 'rgba(255,200,0,0.7)';
     ctx.lineWidth = Math.max(1, d.rawScale);
-    for (const node of d.prunedMesh.nodes) {
-      const right = kept.get(`${node.row},${node.col + 1}`);
-      const down = kept.get(`${node.row + 1},${node.col}`);
-      for (const nb of [right, down]) {
-        if (!nb) continue;
-        const a = toVideo(node.x, node.y), b = toVideo(nb.x, nb.y);
-        ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-      }
+    for (let i = 0; i <= d.rows; i++) {
+      const p1 = applyHomography(d.H, i, 0), p2 = applyHomography(d.H, i, d.cols);
+      if (!p1 || !p2) continue;
+      const a = toVideo(p1[0], p1[1]), b = toVideo(p2[0], p2[1]);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
-    // Surviving nodes as small green dots.
-    for (const node of d.prunedMesh.nodes) {
-      const p = toVideo(node.x, node.y);
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, dotR * 0.6, 0, Math.PI * 2);
-      ctx.fillStyle = '#0f0';
-      ctx.fill();
-    }
-    // Nodes buildMesh found but pruneInconsistentNodes rejected — shown as
-    // red X marks, so it's visible what got thrown out and why the surviving
-    // mesh is sparser than raw detection alone would suggest.
-    ctx.strokeStyle = '#f00';
-    ctx.lineWidth = Math.max(1, d.rawScale * 1.5);
-    for (const node of d.rawMesh.nodes) {
-      if (kept.has(`${node.row},${node.col}`)) continue;
-      const p = toVideo(node.x, node.y);
-      const r = dotR * 0.7;
-      ctx.beginPath(); ctx.moveTo(p.x - r, p.y - r); ctx.lineTo(p.x + r, p.y + r); ctx.stroke();
-      ctx.beginPath(); ctx.moveTo(p.x + r, p.y - r); ctx.lineTo(p.x - r, p.y + r); ctx.stroke();
-    }
-  }
-
-  if (toggleCells.checked && d.sampledGrid) {
-    // Dot size/opacity encodes how many of the cell's 4 corners were
-    // actually known (2, 3, or 4 — see sampleFromMesh's diagonal-pair
-    // comment) — a rough per-cell confidence signal: a full, opaque dot
-    // means all 4 corners were found, a small, faint one means the position
-    // was estimated from just one diagonal pair.
-    for (const row of d.sampledGrid.cells) {
-      for (const cell of row) {
-        if (!cell.valid) continue;
-        const p = toVideo(cell.x, cell.y);
-        const frac = Math.max(0, Math.min(1, (cell.cornerCount - 2) / 2)); // 2->0, 3->0.5, 4->1
-        const r = dotR * (0.5 + 0.5 * frac);
-        ctx.globalAlpha = 0.5 + 0.5 * frac;
-        ctx.beginPath();
-        ctx.arc(p.x, p.y, r, 0, Math.PI * 2);
-        ctx.fillStyle = cell.bit ? '#000' : '#fff';
-        ctx.fill();
-        ctx.lineWidth = Math.max(1, r * 0.3);
-        ctx.strokeStyle = '#888';
-        ctx.stroke();
-        ctx.globalAlpha = 1;
-      }
+    for (let j = 0; j <= d.cols; j++) {
+      const p1 = applyHomography(d.H, 0, j), p2 = applyHomography(d.H, d.rows, j);
+      if (!p1 || !p2) continue;
+      const a = toVideo(p1[0], p1[1]), b = toVideo(p2[0], p2[1]);
+      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
     }
   }
 }

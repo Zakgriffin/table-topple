@@ -485,7 +485,7 @@ export function decodePatches(sg: SampledGrid, order: number, lookup: Int32Array
 // its window's reference point by one cell in each sampled-grid direction —
 // same underlying rotation, just applied to a shift vector instead of a
 // cell index.
-function rotateShift(da: number, db: number, orientation: number): [number, number] {
+export function rotateShift(da: number, db: number, orientation: number): [number, number] {
   if (orientation === 1) return [db, -da];
   if (orientation === 2) return [-da, -db];
   if (orientation === 3) return [-db, da];

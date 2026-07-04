@@ -29,7 +29,7 @@ export interface HoughField {
   acc: Float64Array; // thetaBins x rhoBins, row-major (theta-major)
 }
 
-function boxBlur(src: Float64Array, w: number, h: number, radius: number): Float64Array {
+export function boxBlur(src: Float64Array, w: number, h: number, radius: number): Float64Array {
   const out = new Float64Array(w * h);
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {

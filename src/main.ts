@@ -1,10 +1,14 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
 import { pickBestCandidate, toGrayscale, binarize } from './decode.ts';
 import type { SampledGrid, SampledCell, CandidateResult } from './decode.ts';
-import { buildLineAccumulator, findLinePeaksTiered } from './lines.ts';
-import type { LineCandidate } from './lines.ts';
-import { splitIntoTwoFamilies, vpIsFinite, vpToPoint } from './vp.ts';
+import { buildLineAccumulator, findLinePeaksTiered, boxBlur } from './lines.ts';
+import type { LineCandidate, HoughField } from './lines.ts';
+// splitIntoTwoFamilies (discrete peaks + RANSAC pairing) is the OLD Level-2
+// family-finder — kept for easy revert, no longer called (see runPipeline).
+// import { splitIntoTwoFamilies } from './vp.ts';
+import { vpIsFinite, vpToPoint } from './vp.ts';
 import type { LineFamily, VanishingPoint as LineVP } from './vp.ts';
+import { searchOrthogonalVPs, assignLinesToFamilies, directionToVanishingPoint, estimateFocalPxFromDiagonalFov } from './orthogonalVp.ts';
 import { indexFamilyLines, buildLatticeCorrespondences } from './lattice.ts';
 import type { IndexedLine } from './lattice.ts';
 import { fitHomographyRobust, applyHomography } from './homography.ts';
@@ -108,11 +112,14 @@ startCamera('environment')
 
 // ── Position-tracking pipeline ──────────────────────────────────────────────
 // Detect grid lines directly via a gradient-oriented Hough transform
-// (src/lines.ts), split them into the two row/col families by their
-// vanishing points (src/vp.ts), recover each line's true gap-tolerant
-// integer index via a Mobius-model fit (src/lattice.ts), then treat every
-// row-line x col-line crossing as a correspondence for a single weighted,
-// outlier-rejecting homography fit (src/homography.ts's fitHomographyRobust).
+// (src/lines.ts), split them into the two row/col families via a
+// constrained 3-parameter direct search that exploits the pattern being a
+// right-angle grid (src/orthogonalVp.ts — replaced src/vp.ts's discrete-peak
+// + RANSAC splitIntoTwoFamilies, kept in place but uncalled for easy
+// revert), recover each line's true gap-tolerant integer index via a
+// Mobius-model fit (src/lattice.ts), then treat every row-line x col-line
+// crossing as a correspondence for a single weighted, outlier-rejecting
+// homography fit (src/homography.ts's fitHomographyRobust).
 // Sampling every lattice cell through
 // that homography and decoding via src/decode.ts's pickBestCandidate gives
 // this app's actual reported position — this is the only pipeline left; an
@@ -132,10 +139,15 @@ startCamera('environment')
 const pipelineStatus = document.getElementById('pipelineStatus')!;
 const analyzeBtn = document.getElementById('analyzeBtn') as HTMLButtonElement;
 const toggleBinarized = document.getElementById('toggleBinarized') as HTMLInputElement;
-const toggleHoughLines = document.getElementById('toggleHoughLines') as HTMLInputElement;
+const toggleGradientField = document.getElementById('toggleGradientField') as HTMLInputElement;
+// toggleHoughLines (per-line family-colored overlay) retired along with the
+// old Level 2 pipeline it visualized — the Hough-space window below is the
+// replacement way to see what detection is doing.
+// const toggleHoughLines = document.getElementById('toggleHoughLines') as HTMLInputElement;
 const toggleLineVPs = document.getElementById('toggleLineVPs') as HTMLInputElement;
 const toggleLineHomography = document.getElementById('toggleLineHomography') as HTMLInputElement;
 const togglePatches = document.getElementById('togglePatches') as HTMLInputElement;
+const toggleHoughSpace = document.getElementById('toggleHoughSpace') as HTMLInputElement;
 
 // Live-tunable pipeline parameters — each backed by a <input type=range> in
 // the "tuning" details panel (index.html). Reads the slider's CURRENT value
@@ -155,9 +167,10 @@ const tMinMag = bindSlider('tMinMag');
 const tPeakThreshold = bindSlider('tPeakThreshold');
 const tNmsTheta = bindSlider('tNmsTheta');
 const tNmsRho = bindSlider('tNmsRho');
-// Level 2 — VP split (src/vp.ts)
-const tSplitInlierPx = bindSlider('tSplitInlierPx');
-const tMaxCandidates = bindSlider('tMaxCandidates');
+// Level 2 — VP split. OLD (src/vp.ts's splitIntoTwoFamilies, not currently
+// called — see runPipeline): tSplitInlierPx, tMaxCandidates.
+// NEW (src/orthogonalVp.ts's searchOrthogonalVPs):
+const tOrthoDeltaPx = bindSlider('tOrthoDeltaPx');
 // Level 3 — index recovery (src/lattice.ts)
 const tIndexInlierPx = bindSlider('tIndexInlierPx');
 const tMaxGap = bindSlider('tMaxGap');
@@ -201,10 +214,19 @@ const analysisCanvas = document.createElement('canvas');
 const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true })!;
 const binCanvas = document.createElement('canvas');
 const binCtx = binCanvas.getContext('2d')!;
+const gradientCanvas = document.createElement('canvas');
+const gradientCtx = gradientCanvas.getContext('2d')!;
+// Hough-space window: a separate, always-fixed-position element (not
+// composited onto the live video like the other overlays), so it's drawn
+// once per completed pipeline pass (see runPipeline) rather than every
+// render() frame.
+const houghSpaceCanvas = document.getElementById('houghSpaceCanvas') as HTMLCanvasElement;
+const houghSpaceCtx = houghSpaceCanvas.getContext('2d')!;
 
 interface PipelineResult {
   cropSx: number; cropSy: number; rawScale: number; rawW: number; rawH: number;
   bin: Uint8Array;
+  gray: Float64Array;
   peaks: LineCandidate[];
   familyA: LineFamily | null;
   familyB: LineFamily | null;
@@ -246,6 +268,63 @@ function mirrorRowsGrid(sg: SampledGrid): SampledGrid {
   return { ...sg, cells: sg.cells.slice().reverse() };
 }
 
+// Renders the raw (theta,rho) Hough accumulator itself as a heatmap, with
+// detected peaks marked on top — the replacement for the old per-line
+// image-space overlay: instead of seeing which lines got found, this shows
+// the actual evidence field detection is working from, which is more useful
+// for building intuition about WHY a peak was or wasn't found. Drawn once
+// per completed pipeline pass (called from runPipeline), not per render()
+// frame, since the field is unchanged between passes and this canvas isn't
+// composited onto the live video.
+function drawHoughSpace(field: HoughField, strong: LineCandidate[], weak: LineCandidate[]) {
+  if (!toggleHoughSpace.checked) { houghSpaceCanvas.style.display = 'none'; return; }
+  houghSpaceCanvas.style.display = 'block';
+  const { thetaBins, rhoBins, rhoMin, rhoBinSize, acc } = field;
+  houghSpaceCanvas.width = thetaBins;
+  houghSpaceCanvas.height = rhoBins;
+
+  let maxVal = 0;
+  for (let i = 0; i < acc.length; i++) if (acc[i] > maxVal) maxVal = acc[i];
+  const imgData = houghSpaceCtx.createImageData(thetaBins, rhoBins);
+  for (let tb = 0; tb < thetaBins; tb++) {
+    for (let rb = 0; rb < rhoBins; rb++) {
+      // sqrt compression: a Hough accumulator is usually a few very tall
+      // peaks over a much dimmer background — a linear map crushes that
+      // background to near-black, hiding the structure that's actually
+      // useful for building intuition about near-miss/weak-family lines.
+      const v = maxVal > 0 ? Math.sqrt(acc[tb * rhoBins + rb] / maxVal) : 0;
+      const idx = (rb * thetaBins + tb) * 4;
+      const g = Math.round(v * 255);
+      imgData.data[idx] = g; imgData.data[idx + 1] = g; imgData.data[idx + 2] = g; imgData.data[idx + 3] = 255;
+    }
+  }
+  houghSpaceCtx.putImageData(imgData, 0, 0);
+
+  const markPeak = (line: LineCandidate, color: string) => {
+    const tb = (line.theta / Math.PI) * thetaBins;
+    const rb = (line.rho - rhoMin) / rhoBinSize;
+    houghSpaceCtx.beginPath();
+    houghSpaceCtx.arc(tb, rb, 1.5, 0, Math.PI * 2);
+    houghSpaceCtx.fillStyle = color;
+    houghSpaceCtx.fill();
+  };
+  for (const line of weak) markPeak(line, 'rgba(255,150,0,0.8)');
+  for (const line of strong) markPeak(line, 'rgba(0,255,120,0.9)');
+}
+
+// Maps an HSV color (h in [0,360), s,v in [0,1]) to 0-255 RGB, for the
+// gradient-field overlay (hue=direction, saturation=magnitude).
+function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
+  const c = v * s;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m = v - c;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; } else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; } else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
+  return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
+}
+
 function runPipeline() {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return;
@@ -277,11 +356,32 @@ function runPipeline() {
   let sampledGrid: SampledGrid | null = null;
   let decodeResult: CandidateResult | null = null;
 
+  // -- OLD Level 2: discrete peaks + exhaustive-pair RANSAC (src/vp.ts) --
+  // if (peaks.length >= 8) {
+  //   try {
+  //     const split = splitIntoTwoFamilies(peaks, rawW, rawH, tSplitInlierPx.get(), Math.round(tMaxCandidates.get()), rescuePeaks);
+  //     familyA = split.familyA; familyB = split.familyB; unassigned = split.unassigned;
+  //   } catch { /* fewer than 2 usable lines — leave families null */ }
+  // }
+
+  // -- NEW Level 2: orthogonal-constraint 3-parameter direct search
+  // (src/orthogonalVp.ts) — exploits the pattern being a right-angle grid
+  // (the two vanishing directions are ORTHOGONAL unit vectors in 3D, not
+  // independent unknowns) instead of finding+pairing discrete peaks. Needs
+  // an assumed focal length, which nothing else in this pipeline needs —
+  // see estimateFocalPxFromDiagonalFov's own comment for what that number
+  // is and how confidently it's actually known right now.
   if (peaks.length >= 8) {
-    try {
-      const split = splitIntoTwoFamilies(peaks, rawW, rawH, tSplitInlierPx.get(), Math.round(tMaxCandidates.get()), rescuePeaks);
-      familyA = split.familyA; familyB = split.familyB; unassigned = split.unassigned;
-    } catch { /* fewer than 2 usable lines — leave families null */ }
+    const focalPx = estimateFocalPxFromDiagonalFov(rawW, rawH);
+    const allLines = [...peaks, ...rescuePeaks];
+    const { Drow, Dcol } = searchOrthogonalVPs(allLines, focalPx, tOrthoDeltaPx.get());
+    const cx = rawW / 2, cy = rawH / 2;
+    const { familyA: linesA, familyB: linesB, unassigned: rest } = assignLinesToFamilies(allLines, Drow, Dcol, focalPx);
+    if (linesA.length >= 2 && linesB.length >= 2) {
+      familyA = { vp: directionToVanishingPoint(Drow, focalPx, cx, cy), lines: linesA };
+      familyB = { vp: directionToVanishingPoint(Dcol, focalPx, cx, cy), lines: linesB };
+      unassigned = rest;
+    }
   }
 
   const minFamilySize = Math.round(tMinFamily.get());
@@ -314,9 +414,11 @@ function runPipeline() {
   }
 
   pipelineResult = {
-    cropSx, cropSy, rawScale, rawW, rawH, bin,
+    cropSx, cropSy, rawScale, rawW, rawH, bin, gray,
     peaks, familyA, familyB, unassigned, rowIndexed, colIndexed, H, rows, cols, sampledGrid, decodeResult,
   };
+
+  drawHoughSpace(field, peaks, rescuePeaks);
 
   const locked = !!decodeResult?.match && decodeResult.consistency >= tConfidence.get();
   pipelineStatus.textContent = [
@@ -402,28 +504,70 @@ function drawDebugOverlays(d: PipelineResult) {
     ctx.imageSmoothingEnabled = true;
   }
 
-  // Every detected Hough line (src/lines.ts), drawn full-length across the
-  // frame (a line has no endpoints of its own, just a theta/rho) — colored
-  // by which family it ended up in, so the split (src/vp.ts) is visually
-  // checkable against the real grid: family A / family B / unassigned
-  // (neither VP's inlier — noise, or a genuine line the split couldn't
-  // place) each get a distinct color.
-  if (toggleHoughLines.checked) {
-    const cx = d.rawW / 2, cy = d.rawH / 2;
-    const big = 2 * Math.max(d.rawW, d.rawH);
-    const drawLine = (line: LineCandidate, color: string, width: number) => {
-      const a = Math.cos(line.theta), b = Math.sin(line.theta);
-      const px = cx + line.rho * a, py = cy + line.rho * b;
-      const tx = -b, ty = a; // direction along the line (perpendicular to its normal)
-      const p1 = toVideo(px - tx * big, py - ty * big);
-      const p2 = toVideo(px + tx * big, py + ty * big);
-      ctx.strokeStyle = color;
-      ctx.lineWidth = Math.max(1, d.rawScale * width);
-      ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
-    };
-    for (const line of d.unassigned) drawLine(line, 'rgba(150,150,150,0.4)', 0.75);
-    for (const line of d.familyA?.lines ?? []) drawLine(line, 'rgba(0,255,255,0.7)', 1);
-    for (const line of d.familyB?.lines ?? []) drawLine(line, 'rgba(255,0,255,0.7)', 1);
+  // -- OLD: every detected Hough line, colored by family (src/vp.ts's old
+  // splitIntoTwoFamilies). Retired along with that pipeline — the Hough-space
+  // window (see drawHoughSpace, called from runPipeline) is the replacement
+  // way to see what detection found, without needing a per-line family
+  // assignment to color by.
+  // if (toggleHoughLines.checked) {
+  //   const cx = d.rawW / 2, cy = d.rawH / 2;
+  //   const big = 2 * Math.max(d.rawW, d.rawH);
+  //   const drawLine = (line: LineCandidate, color: string, width: number) => {
+  //     const a = Math.cos(line.theta), b = Math.sin(line.theta);
+  //     const px = cx + line.rho * a, py = cy + line.rho * b;
+  //     const tx = -b, ty = a; // direction along the line (perpendicular to its normal)
+  //     const p1 = toVideo(px - tx * big, py - ty * big);
+  //     const p2 = toVideo(px + tx * big, py + ty * big);
+  //     ctx.strokeStyle = color;
+  //     ctx.lineWidth = Math.max(1, d.rawScale * width);
+  //     ctx.beginPath(); ctx.moveTo(p1.x, p1.y); ctx.lineTo(p2.x, p2.y); ctx.stroke();
+  //   };
+  //   for (const line of d.unassigned) drawLine(line, 'rgba(150,150,150,0.4)', 0.75);
+  //   for (const line of d.familyA?.lines ?? []) drawLine(line, 'rgba(0,255,255,0.7)', 1);
+  //   for (const line of d.familyB?.lines ?? []) drawLine(line, 'rgba(255,0,255,0.7)', 1);
+  // }
+
+  // Raw gradient field (magnitude + direction) feeding Level 1's Hough
+  // transform, encoded as hue=direction (folded to [0,PI) — a line has no
+  // arrow, matching exactly what the Hough transform itself sees, see
+  // src/lines.ts) and saturation=magnitude (normalized to this frame's own
+  // max, so it stays legible across different lighting). Recomputed from the
+  // stored grayscale using the CURRENT blur-radius slider value (not
+  // whatever runPipeline last used), so retuning that slider gives immediate
+  // visual feedback without waiting for the next scheduled pass.
+  if (toggleGradientField.checked) {
+    const blurRadius = Math.round(tBlurRadius.get());
+    const blurred = boxBlur(d.gray, d.rawW, d.rawH, blurRadius);
+    gradientCanvas.width = d.rawW; gradientCanvas.height = d.rawH;
+    const imgData = gradientCtx.createImageData(d.rawW, d.rawH);
+    let maxMag = 0;
+    const mags = new Float64Array(d.rawW * d.rawH);
+    for (let y = 1; y < d.rawH - 1; y++) {
+      for (let x = 1; x < d.rawW - 1; x++) {
+        const i = y * d.rawW + x;
+        const fx = blurred[i + 1] - blurred[i - 1];
+        const fy = blurred[i + d.rawW] - blurred[i - d.rawW];
+        const mag = Math.hypot(fx, fy);
+        mags[i] = mag;
+        if (mag > maxMag) maxMag = mag;
+      }
+    }
+    for (let y = 1; y < d.rawH - 1; y++) {
+      for (let x = 1; x < d.rawW - 1; x++) {
+        const i = y * d.rawW + x;
+        const fx = blurred[i + 1] - blurred[i - 1];
+        const fy = blurred[i + d.rawW] - blurred[i - d.rawW];
+        let theta = Math.atan2(fy, fx);
+        if (theta < 0) theta += Math.PI;
+        if (theta >= Math.PI) theta -= Math.PI;
+        const sat = maxMag > 0 ? mags[i] / maxMag : 0;
+        const [r, g, b] = hsvToRgb((theta / Math.PI) * 360, sat, 1);
+        const idx = i * 4;
+        imgData.data[idx] = r; imgData.data[idx + 1] = g; imgData.data[idx + 2] = b; imgData.data[idx + 3] = 255;
+      }
+    }
+    gradientCtx.putImageData(imgData, 0, 0);
+    ctx.drawImage(gradientCanvas, d.cropSx, d.cropSy, d.rawW * d.rawScale, d.rawH * d.rawScale);
   }
 
   // The two families' vanishing points (src/vp.ts) — drawn as full lines

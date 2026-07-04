@@ -62,6 +62,17 @@
     text-shadow: 0 0 9px #000, 0 0 9px #000;
     margin-top: 220px;
   }
+
+  #tuningPanel {
+    margin-top: 6px; font-size: 18px; color: white; font-family: monospace;
+  }
+  #tuningPanel summary { font-size: 22px; cursor: pointer; padding: 4px 0; }
+  #tuningGroup { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; max-height: 60vh; overflow-y: auto; }
+  .tuningHeader { font-size: 16px; opacity: 0.7; margin-top: 6px; text-transform: uppercase; letter-spacing: 1px; }
+  .tuningRow { display: flex; align-items: center; gap: 10px; }
+  .tuningRow span.tName { flex: 0 0 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tuningRow input[type=range] { flex: 1; accent-color: #0f0; height: 14px; }
+  .tuningRow span.tVal { flex: 0 0 48px; text-align: right; }
 </style>
 </head>
 <body>
@@ -86,6 +97,37 @@
   <label><input type="checkbox" id="toggleLineHomography"> rectified grid</label>
   <hr style="width:100%; border-color: rgba(255,255,255,0.3);">
   <label><input type="checkbox" id="toggleStage2"> stage2 lines</label>
+
+  <details id="tuningPanel">
+    <summary>&#9881; tuning</summary>
+    <div id="tuningGroup">
+      <div class="tuningHeader">Level 1 — hough lines</div>
+      <label class="tuningRow"><span class="tName">blur radius</span><input type="range" id="tBlurRadius" min="0" max="4" step="1" value="1"><span class="tVal" id="tBlurRadiusVal">1</span></label>
+      <label class="tuningRow"><span class="tName">noise floor</span><input type="range" id="tMinMag" min="0" max="30" step="0.5" value="4"><span class="tVal" id="tMinMagVal">4</span></label>
+      <label class="tuningRow"><span class="tName">res. divisor</span><input type="range" id="tRhoDivisor" min="2" max="16" step="0.5" value="8"><span class="tVal" id="tRhoDivisorVal">8</span></label>
+      <label class="tuningRow"><span class="tName">peak thresh.</span><input type="range" id="tPeakThreshold" min="0.02" max="0.5" step="0.01" value="0.15"><span class="tVal" id="tPeakThresholdVal">0.15</span></label>
+      <label class="tuningRow"><span class="tName">NMS &theta; radius</span><input type="range" id="tNmsTheta" min="1" max="10" step="1" value="4"><span class="tVal" id="tNmsThetaVal">4</span></label>
+      <label class="tuningRow"><span class="tName">NMS &rho; radius</span><input type="range" id="tNmsRho" min="1" max="10" step="1" value="3"><span class="tVal" id="tNmsRhoVal">3</span></label>
+
+      <div class="tuningHeader">Level 2 — VP split</div>
+      <label class="tuningRow"><span class="tName">inlier px</span><input type="range" id="tSplitInlierPx" min="1" max="40" step="0.5" value="6"><span class="tVal" id="tSplitInlierPxVal">6</span></label>
+      <label class="tuningRow"><span class="tName">max candidates</span><input type="range" id="tMaxCandidates" min="10" max="200" step="5" value="60"><span class="tVal" id="tMaxCandidatesVal">60</span></label>
+
+      <div class="tuningHeader">Level 3 — index recovery</div>
+      <label class="tuningRow"><span class="tName">inlier px</span><input type="range" id="tIndexInlierPx" min="1" max="40" step="0.5" value="4"><span class="tVal" id="tIndexInlierPxVal">4</span></label>
+      <label class="tuningRow"><span class="tName">scale tol.</span><input type="range" id="tScaleTolerance" min="1.1" max="3" step="0.05" value="1.6"><span class="tVal" id="tScaleToleranceVal">1.6</span></label>
+      <label class="tuningRow"><span class="tName">max gap search</span><input type="range" id="tMaxGap" min="1" max="6" step="1" value="3"><span class="tVal" id="tMaxGapVal">3</span></label>
+      <label class="tuningRow"><span class="tName">span cap &times;</span><input type="range" id="tSpanCap" min="2" max="10" step="1" value="3"><span class="tVal" id="tSpanCapVal">3</span></label>
+
+      <div class="tuningHeader">orchestration</div>
+      <label class="tuningRow"><span class="tName">analysis res.</span><input type="range" id="tAnalysisRes" min="160" max="640" step="10" value="320"><span class="tVal" id="tAnalysisResVal">320</span></label>
+      <label class="tuningRow"><span class="tName">patch size</span><input type="range" id="tPatchSize" min="60" max="200" step="5" value="120"><span class="tVal" id="tPatchSizeVal">120</span></label>
+      <label class="tuningRow"><span class="tName">confidence</span><input type="range" id="tConfidence" min="0.5" max="1" step="0.01" value="0.85"><span class="tVal" id="tConfidenceVal">0.85</span></label>
+      <label class="tuningRow"><span class="tName">refresh ms</span><input type="range" id="tRefreshDelay" min="300" max="5000" step="100" value="1200"><span class="tVal" id="tRefreshDelayVal">1200</span></label>
+      <label class="tuningRow"><span class="tName">min family size</span><input type="range" id="tMinFamily" min="2" max="10" step="1" value="3"><span class="tVal" id="tMinFamilyVal">3</span></label>
+      <label class="tuningRow"><span class="tName">stage2 res.</span><input type="range" id="tStage2Res" min="100" max="400" step="5" value="190"><span class="tVal" id="tStage2ResVal">190</span></label>
+    </div>
+  </details>
 </div>
 <div id="zoomBox">
   <span id="zoomLabel">Zoom</span>

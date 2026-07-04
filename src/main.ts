@@ -152,8 +152,40 @@ const toggleHoughLines = document.getElementById('toggleHoughLines') as HTMLInpu
 const toggleLineVPs = document.getElementById('toggleLineVPs') as HTMLInputElement;
 const toggleLineHomography = document.getElementById('toggleLineHomography') as HTMLInputElement;
 
-const MESH_ANALYSIS_BUDGET = 320 * 320;
-const MESH_PATCH = 120; // small central patch, only for an accurate pitch seed under roll
+// Live-tunable pipeline parameters — each backed by a <input type=range> in
+// the "tuning" details panel (index.html). Reads the slider's CURRENT value
+// on every call via .get(), so a change takes effect on the next Analyze
+// click or auto-refresh pass with no extra plumbing.
+function bindSlider(id: string): { get: () => number } {
+  const input = document.getElementById(id) as HTMLInputElement;
+  const valSpan = document.getElementById(id + 'Val');
+  const sync = () => { if (valSpan) valSpan.textContent = input.value; };
+  input.addEventListener('input', sync);
+  return { get: () => parseFloat(input.value) };
+}
+
+// Level 1 — hough lines (src/lines.ts)
+const tBlurRadius = bindSlider('tBlurRadius');
+const tMinMag = bindSlider('tMinMag');
+const tRhoDivisor = bindSlider('tRhoDivisor');
+const tPeakThreshold = bindSlider('tPeakThreshold');
+const tNmsTheta = bindSlider('tNmsTheta');
+const tNmsRho = bindSlider('tNmsRho');
+// Level 2 — VP split (src/vp.ts)
+const tSplitInlierPx = bindSlider('tSplitInlierPx');
+const tMaxCandidates = bindSlider('tMaxCandidates');
+// Level 3 — index recovery (src/lattice.ts)
+const tIndexInlierPx = bindSlider('tIndexInlierPx');
+const tScaleTolerance = bindSlider('tScaleTolerance');
+const tMaxGap = bindSlider('tMaxGap');
+const tSpanCap = bindSlider('tSpanCap');
+// Orchestration
+const tAnalysisRes = bindSlider('tAnalysisRes');
+const tPatchSize = bindSlider('tPatchSize');
+const tConfidence = bindSlider('tConfidence');
+const tRefreshDelay = bindSlider('tRefreshDelay');
+const tMinFamily = bindSlider('tMinFamily');
+const tStage2Res = bindSlider('tStage2Res');
 const meshRawCanvas = document.createElement('canvas');
 const meshRawCtx = meshRawCanvas.getContext('2d', { willReadFrequently: true })!;
 const meshPatchCanvas = document.createElement('canvas');
@@ -219,7 +251,8 @@ function runMeshAnalysis() {
   const cropW = vw * 0.95, cropH = vh * 0.95;
   const cropSx = (vw - cropW) / 2, cropSy = (vh - cropH) / 2;
   const aspect = cropW / cropH;
-  const rawH = Math.round(Math.sqrt(MESH_ANALYSIS_BUDGET / aspect));
+  const analysisBudget = tAnalysisRes.get() * tAnalysisRes.get();
+  const rawH = Math.round(Math.sqrt(analysisBudget / aspect));
   const rawW = Math.round(rawH * aspect);
   const rawScale = cropW / rawW;
 
@@ -239,24 +272,25 @@ function runMeshAnalysis() {
   // autocorrelate) is used only as a scale HINT for tuning here — not as the
   // geometry solution itself, which remains fully rotation-general.
   const theta0 = estimateRotationRad(gray, rawW, rawH);
-  meshPatchCanvas.width = MESH_PATCH; meshPatchCanvas.height = MESH_PATCH;
+  const patchSize = Math.round(tPatchSize.get());
+  meshPatchCanvas.width = patchSize; meshPatchCanvas.height = patchSize;
   meshPatchCtx.fillStyle = '#fff';
-  meshPatchCtx.fillRect(0, 0, MESH_PATCH, MESH_PATCH);
+  meshPatchCtx.fillRect(0, 0, patchSize, patchSize);
   meshPatchCtx.save();
-  meshPatchCtx.translate(MESH_PATCH / 2, MESH_PATCH / 2);
+  meshPatchCtx.translate(patchSize / 2, patchSize / 2);
   meshPatchCtx.rotate(-theta0);
   meshPatchCtx.translate(-rawW / 2, -rawH / 2);
   meshPatchCtx.drawImage(meshRawCanvas, 0, 0);
   meshPatchCtx.restore();
-  const patchGray = toGrayscale(meshPatchCtx.getImageData(0, 0, MESH_PATCH, MESH_PATCH).data, MESH_PATCH, MESH_PATCH);
+  const patchGray = toGrayscale(meshPatchCtx.getImageData(0, 0, patchSize, patchSize).data, patchSize, patchSize);
   const patchBin = binarize(patchGray);
-  const coarseGrid = detectGrid(patchBin, MESH_PATCH, MESH_PATCH);
+  const coarseGrid = detectGrid(patchBin, patchSize, patchSize);
   const apparentPitch = (coarseGrid.pitchX + coarseGrid.pitchY) / 2;
-  const rhoBinSize = Math.max(0.5, Math.min(4, apparentPitch / 8));
+  const rhoBinSize = Math.max(0.5, Math.min(4, apparentPitch / tRhoDivisor.get()));
   const thetaBins = Math.max(90, Math.min(1440, Math.round(360 / rhoBinSize)));
 
-  const field = buildLineAccumulator(gray, rawW, rawH, thetaBins, rhoBinSize);
-  const peaks = findLinePeaks(field, 0.15, 4, 3);
+  const field = buildLineAccumulator(gray, rawW, rawH, thetaBins, rhoBinSize, Math.round(tBlurRadius.get()), tMinMag.get());
+  const peaks = findLinePeaks(field, tPeakThreshold.get(), Math.round(tNmsTheta.get()), Math.round(tNmsRho.get()));
 
   let familyA: LineFamily | null = null, familyB: LineFamily | null = null, unassigned: LineCandidate[] = [];
   let rowIndexed: IndexedLine[] = [], colIndexed: IndexedLine[] = [];
@@ -267,12 +301,13 @@ function runMeshAnalysis() {
 
   if (peaks.length >= 8) {
     try {
-      const split = splitIntoTwoFamilies(peaks, rawW, rawH);
+      const split = splitIntoTwoFamilies(peaks, rawW, rawH, tSplitInlierPx.get(), Math.round(tMaxCandidates.get()));
       familyA = split.familyA; familyB = split.familyB; unassigned = split.unassigned;
     } catch { /* fewer than 2 usable lines — leave families null */ }
   }
 
-  if (familyA && familyB && familyA.lines.length >= 3 && familyB.lines.length >= 3) {
+  const minFamilySize = Math.round(tMinFamily.get());
+  if (familyA && familyB && familyA.lines.length >= minFamilySize && familyB.lines.length >= minFamilySize) {
     // expectedSpacingPx (the same apparentPitch used above for Hough bin
     // sizing) resolves a real ambiguity found via live testing: from line
     // positions alone, "no gaps" and "a uniform pattern of missing lines"
@@ -280,8 +315,8 @@ function runMeshAnalysis() {
     // gap-free lines to occasionally be mis-indexed as 2x/3x sparser,
     // splitting real cells into phantom half-cells in the rectified-grid
     // overlay (see src/lattice.ts's recoverIndicesFromTransversal doc).
-    rowIndexed = indexFamilyLines(familyA, familyB.vp, rawW, rawH, 4, apparentPitch);
-    colIndexed = indexFamilyLines(familyB, familyA.vp, rawW, rawH, 4, apparentPitch);
+    rowIndexed = indexFamilyLines(familyA, familyB.vp, rawW, rawH, tIndexInlierPx.get(), apparentPitch, Math.round(tMaxGap.get()), tScaleTolerance.get(), Math.round(tSpanCap.get()));
+    colIndexed = indexFamilyLines(familyB, familyA.vp, rawW, rawH, tIndexInlierPx.get(), apparentPitch, Math.round(tMaxGap.get()), tScaleTolerance.get(), Math.round(tSpanCap.get()));
     const correspondences = buildLatticeCorrespondences(rowIndexed, colIndexed, rawW, rawH);
     H = fitHomographyDLT(correspondences);
     if (H) {
@@ -304,7 +339,7 @@ function runMeshAnalysis() {
     peaks, familyA, familyB, unassigned, rowIndexed, colIndexed, H, rows, cols, sampledGrid, decodeResult,
   };
 
-  const locked = !!decodeResult?.match && decodeResult.consistency >= CONFIDENCE_THRESHOLD;
+  const locked = !!decodeResult?.match && decodeResult.consistency >= tConfidence.get();
   meshStatus.textContent = [
     `lines: ${peaks.length} peaks, ${unassigned.length} unassigned`,
     `families: A=${familyA?.lines.length ?? 0} B=${familyB?.lines.length ?? 0}`,
@@ -335,7 +370,6 @@ function triggerAnalysis(after: () => void) {
 // after the PREVIOUS pass finishes (not a fixed-cadence interval), since a
 // pass can take a while and overlapping runs would just queue up jank.
 // Stops entirely once every layer is toggled off, so idle cost is zero.
-const MESH_REFRESH_DELAY_MS = 1200;
 let autoRefreshTimer: number | null = null;
 
 function anyMeshLayerVisible(): boolean {
@@ -348,7 +382,7 @@ function scheduleAutoRefresh() {
     autoRefreshTimer = null;
     if (!anyMeshLayerVisible()) return;
     triggerAnalysis(scheduleAutoRefresh);
-  }, MESH_REFRESH_DELAY_MS);
+  }, tRefreshDelay.get());
 }
 
 for (const toggle of [toggleBinarized, toggleHoughLines, toggleLineVPs, toggleLineHomography]) {
@@ -382,9 +416,6 @@ analyzeBtn.addEventListener('click', () => triggerAnalysis(scheduleAutoRefresh))
 //      correct decodes score ~1.0 (degrading smoothly with real bit noise),
 //      wrong ones sit around ~0.55-0.6 (close to the 0.5 "uncorrelated"
 //      baseline) — see scripts/test-decode.ts's noise-injection test.
-
-const CONFIDENCE_THRESHOLD = 0.85; // correlation score vs the known pattern; wrong matches empirically top out ~0.6
-const ANALYSIS_BUDGET = 190 * 190; // target ALIGNED_w * ALIGNED_h, keeps analysis cost roughly constant
 
 const rawCanvas = document.createElement('canvas');
 const rawCtx = rawCanvas.getContext('2d', { willReadFrequently: true })!;
@@ -422,7 +453,7 @@ function decodeFrame(): DecodeResult | null {
   const cropSx = (vw - cropW) / 2, cropSy = (vh - cropH) / 2;
 
   const aspect = cropW / cropH;
-  const alignedH = Math.round(Math.sqrt(ANALYSIS_BUDGET / aspect));
+  const alignedH = Math.round(Math.sqrt((tStage2Res.get() * tStage2Res.get()) / aspect));
   const alignedW = Math.round(alignedH * aspect);
   const rawScale = cropW / alignedW; // == cropH / alignedH
   const rawSide = Math.ceil(Math.sqrt(alignedW * alignedW + alignedH * alignedH)); // covers ALIGNED's diagonal at any rotation
@@ -476,7 +507,7 @@ function decodeFrame(): DecodeResult | null {
   if (best.candidateIndex === -1) return null; // no candidate found any valid reading orientation at all
   const theta = theta0 + best.candidateIndex * (Math.PI / 2);
   const grid = grids[best.candidateIndex];
-  const match = best.consistency >= CONFIDENCE_THRESHOLD ? best.match : null;
+  const match = best.consistency >= tConfidence.get() ? best.match : null;
 
   return {
     match, patches: best.patches, consistency: best.consistency, theta, grid,
@@ -501,7 +532,7 @@ function render() {
 
   if (result && toggleStage2.checked) {
     const toVideo = (ax: number, ay: number) => alignedToVideo(ax, ay, result);
-    const confident = result.consistency >= CONFIDENCE_THRESHOLD;
+    const confident = result.consistency >= tConfidence.get();
 
     // Blue lines for the estimated grid edges (both line families), so you
     // can visually check the detected grid against the real one on screen.

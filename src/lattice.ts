@@ -118,11 +118,11 @@ function fitMobius(pairs: { v: number; t: number }[]): Mobius | null {
 // rejected before it ever gets to compete on inlier count.
 function recoverIndicesFromTransversal(
   scored: { line: LineCandidate; t: number }[], inlierPx: number, expectedSpacingPx?: number,
+  maxGap = 3, scaleTolerance = 1.6, spanCapMultiplier = 3,
 ): { line: LineCandidate; index: number }[] {
   const n = scored.length;
   const WINDOW = 4;
-  const GAP_CHOICES = [1, 2, 3];
-  const SCALE_TOLERANCE = 1.6; // accept implied spacing within [1/1.6, 1.6] of expectedSpacingPx
+  const GAP_CHOICES = Array.from({ length: maxGap }, (_, i) => i + 1); // [1, 2, ..., maxGap]
   if (n < WINDOW) {
     // Not enough lines to fit a Mobius model at all — fall back to the
     // naive consecutive assumption (only wrong if this tiny set itself has
@@ -167,7 +167,7 @@ function recoverIndicesFromTransversal(
         // tolerance band below is already loose enough not to need more.
         const impliedSpacing = Math.abs(window[3].t - window[0].t) / (vs[3] - vs[0]);
         const ratio = impliedSpacing / expectedSpacingPx;
-        if (ratio < 1 / SCALE_TOLERANCE || ratio > SCALE_TOLERANCE) continue; // implausible scale -- almost certainly a step-size alias, not a real fit
+        if (ratio < 1 / scaleTolerance || ratio > scaleTolerance) continue; // implausible scale -- almost certainly a step-size alias, not a real fit
       }
       const { count, totalResidual, span } = scoreModel(model);
       // A tiny 4-point fit can be near-degenerate (r close to 0, an almost-
@@ -180,7 +180,7 @@ function recoverIndicesFromTransversal(
       // than a handful of missed lines per real one, so span is capped at a
       // generous multiple of the actual line count — this is a sanity bound
       // on the search, not a claim about real gap frequency.
-      if (span > n * 3) continue;
+      if (span > n * spanCapMultiplier) continue;
       const better = !best || count > best.count
         || (count === best.count && span < best.span)
         || (count === best.count && span === best.span && totalResidual < best.totalResidual);
@@ -219,6 +219,7 @@ function recoverIndicesFromTransversal(
 // intersections numerically unstable (or, exactly parallel, nonexistent).
 export function indexFamilyLines(
   family: LineFamily, otherVp: VanishingPoint, w: number, h: number, inlierPx = 4, expectedSpacingPx?: number,
+  maxGap = 3, scaleTolerance = 1.6, spanCapMultiplier = 3,
 ): IndexedLine[] {
   const cx = w / 2, cy = h / 2;
   let dx: number, dy: number;
@@ -244,7 +245,7 @@ export function indexFamilyLines(
   });
   scored.sort((a, b) => a.t - b.t);
 
-  return recoverIndicesFromTransversal(scored, inlierPx, expectedSpacingPx);
+  return recoverIndicesFromTransversal(scored, inlierPx, expectedSpacingPx, maxGap, scaleTolerance, spanCapMultiplier);
 }
 
 // Every (row-line, col-line) crossing is a lattice corner with a known

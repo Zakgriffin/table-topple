@@ -1,19 +1,6 @@
 import { generateTorus, buildLookupTable } from './debruijn.ts';
-import { detectGrid, sampleFullGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad, asSignedResidual, buildBoundaries } from './decode.ts';
-import type { GridDetection, SampledGrid, SampledCell, CandidateResult } from './decode.ts';
-import type { Patch } from './decode.ts';
-// Old corner/mesh/VP/homography-mesh geometry pipeline (Option B) — retired
-// in favor of the line-based redesign below (src/lines.ts, src/vp.ts,
-// src/lattice.ts). Left commented rather than deleted since this repo is a
-// testbed and the old approach's own source files are untouched, just
-// unused here now.
-// import { computeJunctionField, detectJunctions, refineJunctionSubPixel, computeAxisDirections } from './cornerdetect.ts';
-// import type { JunctionType } from './cornerdetect.ts';
-// import { buildMesh, pruneInconsistentNodes } from './mesh.ts';
-// import type { Mesh } from './mesh.ts';
-// import { estimateVanishingPoints } from './vanishing.ts';
-// import type { VanishingPoint } from './vanishing.ts';
-// import { buildMeshViaHomography } from './rectify.ts';
+import { detectGrid, pickBestCandidate, toGrayscale, binarize, estimateRotationRad } from './decode.ts';
+import type { SampledGrid, SampledCell, CandidateResult } from './decode.ts';
 import { buildLineAccumulator, findLinePeaks } from './lines.ts';
 import type { LineCandidate } from './lines.ts';
 import { splitIntoTwoFamilies, vpIsFinite, vpToPoint } from './vp.ts';
@@ -119,43 +106,40 @@ startCamera('environment')
   .then(() => render())
   .catch((e: any) => { status.textContent = 'Camera error: ' + e.message; });
 
-// ── Mesh-based geometry pipeline (Option B) — on-demand debug analysis ─────────
-// Unlike the Stage 2 pipeline below, corner detection is rotation-robust by
-// construction (validated up to 75deg, see scripts/test-junctions.ts), so
-// this skips the derotation-candidate search entirely — one capture,
-// analyzed directly. Still far too slow for every frame (~2.4s/analysis in
-// Node testing, 500-1500 junctions on a real capture), so it runs on
-// demand (the Analyze button) rather than every render().
+// ── Position-tracking pipeline ──────────────────────────────────────────────
+// Detect grid lines directly via a gradient-oriented Hough transform
+// (src/lines.ts), split them into the two row/col families by their
+// vanishing points (src/vp.ts), recover each line's true gap-tolerant
+// integer index via a Mobius-model fit (src/lattice.ts), then treat every
+// row-line x col-line crossing as a correspondence for a single DLT
+// homography fit (src/homography.ts). Sampling every lattice cell through
+// that homography and decoding via src/decode.ts's pickBestCandidate gives
+// this app's actual reported position — this is the only pipeline left; an
+// earlier corner/mesh/vanishing-point approach (retired) needed to chain
+// local neighbor-to-neighbor links to cover the ~55% of lattice points its
+// corner detector could find individually, and a single bad link could drift
+// a whole connected region undetected. Recovering a full global row/col
+// index directly, then fitting one global homography from all of them at
+// once, has no such local-chaining step to drift in the first place.
 //
-// End-to-end decode through this pipeline isn't reliable yet — a whole
-// connected region of the mesh can drift together during construction and
-// still look locally self-consistent to pruneInconsistentNodes, so the
-// decoded row/col here should not be trusted. This is wired in as a
-// DIAGNOSTIC view of each stage (what got detected, what got kept vs
-// pruned, how many corners sourced each cell), not as the app's actual
-// position source — the status text above still comes from decodeFrame's
-// Stage 2 result.
+// A full pass (Hough transform over the whole capture, VP split, index
+// recovery, homography fit, decode) is too heavy to run every rendered
+// frame, so it runs on a self-rescheduling timer (see scheduleNextPipelinePass)
+// instead — the render loop just redraws the last completed pass's result
+// every frame, including the live video underneath it.
 
-const meshStatus = document.getElementById('meshStatus')!;
+const pipelineStatus = document.getElementById('pipelineStatus')!;
 const analyzeBtn = document.getElementById('analyzeBtn') as HTMLButtonElement;
 const toggleBinarized = document.getElementById('toggleBinarized') as HTMLInputElement;
-// Old corner/mesh/VP/homography-mesh toggles — retired alongside the
-// pipeline they drove (see the import comment above). Element refs kept
-// commented so this section is easy to diff against if resurrected.
-// const toggleJunctions = document.getElementById('toggleJunctions') as HTMLInputElement;
-// const toggleMesh = document.getElementById('toggleMesh') as HTMLInputElement;
-// const toggleCells = document.getElementById('toggleCells') as HTMLInputElement;
-// const toggleVP = document.getElementById('toggleVP') as HTMLInputElement;
-// const toggleHomography = document.getElementById('toggleHomography') as HTMLInputElement;
-const toggleStage2 = document.getElementById('toggleStage2') as HTMLInputElement;
 const toggleHoughLines = document.getElementById('toggleHoughLines') as HTMLInputElement;
 const toggleLineVPs = document.getElementById('toggleLineVPs') as HTMLInputElement;
 const toggleLineHomography = document.getElementById('toggleLineHomography') as HTMLInputElement;
+const togglePatches = document.getElementById('togglePatches') as HTMLInputElement;
 
 // Live-tunable pipeline parameters — each backed by a <input type=range> in
 // the "tuning" details panel (index.html). Reads the slider's CURRENT value
-// on every call via .get(), so a change takes effect on the next Analyze
-// click or auto-refresh pass with no extra plumbing.
+// on every call via .get(), so a change takes effect on the next scheduled
+// pass or Analyze click with no extra plumbing.
 function bindSlider(id: string): { get: () => number } {
   const input = document.getElementById(id) as HTMLInputElement;
   const valSpan = document.getElementById(id + 'Val');
@@ -185,24 +169,17 @@ const tPatchSize = bindSlider('tPatchSize');
 const tConfidence = bindSlider('tConfidence');
 const tRefreshDelay = bindSlider('tRefreshDelay');
 const tMinFamily = bindSlider('tMinFamily');
-const tStage2Res = bindSlider('tStage2Res');
-const meshRawCanvas = document.createElement('canvas');
-const meshRawCtx = meshRawCanvas.getContext('2d', { willReadFrequently: true })!;
-const meshPatchCanvas = document.createElement('canvas');
-const meshPatchCtx = meshPatchCanvas.getContext('2d', { willReadFrequently: true })!;
+
+const analysisCanvas = document.createElement('canvas');
+const analysisCtx = analysisCanvas.getContext('2d', { willReadFrequently: true })!;
+const rotationPatchCanvas = document.createElement('canvas');
+const rotationPatchCtx = rotationPatchCanvas.getContext('2d', { willReadFrequently: true })!;
 const binCanvas = document.createElement('canvas');
 const binCtx = binCanvas.getContext('2d')!;
 
-interface MeshAnalysisResult {
+interface PipelineResult {
   cropSx: number; cropSy: number; rawScale: number; rawW: number; rawH: number;
   bin: Uint8Array;
-  // Line-based rectification pipeline (src/lines.ts -> src/vp.ts ->
-  // src/lattice.ts -> src/homography.ts), replacing the old corner/mesh/VP
-  // geometry above: detect grid lines directly via a gradient-oriented Hough
-  // transform, split into the two row/col families by their vanishing
-  // points, recover each line's true (gap-tolerant) integer index via a
-  // Mobius-model fit, then treat every row-line x col-line crossing as a
-  // lattice correspondence for a single DLT homography fit.
   peaks: LineCandidate[];
   familyA: LineFamily | null;
   familyB: LineFamily | null;
@@ -215,9 +192,9 @@ interface MeshAnalysisResult {
   decodeResult: CandidateResult | null;
 }
 
-let meshResult: MeshAnalysisResult | null = null;
+let pipelineResult: PipelineResult | null = null;
 
-function rawToVideo(rx: number, ry: number, d: MeshAnalysisResult): { x: number; y: number } {
+function rawToVideo(rx: number, ry: number, d: PipelineResult): { x: number; y: number } {
   return { x: d.cropSx + rx * d.rawScale, y: d.cropSy + ry * d.rawScale };
 }
 
@@ -244,7 +221,7 @@ function mirrorRowsGrid(sg: SampledGrid): SampledGrid {
   return { ...sg, cells: sg.cells.slice().reverse() };
 }
 
-function runMeshAnalysis() {
+function runPipeline() {
   const vw = video.videoWidth, vh = video.videoHeight;
   if (!vw || !vh) return;
 
@@ -256,9 +233,9 @@ function runMeshAnalysis() {
   const rawW = Math.round(rawH * aspect);
   const rawScale = cropW / rawW;
 
-  meshRawCanvas.width = rawW; meshRawCanvas.height = rawH;
-  meshRawCtx.drawImage(video, cropSx, cropSy, cropW, cropH, 0, 0, rawW, rawH);
-  const rawRgba = meshRawCtx.getImageData(0, 0, rawW, rawH).data;
+  analysisCanvas.width = rawW; analysisCanvas.height = rawH;
+  analysisCtx.drawImage(video, cropSx, cropSy, cropW, cropH, 0, 0, rawW, rawH);
+  const rawRgba = analysisCtx.getImageData(0, 0, rawW, rawH).data;
   const gray = toGrayscale(rawRgba, rawW, rawH);
   const bin = binarize(gray);
 
@@ -267,22 +244,21 @@ function runMeshAnalysis() {
   // space depending on zoom/tilt, and a fixed resolution either merges
   // distinct lines (too coarse) or splits one line into duplicate peaks (too
   // fine): confirmed via scripts/test-lines-decode.ts, fixed defaults merged
-  // real lines down to ~40% of the true count. Seeding resolution from the
-  // OLD pipeline's apparent-pitch estimator (derotate a small patch,
-  // autocorrelate) is used only as a scale HINT for tuning here — not as the
-  // geometry solution itself, which remains fully rotation-general.
+  // real lines down to ~40% of the true count. Estimating rotation + pitch on
+  // a small derotated patch is used only as a scale HINT for tuning here —
+  // not as the geometry solution itself, which remains fully rotation-general.
   const theta0 = estimateRotationRad(gray, rawW, rawH);
   const patchSize = Math.round(tPatchSize.get());
-  meshPatchCanvas.width = patchSize; meshPatchCanvas.height = patchSize;
-  meshPatchCtx.fillStyle = '#fff';
-  meshPatchCtx.fillRect(0, 0, patchSize, patchSize);
-  meshPatchCtx.save();
-  meshPatchCtx.translate(patchSize / 2, patchSize / 2);
-  meshPatchCtx.rotate(-theta0);
-  meshPatchCtx.translate(-rawW / 2, -rawH / 2);
-  meshPatchCtx.drawImage(meshRawCanvas, 0, 0);
-  meshPatchCtx.restore();
-  const patchGray = toGrayscale(meshPatchCtx.getImageData(0, 0, patchSize, patchSize).data, patchSize, patchSize);
+  rotationPatchCanvas.width = patchSize; rotationPatchCanvas.height = patchSize;
+  rotationPatchCtx.fillStyle = '#fff';
+  rotationPatchCtx.fillRect(0, 0, patchSize, patchSize);
+  rotationPatchCtx.save();
+  rotationPatchCtx.translate(patchSize / 2, patchSize / 2);
+  rotationPatchCtx.rotate(-theta0);
+  rotationPatchCtx.translate(-rawW / 2, -rawH / 2);
+  rotationPatchCtx.drawImage(analysisCanvas, 0, 0);
+  rotationPatchCtx.restore();
+  const patchGray = toGrayscale(rotationPatchCtx.getImageData(0, 0, patchSize, patchSize).data, patchSize, patchSize);
   const patchBin = binarize(patchGray);
   const coarseGrid = detectGrid(patchBin, patchSize, patchSize);
   const apparentPitch = (coarseGrid.pitchX + coarseGrid.pitchY) / 2;
@@ -334,13 +310,13 @@ function runMeshAnalysis() {
     }
   }
 
-  meshResult = {
+  pipelineResult = {
     cropSx, cropSy, rawScale, rawW, rawH, bin,
     peaks, familyA, familyB, unassigned, rowIndexed, colIndexed, H, rows, cols, sampledGrid, decodeResult,
   };
 
   const locked = !!decodeResult?.match && decodeResult.consistency >= tConfidence.get();
-  meshStatus.textContent = [
+  pipelineStatus.textContent = [
     `lines: ${peaks.length} peaks, ${unassigned.length} unassigned`,
     `families: A=${familyA?.lines.length ?? 0} B=${familyB?.lines.length ?? 0}`,
     `indexed: rows 0..${rows} (${rowIndexed.length} lines), cols 0..${cols} (${colIndexed.length} lines)`,
@@ -349,171 +325,32 @@ function runMeshAnalysis() {
   ].join('\n');
 }
 
-// Runs one analysis pass, painting "analyzing..." first since the pass
+// Runs one pipeline pass, painting "analyzing..." first since the pass
 // itself blocks the main thread for a while (double rAF: the DOM update is
 // guaranteed painted by the time the heavy synchronous work in the second
 // callback runs — a single rAF doesn't guarantee the paint has happened
-// yet). Calls `after` once done, whether or not anything was actually drawn.
+// yet). Calls `after` once done, whether or not anything was actually found.
 function triggerAnalysis(after: () => void) {
   analyzeBtn.disabled = true;
-  meshStatus.textContent = 'analyzing...';
+  pipelineStatus.textContent = 'analyzing...';
   requestAnimationFrame(() => requestAnimationFrame(() => {
-    try { runMeshAnalysis(); }
+    try { runPipeline(); }
     finally { analyzeBtn.disabled = false; after(); }
   }));
 }
 
-// Auto-refresh: junctions/mesh/cells are all derived from the same
-// runMeshAnalysis() pass, so one toggle being on is enough reason to keep
-// it current — otherwise checking "junctions" just shows an increasingly
-// stale single snapshot as you move the camera. Re-triggers itself only
-// after the PREVIOUS pass finishes (not a fixed-cadence interval), since a
-// pass can take a while and overlapping runs would just queue up jank.
-// Stops entirely once every layer is toggled off, so idle cost is zero.
-let autoRefreshTimer: number | null = null;
-
-function anyMeshLayerVisible(): boolean {
-  return toggleBinarized.checked || toggleHoughLines.checked || toggleLineVPs.checked || toggleLineHomography.checked;
+// The pipeline result drives BOTH the debug overlays below and the app's
+// actual reported position, so — unlike when this was purely a diagnostic
+// view — it must keep running continuously, not just while a debug toggle
+// happens to be checked. Reschedules itself only after the PREVIOUS pass
+// finishes (not a fixed-cadence interval), since a pass can take a while and
+// overlapping runs would just queue up jank.
+function scheduleNextPipelinePass() {
+  window.setTimeout(() => triggerAnalysis(scheduleNextPipelinePass), tRefreshDelay.get());
 }
 
-function scheduleAutoRefresh() {
-  if (autoRefreshTimer !== null || !anyMeshLayerVisible()) return;
-  autoRefreshTimer = window.setTimeout(() => {
-    autoRefreshTimer = null;
-    if (!anyMeshLayerVisible()) return;
-    triggerAnalysis(scheduleAutoRefresh);
-  }, tRefreshDelay.get());
-}
-
-for (const toggle of [toggleBinarized, toggleHoughLines, toggleLineVPs, toggleLineHomography]) {
-  toggle.addEventListener('change', scheduleAutoRefresh);
-}
-
-analyzeBtn.addEventListener('click', () => triggerAnalysis(scheduleAutoRefresh));
-
-// ── Grid decode pipeline (Stage 2: rotation + uniform scale) ───────────────────
-// See src/decode.ts's module header for the full algorithm writeup. Summary:
-//   1. Crop nearly the WHOLE video viewport (not just a small centered
-//      square) — when the camera is close enough that only one patch's
-//      worth of cells is visible, cross-patch consistency has no neighbors
-//      to check, so every available cell matters. The capture rectangle
-//      matches the video's real aspect ratio rather than being limited to a
-//      square bounded by the shorter dimension.
-//   2. Estimate rotation mod 90 degrees via gradient-orientation histogram.
-//   3. Derotate at that angle plus 90/180/270-degree offsets (4 candidates —
-//      edge orientation alone can't tell which of the 4 is the true one).
-//      The square RAW buffer that rotation happens in is sized off the
-//      ALIGNED rectangle's diagonal (not a fixed side), since a wider or
-//      taller capture needs more rotation margin to stay fully covered.
-//   4. For each candidate: detect grid pitch/phase, sample every visible
-//      cell, tile into discrete order x order patches, decode each patch.
-//   5. Keep whichever candidate's exact-match patches yield the best-
-//      correlated position against the actual known pattern (see
-//      pickBestCandidate / scoreCorrelation in decode.ts) — this tolerates
-//      individual misread bits gracefully rather than exact-match's
-//      all-or-nothing, and gives a MUCH better-separated confidence score
-//      than checking patches only agree with each other: empirically,
-//      correct decodes score ~1.0 (degrading smoothly with real bit noise),
-//      wrong ones sit around ~0.55-0.6 (close to the 0.5 "uncorrelated"
-//      baseline) — see scripts/test-decode.ts's noise-injection test.
-
-const rawCanvas = document.createElement('canvas');
-const rawCtx = rawCanvas.getContext('2d', { willReadFrequently: true })!;
-const alignedCanvas = document.createElement('canvas');
-const alignedCtx = alignedCanvas.getContext('2d', { willReadFrequently: true })!;
-
-interface DecodeResult {
-  match: { row: number; col: number } | null;
-  patches: Patch[];
-  consistency: number;
-  theta: number; // resolved full rotation angle (radians) for the winning candidate
-  grid: GridDetection;
-  alignedW: number; alignedH: number;
-  cropSx: number; cropSy: number; rawScale: number; rawSide: number; contentDx: number; contentDy: number;
-}
-
-// Maps a point in the (winning candidate's) ALIGNED buffer back to video
-// coordinates, for overlay drawing: aligned -> raw (inverse of the
-// ctx.rotate(-theta) derotation, see src/decode.ts's header) -> video. RAW's
-// content is drawn centered with a padding margin (contentDx/Dy) since RAW
-// is sized for rotation coverage, not 1:1 with the real capture rectangle.
-function alignedToVideo(ax: number, ay: number, d: DecodeResult): { x: number; y: number } {
-  const relX = ax - d.alignedW / 2, relY = ay - d.alignedH / 2;
-  const cosT = Math.cos(d.theta), sinT = Math.sin(d.theta);
-  const rx = relX * cosT - relY * sinT + d.rawSide / 2;
-  const ry = relX * sinT + relY * cosT + d.rawSide / 2;
-  return { x: d.cropSx + (rx - d.contentDx) * d.rawScale, y: d.cropSy + (ry - d.contentDy) * d.rawScale };
-}
-
-function decodeFrame(): DecodeResult | null {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh) return null;
-
-  const cropW = vw * 0.95, cropH = vh * 0.95;
-  const cropSx = (vw - cropW) / 2, cropSy = (vh - cropH) / 2;
-
-  const aspect = cropW / cropH;
-  const alignedH = Math.round(Math.sqrt((tStage2Res.get() * tStage2Res.get()) / aspect));
-  const alignedW = Math.round(alignedH * aspect);
-  const rawScale = cropW / alignedW; // == cropH / alignedH
-  const rawSide = Math.ceil(Math.sqrt(alignedW * alignedW + alignedH * alignedH)); // covers ALIGNED's diagonal at any rotation
-  const contentDx = (rawSide - alignedW) / 2, contentDy = (rawSide - alignedH) / 2;
-
-  rawCanvas.width = rawSide; rawCanvas.height = rawSide;
-  alignedCanvas.width = alignedW; alignedCanvas.height = alignedH;
-
-  rawCtx.fillStyle = '#fff';
-  rawCtx.fillRect(0, 0, rawSide, rawSide);
-  rawCtx.drawImage(video, cropSx, cropSy, cropW, cropH, contentDx, contentDy, alignedW, alignedH);
-
-  const rawImg = rawCtx.getImageData(0, 0, rawSide, rawSide).data;
-  const rawGray = toGrayscale(rawImg, rawSide, rawSide);
-
-  // Derotates rawCanvas by theta into alignedCanvas and returns its grayscale.
-  const derotateToGray = (theta: number): Float64Array => {
-    alignedCtx.save();
-    alignedCtx.translate(alignedW / 2, alignedH / 2);
-    alignedCtx.rotate(-theta);
-    alignedCtx.translate(-rawSide / 2, -rawSide / 2);
-    alignedCtx.drawImage(rawCanvas, 0, 0);
-    alignedCtx.restore();
-    return toGrayscale(alignedCtx.getImageData(0, 0, alignedW, alignedH).data, alignedW, alignedH);
-  };
-
-  const thetaCoarse = estimateRotationRad(rawGray, rawSide, rawSide);
-
-  // Coarse-to-fine: derotate once with the coarse estimate, then re-run the
-  // SAME estimator on that now-mostly-aligned result to correct residual
-  // angular error. Error from a wrong rotation grows with distance from the
-  // pivot, so this matters more now that capture uses the full viewport
-  // (bigger radius) than it did with the old small centered crop. Reuses
-  // estimateRotationRad rather than adding new rotation-specific machinery,
-  // since this single-angle model is scoped to be superseded by full
-  // homography estimation later anyway.
-  const previewGray = derotateToGray(thetaCoarse);
-  const residual = asSignedResidual(estimateRotationRad(previewGray, alignedW, alignedH));
-  const theta0 = thetaCoarse + residual;
-
-  const grids: GridDetection[] = [];
-  const sampledGrids = [0, 1, 2, 3].map(k => {
-    const theta = theta0 + k * (Math.PI / 2);
-    const alignedBin = binarize(derotateToGray(theta));
-    const grid = detectGrid(alignedBin, alignedW, alignedH);
-    grids.push(grid);
-    return sampleFullGrid(alignedBin, alignedW, alignedH, grid);
-  });
-
-  const best = pickBestCandidate(sampledGrids, ORDER, lookup, debruijn.torus, R, C);
-  if (best.candidateIndex === -1) return null; // no candidate found any valid reading orientation at all
-  const theta = theta0 + best.candidateIndex * (Math.PI / 2);
-  const grid = grids[best.candidateIndex];
-  const match = best.consistency >= tConfidence.get() ? best.match : null;
-
-  return {
-    match, patches: best.patches, consistency: best.consistency, theta, grid,
-    alignedW, alignedH, cropSx, cropSy, rawScale, rawSide, contentDx, contentDy,
-  };
-}
+analyzeBtn.addEventListener('click', () => triggerAnalysis(() => {}));
+scheduleNextPipelinePass();
 
 // ── Render loop ───────────────────────────────────────────────────────────────
 
@@ -528,92 +365,28 @@ function render() {
   canvas.style.height = (canvas.height * scaleToFit) + 'px';
   ctx.drawImage(video, 0, 0);
 
-  const result = decodeFrame();
+  if (pipelineResult) drawDebugOverlays(pipelineResult);
 
-  if (result && toggleStage2.checked) {
-    const toVideo = (ax: number, ay: number) => alignedToVideo(ax, ay, result);
-    const confident = result.consistency >= tConfidence.get();
-
-    // Blue lines for the estimated grid edges (both line families), so you
-    // can visually check the detected grid against the real one on screen.
-    // Uses the SAME buildBoundaries walk sampleFullGrid uses internally,
-    // so the drawn lines stay truthful to what's actually being sampled.
-    const { px, py, pitchX, pitchY } = result.grid;
-    ctx.strokeStyle = 'rgba(60,140,255,0.8)';
-    ctx.lineWidth = Math.max(1, result.rawScale * 1.2);
-    const { boundaries: xB } = buildBoundaries(px, pitchX, 0, result.alignedW);
-    const { boundaries: yB } = buildBoundaries(py, pitchY, 0, result.alignedH);
-    for (const x of xB) {
-      const a = toVideo(x, 0), b = toVideo(x, result.alignedH);
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-    }
-    for (const y of yB) {
-      const a = toVideo(0, y), b = toVideo(result.alignedW, y);
-      ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
-    }
-
-    // Each patch drawn as a discrete outlined quad (green if it decoded to a
-    // valid position AND the frame is confident overall, orange if it found
-    // a lookup hit but overall confidence is low, red if no hit), containing
-    // its own black/white dots so patches are visually distinguishable.
-    for (const patch of result.patches) {
-      // Derived from the patch's own sampled cell positions (always correct)
-      // rather than px + tileCol*order*pitchX — that formula assumed tile 0
-      // starts AT px, which broke once px was anchored near the buffer
-      // center with tiles extending both directions from it (same root
-      // cause as the blue-line fix above).
-      const x0 = patch.cells[0][0].x - pitchX / 2, x1 = patch.cells[0][ORDER - 1].x + pitchX / 2;
-      const y0 = patch.cells[0][0].y - pitchY / 2, y1 = patch.cells[ORDER - 1][0].y + pitchY / 2;
-      const corners = [toVideo(x0, y0), toVideo(x1, y0), toVideo(x1, y1), toVideo(x0, y1)];
-      ctx.strokeStyle = patch.match ? (confident ? '#0f0' : '#fa0') : '#f00';
-      ctx.lineWidth = Math.max(1, result.rawScale);
-      ctx.beginPath();
-      ctx.moveTo(corners[0].x, corners[0].y);
-      for (const c of corners.slice(1)) ctx.lineTo(c.x, c.y);
-      ctx.closePath();
-      ctx.stroke();
-
-      const dotRadius = Math.max(2, pitchX * result.rawScale * 0.25);
-      for (let i = 0; i < ORDER; i++) {
-        for (let j = 0; j < ORDER; j++) {
-          const cell = patch.cells[i][j];
-          const p = toVideo(cell.x, cell.y);
-          ctx.beginPath();
-          ctx.arc(p.x, p.y, dotRadius, 0, Math.PI * 2);
-          ctx.fillStyle = cell.bit ? '#000' : '#fff';
-          ctx.fill();
-          ctx.lineWidth = Math.max(1, dotRadius * 0.3);
-          // Per-cell ground truth when available (does THIS cell match the
-          // actual pattern, not just "did the patch find a match") — falls
-          // back to the coarser patch-level match when no anchor was found
-          // to compare against at all (see Patch.correct in decode.ts).
-          ctx.strokeStyle = patch.correct ? (patch.correct[i][j] ? '#0f0' : '#f00') : (patch.match ? '#0f0' : '#f00');
-          ctx.stroke();
-        }
-      }
-    }
-  }
-
-  status.textContent = result?.match
-    ? `order ${ORDER}  torus ${R}x${C}\nrow ${result.match.row}  col ${result.match.col}\nconfidence ${(result.consistency * 100).toFixed(0)}%`
+  const decodeResult = pipelineResult?.decodeResult;
+  const locked = !!decodeResult?.match && decodeResult.consistency >= tConfidence.get();
+  status.textContent = locked
+    ? `order ${ORDER}  torus ${R}x${C}\nrow ${decodeResult!.match!.row}  col ${decodeResult!.match!.col}\nconfidence ${(decodeResult!.consistency * 100).toFixed(0)}%`
     : `order ${ORDER}  torus ${R}x${C}\nno lock — move closer / center the pattern`;
-
-  if (meshResult) drawMeshDebug(meshResult);
 }
 
-// Draws whichever of the mesh-pipeline's diagnostic layers are toggled on,
-// from the last Analyze snapshot (see runMeshAnalysis — this data is stale
-// relative to the live video by however long ago the button was pressed,
-// unlike everything else in render() which is per-frame).
-function drawMeshDebug(d: MeshAnalysisResult) {
+// Draws whichever of the pipeline's diagnostic layers are toggled on, from
+// the last completed pass (see runPipeline — this data is stale relative to
+// the live video by however long ago that pass ran, unlike the live video
+// feed itself which render() draws fresh every frame).
+function drawDebugOverlays(d: PipelineResult) {
   const toVideo = (rx: number, ry: number) => rawToVideo(rx, ry, d);
   const dotR = Math.max(2, d.rawScale * 4);
 
   if (toggleBinarized.checked) {
-    // Renders the same bit array sampleFromMesh reads bits from, so you can
-    // see exactly what the rest of the pipeline is working with — drawn as
-    // a plain image (nearest-neighbor, no smoothing) rather than per-pixel
-    // canvas calls, since that'd be tens of thousands of draw calls/frame.
+    // Renders the same bit array the pipeline reads bits from, so you can
+    // see exactly what it's working with — drawn as a plain image
+    // (nearest-neighbor, no smoothing) rather than per-pixel canvas calls,
+    // since that'd be tens of thousands of draw calls/frame.
     binCanvas.width = d.rawW; binCanvas.height = d.rawH;
     const imgData = binCtx.createImageData(d.rawW, d.rawH);
     for (let i = 0; i < d.bin.length; i++) {
@@ -706,6 +479,59 @@ function drawMeshDebug(d: MeshAnalysisResult) {
       if (!p1 || !p2) continue;
       const a = toVideo(p1[0], p1[1]), b = toVideo(p2[0], p2[1]);
       ctx.beginPath(); ctx.moveTo(a.x, a.y); ctx.lineTo(b.x, b.y); ctx.stroke();
+    }
+  }
+
+  // Each decoded patch as a discrete outlined quad (green if it decoded to a
+  // valid position AND the frame is confident overall, orange if it found a
+  // lookup hit but overall confidence is low, red if no hit), containing its
+  // own black/white bit dots (stroked green/red per-cell against the actual
+  // known pattern, see Patch.correct) so patches are visually distinguishable
+  // and individually verifiable.
+  //
+  // The quad corners are extrapolated half a cell beyond this patch's own 4
+  // corner CELL positions using THIS patch's own local row/col step vectors
+  // — not a global constant pitch (the old axis-aligned pipeline's
+  // approach) — since sampled cell spacing varies smoothly across the frame
+  // under real perspective (foreshortened farther from the camera). A single
+  // cell's extrapolation is small enough that this local-linear
+  // approximation of the true (homography-curved) boundary is accurate.
+  if (togglePatches.checked && d.decodeResult) {
+    const dr = d.decodeResult;
+    const confident = dr.consistency >= tConfidence.get();
+    const denom = Math.max(1, ORDER - 1);
+    for (const patch of dr.patches) {
+      const tl = patch.cells[0][0], tr = patch.cells[0][ORDER - 1];
+      const bl = patch.cells[ORDER - 1][0], br = patch.cells[ORDER - 1][ORDER - 1];
+      const rowStep = { x: (bl.x - tl.x) / denom, y: (bl.y - tl.y) / denom };
+      const colStep = { x: (tr.x - tl.x) / denom, y: (tr.y - tl.y) / denom };
+      const corner = (base: SampledCell, rowSign: number, colSign: number) => toVideo(
+        base.x + rowSign * rowStep.x / 2 + colSign * colStep.x / 2,
+        base.y + rowSign * rowStep.y / 2 + colSign * colStep.y / 2,
+      );
+      const corners = [corner(tl, -1, -1), corner(tr, -1, 1), corner(br, 1, 1), corner(bl, 1, -1)];
+      ctx.strokeStyle = patch.match ? (confident ? '#0f0' : '#fa0') : '#f00';
+      ctx.lineWidth = Math.max(1, d.rawScale);
+      ctx.beginPath();
+      ctx.moveTo(corners[0].x, corners[0].y);
+      for (const c of corners.slice(1)) ctx.lineTo(c.x, c.y);
+      ctx.closePath();
+      ctx.stroke();
+
+      const dotRadius = Math.max(2, Math.hypot(colStep.x, colStep.y) * d.rawScale * 0.25);
+      for (let i = 0; i < ORDER; i++) {
+        for (let j = 0; j < ORDER; j++) {
+          const cell = patch.cells[i][j];
+          const p = toVideo(cell.x, cell.y);
+          ctx.beginPath();
+          ctx.arc(p.x, p.y, dotRadius, 0, Math.PI * 2);
+          ctx.fillStyle = cell.bit ? '#000' : '#fff';
+          ctx.fill();
+          ctx.lineWidth = Math.max(1, dotRadius * 0.3);
+          ctx.strokeStyle = patch.correct ? (patch.correct[i][j] ? '#0f0' : '#f00') : (patch.match ? '#0f0' : '#f00');
+          ctx.stroke();
+        }
+      }
     }
   }
 }

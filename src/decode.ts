@@ -1,49 +1,27 @@
-// Grid decode pipeline — pure logic, no DOM/camera dependency, so it can run
-// both in the browser (src/main.ts) and under Node for testing
-// (scripts/test-decode.ts) against a known image.
+// Grid decode primitives shared by the line-based rectification pipeline
+// (src/lines.ts -> src/vp.ts -> src/lattice.ts -> src/homography.ts,
+// orchestrated in src/main.ts): grayscale/binarize conversion, the
+// rotation-mod-90 estimator, autocorrelation-based pitch/phase detection
+// (used only as an adaptive-resolution hint for the Hough transform, not as
+// the geometry solution), and pickBestCandidate's patch-tiling + correlation
+// scoring, which the line pipeline reuses to decode whatever grid it samples
+// via its fitted homography. Pure logic, no DOM/camera dependency, so it can
+// run both in the browser and under Node for testing.
 //
-// Stage 2: rotation + uniform scale (still assumes the mat is planar / camera
-// faces it straight-on — no perspective/skew handling).
-//   1. Convert a square crop to grayscale, then binarize it (global mean
-//      threshold — the pattern is pure black/white, so this is robust as
-//      long as lighting is roughly even).
-//   2. Estimate the grid's rotation via a gradient-orientation histogram
-//      (see estimateRotationRad) on that raw (still-rotated) crop. Edge
-//      orientation alone only pins the angle down modulo 90 degrees (a
-//      square grid looks the same rotated by any multiple of 90) — so this
-//      gives 4 candidate full angles: theta, theta+90, theta+180, theta+270.
-//   3. The caller derotates the ORIGINAL grayscale/RGBA crop by EACH of
-//      those 4 candidate angles (browser: via canvas ctx.rotate + drawImage,
-//      for smooth resampling; Node test: via manual resampling) into 4
-//      separate "aligned" buffers, then re-binarizes each.
-//   4. For each aligned buffer, find the cell pitch + phase via
-//      autocorrelation of an "edge energy" profile (sum of adjacent-pixel
-//      differences) — periodic peaks land at cell boundaries. Since the
-//      buffer is now (assumed) axis-aligned, this is the same detector as
-//      Stage 1, just running on rotation-corrected pixels.
-//   5. Sample every fully-visible cell in each candidate into a grid, tile
-//      into discrete, non-overlapping order x order patches, and decode
-//      each patch's bits (see decodePatches — which internally also tries
-//      all 4 *reading* orientations per candidate, since a wrong-by-90
-//      derotation angle shifts tile boundaries too, not just content, so
-//      reading-orientation and derotation-angle ambiguity must both be
-//      resolved together).
-//   6. Each patch's exact-match lookup gives a candidate SEED anchor
-//      position — fast, narrows the search from "every torus position" to a
-//      handful, but weak evidence on its own: with only 16 bits of key
-//      space at order 4, 65535 of 65536 possible windows are valid, so a
-//      single patch finding "a" match doesn't mean much. pickBestCandidate
-//      scores every distinct seed by CORRELATING the entire sampled grid
-//      (not just one patch) against the actual known pattern at the
-//      position that seed implies (see scoreCorrelation), and keeps
-//      whichever seed — and whichever of the 4 angle candidates — scores
-//      highest. This tolerates individual misread bits gracefully (a
-//      genuinely correct anchor stays close to 1.0 even with some noise)
-//      while a wrong anchor sits close to 0.5 (uncorrelated with a random
-//      binary pattern) — a much better-separated signal than checking
-//      patches only agree with each other.
-
-import type { Mesh } from './mesh.ts';
+// pickBestCandidate picks among candidate sampled grids (the line pipeline
+// passes exactly 2: the sampled grid and its row-mirrored twin, to cover the
+// row-axis sort-direction ambiguity — see scripts/test-lines-decode.ts) by
+// tiling each into discrete order x order patches, looking up each patch's
+// exact-match seed anchor, then scoring every distinct seed by CORRELATING
+// the ENTIRE sampled grid (not just one patch) against the actual known
+// pattern at the position that seed implies (see scoreCorrelation). This
+// tolerates individual misread bits gracefully (a genuinely correct anchor
+// stays close to 1.0 even with some noise) while a wrong anchor sits close
+// to 0.5 (uncorrelated with a random binary pattern) — with only 16 bits of
+// key space at order 4, 65535 of 65536 possible windows are "valid", so a
+// single patch's exact-match hit alone is weak evidence; this correlation
+// check is what actually distinguishes a correct decode from noise that
+// happened to hash to *some* valid-but-wrong position.
 
 export interface GridDetection {
   px: number; py: number; // phase (px offset of first cell boundary)
@@ -112,13 +90,10 @@ function detectGridInRegion(bin: Uint8Array, w: number, x0: number, y0: number, 
 
   // Re-anchor the phase to the boundary nearest the REGION's center, rather
   // than leaving it wherever findPhase's [0, pitch) search happened to land
-  // it (always near the region's own index 0). Cell positions are
-  // extrapolated outward from this anchor (see sampleFullGrid), so any
-  // residual pitch error compounds with distance from it — anchoring near
-  // one edge means the far edge carries the full accumulated error;
-  // anchoring near the center means every visible edge is at most half that
-  // distance away, roughly halving the worst-case drift and making it
-  // symmetric instead of one-sided.
+  // it (always near the region's own index 0) — anchoring near the center
+  // keeps this estimate more stable when only used as a coarse pitch HINT
+  // (see src/main.ts's apparentPitch), rather than as a basis for
+  // extrapolating cell positions outward.
   const cx = (x0 + x1) / 2, cy = (y0 + y1) / 2;
   px += pitchX * Math.round((cx - px) / pitchX);
   py += pitchY * Math.round((cy - py) / pitchY);
@@ -192,175 +167,21 @@ export function estimateRotationRad(gray: Float64Array, w: number, h: number): n
   return theta; // [0, PI/2)
 }
 
-// Reinterprets an estimateRotationRad() result as a signed correction near 0
-// rather than an unsigned angle in [0, PI/2) — for refining a buffer that's
-// already nearly aligned, where the true residual is expected to be small
-// but wraps to near PI/2 if it was actually a small negative correction.
-// Lets a caller derotate once with a coarse estimate, then call
-// estimateRotationRad again on that mostly-aligned result to correct
-// residual error (which grows with distance from the rotation pivot, so it
-// matters more the larger the capture region is) — reusing the same
-// estimator rather than adding a second one.
-export function asSignedResidual(angle: number): number {
-  return angle > Math.PI / 4 ? angle - Math.PI / 2 : angle;
-}
-
-// valid is false when a cell couldn't actually be sampled — only relevant
-// for mesh-based sampling (see sampleFromMesh), where gaps exist because not
-// every grid lattice point is 2D-localizable (see src/cornerdetect.ts); x/y/
-// bit are meaningless placeholders in that case. sampleFullGrid's constant-
-// pitch model has no gaps, so valid is always true there.
-//
-// cornerCount is how many of the cell's 4 mesh corners were actually known
-// when sampleFromMesh estimated its center (2, 3, or 4 — see its diagonal-
-// pair comment for why 2 is enough) — a rough per-cell confidence signal,
-// mainly for debug display (src/main.ts's overlay). 0 for sampleFullGrid,
-// which isn't corner-based at all.
+// valid is false when a cell couldn't actually be sampled (the homography
+// mapped it outside the image, see src/main.ts's sampleFromHomography) — x/
+// y/bit are meaningless placeholders in that case. cornerCount is a leftover
+// per-cell confidence field from an earlier corner-mesh-based sampler,
+// unused by the line pipeline (always 0).
 export interface SampledCell { x: number; y: number; bit: number; valid: boolean; cornerCount: number; }
 
-// Walks outward from `anchor` in both directions at a constant `pitch`,
-// accumulating cell boundary positions.
-export function buildBoundaries(anchor: number, pitch: number, minPos: number, maxPos: number): { boundaries: number[]; anchorIndex: number } {
-  const right: number[] = [anchor];
-  let x = anchor;
-  while (x < maxPos) { x += pitch; right.push(x); }
-  const left: number[] = [];
-  x = anchor;
-  while (x > minPos) { x -= pitch; left.unshift(x); }
-  return { boundaries: [...left, ...right], anchorIndex: left.length };
-}
-
-// Samples every fully-visible cell in the (assumed axis-aligned) buffer into
-// a 2D grid, cells[row][col], row 0 = top. Extends in BOTH directions from
-// (px, py) — not just rightward/downward — since detectGrid re-anchors
-// (px, py) near the buffer's center rather than near index 0. originRow/
-// originCol give the array index of the cell whose top-left corner sits at
-// exactly (px, py), for callers that need to map back to pixel positions
-// (e.g. drawing overlay lines) without recomputing the anchor themselves.
+// rows/cols is however many cells the sampler produced; originRow/originCol
+// give the array index of whichever cell the sampler treats as its anchor,
+// for callers that need to map back to pixel positions without recomputing
+// it themselves. src/main.ts's sampleFromHomography (the line pipeline's
+// sampler) always sets both to 0.
 export interface SampledGrid {
   rows: number; cols: number; cells: SampledCell[][];
   originRow: number; originCol: number;
-}
-
-export function sampleFullGrid(bin: Uint8Array, w: number, h: number, grid: GridDetection): SampledGrid {
-  const { px, py, pitchX, pitchY } = grid;
-
-  const { boundaries: xB, anchorIndex: colsLeft } = buildBoundaries(px, pitchX, 0, w);
-  const { boundaries: yB, anchorIndex: rowsUp } = buildBoundaries(py, pitchY, 0, h);
-  const cols = xB.length - 1, rows = yB.length - 1;
-
-  const cells: SampledCell[][] = [];
-  for (let i = 0; i < rows; i++) {
-    const cy = (yB[i] + yB[i + 1]) / 2;
-    const by = Math.max(2, Math.floor((yB[i + 1] - yB[i]) * 0.2));
-    const rowCells: SampledCell[] = [];
-    for (let j = 0; j < cols; j++) {
-      const cx = (xB[j] + xB[j + 1]) / 2;
-      const bx = Math.max(2, Math.floor((xB[j + 1] - xB[j]) * 0.2));
-      let sum = 0, count = 0;
-      for (let dy = -by; dy <= by; dy++) {
-        const yy = Math.round(cy + dy);
-        if (yy < 0 || yy >= h) continue;
-        for (let dx = -bx; dx <= bx; dx++) {
-          const xx = Math.round(cx + dx);
-          if (xx < 0 || xx >= w) continue;
-          sum += bin[yy * w + xx];
-          count++;
-        }
-      }
-      rowCells.push({ x: cx, y: cy, bit: count > 0 && sum / count > 0.5 ? 1 : 0, valid: true, cornerCount: 0 });
-    }
-    cells.push(rowCells);
-  }
-  return { rows, cols, cells, originRow: rowsUp, originCol: colsLeft };
-}
-
-// Samples cell-fill bits from a corner mesh (src/mesh.ts) instead of a
-// constant-pitch grid — each cell (row,col) is bounded by the 4 mesh nodes
-// at (row,col), (row,col+1), (row+1,col), (row+1,col+1), and its bit is
-// sampled at the cell's actual detected center, so cell size and shape
-// follow whatever local perspective distortion the mesh captured, not an
-// assumed constant pitch.
-//
-// Only 5/8 of lattice points are ever directly detectable (see
-// src/cornerdetect.ts), so requiring all 4 corners is a much stricter bar
-// than it sounds: at a representative ~55% per-corner mesh-linking rate,
-// P(all 4 present) is only ~9%, which measured out as true on real captures
-// and left far too few valid cells for either decodePatches's tiling or
-// findSlidingSeeds's exhaustive search to find enough complete windows.
-//
-// The fix uses a property of the (locally-approximated) parallelogram each
-// cell forms: its center is the midpoint of EITHER diagonal, since both
-// diagonals of a parallelogram bisect each other. So only one complete
-// diagonal pair — {TL,BR} or {TR,BL} — is needed, not all 4 corners; a cell
-// with exactly 3 known corners always has one complete diagonal pair
-// automatically (whichever diagonal doesn't include the missing corner).
-// At the same ~55% per-corner rate this raises P(valid) to ~51% (2p^2-p^4
-// vs p^4) — order-of-magnitude more cells to work with. Genuinely
-// under-determined cells (0-2 corners known, or 2 known but ADJACENT rather
-// than diagonal) are still marked SampledCell.valid=false rather than
-// guessed at with a weaker assumption.
-export function sampleFromMesh(bin: Uint8Array, w: number, h: number, mesh: Mesh): SampledGrid {
-  if (mesh.nodes.length === 0) return { rows: 0, cols: 0, cells: [], originRow: 0, originCol: 0 };
-
-  let minRow = Infinity, maxRow = -Infinity, minCol = Infinity, maxCol = -Infinity;
-  for (const n of mesh.nodes) {
-    minRow = Math.min(minRow, n.row); maxRow = Math.max(maxRow, n.row);
-    minCol = Math.min(minCol, n.col); maxCol = Math.max(maxCol, n.col);
-  }
-  const rows = maxRow - minRow, cols = maxCol - minCol; // one fewer cell than the node span, each direction
-  if (rows <= 0 || cols <= 0) return { rows: 0, cols: 0, cells: [], originRow: 0, originCol: 0 };
-
-  const cells: SampledCell[][] = [];
-  for (let i = 0; i < rows; i++) {
-    const gridRow = minRow + i;
-    const rowCells: SampledCell[] = [];
-    for (let j = 0; j < cols; j++) {
-      const gridCol = minCol + j;
-      const tl = mesh.byCoord.get(`${gridRow},${gridCol}`);
-      const tr = mesh.byCoord.get(`${gridRow},${gridCol + 1}`);
-      const bl = mesh.byCoord.get(`${gridRow + 1},${gridCol}`);
-      const br = mesh.byCoord.get(`${gridRow + 1},${gridCol + 1}`);
-
-      const diag1 = tl && br ? { ax: tl.x, ay: tl.y, bx: br.x, by: br.y } : null; // TL-BR
-      const diag2 = tr && bl ? { ax: tr.x, ay: tr.y, bx: bl.x, by: bl.y } : null; // TR-BL
-      if (!diag1 && !diag2) {
-        rowCells.push({ x: NaN, y: NaN, bit: 0, valid: false, cornerCount: 0 });
-        continue;
-      }
-      const cornerCount = [tl, tr, bl, br].filter(c => c !== undefined).length;
-      // Average both diagonal midpoints when both happen to be known (all 4
-      // corners present) for slightly better precision; otherwise use
-      // whichever one is available.
-      const mids = [diag1, diag2].filter((d): d is NonNullable<typeof d> => d !== null)
-        .map(d => [(d.ax + d.bx) / 2, (d.ay + d.by) / 2]);
-      const cx = mids.reduce((s, m) => s + m[0], 0) / mids.length;
-      const cy = mids.reduce((s, m) => s + m[1], 0) / mids.length;
-      // Cell size: half of whichever diagonal(s) are known (a diagonal
-      // spans corner-to-corner, i.e. sqrt(2) side lengths for a square
-      // cell) — reasonable even without direct edge measurements.
-      const diagLen = mids.length === 2
-        ? (Math.hypot(diag1!.bx - diag1!.ax, diag1!.by - diag1!.ay) + Math.hypot(diag2!.bx - diag2!.ax, diag2!.by - diag2!.ay)) / 2
-        : Math.hypot((diag1 ?? diag2)!.bx - (diag1 ?? diag2)!.ax, (diag1 ?? diag2)!.by - (diag1 ?? diag2)!.ay);
-      const halfSide = diagLen / (2 * Math.SQRT2);
-      const bx = Math.max(2, Math.floor(halfSide * 0.4)), by = bx;
-
-      let sum = 0, count = 0;
-      for (let dy = -by; dy <= by; dy++) {
-        const yy = Math.round(cy + dy);
-        if (yy < 0 || yy >= h) continue;
-        for (let dx = -bx; dx <= bx; dx++) {
-          const xx = Math.round(cx + dx);
-          if (xx < 0 || xx >= w) continue;
-          sum += bin[yy * w + xx];
-          count++;
-        }
-      }
-      rowCells.push({ x: cx, y: cy, bit: count > 0 && sum / count > 0.5 ? 1 : 0, valid: true, cornerCount });
-    }
-    cells.push(rowCells);
-  }
-  return { rows, cols, cells, originRow: -minRow, originCol: -minCol };
 }
 
 // Packs an order x order cell block into a lookup key, reading it under one
@@ -400,34 +221,6 @@ export interface PatchDecodeResult {
   consistency: number; // fraction of adjacent-tile pairs whose decoded positions agree, 0..1
 }
 
-// Scores how self-consistent a set of decoded patches is: for each pair of
-// tiles that are adjacent in the tile grid (share an edge), their decoded
-// torus positions should be close together (within a couple of cells) if the
-// decode is genuinely correct. With only 16 bits of key space (order 4),
-// 65535 of 65536 possible windows are valid, so a single patch's "found a
-// match" is very weak evidence on its own — cross-checking neighbors against
-// each other is what actually distinguishes a correct decode from noise that
-// happened to hash to *some* valid-but-wrong position.
-function scoreConsistency(patches: Patch[], order: number, R: number, C: number): number {
-  const byTile = new Map<string, Patch>();
-  for (const p of patches) byTile.set(`${p.tileRow},${p.tileCol}`, p);
-  const wrapDist = (a: number, b: number, mod: number) => Math.min(Math.abs(a - b), mod - Math.abs(a - b));
-
-  let agree = 0, total = 0;
-  for (const p of patches) {
-    if (!p.match) continue;
-    for (const [dI, dJ] of [[1, 0], [0, 1]] as const) {
-      const neighbor = byTile.get(`${p.tileRow + dI},${p.tileCol + dJ}`);
-      if (!neighbor || !neighbor.match) continue;
-      total++;
-      const dr = wrapDist(p.match.row, neighbor.match.row, R);
-      const dc = wrapDist(p.match.col, neighbor.match.col, C);
-      if (dr <= order * 2 && dc <= order * 2) agree++;
-    }
-  }
-  return total > 0 ? agree / total : 0;
-}
-
 interface Tile { tileRow: number; tileCol: number; cells: SampledCell[][]; }
 
 function buildTiles(sg: SampledGrid, order: number): Tile[] {
@@ -446,35 +239,16 @@ function buildTiles(sg: SampledGrid, order: number): Tile[] {
 
 function patchesForOrientation(tiles: Tile[], order: number, lookup: Int32Array, C: number, o: number): Patch[] {
   return tiles.map(tile => {
-    // A gap anywhere in the tile (see SampledCell.valid — only relevant for
-    // mesh-based sampling) means an exact-match lookup can't be trusted;
-    // skip straight to no-match rather than packing a bogus bit into the
-    // key. The tile still contributes to scoreCorrelation later via
-    // whichever of its cells ARE valid, just not as an exact-match seed
-    // candidate here.
+    // A gap anywhere in the tile (see SampledCell.valid) means an
+    // exact-match lookup can't be trusted; skip straight to no-match rather
+    // than packing a bogus bit into the key. The tile still contributes to
+    // scoreCorrelation later via whichever of its cells ARE valid, just not
+    // as an exact-match seed candidate here.
     const complete = tile.cells.every(row => row.every(c => c.valid));
     const packed = complete ? lookup[packPatchCells(tile.cells, order, o)] : -1;
     const match = packed === -1 ? null : { row: Math.floor(packed / C), col: packed % C };
     return { tileRow: tile.tileRow, tileCol: tile.tileCol, cells: tile.cells, match, correct: null };
   });
-}
-
-// Tiles the sampled grid into discrete, non-overlapping order x order
-// patches, resolves the shared 0/90/180/270 reading-orientation ambiguity
-// (the gradient-histogram rotation estimate only pins down the grid angle
-// modulo 90 degrees) by trying every orientation and picking whichever gives
-// the most self-consistent set of decoded patches (see scoreConsistency —
-// picking the first orientation with any valid hit is NOT reliable here,
-// since almost any noise hashes to *some* valid window).
-export function decodePatches(sg: SampledGrid, order: number, lookup: Int32Array, R: number, C: number): PatchDecodeResult {
-  const tiles = buildTiles(sg, order);
-  let best: PatchDecodeResult = { patches: [], orientation: null, consistency: -1 };
-  for (let o = 0; o < 4; o++) {
-    const patches = patchesForOrientation(tiles, order, lookup, C, o);
-    const consistency = scoreConsistency(patches, order, R, C);
-    if (consistency > best.consistency) best = { patches, orientation: o, consistency };
-  }
-  return best;
 }
 
 // Applies the same orientation-dependent rotation packPatchCells uses (see
@@ -492,18 +266,15 @@ export function rotateShift(da: number, db: number, orientation: number): [numbe
   return [da, db];
 }
 
-// Alternative seed generation to decodePatches's non-overlapping tiling —
-// needed for mesh-based sampling (see sampleFromMesh), where only 5/8 of
-// lattice points are ever detectable so a randomly-placed order x order
-// TILE landing on a fully-valid block of cells is rare even when plenty of
-// individually-valid cells exist scattered through the grid (a real
-// pattern's mesh coverage tested out around only ~5-10% of tiles being
-// fully valid — decodePatches found literally zero seeds there despite
-// ~10% of individual cells being valid). Sliding a window across EVERY
-// possible position, not just tile-aligned ones, finds a valid window far
-// more often. Only called when the grid actually has gaps (see
-// pickBestCandidate) — the old dense sampleFullGrid path never has any, so
-// its behavior and cost are completely unchanged.
+// Alternative seed generation to patchesForOrientation's non-overlapping
+// tiling — the line pipeline's homography-based sampling (src/main.ts's
+// sampleFromHomography) can produce gaps near the image edge, where a
+// tile-aligned order x order block landing entirely inside the valid region
+// is far less likely than SOME order x order window doing so. Sliding a
+// window across EVERY possible position, not just tile-aligned ones, finds a
+// valid window far more often. Only called when the grid actually has gaps
+// (see pickBestCandidate) — a fully-valid grid never needs this, so its
+// behavior and cost are unaffected.
 function findSlidingSeeds(sg: SampledGrid, order: number, lookup: Int32Array, R: number, C: number, orientation: number): { row: number; col: number }[] {
   const seen = new Set<string>();
   const anchors: { row: number; col: number }[] = [];
@@ -534,21 +305,19 @@ function findSlidingSeeds(sg: SampledGrid, order: number, lookup: Int32Array, R:
 // Scores a candidate torus anchor (the torus position implied for the
 // sampled grid's own cell (0,0), i.e. its top-left corner) by comparing
 // EVERY sampled cell — not just one patch, not just adjacent pairs — against
-// the actual torus content at the positions that anchor implies. This is a
-// strictly stronger signal than checking patches agree with EACH OTHER
-// (the previous approach, scoreDenseConsistency): it checks agreement with
-// the known pattern directly, so a genuinely correct anchor stays close to
-// 1.0 even with a handful of misread bits (graceful degradation, rather than
-// exact-match's all-or-nothing), while a wrong anchor — even one some patch
-// found via a "valid" exact-match lookup, which is weak evidence on its own
-// given only 16 bits of key space at order 4 (65535 of 65536 possible
-// windows are valid) — should sit close to 0.5 (uncorrelated with a random
-// binary pattern), giving much better separation than the old metric.
+// the actual torus content at the positions that anchor implies. A genuinely
+// correct anchor stays close to 1.0 even with a handful of misread bits
+// (graceful degradation, rather than exact-match's all-or-nothing), while a
+// wrong anchor — even one some patch found via a "valid" exact-match lookup,
+// which is weak evidence on its own given only 16 bits of key space at order
+// 4 (65535 of 65536 possible windows are valid) — should sit close to 0.5
+// (uncorrelated with a random binary pattern), giving much better separation
+// than checking patches only agree with each other.
 function scoreCorrelation(sg: SampledGrid, torus: Uint8Array[], R: number, C: number, anchorRow: number, anchorCol: number, orientation: number): number {
   let agree = 0, total = 0;
   for (let i = 0; i < sg.rows; i++) {
     for (let j = 0; j < sg.cols; j++) {
-      if (!sg.cells[i][j].valid) continue; // gap in mesh-based sampling — no data to compare
+      if (!sg.cells[i][j].valid) continue; // gap (e.g. sampled point fell outside the image) — no data to compare
       total++;
       const [dr, dc] = rotateShift(i, j, orientation);
       const torusRow = ((anchorRow + dr) % R + R) % R;
@@ -559,32 +328,24 @@ function scoreCorrelation(sg: SampledGrid, torus: Uint8Array[], R: number, C: nu
   return total === 0 ? 0 : agree / total;
 }
 
-// Runs across several rotation candidates (typically the gradient-histogram
-// estimate plus 90/180/270-degree offsets of it — see this module's header
-// comment for why the full angle isn't pinned down by edge orientation
-// alone), and — unlike an earlier version of this function — across all 4
-// tile-reading orientations independently via scoreCorrelation directly,
-// rather than delegating orientation choice to decodePatches's own
-// scoreConsistency. That was fine for the dense sampleFullGrid case (patch
-// matches exist for scoreConsistency to compare), but for mesh-based
-// sampling (see sampleFromMesh), where the grid has gaps, scoreConsistency
-// has nothing to compare and returns 0 for every orientation identically —
-// it can't actually discriminate the right one. scoreCorrelation, the
-// stronger signal already used for anchor selection, does not have this
-// problem, so it now picks orientation too; this is a superset of the old
-// behavior for the dense case (never worse, since it tries everything the
-// old path did plus more).
+// Runs across every candidate sampled grid the caller passes (the line
+// pipeline passes 2: the sampled grid and its row-mirrored twin, to cover
+// the row-axis sort-direction ambiguity — see scripts/test-lines-decode.ts),
+// and across all 4 tile-reading orientations, via scoreCorrelation directly
+// rather than the weaker patch-vs-patch agreement check — necessary because
+// a grid with edge gaps can have too few adjacent-patch pairs for that check
+// to discriminate anything, whereas scoreCorrelation always has real
+// pattern content to compare against.
 //
-// Seeds come from two sources: decodePatches's non-overlapping tiles (fast,
-// works well when most cells are valid) and, when the grid has any gaps,
-// findSlidingSeeds's exhaustive window search (needed because a randomly
-// tile-aligned window landing on an all-valid block is rare once a
+// Seeds come from two sources: patchesForOrientation's non-overlapping tiles
+// (fast, works well when most cells are valid) and, when the grid has any
+// gaps, findSlidingSeeds's exhaustive window search (needed because a
+// randomly tile-aligned window landing on an all-valid block is rare once a
 // meaningful fraction of cells are gaps — see findSlidingSeeds). Both feed
-// the same scoreCorrelation-based selection, so a mesh-sampled grid pays the
+// the same scoreCorrelation-based selection, so a grid with gaps pays the
 // extra sliding-window cost only when it actually needs it. match is the
 // torus position of the sampled grid's CENTER cell (roughly where the
-// camera is actually pointed), not (0,0), which could be anywhere depending
-// on how far the phase anchor extends in each direction (see detectGrid).
+// camera is actually pointed), not (0,0).
 export interface CandidateResult extends PatchDecodeResult { candidateIndex: number; match: { row: number; col: number } | null; }
 
 export function pickBestCandidate(sampledGrids: SampledGrid[], order: number, lookup: Int32Array, torus: Uint8Array[], R: number, C: number): CandidateResult {

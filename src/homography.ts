@@ -1,11 +1,10 @@
 // Fits and applies a planar homography mapping lattice (col,row) <-> image
 // (x,y). A flat grid under perspective is exactly a homography (8 DOF) —
-// this is the global model the mesh pipeline is being restructured around:
-// once fitted from a handful of confidently-known correspondences, it lets
-// every OTHER detected corner be assigned a (row,col) address independently
-// (rectify + round), rather than by chaining local neighbor hops where a
-// single bad link can drift an entire connected sub-region (see mesh.ts's
-// buildMesh/pruneInconsistentNodes docs for the failure mode this replaces).
+// used by the line-based rectification pipeline (src/lattice.ts's
+// buildLatticeCorrespondences feeds fitHomographyDLT) to turn every indexed
+// row/col line crossing into a single global model, letting every lattice
+// cell be addressed directly (rectify + round) rather than by chaining local
+// neighbor hops.
 
 export type Mat3 = Float64Array; // row-major 3x3, 9 entries
 
@@ -127,65 +126,4 @@ export function applyHomography(H: Mat3, u: number, v: number): [number, number]
 
 export function invertHomography(H: Mat3): Mat3 | null {
   return mat3Invert(H);
-}
-
-// A vanishing point/direction as produced by src/vanishing.ts — declared
-// structurally here rather than imported, so this module doesn't need to
-// depend on vanishing.ts's internals, just this shape.
-export interface VPLike { finite: boolean; x: number; y: number; angle: number; }
-
-function vpToHomogeneous(vp: VPLike): [number, number, number] {
-  return vp.finite ? [vp.x, vp.y, 1] : [Math.cos(vp.angle), Math.sin(vp.angle), 0];
-}
-
-// Fits a homography using the row/column vanishing points to fix the
-// DIRECTION of H's first two columns (see src/vanishing.ts's module doc: a
-// flat grid's row-lines all converge to VP_row, i.e. VP_row IS H's first
-// column up to an unknown scale, same for VP_col/second column), and a
-// small local point patch only to solve for what the VPs can't supply: the
-// per-axis scale (image-pixels per lattice step) and the exact position of
-// lattice (0,0) via `origin`.
-//
-// This deliberately avoids plain point-correspondence DLT (fitHomographyDLT)
-// for this role: validated via scripts/test-homography.ts that an 8-unknown
-// DLT fit from a small, spatially CLUSTERED local patch (exactly what a
-// short-range BFS seed produces) extrapolates wildly under even mild (0.5-2px)
-// corner-detection noise — clustered points carry almost no information about
-// H's perspective terms. Fixing those terms' direction from wide-baseline VP
-// evidence instead collapses the fit to 2 unknowns (the two scales), which a
-// small nearby patch CAN determine reliably (it's a scale/nearby-distance
-// measurement, exactly what local data is good at).
-//
-// origin must be one of the patch's own points (its measured pixel position
-// is used directly as H's third column — the lattice-(0,0) point needs no
-// fitting, unlike a direction, since it's an ordinary finite point).
-export function fitHomographyFromVPAndPatch(
-  vpRow: VPLike, vpCol: VPLike, origin: PointCorrespondence, patch: PointCorrespondence[],
-): Mat3 | null {
-  const [Rx, Ry, Rw] = vpToHomogeneous(vpRow);
-  const [Cx, Cy, Cw] = vpToHomogeneous(vpCol);
-
-  let A00 = 0, A01 = 0, A11 = 0, b0 = 0, b1 = 0;
-  for (const p of patch) {
-    const u = p.u - origin.u, v = p.v - origin.v;
-    if (u === 0 && v === 0) continue;
-    const x = p.x, y = p.y;
-    const ai0 = u * (Rx - x * Rw), ai1 = v * (Cx - x * Cw), bi = x - origin.x;
-    const aj0 = u * (Ry - y * Rw), aj1 = v * (Cy - y * Cw), bj = y - origin.y;
-    A00 += ai0 * ai0 + aj0 * aj0;
-    A01 += ai0 * ai1 + aj0 * aj1;
-    A11 += ai1 * ai1 + aj1 * aj1;
-    b0 += ai0 * bi + aj0 * bj;
-    b1 += ai1 * bi + aj1 * bj;
-  }
-  const det = A00 * A11 - A01 * A01;
-  if (Math.abs(det) < 1e-9) return null;
-  const alpha = (A11 * b0 - A01 * b1) / det;
-  const beta = (A00 * b1 - A01 * b0) / det;
-
-  return new Float64Array([
-    alpha * Rx, beta * Cx, origin.x,
-    alpha * Ry, beta * Cy, origin.y,
-    alpha * Rw, beta * Cw, 1,
-  ]);
 }

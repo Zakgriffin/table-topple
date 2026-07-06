@@ -40,6 +40,10 @@
   .row span.val { flex: 0 0 44px; text-align: right; font-size: 11px; color: #eee; }
   label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 4px; cursor: pointer; }
   label.chk input { accent-color: #2a7; }
+  .fieldViewDivider {
+    font-size: 10px; color: #678; text-align: center; margin: 6px 0;
+    border-top: 1px dashed rgba(255,255,255,0.2); padding-top: 6px;
+  }
   #readout { font-size: 11px; color: #6c9; line-height: 1.5; margin-top: 4px; }
   #axesReadout { font-size: 11px; color: #fc6; line-height: 1.5; margin-top: 8px; white-space: pre-line; }
   .captureBtn {
@@ -75,10 +79,10 @@
   </div>
 
   <div class="section">
-    <h2>camera pose</h2>
-    <div class="row"><span class="label">X</span><input type="range" id="camX" min="-15" max="15" step="0.1" value="0"><span class="val" id="camXVal"></span></div>
-    <div class="row"><span class="label">height</span><input type="range" id="camY" min="0.5" max="15" step="0.1" value="4"><span class="val" id="camYVal"></span></div>
-    <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-15" max="15" step="0.1" value="8"><span class="val" id="camZVal"></span></div>
+    <h2>camera details</h2>
+    <div class="row"><span class="label">X</span><input type="range" id="camX" min="-50" max="50" step="0.1" value="0"><span class="val" id="camXVal"></span></div>
+    <div class="row"><span class="label">height</span><input type="range" id="camY" min="0.5" max="50" step="0.1" value="4"><span class="val" id="camYVal"></span></div>
+    <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-50" max="50" step="0.1" value="8"><span class="val" id="camZVal"></span></div>
     <div class="row"><span class="label">yaw</span><input type="range" id="camYaw" min="-180" max="180" step="1" value="0"><span class="val" id="camYawVal"></span></div>
     <div class="row"><span class="label">pitch</span><input type="range" id="camPitch" min="-89" max="89" step="1" value="-20"><span class="val" id="camPitchVal"></span></div>
     <div class="row"><span class="label">focal (mm eq.)</span><input type="range" id="camFocal" min="10" max="85" step="1" value="26"><span class="val" id="camFocalVal"></span></div>
@@ -91,15 +95,22 @@
     <h2>simulated capture distortion</h2>
     <div class="row"><span class="label">pixel noise &sigma;</span><input type="range" id="simNoise" min="0" max="40" step="1" value="8"><span class="val" id="simNoiseVal"></span></div>
     <div class="row"><span class="label">blur radius</span><input type="range" id="simBlur" min="0" max="4" step="1" value="1"><span class="val" id="simBlurVal"></span></div>
-    <div class="row"><span class="label">gradient radius</span><input type="range" id="simGradRadius" min="1" max="6" step="1" value="1"><span class="val" id="simGradRadiusVal"></span></div>
-    <div class="row"><span class="label">noise floor</span><input type="range" id="simMinMag" min="0" max="40" step="1" value="4"><span class="val" id="simMinMagVal"></span></div>
-    <div class="row"><span class="label">corner window</span><input type="range" id="coherenceRadius" min="1" max="20" step="1" value="1"><span class="val" id="coherenceRadiusVal"></span></div>
     <div class="row"><span class="label">supersample</span><input type="range" id="captureSupersample" min="1" max="4" step="1" value="2"><span class="val" id="captureSupersampleVal"></span></div>
   </div>
 
   <div class="section">
+    <h2>2D filter pipeline</h2>
+    <div class="row"><span class="label">gradient radius</span><input type="range" id="simGradRadius" min="1" max="6" step="1" value="1"><span class="val" id="simGradRadiusVal"></span></div>
+    <div class="row"><span class="label">noise floor</span><input type="range" id="simMinMag" min="0" max="40" step="1" value="4"><span class="val" id="simMinMagVal"></span></div>
+    <div class="row"><span class="label">corner window</span><input type="range" id="coherenceRadius" min="1" max="20" step="1" value="1"><span class="val" id="coherenceRadiusVal"></span></div>
+  </div>
+
+  <div class="section">
     <h2>field view</h2>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewNormal" value="normal" checked> normal</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewRaw" value="raw"> raw (no blur, no noise)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewDownsampled" value="downsampled"> downsampled (+blur, no noise yet)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised" checked> noised (final image the algorithm sees)</label>
+    <div class="fieldViewDivider">&darr; 2D filter pipeline starts here &darr;</div>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewGradient" value="gradient"> gradient field (hue=direction, sat=magnitude)</label>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewCleaned" value="cleaned"> gradient field, cleaned (sat &times; cornerness coherence)</label>
   </div>

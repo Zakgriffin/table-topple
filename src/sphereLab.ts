@@ -65,7 +65,11 @@ function bindCheckbox(id: string, onChange: (v: boolean) => void) {
 
 function bindRadioGroup(name: string, onChange: (v: string) => void) {
   const inputs = Array.from(document.getElementsByName(name)) as HTMLInputElement[];
-  if (savedControls[name] !== undefined) {
+  // Only honor a saved value if it still matches one of the CURRENT options --
+  // otherwise a renamed/removed option value (e.g. an old 'normal' after this
+  // group's options changed) would leave every input unchecked instead of
+  // falling back to the HTML's own default `checked` attribute.
+  if (savedControls[name] !== undefined && inputs.some((inp) => inp.value === savedControls[name])) {
     for (const inp of inputs) inp.checked = inp.value === savedControls[name];
   }
   const apply = () => {
@@ -92,7 +96,7 @@ const state = {
   showAxisVectors: false,
   showTopCircles: true,
   weightSharpenPower: 4,
-  fieldView: 'normal' as 'normal' | 'gradient' | 'cleaned',
+  fieldView: 'noised' as 'raw' | 'downsampled' | 'noised' | 'gradient' | 'cleaned',
   axesAutoCapture: false, axesCaptureIntervalMs: 500,
   viewportW: 512, viewportH: 384, captureSupersample: 2, aspectLocked: false,
 };
@@ -290,6 +294,18 @@ distortedPreviewTex.colorSpace = THREE.SRGBColorSpace;
 // the module would still be in its temporal dead zone at that point.
 let pipRect = { x: 0, y: 0, w: 0, h: 0 };
 
+// True whenever gizmoCam's rendered output might have changed since the last
+// capture -- camera details or a capture-distortion/filter-pipeline tunable.
+// Declared here (not down by its own usage in animate()) for the same
+// reason as pipRect above: markCaptureDirty() can fire as early as
+// page-load-time slider binding, before a `let` declared later in the
+// module would have left its temporal dead zone. Starts true so the very
+// first frame always populates the preview.
+let captureDirty = true;
+function markCaptureDirty() {
+  captureDirty = true;
+}
+
 // Called once at startup (implicitly, via the viewportW/H/captureSupersample
 // slider bindings firing on load) and again whenever those sliders change.
 // camRT.setSize() resizes the render target in place; distortedPreviewTex
@@ -297,6 +313,7 @@ let pipRect = { x: 0, y: 0, w: 0, h: 0 };
 // reference to it, don't need to be touched) by having its .image swapped
 // for a new {data,width,height} triple -- DataTexture has no other resize path.
 function resizeCaptureBuffers() {
+  captureDirty = true;
   rtSize = { w: Math.round(state.viewportW), h: Math.round(state.viewportH) };
   RT_ASPECT = rtSize.w / rtSize.h;
   captureRTSize = { w: rtSize.w * state.captureSupersample, h: rtSize.h * state.captureSupersample };
@@ -561,6 +578,28 @@ function flipRowsF64(src: Float64Array, w: number, h: number): Float64Array {
   return out;
 }
 
+// Renders gizmoCam's view into camRT -- pulled out into its own function so
+// the real analysis path (captureDistortedGrayscale, below) can always force
+// a truly fresh capture regardless of the passive preview's dirty/throttle
+// gating in animate(): correctness of "capture now" matters more than saving
+// a render that's already infrequent (button click / auto-capture interval).
+// renderer.setViewport/setScissor multiply whatever they're given by
+// devicePixelRatio internally before the real gl.viewport() call — verified
+// empirically (a call with device-pixel values here produced a raw GL
+// viewport double what was intended, and against camRT specifically, a
+// viewport bigger than the target's actual buffer, silently cropping the
+// capture to one quadrant). Always pass plain CSS-pixel values.
+function renderCamRT() {
+  const dpr = renderer.getPixelRatio();
+  const prevRT = renderer.getRenderTarget();
+  renderer.setRenderTarget(camRT);
+  renderer.setViewport(0, 0, captureRTSize.w / dpr, captureRTSize.h / dpr);
+  renderer.setScissorTest(false);
+  renderer.clear();
+  renderer.render(scene, gizmoCam);
+  renderer.setRenderTarget(prevRT);
+}
+
 // Replaces the old "render small, blur small" pipeline with the physically
 // correct order: render at captureSupersample x, blur THERE (so the blur
 // acts on a near-continuous image the way a real lens's defocus/diffraction
@@ -579,6 +618,7 @@ function flipRowsF64(src: Float64Array, w: number, h: number): Float64Array {
 // needs -- the shared step has to stay neutral (native order) and let each
 // caller transform to what IT specifically needs.
 function captureDistortedGrayscale(): { gray: Float64Array; w: number; h: number } {
+  renderCamRT();
   const { w: cw, h: ch } = captureRTSize;
   const raw = new Uint8Array(cw * ch * 4);
   renderer.readRenderTargetPixels(camRT, 0, 0, cw, ch, raw);
@@ -587,6 +627,57 @@ function captureDistortedGrayscale(): { gray: Float64Array; w: number; h: number
   const gray = downsampleBoxAverage(hiResBlurred, cw, ch, state.captureSupersample, rtSize.w, rtSize.h);
   addGaussianNoise(gray, state.simNoise);
   return { gray, w: rtSize.w, h: rtSize.h };
+}
+
+// For the field-view preview only (not the real analysis path above, which
+// stays a fast single-purpose function). "blurred" isn't its own stage
+// here: once resampled down to a common display resolution, "blur at
+// hi-res, then box-average to rtSize for display" and "blur at hi-res,
+// then box-average downsample to rtSize as the real pipeline step" are the
+// exact same computation -- so it would be pixel-identical to "downsampled"
+// and add no new information.
+//
+// Stops as soon as it has what the CURRENTLY selected field view needs,
+// instead of always computing raw+downsampled+noised regardless of which
+// one is displayed -- the earlier always-compute-everything version did a
+// second full downsample pass (for "raw") and a full-buffer .slice() copy
+// (for "noised") on every single throttled tick even when neither was
+// selected, real wasted work on top of what was already the most expensive
+// per-frame CPU cost in the app.
+function updateDistortedPreview() {
+  const { w: cw, h: ch } = captureRTSize;
+  const rawRGBA = new Uint8Array(cw * ch * 4);
+  renderer.readRenderTargetPixels(camRT, 0, 0, cw, ch, rawRGBA);
+  const hiResGray = toGrayscale(rawRGBA, cw, ch);
+
+  if (state.fieldView === 'raw') {
+    const raw = downsampleBoxAverage(hiResGray, cw, ch, state.captureSupersample, rtSize.w, rtSize.h);
+    fillGrayscalePreview(raw, distortedPreviewData);
+    distortedPreviewTex.needsUpdate = true;
+    return;
+  }
+
+  const hiResBlurred = separableBoxBlur(hiResGray, cw, ch, Math.round(state.simBlur * state.captureSupersample));
+  const downsampled = downsampleBoxAverage(hiResBlurred, cw, ch, state.captureSupersample, rtSize.w, rtSize.h);
+
+  if (state.fieldView === 'downsampled') {
+    fillGrayscalePreview(downsampled, distortedPreviewData);
+    distortedPreviewTex.needsUpdate = true;
+    return;
+  }
+
+  // Safe to noise in place from here -- downsampled's un-noised value is
+  // never needed again once we know the view isn't 'downsampled' itself.
+  const noised = downsampled;
+  addGaussianNoise(noised, state.simNoise);
+  if (state.fieldView === 'noised') {
+    fillGrayscalePreview(noised, distortedPreviewData);
+  } else if (state.fieldView === 'gradient') {
+    paintGradientField(noised, rtSize.w, rtSize.h, distortedPreviewData);
+  } else if (state.fieldView === 'cleaned') {
+    paintCleanedGradientField(noised, rtSize.w, rtSize.h, distortedPreviewData);
+  }
+  distortedPreviewTex.needsUpdate = true;
 }
 
 let lastPreviewUpdate = 0;
@@ -730,20 +821,12 @@ function paintCleanedGradientField(gray: Float64Array, w: number, h: number, out
   }
 }
 
-function updateDistortedPreview() {
-  const { gray, w, h } = captureDistortedGrayscale();
-  if (state.fieldView === 'gradient') {
-    paintGradientField(gray, w, h, distortedPreviewData);
-  } else if (state.fieldView === 'cleaned') {
-    paintCleanedGradientField(gray, w, h, distortedPreviewData);
-  } else {
-    for (let i = 0; i < gray.length; i++) {
-      const v = Math.max(0, Math.min(255, gray[i]));
-      const o = i * 4;
-      distortedPreviewData[o] = v; distortedPreviewData[o + 1] = v; distortedPreviewData[o + 2] = v; distortedPreviewData[o + 3] = 255;
-    }
+function fillGrayscalePreview(gray: Float64Array, out: Uint8Array) {
+  for (let i = 0; i < gray.length; i++) {
+    const v = Math.max(0, Math.min(255, gray[i]));
+    const o = i * 4;
+    out[o] = v; out[o + 1] = v; out[o + 2] = v; out[o + 3] = 255;
   }
-  distortedPreviewTex.needsUpdate = true;
 }
 
 // gray is expected to already be captureDistortedGrayscale's output --
@@ -1068,12 +1151,12 @@ modeBtns.inside.addEventListener('click', () => setMode('inside'));
 
 // ── Slider / checkbox wiring ─────────────────────────────────────────────
 
-bindSlider('camX', (v) => (state.camX = v));
-bindSlider('camY', (v) => (state.camY = v));
-bindSlider('camZ', (v) => (state.camZ = v));
-bindSlider('camYaw', (v) => (state.camYawDeg = v), (v) => `${v.toFixed(0)}°`);
-bindSlider('camPitch', (v) => (state.camPitchDeg = v), (v) => `${v.toFixed(0)}°`);
-bindSlider('camFocal', (v) => (state.focalMM = v), (v) => `${v.toFixed(0)}mm`);
+bindSlider('camX', (v) => { state.camX = v; markCaptureDirty(); });
+bindSlider('camY', (v) => { state.camY = v; markCaptureDirty(); });
+bindSlider('camZ', (v) => { state.camZ = v; markCaptureDirty(); });
+bindSlider('camYaw', (v) => { state.camYawDeg = v; markCaptureDirty(); }, (v) => `${v.toFixed(0)}°`);
+bindSlider('camPitch', (v) => { state.camPitchDeg = v; markCaptureDirty(); }, (v) => `${v.toFixed(0)}°`);
+bindSlider('camFocal', (v) => { state.focalMM = v; markCaptureDirty(); }, (v) => `${v.toFixed(0)}mm`);
 // Re-entrancy guard: with aspect lock on, dragging one slider programmatically
 // drives the other via a dispatched 'input' event, which would otherwise
 // trigger ITS OWN lock logic and try to drive the first one back again.
@@ -1116,13 +1199,13 @@ bindCheckbox('showPatch', (v) => (state.showPatch = v));
 bindCheckbox('showFloor', (v) => (state.showFloor = v));
 bindCheckbox('showGizmoBody', (v) => (state.showGizmoBody = v));
 
-bindSlider('simNoise', (v) => (state.simNoise = v), (v) => v.toFixed(0));
-bindSlider('simBlur', (v) => (state.simBlur = v), (v) => v.toFixed(0));
-bindSlider('simGradRadius', (v) => (state.simGradRadius = v), (v) => v.toFixed(0));
-bindSlider('simMinMag', (v) => (state.simMinMag = v), (v) => v.toFixed(0));
+bindSlider('simNoise', (v) => { state.simNoise = v; markCaptureDirty(); }, (v) => v.toFixed(0));
+bindSlider('simBlur', (v) => { state.simBlur = v; markCaptureDirty(); }, (v) => v.toFixed(0));
+bindSlider('simGradRadius', (v) => { state.simGradRadius = v; markCaptureDirty(); }, (v) => v.toFixed(0));
+bindSlider('simMinMag', (v) => { state.simMinMag = v; markCaptureDirty(); }, (v) => v.toFixed(0));
 bindSlider('captureSupersample', (v) => { state.captureSupersample = v; resizeCaptureBuffers(); }, (v) => `${v.toFixed(0)}x`);
-bindSlider('coherenceRadius', (v) => (state.coherenceRadius = v), (v) => v.toFixed(0));
-bindRadioGroup('fieldView', (v) => (state.fieldView = v as 'normal' | 'gradient' | 'cleaned'));
+bindSlider('coherenceRadius', (v) => { state.coherenceRadius = v; markCaptureDirty(); }, (v) => v.toFixed(0));
+bindRadioGroup('fieldView', (v) => { state.fieldView = v as 'raw' | 'downsampled' | 'noised' | 'gradient' | 'cleaned'; markCaptureDirty(); });
 bindSlider('circleSamplePercentMin', (v) => { state.circleSamplePercentMin = v; updateGradientCirclesDebug(); }, (v) => `${v.toFixed(0)}%`);
 bindSlider('circleSamplePercentMax', (v) => { state.circleSamplePercentMax = v; updateGradientCirclesDebug(); }, (v) => `${v.toFixed(0)}%`);
 bindCheckbox('showRecoveredPoles', (v) => (state.showRecoveredPoles = v));
@@ -1284,34 +1367,22 @@ function animate() {
   floorMesh.visible = state.showFloor;
 
   // Camera render target feeds the PIP preview, the sphere patch, AND
-  // Through-Cam mode now (previously skipped in "through" since that mode
-  // used to render gizmoCam live instead) -- all three now show the same
-  // distorted preview texture rather than gizmoCam directly, so all three
-  // need camRT fresh every frame.
-  // renderer.setViewport/setScissor multiply whatever they're given by
-  // devicePixelRatio internally before the real gl.viewport() call — verified
-  // empirically (a call with device-pixel values here produced a raw GL
-  // viewport double what was intended, and against camRT specifically, a
-  // viewport bigger than the target's actual buffer, silently cropping the
-  // capture to one quadrant). Every call below therefore passes plain
-  // CSS-pixel values, matching innerWidth/innerHeight — never pre-multiplied.
-  const dpr = renderer.getPixelRatio();
-
-  {
-    const prevRT = renderer.getRenderTarget();
-    renderer.setRenderTarget(camRT);
-    renderer.setViewport(0, 0, captureRTSize.w / dpr, captureRTSize.h / dpr);
-    renderer.setScissorTest(false);
-    renderer.clear();
-    renderer.render(scene, gizmoCam);
-    renderer.setRenderTarget(prevRT);
-  }
-
-  // Throttled: a full readback + per-pixel noise + blur every frame is real
-  // CPU cost for a preview that only needs to look live, not be frame-exact.
+  // Through-Cam mode -- all three show the same distorted preview texture
+  // rather than gizmoCam directly. Only worth redoing when something that
+  // actually changes gizmoCam's output has changed (camera details, or a
+  // capture-distortion/filter-pipeline tunable -- see markCaptureDirty's
+  // call sites), NOT every single frame: panning the WORLD-mode orbit
+  // camera, for instance, never touches gizmoCam at all, so re-rendering
+  // and reading back a potentially large captureRTSize buffer on every one
+  // of those frames was pure waste that made panning feel heavy at larger
+  // viewport sizes. Still throttled on top (a full readback + blur/downsample
+  // is real CPU cost even when it IS needed -- e.g. while a slider is being
+  // actively dragged, firing many 'input' events per second).
   const now = performance.now();
-  if (now - lastPreviewUpdate >= PREVIEW_UPDATE_INTERVAL_MS) {
+  if (captureDirty && now - lastPreviewUpdate >= PREVIEW_UPDATE_INTERVAL_MS) {
     lastPreviewUpdate = now;
+    captureDirty = false;
+    renderCamRT();
     updateDistortedPreview();
   }
 

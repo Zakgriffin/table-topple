@@ -3,3 +3,6 @@ dist/
 .vite/
 .DS_Store
 stuffs/
+.claude/settings.local.json
+renders/
+scripts/dev-bridge/latest-frame.png

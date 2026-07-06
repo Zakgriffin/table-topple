@@ -1,0 +1,155 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>De Bruijn Torus Tracker</title>
+<style>
+  * { margin: 0; padding: 0; }
+  body { background: #000; overflow: hidden; }
+  canvas#c {
+    position: fixed;
+    top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+  }
+  canvas#c.mirror {
+    transform: translate(-50%, -50%) scaleX(-1);
+  }
+  #status {
+    position: fixed; top: 30px; left: 30px; color: #0f0;
+    font-family: monospace; font-size: 42px; white-space: pre;
+    text-shadow: 0 0 9px #000, 0 0 9px #000;
+  }
+  #switchCam {
+    position: fixed; bottom: 48px; right: 48px; z-index: 10;
+    padding: 30px 42px; border-radius: 999px; border: none;
+    background: rgba(255,255,255,0.15); color: white;
+    font-family: monospace; font-size: 42px; backdrop-filter: blur(4px);
+  }
+  #switchCam:active { background: rgba(255,255,255,0.3); }
+  #zoomBox {
+    position: fixed; bottom: 190px; left: 48px; right: 48px; z-index: 10;
+    display: flex; align-items: center; gap: 24px;
+    background: rgba(255,255,255,0.15); backdrop-filter: blur(4px);
+    border-radius: 999px; padding: 18px 42px;
+  }
+  #zoomLabel { color: white; font-family: monospace; font-size: 36px; white-space: nowrap; }
+  #zoom {
+    flex: 1; accent-color: #0f0;
+    height: 24px;
+  }
+  #zoom::-webkit-slider-thumb { width: 42px; height: 42px; }
+  #zoom::-moz-range-thumb { width: 42px; height: 42px; }
+  #zoom:disabled { accent-color: #f00; opacity: 0.5; }
+
+  #debugPanel {
+    position: fixed; top: 30px; right: 30px; z-index: 10;
+    background: rgba(255,255,255,0.15); backdrop-filter: blur(4px);
+    border-radius: 24px; padding: 24px 30px;
+    display: flex; flex-direction: column; gap: 14px;
+    color: white; font-family: monospace; font-size: 30px;
+  }
+  #analyzeBtn {
+    padding: 20px 28px; border-radius: 999px; border: none;
+    background: rgba(60,140,255,0.5); color: white;
+    font-family: monospace; font-size: 30px;
+  }
+  #analyzeBtn:active { background: rgba(60,140,255,0.8); }
+  #debugPanel label { display: flex; align-items: center; gap: 12px; white-space: nowrap; }
+  #debugPanel input[type=checkbox] { width: 30px; height: 30px; accent-color: #0f0; }
+  #pipelineStatus {
+    position: fixed; top: 30px; left: 30px; color: #3cf;
+    font-family: monospace; font-size: 30px; white-space: pre;
+    text-shadow: 0 0 9px #000, 0 0 9px #000;
+    margin-top: 220px;
+  }
+
+  #tuningPanel {
+    margin-top: 6px; font-size: 18px; color: white; font-family: monospace;
+  }
+  #tuningPanel summary { font-size: 22px; cursor: pointer; padding: 4px 0; }
+  #homeLink {
+    position: fixed; top: 30px; left: 50%; transform: translateX(-50%); z-index: 20;
+    color: #6c9; font-family: monospace; font-size: 16px; text-decoration: none;
+    background: rgba(0,0,0,0.4); padding: 6px 14px; border-radius: 999px;
+  }
+  #tuningGroup { display: flex; flex-direction: column; gap: 10px; margin-top: 10px; max-height: 60vh; overflow-y: auto; }
+  .tuningHeader { font-size: 16px; opacity: 0.7; margin-top: 6px; text-transform: uppercase; letter-spacing: 1px; }
+  .tuningRow { display: flex; align-items: center; gap: 10px; }
+  .tuningRow span.tName { flex: 0 0 150px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .tuningRow input[type=range] { flex: 1; accent-color: #0f0; height: 14px; }
+  .tuningRow span.tVal { flex: 0 0 48px; text-align: right; }
+
+  /* Hough-space window: a separate fixed panel (not composited onto the
+     video canvas like the other debug overlays) so it can sit alongside
+     the live view rather than obscuring it. Canvas pixel buffer is set to
+     the accumulator's own theta x rho bin dimensions in main.ts; this CSS
+     just controls its on-screen size/position. Hidden by default, shown by
+     toggleHoughSpace. */
+  #houghSpaceCanvas {
+    display: none;
+    position: fixed; bottom: 20px; right: 20px; z-index: 8;
+    width: 55vw; height: auto;
+    border: 2px solid rgba(255,255,255,0.3); border-radius: 8px;
+    background: #000;
+  }
+</style>
+</head>
+<body>
+<a id="homeLink" href="/">&larr; home</a>
+<canvas id="c"></canvas>
+<canvas id="houghSpaceCanvas"></canvas>
+<div id="status">Starting camera...</div>
+<div id="pipelineStatus"></div>
+<div id="debugPanel">
+  <button id="analyzeBtn">🔍 Analyze</button>
+  <label><input type="checkbox" id="toggleGrayscale"> grayscale</label>
+  <label><input type="checkbox" id="toggleBinarized"> binarized</label>
+  <label><input type="checkbox" id="toggleGradientField"> gradient field</label>
+  <hr style="width:100%; border-color: rgba(255,255,255,0.3);">
+  <!-- retired along with the old Level 2 pipeline it visualized (see src/main.ts) -->
+  <!-- <label><input type="checkbox" id="toggleHoughLines"> hough lines</label> -->
+  <label><input type="checkbox" id="toggleLineVPs"> line VPs</label>
+  <label><input type="checkbox" id="toggleLineHomography"> rectified grid</label>
+  <label><input type="checkbox" id="togglePatches"> patches</label>
+  <label><input type="checkbox" id="toggleHoughSpace"> hough space</label>
+  <label style="padding-left: 24px;"><input type="checkbox" id="toggleHoughSpacePeaks" checked> &nbsp;&#8627; show peaks</label>
+
+  <details id="tuningPanel">
+    <summary>&#9881; tuning</summary>
+    <div id="tuningGroup">
+      <div class="tuningHeader">Level 1 — hough lines</div>
+      <label class="tuningRow"><span class="tName">blur radius</span><input type="range" id="tBlurRadius" min="0" max="4" step="1" value="1"><span class="tVal" id="tBlurRadiusVal">1</span></label>
+      <label class="tuningRow"><span class="tName">gradient radius</span><input type="range" id="tGradientRadius" min="1" max="6" step="1" value="1"><span class="tVal" id="tGradientRadiusVal">1</span></label>
+      <label class="tuningRow"><span class="tName">noise floor</span><input type="range" id="tMinMag" min="0" max="30" step="0.5" value="4"><span class="tVal" id="tMinMagVal">4</span></label>
+      <label class="tuningRow"><span class="tName">peak thresh.</span><input type="range" id="tPeakThreshold" min="0.02" max="0.5" step="0.01" value="0.15"><span class="tVal" id="tPeakThresholdVal">0.15</span></label>
+      <label class="tuningRow"><span class="tName">NMS &theta; radius</span><input type="range" id="tNmsTheta" min="1" max="10" step="1" value="4"><span class="tVal" id="tNmsThetaVal">4</span></label>
+      <label class="tuningRow"><span class="tName">NMS &rho; radius</span><input type="range" id="tNmsRho" min="1" max="10" step="1" value="3"><span class="tVal" id="tNmsRhoVal">3</span></label>
+
+      <div class="tuningHeader">Level 2 — VP split (orthogonal search)</div>
+      <!-- OLD (src/vp.ts's splitIntoTwoFamilies, not currently called):
+      <label class="tuningRow"><span class="tName">inlier px</span><input type="range" id="tSplitInlierPx" min="1" max="40" step="0.5" value="6"><span class="tVal" id="tSplitInlierPxVal">6</span></label>
+      <label class="tuningRow"><span class="tName">max candidates</span><input type="range" id="tMaxCandidates" min="10" max="200" step="5" value="60"><span class="tVal" id="tMaxCandidatesVal">60</span></label>
+      -->
+      <label class="tuningRow"><span class="tName">robust delta px</span><input type="range" id="tOrthoDeltaPx" min="1" max="30" step="0.5" value="6"><span class="tVal" id="tOrthoDeltaPxVal">6</span></label>
+
+      <div class="tuningHeader">Level 3 — index recovery</div>
+      <label class="tuningRow"><span class="tName">inlier px</span><input type="range" id="tIndexInlierPx" min="1" max="40" step="0.5" value="4"><span class="tVal" id="tIndexInlierPxVal">4</span></label>
+      <label class="tuningRow"><span class="tName">max gap search</span><input type="range" id="tMaxGap" min="1" max="6" step="1" value="3"><span class="tVal" id="tMaxGapVal">3</span></label>
+      <label class="tuningRow"><span class="tName">span cap &times;</span><input type="range" id="tSpanCap" min="2" max="10" step="1" value="3"><span class="tVal" id="tSpanCapVal">3</span></label>
+
+      <div class="tuningHeader">orchestration</div>
+      <label class="tuningRow"><span class="tName">analysis res.</span><input type="range" id="tAnalysisRes" min="160" max="640" step="10" value="320"><span class="tVal" id="tAnalysisResVal">320</span></label>
+      <label class="tuningRow"><span class="tName">confidence</span><input type="range" id="tConfidence" min="0.5" max="1" step="0.01" value="0.85"><span class="tVal" id="tConfidenceVal">0.85</span></label>
+      <label class="tuningRow"><span class="tName">refresh ms</span><input type="range" id="tRefreshDelay" min="300" max="5000" step="100" value="1200"><span class="tVal" id="tRefreshDelayVal">1200</span></label>
+      <label class="tuningRow"><span class="tName">min family size</span><input type="range" id="tMinFamily" min="2" max="10" step="1" value="3"><span class="tVal" id="tMinFamilyVal">3</span></label>
+    </div>
+  </details>
+</div>
+<div id="zoomBox">
+  <span id="zoomLabel">Zoom</span>
+  <input type="range" id="zoom" min="0" max="1" step="0.01" value="0" disabled>
+</div>
+<button id="switchCam" title="Switch camera">⟲ Flip camera</button>
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

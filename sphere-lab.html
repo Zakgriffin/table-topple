@@ -1,0 +1,140 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Great Sphere Lab</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #111; overflow: hidden; font-family: monospace; }
+  canvas#gl { display: block; }
+
+  #pipFrame {
+    position: fixed; z-index: 5; pointer-events: none;
+    border: 2px solid rgba(255,255,255,0.5); border-radius: 4px;
+  }
+  #pipLabel {
+    position: fixed; z-index: 5; pointer-events: none;
+    color: #fff; font-size: 12px; text-shadow: 0 0 4px #000;
+  }
+
+  #panel {
+    position: fixed; top: 16px; left: 16px; z-index: 10;
+    background: rgba(20,20,20,0.85); backdrop-filter: blur(6px);
+    border-radius: 10px; padding: 14px 16px;
+    color: #ddd; font-size: 13px; width: 300px;
+    max-height: calc(100vh - 32px); overflow-y: auto;
+  }
+  #panel h1 { font-size: 15px; color: #fff; margin-bottom: 8px; }
+  #panel .hint { font-size: 11px; color: #999; margin-bottom: 10px; line-height: 1.4; }
+  .modeRow { display: flex; gap: 6px; margin-bottom: 12px; }
+  .modeRow button {
+    flex: 1; padding: 8px 4px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(255,255,255,0.08); color: #ccc; font-family: monospace; font-size: 11px; cursor: pointer;
+  }
+  .modeRow button.active { background: #2a7; color: #fff; border-color: #2a7; }
+  .section { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.15); }
+  .section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #8ab; margin-bottom: 6px; }
+  .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
+  .row span.label { flex: 0 0 88px; color: #aaa; font-size: 11px; }
+  .row input[type=range] { flex: 1; accent-color: #2a7; }
+  .row span.val { flex: 0 0 44px; text-align: right; font-size: 11px; color: #eee; }
+  label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 4px; cursor: pointer; }
+  label.chk input { accent-color: #2a7; }
+  #readout { font-size: 11px; color: #6c9; line-height: 1.5; margin-top: 4px; }
+  #axesReadout { font-size: 11px; color: #fc6; line-height: 1.5; margin-top: 8px; white-space: pre-line; }
+  .captureBtn {
+    width: 100%; padding: 8px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(60,140,255,0.35); color: #fff; font-family: monospace; font-size: 12px; cursor: pointer; margin-bottom: 8px;
+  }
+  #insideHint {
+    position: fixed; bottom: 16px; left: 16px; z-index: 10; color: #999;
+    font-size: 11px; background: rgba(20,20,20,0.7); padding: 8px 12px; border-radius: 6px;
+    display: none;
+  }
+  #homeLink {
+    position: fixed; top: 16px; left: 50%; transform: translateX(-50%); z-index: 20;
+    color: #6c9; font-family: monospace; font-size: 13px; text-decoration: none;
+    background: rgba(0,0,0,0.4); padding: 5px 12px; border-radius: 999px;
+  }
+</style>
+</head>
+<body>
+<a id="homeLink" href="/">&larr; home</a>
+<canvas id="gl"></canvas>
+<div id="pipFrame"></div>
+<div id="pipLabel">through camera</div>
+<div id="insideHint">drag to look around &middot; scroll to zoom &middot; you are standing at the camera's optical center</div>
+
+<div id="panel">
+  <h1>Great Sphere Lab</h1>
+
+  <div class="modeRow">
+    <button id="modeWorld" class="active">World</button>
+    <button id="modeThrough">Through Cam</button>
+    <button id="modeInside">Inside Sphere</button>
+  </div>
+
+  <div class="section">
+    <h2>camera pose</h2>
+    <div class="row"><span class="label">X</span><input type="range" id="camX" min="-15" max="15" step="0.1" value="0"><span class="val" id="camXVal"></span></div>
+    <div class="row"><span class="label">height</span><input type="range" id="camY" min="0.5" max="15" step="0.1" value="4"><span class="val" id="camYVal"></span></div>
+    <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-15" max="15" step="0.1" value="8"><span class="val" id="camZVal"></span></div>
+    <div class="row"><span class="label">yaw</span><input type="range" id="camYaw" min="-180" max="180" step="1" value="0"><span class="val" id="camYawVal"></span></div>
+    <div class="row"><span class="label">pitch</span><input type="range" id="camPitch" min="-89" max="89" step="1" value="-20"><span class="val" id="camPitchVal"></span></div>
+    <div class="row"><span class="label">focal (mm eq.)</span><input type="range" id="camFocal" min="10" max="85" step="1" value="26"><span class="val" id="camFocalVal"></span></div>
+    <div class="row"><span class="label">viewport W</span><input type="range" id="viewportW" min="128" max="2000" step="32" value="512"><span class="val" id="viewportWVal"></span></div>
+    <div class="row"><span class="label">viewport H</span><input type="range" id="viewportH" min="96" max="2000" step="24" value="384"><span class="val" id="viewportHVal"></span></div>
+    <label class="chk"><input type="checkbox" id="aspectLocked"> aspect lock</label>
+  </div>
+
+  <div class="section">
+    <h2>simulated capture distortion</h2>
+    <div class="row"><span class="label">pixel noise &sigma;</span><input type="range" id="simNoise" min="0" max="40" step="1" value="8"><span class="val" id="simNoiseVal"></span></div>
+    <div class="row"><span class="label">blur radius</span><input type="range" id="simBlur" min="0" max="4" step="1" value="1"><span class="val" id="simBlurVal"></span></div>
+    <div class="row"><span class="label">gradient radius</span><input type="range" id="simGradRadius" min="1" max="6" step="1" value="1"><span class="val" id="simGradRadiusVal"></span></div>
+    <div class="row"><span class="label">noise floor</span><input type="range" id="simMinMag" min="0" max="40" step="1" value="4"><span class="val" id="simMinMagVal"></span></div>
+    <div class="row"><span class="label">corner window</span><input type="range" id="coherenceRadius" min="1" max="20" step="1" value="1"><span class="val" id="coherenceRadiusVal"></span></div>
+    <div class="row"><span class="label">supersample</span><input type="range" id="captureSupersample" min="1" max="4" step="1" value="2"><span class="val" id="captureSupersampleVal"></span></div>
+  </div>
+
+  <div class="section">
+    <h2>field view</h2>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewNormal" value="normal" checked> normal</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewGradient" value="gradient"> gradient field (hue=direction, sat=magnitude)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewCleaned" value="cleaned"> gradient field, cleaned (sat &times; cornerness coherence)</label>
+  </div>
+
+  <div class="section">
+    <h2>sphere overlays</h2>
+    <label class="chk"><input type="checkbox" id="showSphere" checked> sphere shell</label>
+    <label class="chk"><input type="checkbox" id="showCircles" checked> grid-line great circles</label>
+    <label class="chk"><input type="checkbox" id="showPoles" checked> vanishing-point poles</label>
+    <label class="chk"><input type="checkbox" id="showFrustum" checked> frustum outline</label>
+    <label class="chk"><input type="checkbox" id="showPatch" checked> live viewport image patch</label>
+    <label class="chk"><input type="checkbox" id="showFloor" checked> floor</label>
+    <label class="chk"><input type="checkbox" id="showGizmoBody" checked> camera box</label>
+  </div>
+
+  <div class="section">
+    <h2>axes reconstruction</h2>
+    <div class="row"><span class="label">circles min</span><input type="range" id="circleSamplePercentMin" min="0" max="100" step="1" value="0"><span class="val" id="circleSamplePercentMinVal"></span></div>
+    <div class="row"><span class="label">circles max</span><input type="range" id="circleSamplePercentMax" min="0" max="100" step="1" value="5"><span class="val" id="circleSamplePercentMaxVal"></span></div>
+    <label class="chk"><input type="checkbox" id="showTopCircles" checked> show top circles (rings)</label>
+    <label class="chk"><input type="checkbox" id="showRecoveredPoles" checked> show reconstructed poles</label>
+    <label class="chk"><input type="checkbox" id="showAxisVectors"> show vote axis vectors</label>
+    <div class="row"><span class="label">weight sharpen</span><input type="range" id="weightSharpenPower" min="1" max="10" step="0.5" value="4"><span class="val" id="weightSharpenPowerVal"></span></div>
+    <button id="captureAxesBtn" class="captureBtn">&#9889; capture now</button>
+    <label class="chk"><input type="checkbox" id="axesAutoCapture"> auto-recompute</label>
+    <div class="row"><span class="label">interval (ms)</span><input type="range" id="axesCaptureInterval" min="50" max="2000" step="50" value="500"><span class="val" id="axesCaptureIntervalVal"></span></div>
+    <div id="axesReadout">not yet computed</div>
+  </div>
+
+  <div class="section">
+    <h2>readout</h2>
+    <div id="readout"></div>
+  </div>
+</div>
+
+<script type="module" src="/src/sphereLab.ts"></script>
+</body>
+</html>

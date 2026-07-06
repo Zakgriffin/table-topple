@@ -4,6 +4,7 @@
     "type": "module",
     "scripts": {
         "dev": "vite --host",
+        "dev:bridge": "node scripts/dev-bridge/server.js",
         "generate:torus": "node scripts/generate-debruijn-torus.ts"
     },
     "devDependencies": {
@@ -13,7 +14,8 @@
         "@vitejs/plugin-basic-ssl": "^2.3.0",
         "pngjs": "^7.0.0",
         "typescript": "^6.0.3",
-        "vite": "^8.0.14"
+        "vite": "^8.0.14",
+        "ws": "^8.21.0"
     },
     "dependencies": {
         "jsqr": "^1.4.0",

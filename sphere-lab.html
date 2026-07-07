@@ -76,6 +76,7 @@
     <button id="modeWorld" class="active">World</button>
     <button id="modeThrough">Through Cam</button>
     <button id="modeInside">Inside Sphere</button>
+    <button id="modeProjected">Projected Cam</button>
   </div>
 
   <div class="section">
@@ -102,17 +103,19 @@
     <h2>2D filter pipeline</h2>
     <div class="row"><span class="label">gradient radius</span><input type="range" id="simGradRadius" min="1" max="6" step="1" value="1"><span class="val" id="simGradRadiusVal"></span></div>
     <div class="row"><span class="label">noise floor</span><input type="range" id="simMinMag" min="0" max="40" step="1" value="4"><span class="val" id="simMinMagVal"></span></div>
-    <div class="row"><span class="label">corner window</span><input type="range" id="coherenceRadius" min="1" max="20" step="1" value="1"><span class="val" id="coherenceRadiusVal"></span></div>
+    <div class="row"><span class="label">density window</span><input type="range" id="coherenceRadius" min="0" max="20" step="1" value="1"><span class="val" id="coherenceRadiusVal"></span></div>
   </div>
 
   <div class="section">
     <h2>field view</h2>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewRaw" value="raw"> raw (no blur, no noise)</label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewDownsampled" value="downsampled"> downsampled (+blur, no noise yet)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewAntialiased" value="antialiased"> antialiased (sensor AA filter, no lens blur yet)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewDownsampled" value="downsampled"> downsampled (+lens blur, no noise yet)</label>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised" checked> noised (final image the algorithm sees)</label>
     <div class="fieldViewDivider">&darr; 2D filter pipeline starts here &darr;</div>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewGradient" value="gradient"> gradient field (hue=direction, sat=magnitude)</label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewCleaned" value="cleaned"> gradient field, cleaned (sat &times; cornerness coherence)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewDensity" value="density"> gradient density (local crowding, not yet applied to fit)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewEffective" value="effective"> effective gradient field (gradient &times; density)</label>
   </div>
 
   <div class="section">

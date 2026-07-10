@@ -14,8 +14,9 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { generateTorus } from './debruijn.ts';
-import { toGrayscale } from './decode.ts';
+import { generateTorus, buildLookupTable } from './debruijn.ts';
+import { toGrayscale, binarize, pickBestCandidate } from './decode.ts';
+import type { SampledGrid, SampledCell } from './decode.ts';
 import { jacobiEigenSymmetric, smallestEigenvector } from './linalg.ts';
 
 type Mode = 'world' | 'through' | 'inside' | 'projected';
@@ -29,6 +30,15 @@ const insideHint = document.getElementById('insideHint') as HTMLDivElement;
 const readout = document.getElementById('readout') as HTMLDivElement;
 const axesReadout = document.getElementById('axesReadout') as HTMLDivElement;
 const captureAxesBtn = document.getElementById('captureAxesBtn') as HTMLButtonElement;
+const positionReadout = document.getElementById('positionReadout') as HTMLDivElement;
+const marginalRightCanvas = document.getElementById('marginalRight') as HTMLCanvasElement;
+const marginalBottomCanvas = document.getElementById('marginalBottom') as HTMLCanvasElement;
+const marginalRightCtx = marginalRightCanvas.getContext('2d')!;
+const marginalBottomCtx = marginalBottomCanvas.getContext('2d')!;
+const contamToggles = document.getElementById('contamToggles') as HTMLDivElement;
+const toggleHideFieldBtn = document.getElementById('toggleHideField') as HTMLButtonElement;
+const toggleTrueContamBtn = document.getElementById('toggleTrueContam') as HTMLButtonElement;
+const toggleReconContamBtn = document.getElementById('toggleReconContam') as HTMLButtonElement;
 
 const modeBtns: Record<Mode, HTMLButtonElement> = {
   world: document.getElementById('modeWorld') as HTMLButtonElement,
@@ -90,14 +100,15 @@ const state = {
   camYawDeg: 0, camPitchDeg: -20,
   focalMM: 26,
   mode: 'world' as Mode,
-  showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showFloor: true, showGizmoBody: true,
-  simNoise: 8, simBlur: 1, simGradRadius: 1, simMinMag: 4, coherenceRadius: 1,
+  showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showFloor: true, showGizmoBody: true, showRecoveredFloor: true,
+  showTrueContamination: false, showReconstructedContamination: false, hideField: false,
+  simNoise: 8, simBlur: 1, simGradRadius: 1, coherenceRadius: 1,
   circleSamplePercentMin: 0, circleSamplePercentMax: 5,
   showRecoveredPoles: true,
   showAxisVectors: false,
   showTopCircles: true,
   weightSharpenPower: 4,
-  fieldView: 'noised' as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'density' | 'effective',
+  fieldView: 'noised' as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'agreement' | 'effective',
   axesAutoCapture: false, axesCaptureIntervalMs: 500,
   viewportW: 512, viewportH: 384, captureSupersample: 2, aspectLocked: false,
 };
@@ -132,6 +143,9 @@ scene.add(sun);
 const ORDER = parseInt(new URLSearchParams(location.search).get('order') ?? '4', 10);
 const debruijn = generateTorus(ORDER);
 const { R, C, torus } = debruijn;
+// For decoding an ORDER x ORDER sampled bit window back into an absolute
+// torus (row,col) position -- see runPositionDecode.
+const debruijnLookup = buildLookupTable(debruijn);
 // One instance of the torus, sized in world units at GRID_STEP per cell —
 // NOT tiled. Half-extents, since grid lines/great circles below are indexed
 // out from the origin at the pattern's center.
@@ -196,6 +210,27 @@ const gizmoBody = new THREE.Mesh(
 scene.add(gizmoBody);
 const gizmoAxes = new THREE.AxesHelper(0.6);
 gizmoBody.add(gizmoAxes);
+
+// Same shape/size as the yellow ground-truth gizmoBody above, in green, at
+// the DECODED position from runPositionDecode -- uses the real camQuat for
+// orientation (camQuat is a known input to the whole recovery pipeline, not
+// something being solved for here) so any visible gap against the yellow box
+// is purely positional error. Hidden until a successful decode exists.
+const recoveredCamGizmo = new THREE.Mesh(
+  new THREE.BoxGeometry(0.3, 0.25, 0.4),
+  new THREE.MeshStandardMaterial({ color: 0x33dd55 }),
+);
+recoveredCamGizmo.visible = false;
+scene.add(recoveredCamGizmo);
+const recoveredCamAxes = new THREE.AxesHelper(0.6);
+recoveredCamGizmo.add(recoveredCamAxes);
+function updateRecoveredCamGizmo() {
+  if (lastPositionDecode) {
+    recoveredCamGizmo.position.copy(lastPositionDecode.camPos);
+    recoveredCamGizmo.quaternion.copy(camQuat);
+  }
+  recoveredCamGizmo.visible = state.mode === 'world' && state.showGizmoBody && !!lastPositionDecode;
+}
 
 const camHelper = new THREE.CameraHelper(gizmoCam);
 scene.add(camHelper);
@@ -335,6 +370,14 @@ function resizeCaptureBuffers() {
   projectedPreviewTex.image = { data: projectedPreviewData, width: rtSize.w, height: rtSize.h };
   projectedPreviewTex.dispose();
   projectedPreviewTex.needsUpdate = true;
+  trueContamData = new Uint8Array(rtSize.w * rtSize.h * 4);
+  trueContamTex.image = { data: trueContamData, width: rtSize.w, height: rtSize.h };
+  trueContamTex.dispose();
+  trueContamTex.needsUpdate = true;
+  reconContamData = new Uint8Array(rtSize.w * rtSize.h * 4);
+  reconContamTex.image = { data: reconContamData, width: rtSize.w, height: rtSize.h };
+  reconContamTex.dispose();
+  reconContamTex.needsUpdate = true;
   gizmoCam.aspect = RT_ASPECT;
   gizmoCam.updateProjectionMatrix();
   layoutPip();
@@ -373,6 +416,157 @@ function renderProjectedViewport(x: number, y: number, w: number, h: number) {
   renderer.render(projectedQuadScene, previewQuadCam);
 }
 
+// Through-Cam-only translucent overlays: per-pixel alpha is how "bad" that
+// pixel's vote axis vector (see computeWorldVotes) is against a pair of
+// reference directions -- true ROW_DIR/COL_DIR for the red overlay, the last
+// recovered Drow/Dcol for the orange one -- so contamination (votes that
+// don't actually belong to either family) shows up as a translucent wash
+// directly on top of whatever field view is already selected, instead of
+// only being visible indirectly via the fit's error numbers. Same
+// DataTexture-quad architecture as projectedPreviewTex above, rendered as an
+// extra alpha-blended pass on top of Through-Cam's own preview quad.
+let trueContamData = new Uint8Array(rtSize.w * rtSize.h * 4);
+const trueContamTex = new THREE.DataTexture(trueContamData, rtSize.w, rtSize.h, THREE.RGBAFormat);
+trueContamTex.flipY = false;
+const trueContamMat = new THREE.MeshBasicMaterial({ map: trueContamTex, transparent: true, depthTest: false, depthWrite: false });
+const trueContamScene = new THREE.Scene();
+trueContamScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), trueContamMat));
+function renderTrueContamOverlay(x: number, y: number, w: number, h: number) {
+  renderer.setViewport(x, y, w, h);
+  renderer.setScissor(x, y, w, h);
+  renderer.setScissorTest(true);
+  renderer.render(trueContamScene, previewQuadCam);
+}
+
+let reconContamData = new Uint8Array(rtSize.w * rtSize.h * 4);
+const reconContamTex = new THREE.DataTexture(reconContamData, rtSize.w, rtSize.h, THREE.RGBAFormat);
+reconContamTex.flipY = false;
+const reconContamMat = new THREE.MeshBasicMaterial({ map: reconContamTex, transparent: true, depthTest: false, depthWrite: false });
+const reconContamScene = new THREE.Scene();
+reconContamScene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), reconContamMat));
+function renderReconContamOverlay(x: number, y: number, w: number, h: number) {
+  renderer.setViewport(x, y, w, h);
+  renderer.setScissor(x, y, w, h);
+  renderer.setScissorTest(true);
+  renderer.render(reconContamScene, previewQuadCam);
+}
+
+// Per-pixel "badness": 90 - angleBetweenDegV(n, D) is 0 when the vote normal
+// n is exactly perpendicular to D (the ideal case -- see computeWorldVotes'
+// own n·D=0 constraint) and grows as n drifts toward being PARALLEL to D
+// instead (the degenerate/wrong case). Taking the min across both reference
+// directions mirrors "take the min badness for the two planes" -- a vote is
+// only truly contaminated if it fits NEITHER family well. /45 so 45 degrees
+// off reads as fully opaque, matching the user's stated scale; badness can
+// go up to 90 (n exactly parallel to D) but stays clamped at full opacity
+// past 45 rather than needing a wider scale to "fit".
+// agreement is the SAME array computeWorldVotes itself weights votes by
+// (mag * agreement[i], see its own comment) -- multiplying it into alpha
+// here too means a contaminated-corner pixel that the fit barely listens to
+// (tiny effective-gradient weight, even if its raw angle is bad) fades out
+// here as well, so the overlay shows contamination AS the fit actually
+// experiences it, not as a plain per-pixel angle check would in isolation.
+function computeContaminationAlpha(
+  field: GradientField, agreement: Float64Array,
+  dirA: THREE.Vector3, dirB: THREE.Vector3,
+  quat: THREE.Quaternion, vFovRad: number, aspect: number,
+): Float64Array {
+  const { fx, fy, w, h, r } = field;
+  const alpha = new Float64Array(w * h);
+  // Bottom-up, NOT the flipped top-down convention computeWorldVotes uses --
+  // this reads from lastNoisedPreviewGray (same GL-native bottom-up row
+  // order as distortedPreviewData, see buildProjectedTexture's own comment
+  // on the same distinction), and the overlay has to align pixel-for-pixel
+  // with what's already on screen.
+  const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, (py / h) * 2 - 1];
+  for (let y = r; y < h - r; y++) {
+    for (let x = r; x < w - r; x++) {
+      const i = y * w + x;
+      const mag = Math.hypot(fx[i], fy[i]);
+      if (mag === 0) continue;
+      let theta = Math.atan2(fy[i], fx[i]);
+      if (theta < 0) theta += Math.PI;
+      if (theta >= Math.PI) theta -= Math.PI;
+      const tdx = -Math.sin(theta), tdy = Math.cos(theta);
+      const [u1, v1] = toNDC(x, y);
+      const [u2, v2] = toNDC(x + tdx, y + tdy);
+      const ray1 = cornerDir(u1, v1, quat, vFovRad, aspect);
+      const ray2 = cornerDir(u2, v2, quat, vFovRad, aspect);
+      const n = ray1.clone().cross(ray2);
+      if (n.lengthSq() < 1e-12) continue;
+      n.normalize();
+      const badnessA = 90 - angleBetweenDegV(n, dirA);
+      const badnessB = 90 - angleBetweenDegV(n, dirB);
+      const badnessAlpha = THREE.MathUtils.clamp(Math.min(badnessA, badnessB) / 45, 0, 1);
+      alpha[i] = badnessAlpha * agreement[i];
+    }
+  }
+  return alpha;
+}
+
+function paintContaminationOverlay(alpha: Float64Array, color: readonly [number, number, number], out: Uint8Array) {
+  for (let i = 0; i < alpha.length; i++) {
+    const o = i * 4;
+    out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2];
+    out[o + 3] = Math.round(alpha[i] * 255);
+  }
+}
+
+const TRUE_CONTAM_COLOR = [230, 40, 40] as const;
+const RECON_CONTAM_COLOR = [235, 150, 20] as const;
+
+// Recomputes whichever overlay(s) are actually toggled on -- skipped
+// entirely otherwise, since each is a full per-pixel gradient+cross-product
+// pass, the same cost class as computeWorldVotes itself. lum is derived
+// straight from distortedPreviewData (Through-Cam's own current content, any
+// field view), not from a fresh capture -- this overlay always describes
+// whatever's already on screen.
+function updateContaminationOverlays() {
+  if (!state.showTrueContamination && !state.showReconstructedContamination) return;
+  // Real analysis-equivalent brightness, NOT whatever field view happens to
+  // be on screen (see lastNoisedPreviewGray's comment) -- null only if
+  // updateDistortedPreview hasn't run at all yet (cold start), in which case
+  // there's nothing to score.
+  if (!lastNoisedPreviewGray) return;
+  const w = rtSize.w, h = rtSize.h;
+  const lum = lastNoisedPreviewGray;
+  const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
+  // Same field, same agreement computeWorldVotes itself uses to weight
+  // votes -- shared across both overlays below since neither the true nor
+  // the reconstructed reference directions affect this computation at all.
+  const field = computeGradientField(lum, w, h, Math.round(state.simGradRadius));
+  const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
+
+  if (state.showTrueContamination) {
+    const alpha = computeContaminationAlpha(field, agreement, ROW_DIR, COL_DIR, camQuat, vFovRad, RT_ASPECT);
+    paintContaminationOverlay(alpha, TRUE_CONTAM_COLOR, trueContamData);
+    trueContamTex.needsUpdate = true;
+  }
+  if (state.showReconstructedContamination) {
+    if (lastRecoveredAxes) {
+      const alpha = computeContaminationAlpha(field, agreement, lastRecoveredAxes.Drow, lastRecoveredAxes.Dcol, camQuat, vFovRad, RT_ASPECT);
+      paintContaminationOverlay(alpha, RECON_CONTAM_COLOR, reconContamData);
+      toggleReconContamBtn.textContent = 'reconstructed contamination overlay (orange)';
+    } else {
+      // No fit to compare against yet -- fully transparent is correct, but
+      // silently invisible reads as broken. Flag it directly on the button
+      // instead of leaving the user to guess why nothing's showing.
+      reconContamData.fill(0);
+      toggleReconContamBtn.textContent = 'reconstructed contamination overlay (orange) — run "capture now" first';
+    }
+    reconContamTex.needsUpdate = true;
+  }
+}
+
+// Bin geometry from the most recent buildProjectedTexture call -- the (u,v)
+// extent and per-bin width of the floor-plane rectification, in the
+// camera-relative Drow/Dcol frame (see buildProjectedTexture's "Relative to
+// the camera" comment). Exposed at module scope so the marginal-accumulation
+// overlays (drawMarginalLines) and the position decode step can reuse the
+// exact same bin layout instead of re-deriving it.
+interface ProjectedBins { minU: number; maxU: number; minV: number; maxV: number; binWidthU: number; binWidthV: number; w: number; h: number }
+let lastProjectedBins: ProjectedBins | null = null;
+
 const patchMat = new THREE.MeshBasicMaterial({ map: distortedPreviewTex, side: THREE.DoubleSide });
 const patchMesh = new THREE.Mesh(patchGeo, patchMat);
 sphereAnchor.add(patchMesh);
@@ -389,7 +583,54 @@ sphereAnchor.add(patchMesh);
 const DEBUG_LAYER = 1;
 for (const o of [rowGridLines, colGridLines, camHelper, sphereShell, frustumLine, patchMesh]) o.layers.set(DEBUG_LAYER);
 gizmoBody.traverse((o) => o.layers.set(DEBUG_LAYER));
+recoveredCamGizmo.traverse((o) => o.layers.set(DEBUG_LAYER));
 polesGroup.traverse((o) => o.layers.set(DEBUG_LAYER));
+
+// Reuses the SAME projectedPreviewTex "Projected Cam" mode already builds
+// (not a separate computation) as a decal on a plane placed at the DECODED
+// pose in the actual 3D world -- any visible misalignment against the real
+// floor pattern underneath is the recovery pipeline's true end-to-end error,
+// made visible directly rather than read off a percentage.
+const recoveredFloorOverlayMat = new THREE.MeshBasicMaterial({ map: projectedPreviewTex, side: THREE.DoubleSide, transparent: true, opacity: 0.92 });
+const recoveredFloorOverlay = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), recoveredFloorOverlayMat);
+recoveredFloorOverlay.visible = false;
+scene.add(recoveredFloorOverlay);
+recoveredFloorOverlay.layers.set(DEBUG_LAYER);
+
+// Rebuilds the overlay's geometry/position/orientation -- called once per
+// fresh decode (from runAxesReconstruction), not per frame: unlike the
+// gizmo box above, this needs a new PlaneGeometry sized to the current bin
+// extent, which is wasteful to reallocate 60x/sec. Per-frame mode/toggle
+// visibility is handled separately in animate(), same split as gizmoBody.
+function applyRecoveredFloorOverlay() {
+  if (!lastPositionDecode || !lastRecoveredAxes || !lastProjectedBins) return;
+  const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
+  const normal = Dnormal.clone();
+  const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
+  if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
+  const { minU, maxU, minV, maxV } = lastProjectedBins;
+  const width = maxU - minU, height = maxV - minV;
+  if (!(width > 0) || !(height > 0)) return;
+
+  recoveredFloorOverlay.geometry.dispose();
+  recoveredFloorOverlay.geometry = new THREE.PlaneGeometry(width, height);
+
+  const centerU = (minU + maxU) / 2, centerV = (minV + maxV) / 2;
+  recoveredFloorOverlay.position.copy(lastPositionDecode.camPos)
+    .addScaledVector(Drow, centerU)
+    .addScaledVector(Dcol, centerV)
+    .addScaledVector(normal, -distance);
+
+  // Cross product, NOT the sign-corrected `normal` above -- guarantees a
+  // right-handed, purely-rotational basis (setFromRotationMatrix on a
+  // reflection matrix, which using a wrongly-signed normal could produce,
+  // gives a garbage quaternion). Only affects which face is "front"; with
+  // DoubleSide + a paper-thin plane that's invisible, so it's safe to let
+  // this differ from the physically-signed normal used for the offset above.
+  const zAxis = new THREE.Vector3().crossVectors(Drow, Dcol).normalize();
+  const basis = new THREE.Matrix4().makeBasis(Drow, Dcol, zAxis);
+  recoveredFloorOverlay.quaternion.setFromRotationMatrix(basis);
+}
 
 // Two pole markers for whatever (Drow,Dcol) fitPairOfPlanes recovers, in a
 // color distinct from the ground-truth red/blue poles so the two can be
@@ -413,7 +654,7 @@ const recoveredColPoleB = makeRecoveredPoleMarker(0x0000ff);
 
 // Debug overlay: the actual physical great circle each of a random sample
 // of gradient votes traces on the sphere -- not the pole (a single point),
-// the whole circle, low-opacity so overlapping ones read as a density field
+// the whole circle, low-opacity so overlapping ones read as a agreement field
 // rather than individual lines. One shared LineSegments buffer (not a Line
 // per circle) since there can be hundreds of these; each circle contributes
 // DEBUG_CIRCLE_SEGMENTS independent 2-point segments so many unrelated
@@ -702,51 +943,96 @@ function captureDistortedGrayscale(): { gray: Float64Array; w: number; h: number
 // (for "noised") on every single throttled tick even when neither was
 // selected, real wasted work on top of what was already the most expensive
 // per-frame CPU cost in the app.
+// Cached by updateDistortedPreview whenever it computes the "noised"
+// analysis-equivalent grayscale, regardless of which field view is actually
+// selected for display -- the contamination overlays (updateContaminationOverlays)
+// always need to compute gradients from this real brightness signal, never
+// from whatever's currently painted into distortedPreviewData (which for
+// 'gradient'/'agreement'/'effective' is already hue-encoded, and for 'none'
+// is blank -- deriving a gradient back out of either would measure the
+// wrong thing, or nothing at all).
+let lastNoisedPreviewGray: Float64Array | null = null;
+
 function updateDistortedPreview() {
   const { w: cw, h: ch } = captureRTSize;
   const rawRGBA = new Uint8Array(cw * ch * 4);
   renderer.readRenderTargetPixels(camRT, 0, 0, cw, ch, rawRGBA);
   const hiResGray = toGrayscale(rawRGBA, cw, ch);
 
-  if (state.fieldView === 'raw') {
+  // Contamination overlays need the real noised grayscale even when it isn't
+  // otherwise needed for display (hidden, or an early field view like 'raw')
+  // -- see lastNoisedPreviewGray's comment. When neither overlay is active
+  // this stays false and every early-return below still fires exactly as
+  // before, preserving the "stop as soon as the selected view is ready"
+  // perf win this function was originally written for.
+  const needGrayForOverlay = state.showTrueContamination || state.showReconstructedContamination;
+
+  if (state.hideField) {
+    // Solid black -- isolates the contamination overlay(s) with nothing else
+    // competing for attention underneath. A toggle alongside the overlay
+    // buttons, not a field-view choice, so it overrides whichever field is
+    // selected rather than being one itself.
+    for (let i = 0; i < distortedPreviewData.length; i += 4) {
+      distortedPreviewData[i] = 0; distortedPreviewData[i + 1] = 0; distortedPreviewData[i + 2] = 0; distortedPreviewData[i + 3] = 255;
+    }
+    distortedPreviewTex.needsUpdate = true;
+    if (!needGrayForOverlay) return;
+    // Still need the real "noised" grayscale below for the overlay(s) --
+    // every paint call from here on is gated by !state.hideField so nothing
+    // ever gets painted over the blanked buffer.
+  }
+
+  if (!state.hideField && state.fieldView === 'raw') {
     const raw = downsampleBoxAverage(hiResGray, cw, ch, state.captureSupersample, rtSize.w, rtSize.h);
     fillGrayscalePreview(raw, distortedPreviewData);
     distortedPreviewTex.needsUpdate = true;
-    return;
+    if (!needGrayForOverlay) return;
   }
 
   const antialiased = applyAntialiasFilter(hiResGray, cw, ch, state.captureSupersample);
 
-  if (state.fieldView === 'antialiased') {
+  if (!state.hideField && state.fieldView === 'antialiased') {
     const aaDisplay = downsampleBoxAverage(antialiased, cw, ch, state.captureSupersample, rtSize.w, rtSize.h);
     fillGrayscalePreview(aaDisplay, distortedPreviewData);
     distortedPreviewTex.needsUpdate = true;
-    return;
+    if (!needGrayForOverlay) return;
   }
 
   const hiResBlurred = separableBoxBlur(antialiased, cw, ch, Math.round(state.simBlur * state.captureSupersample));
   const downsampled = downsampleBoxAverage(hiResBlurred, cw, ch, state.captureSupersample, rtSize.w, rtSize.h);
 
-  if (state.fieldView === 'downsampled') {
+  if (!state.hideField && state.fieldView === 'downsampled') {
     fillGrayscalePreview(downsampled, distortedPreviewData);
     distortedPreviewTex.needsUpdate = true;
-    return;
+    if (!needGrayForOverlay) return;
   }
 
   // Safe to noise in place from here -- downsampled's un-noised value is
   // never needed again once we know the view isn't 'downsampled' itself.
   const noised = downsampled;
   addGaussianNoise(noised, state.simNoise);
-  if (state.fieldView === 'noised') {
-    fillGrayscalePreview(noised, distortedPreviewData);
-  } else if (state.fieldView === 'gradient') {
-    paintGradientField(noised, rtSize.w, rtSize.h, distortedPreviewData);
-  } else if (state.fieldView === 'density') {
-    paintDensityField(noised, rtSize.w, rtSize.h, distortedPreviewData);
-  } else if (state.fieldView === 'effective') {
-    paintEffectiveGradientField(noised, rtSize.w, rtSize.h, distortedPreviewData);
+  if (!state.hideField) {
+    if (state.fieldView === 'noised') {
+      fillGrayscalePreview(noised, distortedPreviewData);
+      distortedPreviewTex.needsUpdate = true;
+    } else if (state.fieldView === 'gradient') {
+      const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
+      paintVectorFieldAsColor(field, distortedPreviewData);
+      distortedPreviewTex.needsUpdate = true;
+    } else if (state.fieldView === 'agreement') {
+      const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
+      const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
+      paintScalarFieldAsGray(agreement, distortedPreviewData);
+      distortedPreviewTex.needsUpdate = true;
+    } else if (state.fieldView === 'effective') {
+      const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
+      const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
+      const effective = computeEffectiveGradientField(field, agreement);
+      paintVectorFieldAsColor(effective, distortedPreviewData);
+      distortedPreviewTex.needsUpdate = true;
+    }
   }
-  distortedPreviewTex.needsUpdate = true;
+  lastNoisedPreviewGray = noised;
 }
 
 let lastPreviewUpdate = 0;
@@ -773,120 +1059,130 @@ function hsvToRgb(h: number, s: number, v: number): [number, number, number] {
   return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
 }
 
-// Writes the gradient-field visualization into `out` (RGBA, w*h*4) --
-// reuses state.simGradRadius so the visualized kernel matches the one
-// computeWorldVotes actually analyzes with, not an independently-chosen one.
-function paintGradientField(gray: Float64Array, w: number, h: number, out: Uint8Array) {
-  const r = Math.round(state.simGradRadius);
-  const mags = new Float64Array(w * h);
-  let maxMag = 0;
+// ── Value fields (no color) ─────────────────────────────────────────────
+//
+// Every field below is a pure computation over numbers: gradient field is
+// derived only from the grayscale image + a radius, agreement only from a
+// gradient field + a radius, effective gradient only from a gradient field
+// + an agreement field. None of them know about color -- that only happens
+// in the paint* functions further down, and only for whichever ONE field is
+// actually selected for display (see updateDistortedPreview's dispatch).
+
+interface GradientField { fx: Float64Array; fy: Float64Array; w: number; h: number; r: number }
+
+function computeGradientField(gray: Float64Array, w: number, h: number, gradRadius: number): GradientField {
+  const r = gradRadius;
+  const fx = new Float64Array(w * h), fy = new Float64Array(w * h);
   for (let y = r; y < h - r; y++) {
     for (let x = r; x < w - r; x++) {
       const i = y * w + x;
-      const fx = gray[i + r] - gray[i - r];
-      const fy = gray[i + r * w] - gray[i - r * w];
-      const mag = Math.hypot(fx, fy);
-      mags[i] = mag;
-      if (mag > maxMag) maxMag = mag;
+      fx[i] = gray[i + r] - gray[i - r];
+      fy[i] = gray[i + r * w] - gray[i - r * w];
     }
   }
-  out.fill(0);
-  for (let y = r; y < h - r; y++) {
-    for (let x = r; x < w - r; x++) {
-      const i = y * w + x;
-      const fx = gray[i + r] - gray[i - r];
-      const fy = gray[i + r * w] - gray[i - r * w];
-      let theta = Math.atan2(fy, fx);
-      if (theta < 0) theta += Math.PI;
-      if (theta >= Math.PI) theta -= Math.PI;
-      const sat = maxMag > 0 ? mags[i] / maxMag : 0;
-      const [rr, gg, bb] = hsvToRgb((theta / Math.PI) * 360, sat, 1);
-      const o = i * 4;
-      out[o] = rr; out[o + 1] = gg; out[o + 2] = bb; out[o + 3] = 255;
-    }
-  }
+  return { fx, fy, w, h, r };
 }
 
 // Magnitude of the local VECTOR SUM of gradients, not the sum of their
 // individual magnitudes -- gradients that reinforce (point the same way)
-// build density; gradients that conflict (point different ways) cancel
-// instead of both counting toward "dense". Expanding |sum(v_i)|^2 into
+// build agreement; gradients that conflict (point different ways) cancel
+// instead of both counting toward "agreeing". Expanding |sum(v_i)|^2 into
 // sum_i sum_j (v_i . v_j) is exactly the dot-product structure this is
 // going for, just computed via vector-sum-then-magnitude rather than
-// explicit pairwise dot products.
+// explicit pairwise dot products. Turned out to be a real, effective
+// answer to junction/corner contamination -- a blended gradient at a
+// junction disagrees with its neighbors' directions and cancels toward low
+// agreement, doing the job corner-cleaning/coherence used to do, without
+// needing the structure-tensor eigendecomposition that approach required.
 //
 // Raw (fx,fy) flips 180 degrees between a black->white and white->black
 // edge along the SAME physical line (the mod-180 polarity fold discussed
 // elsewhere, e.g. computeWorldVotes) -- summed naively, alternating-polarity
 // edges (which a checkerboard is full of) would falsely cancel and read as
-// "not dense" in genuinely edge-dense areas. Fixed the same way structure
-// tensors handle it: double the angle (cos(2*theta), sin(2*theta)) before
-// summing, which maps a direction and its 180-degree-flipped twin to the
-// identical point, so polarity can't cause false cancellation.
+// "disagreeing" in genuinely coherent, edge-dense areas. Fixed the same way
+// structure tensors handle it: double the angle (cos(2*theta), sin(2*theta))
+// before summing, which maps a direction and its 180-degree-flipped twin to
+// the identical point, so polarity can't cause false cancellation.
 //
-// Reuses coherenceRadius ("density window" in the UI) as the "what counts
-// as nearby" aggregation window, so no new tunable is needed for the
-// radius. Normalized to this frame's own max, same convention used
-// everywhere else in this file. NOT yet wired into any vote weighting --
-// visualization only for now.
-function computeGradientDensityField(gray: Float64Array, w: number, h: number, gradRadius: number, aggRadius: number, minMag: number): Float64Array {
-  const r = gradRadius;
+// No magnitude threshold: a pixel's own contribution to the vector sum
+// already scales with its magnitude (cx,cy = mag*cos/sin(2theta)), so tiny,
+// incoherent noise gradients mostly cancel each other out on aggregation
+// rather than needing to be gated out beforehand. Reuses coherenceRadius
+// ("agreement window" in the UI) as the "what counts as nearby" aggregation
+// window. Normalized to this frame's own max, same convention used
+// everywhere else in this file.
+function computeGradientAgreementField(field: GradientField, aggRadius: number): Float64Array {
+  const { fx, fy, w, h } = field;
   const n = w * h;
   const cx = new Float64Array(n), cy = new Float64Array(n);
-  for (let y = r; y < h - r; y++) {
-    for (let x = r; x < w - r; x++) {
-      const i = y * w + x;
-      const fx = gray[i + r] - gray[i - r];
-      const fy = gray[i + r * w] - gray[i - r * w];
-      const mag = Math.hypot(fx, fy);
-      if (mag < minMag) continue;
-      const theta = Math.atan2(fy, fx);
-      cx[i] = mag * Math.cos(2 * theta);
-      cy[i] = mag * Math.sin(2 * theta);
-    }
+  for (let i = 0; i < n; i++) {
+    const mag = Math.hypot(fx[i], fy[i]);
+    if (mag === 0) continue;
+    const theta = Math.atan2(fy[i], fx[i]);
+    cx[i] = mag * Math.cos(2 * theta);
+    cy[i] = mag * Math.sin(2 * theta);
   }
   const sx = separableBoxBlur(cx, w, h, aggRadius);
   const sy = separableBoxBlur(cy, w, h, aggRadius);
-  const density = new Float64Array(n);
-  let maxDensity = 0;
+  const agreement = new Float64Array(n);
+  let maxAgreement = 0;
   for (let i = 0; i < n; i++) {
-    density[i] = Math.hypot(sx[i], sy[i]);
-    if (density[i] > maxDensity) maxDensity = density[i];
+    agreement[i] = Math.hypot(sx[i], sy[i]);
+    if (agreement[i] > maxAgreement) maxAgreement = agreement[i];
   }
-  if (maxDensity > 0) for (let i = 0; i < n; i++) density[i] /= maxDensity;
-  return density;
+  if (maxAgreement > 0) for (let i = 0; i < n; i++) agreement[i] /= maxAgreement;
+  return agreement;
 }
 
-function paintDensityField(gray: Float64Array, w: number, h: number, out: Uint8Array) {
-  const r = Math.round(state.simGradRadius);
-  const density = computeGradientDensityField(gray, w, h, r, Math.round(state.coherenceRadius), state.simMinMag);
-  for (let i = 0; i < density.length; i++) {
-    const v = Math.round(density[i] * 255);
+// The gradient field's own vector, componentwise-scaled by agreement's
+// scalar -- literally "the multiple of these two fields", nothing more.
+// Direction is unaffected (scaling by a non-negative scalar can't change a
+// vector's angle); magnitude shrinks wherever agreement is low. Wired into
+// computeWorldVotes as the actual vote weight, not just a visualization.
+function computeEffectiveGradientField(field: GradientField, agreement: Float64Array): GradientField {
+  const { fx, fy, w, h, r } = field;
+  const n = w * h;
+  const efx = new Float64Array(n), efy = new Float64Array(n);
+  for (let i = 0; i < n; i++) { efx[i] = fx[i] * agreement[i]; efy[i] = fy[i] * agreement[i]; }
+  return { fx: efx, fy: efy, w, h, r };
+}
+
+// ── Display: colorizes a value field, only for whichever one is on screen ─
+
+// hue = direction, saturation = magnitude normalized to this field's own
+// max, value = 1 always.
+function paintVectorFieldAsColor(field: GradientField, out: Uint8Array) {
+  const { fx, fy, w, h } = field;
+  const n = w * h;
+  const mags = new Float64Array(n);
+  let maxMag = 0;
+  for (let i = 0; i < n; i++) {
+    const mag = Math.hypot(fx[i], fy[i]);
+    mags[i] = mag;
+    if (mag > maxMag) maxMag = mag;
+  }
+  for (let i = 0; i < n; i++) {
+    let theta = Math.atan2(fy[i], fx[i]);
+    if (theta < 0) theta += Math.PI;
+    if (theta >= Math.PI) theta -= Math.PI;
+    const sat = maxMag > 0 ? mags[i] / maxMag : 0;
+    const [rr, gg, bb] = hsvToRgb((theta / Math.PI) * 360, sat, 1);
+    const o = i * 4;
+    out[o] = rr; out[o + 1] = gg; out[o + 2] = bb; out[o + 3] = 255;
+  }
+}
+
+function paintScalarFieldAsGray(field: Float64Array, out: Uint8Array) {
+  for (let i = 0; i < field.length; i++) {
+    const v = Math.round(THREE.MathUtils.clamp(field[i], 0, 1) * 255);
     const o = i * 4;
     out[o] = v; out[o + 1] = v; out[o + 2] = v; out[o + 3] = 255;
   }
 }
 
-// The plain (uncleaned) gradient field, darkened by local density -- a
-// straight per-pixel RGB multiply of the two already-existing renderings,
-// not a re-derivation from scratch. Low-density areas (isolated, uncrowded
-// edges) fade toward black; high-density areas keep the gradient field's
-// full hue/saturation.
-function paintEffectiveGradientField(gray: Float64Array, w: number, h: number, out: Uint8Array) {
-  const r = Math.round(state.simGradRadius);
-  paintGradientField(gray, w, h, out);
-  const density = computeGradientDensityField(gray, w, h, r, Math.round(state.coherenceRadius), state.simMinMag);
-  for (let i = 0; i < density.length; i++) {
-    const o = i * 4;
-    out[o] = Math.round(out[o] * density[i]);
-    out[o + 1] = Math.round(out[o + 1] * density[i]);
-    out[o + 2] = Math.round(out[o + 2] * density[i]);
-  }
-}
-
 // Corner-cleaning (structure-tensor coherence weighting) and its "cleaned"
 // field-view visualization were removed here -- coherenceRadius/"corner
-// window" is kept (computeGradientDensityField's aggregation window still
+// window" is kept (computeGradientAgreementField's aggregation window still
 // uses it), but nothing coherence-specific remains.
 
 function fillGrayscalePreview(gray: Float64Array, out: Uint8Array) {
@@ -904,29 +1200,28 @@ function fillGrayscalePreview(gray: Float64Array, out: Uint8Array) {
 // staircase aliasing an early low-res render bakes in).
 function computeWorldVotes(
   gray: Float64Array, w: number, h: number,
-  minMag: number, gradientRadius: number, densityRadius: number,
+  gradientRadius: number, agreementRadius: number,
   quat: THREE.Quaternion, vFovRad: number, aspect: number,
 ): Vote[] {
-  const r = gradientRadius;
   const votes: Vote[] = [];
   // top-down pixel (px,py) -> NDC (u,v); v flips since NDC is up-positive
   // but py (top-down) is down-positive -- same relationship the patch
   // mesh's own UV fix (elsewhere in this file) already established.
   const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, 1 - (py / h) * 2];
-  // Driving the fit with "effective gradient" (magnitude * density) instead
-  // of plain magnitude -- density is computeGradientDensityField's
+  // Driving the fit with "effective gradient" (magnitude * agreement) instead
+  // of plain magnitude -- agreement is computeGradientAgreementField's
   // dot-product/vector-sum measure (same thing "effective gradient field"
   // visualizes), reused here as the actual vote weight rather than just a
   // display.
-  const density = computeGradientDensityField(gray, w, h, r, densityRadius, minMag);
+  const field = computeGradientField(gray, w, h, gradientRadius);
+  const { fx, fy, r } = field;
+  const agreement = computeGradientAgreementField(field, agreementRadius);
   for (let y = r; y < h - r; y++) {
     for (let x = r; x < w - r; x++) {
       const i = y * w + x;
-      const fx = gray[i + r] - gray[i - r];
-      const fy = gray[i + r * w] - gray[i - r * w];
-      const mag = Math.hypot(fx, fy);
-      if (mag < minMag) continue;
-      let theta = Math.atan2(fy, fx);
+      const mag = Math.hypot(fx[i], fy[i]);
+      if (mag === 0) continue; // untouched border / exactly-flat pixel, not a tunable threshold
+      let theta = Math.atan2(fy[i], fx[i]);
       if (theta < 0) theta += Math.PI;
       if (theta >= Math.PI) theta -= Math.PI;
       // tangent direction (along the line, perpendicular to the gradient),
@@ -939,7 +1234,7 @@ function computeWorldVotes(
       const n = ray1.clone().cross(ray2);
       if (n.lengthSq() < 1e-12) continue;
       n.normalize();
-      votes.push({ n, weight: mag * density[i] });
+      votes.push({ n, weight: mag * agreement[i] });
     }
   }
   return votes;
@@ -1053,8 +1348,8 @@ function updateGradientCirclesDebug() {
 // n1/n2 directly -- for orthogonal n1 ⊥ n2 they come out as the two 45-
 // degree BISECTORS of n1/n2 (eigenvalues of equal magnitude, opposite
 // sign), plus n1 x n2 itself (the floor normal) at eigenvalue ~0. Weighted
-// by "effective gradient" (magnitude * local density, see
-// computeGradientDensityField -- corner-cleaning/coherence weighting was
+// by "effective gradient" (magnitude * local agreement, see
+// computeGradientAgreementField -- corner-cleaning/coherence weighting was
 // removed and replaced with this), then SHARPENED by
 // state.weightSharpenPower (each vote's weight normalized to the strongest
 // in this batch, then raised to that power) before accumulating -- the same
@@ -1244,12 +1539,12 @@ let lastRecoveredAxes: RecoveredAxes | null = null;
 // onto-the-floor idea as estimateFloorDistance, but keeping full 2D
 // structure and each pixel's own color instead of squishing to a 1D
 // magnitude profile -- so this works for ANY field view (raw, noised,
-// gradient, density, ...), not just the gradient magnitude the distance
+// gradient, agreement, ...), not just the gradient magnitude the distance
 // recovery itself needs. Bin grid matches rtSize, same "derive from the
 // existing capture resolution, no new tunable" convention used everywhere
 // else in this file. Needs a successful "capture now" first (lastRecoveredAxes).
 function buildProjectedTexture() {
-  if (!lastRecoveredAxes) { projectedPreviewData.fill(0); projectedPreviewTex.needsUpdate = true; return; }
+  if (!lastRecoveredAxes) { projectedPreviewData.fill(0); projectedPreviewTex.needsUpdate = true; lastProjectedBins = null; lastMarginals = null; return; }
   const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
   const w = rtSize.w, h = rtSize.h;
   const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
@@ -1280,17 +1575,26 @@ function buildProjectedTexture() {
       const denom = rayDir.dot(normal);
       if (denom >= -MIN_GRAZING_COS) continue;
       const t = -distance / denom;
-      hit.copy(camPos).addScaledVector(rayDir, t);
+      // Relative to the camera (origin at the camera itself), NOT
+      // camPos-inclusive -- deliberately so this same ray-cast can double
+      // as the non-cheating basis for position decode (runPositionDecode),
+      // which needs "where is this floor point relative to ME" without
+      // ever reading the ground-truth camPos. Harmless for display/
+      // periodicity purposes too: translating every hit point by the same
+      // constant (camPos) wouldn't change the picture's shape or the
+      // measured period at all.
+      hit.copy(rayDir).multiplyScalar(t);
       const u = hit.dot(Drow), v = hit.dot(Dcol);
       us.push(u); vs.push(v); srcIdx.push(y * w + x);
       if (u < minU) minU = u; if (u > maxU) maxU = u;
       if (v < minV) minV = v; if (v > maxV) maxV = v;
     }
   }
-  if (!isFinite(minU) || !isFinite(minV)) { projectedPreviewData.fill(0); projectedPreviewTex.needsUpdate = true; return; }
+  if (!isFinite(minU) || !isFinite(minV)) { projectedPreviewData.fill(0); projectedPreviewTex.needsUpdate = true; lastProjectedBins = null; lastMarginals = null; return; }
 
   const binWidthU = (maxU - minU) / w || 1;
   const binWidthV = (maxV - minV) / h || 1;
+  lastProjectedBins = { minU, maxU, minV, maxV, binWidthU, binWidthV, w, h };
   const sums = new Float64Array(w * h * 3);
   const counts = new Float64Array(w * h);
   for (let k = 0; k < us.length; k++) {
@@ -1316,6 +1620,272 @@ function buildProjectedTexture() {
     }
   }
   projectedPreviewTex.needsUpdate = true;
+  lastMarginals = computeProjectedMarginals();
+}
+
+// Column sums (U axis, varies with x) and row sums (V axis, varies with y)
+// of projectedPreviewData's CELL-BOUNDARY edge strength, not raw brightness.
+// The de Bruijn torus's bit content is deliberately pseudorandom (that's the
+// whole point -- unique windows everywhere), so adjacent cells' brightness
+// values are uncorrelated and a raw-brightness profile has no special
+// structure at lag = one cell width. A spike train of edge strength at cell
+// BOUNDARIES, however, recurs at exactly the cell period regardless of which
+// side of each boundary is bright vs dark -- the same reason
+// estimateFloorDistance bins gradient magnitude rather than raw brightness.
+// Computed as a simple finite difference directly on the already-rectified
+// projectedPreviewData (cheaper and just as valid as re-deriving gradients
+// from the source image, since rectification has already made cell
+// boundaries axis-aligned here).
+interface Marginals { colSum: Float64Array; rowSum: Float64Array; colPeriod: number | null; rowPeriod: number | null; colPhase: number; rowPhase: number }
+// Cached by buildProjectedTexture's caller (see below) so drawMarginalLines
+// can redraw every frame (cheap: just two line-graph passes) without
+// rescanning projectedPreviewData every frame too (not as cheap, and only
+// actually changes when buildProjectedTexture itself reruns).
+let lastMarginals: Marginals | null = null;
+function computeProjectedMarginals(): Marginals {
+  const w = rtSize.w, h = rtSize.h;
+  const lum = new Float64Array(w * h);
+  for (let i = 0; i < w * h; i++) {
+    const o = i * 4;
+    lum[i] = (projectedPreviewData[o] + projectedPreviewData[o + 1] + projectedPreviewData[o + 2]) / 3;
+  }
+  const colSum = new Float64Array(w);
+  const rowSum = new Float64Array(h);
+  for (let y = 0; y < h; y++) {
+    for (let x = 1; x < w; x++) colSum[x] += Math.abs(lum[y * w + x] - lum[y * w + x - 1]);
+  }
+  for (let x = 0; x < w; x++) {
+    for (let y = 1; y < h; y++) rowSum[y] += Math.abs(lum[y * w + x] - lum[(y - 1) * w + x]);
+  }
+  const colPeriod = autocorrelationPeriod(colSum);
+  const rowPeriod = autocorrelationPeriod(rowSum);
+  const colPhase = colPeriod ? findPhase(colSum, colPeriod) : 0;
+  const rowPhase = rowPeriod ? findPhase(rowSum, rowPeriod) : 0;
+  return { colSum, rowSum, colPeriod, rowPeriod, colPhase, rowPhase };
+}
+
+// Locates the nearest cell-BOUNDARY peak within one period, as a fractional
+// bin index in [0, period) -- a weighted circular mean (de-meaned profile as
+// weight, angle = 2*pi*i/period) rather than a literal peak search, so it's
+// robust to the profile being noisy/asymmetric rather than a clean spike.
+// Needed later so bit-sampling (inverse projection, runPositionDecode) can
+// target true cell CENTERS (half a GRID_STEP off whatever boundary this
+// finds) instead of guessing an arbitrary phase.
+function findPhase(profile: Float64Array, period: number): number {
+  let mean = 0;
+  for (let i = 0; i < profile.length; i++) mean += profile[i];
+  mean /= profile.length;
+  let sc = 0, ss = 0;
+  for (let i = 0; i < profile.length; i++) {
+    const wgt = profile[i] - mean;
+    const theta = (2 * Math.PI * i) / period;
+    sc += wgt * Math.cos(theta);
+    ss += wgt * Math.sin(theta);
+  }
+  let phase = (Math.atan2(ss, sc) / (2 * Math.PI)) * period;
+  if (phase < 0) phase += period;
+  return phase;
+}
+
+// Draws the two marginal-accumulation line graphs beside the Projected Cam
+// viewport: a vertical strip to the right (V/row accumulation, one sample
+// per image row) and a horizontal strip below (U/column accumulation, one
+// sample per image column) -- (x,y,w,h) is the same letterboxed rect
+// animate() just rendered the projected viewport into.
+const MARGINAL_THICKNESS = 90;
+function drawMarginalLines(x: number, y: number, w: number, h: number) {
+  if (!lastMarginals) { hideMarginalLines(); return; }
+  const m = lastMarginals;
+
+  marginalRightCanvas.style.display = 'block';
+  marginalRightCanvas.style.left = (x + w) + 'px';
+  marginalRightCanvas.style.top = y + 'px';
+  marginalRightCanvas.width = MARGINAL_THICKNESS;
+  marginalRightCanvas.height = Math.round(h);
+  marginalRightCanvas.style.width = MARGINAL_THICKNESS + 'px';
+  marginalRightCanvas.style.height = h + 'px';
+  const rc = marginalRightCtx;
+  rc.clearRect(0, 0, marginalRightCanvas.width, marginalRightCanvas.height);
+  {
+    const n = m.rowSum.length;
+    let maxV = 0;
+    for (let i = 0; i < n; i++) if (m.rowSum[i] > maxV) maxV = m.rowSum[i];
+    rc.strokeStyle = '#6cf';
+    rc.lineWidth = 1;
+    rc.beginPath();
+    for (let i = 0; i < n; i++) {
+      const py = (i / n) * marginalRightCanvas.height;
+      const px = maxV > 0 ? (m.rowSum[i] / maxV) * (MARGINAL_THICKNESS - 4) : 0;
+      if (i === 0) rc.moveTo(px, py); else rc.lineTo(px, py);
+    }
+    rc.stroke();
+    if (m.rowPeriod) {
+      rc.strokeStyle = 'rgba(255,80,80,0.6)';
+      for (let py = m.rowPhase; py < n; py += m.rowPeriod) {
+        const yy = (py / n) * marginalRightCanvas.height;
+        rc.beginPath(); rc.moveTo(0, yy); rc.lineTo(MARGINAL_THICKNESS, yy); rc.stroke();
+      }
+    }
+  }
+
+  marginalBottomCanvas.style.display = 'block';
+  marginalBottomCanvas.style.left = x + 'px';
+  marginalBottomCanvas.style.top = (y + h) + 'px';
+  marginalBottomCanvas.width = Math.round(w);
+  marginalBottomCanvas.height = MARGINAL_THICKNESS;
+  marginalBottomCanvas.style.width = w + 'px';
+  marginalBottomCanvas.style.height = MARGINAL_THICKNESS + 'px';
+  const bc = marginalBottomCtx;
+  bc.clearRect(0, 0, marginalBottomCanvas.width, marginalBottomCanvas.height);
+  {
+    const n = m.colSum.length;
+    let maxV = 0;
+    for (let i = 0; i < n; i++) if (m.colSum[i] > maxV) maxV = m.colSum[i];
+    bc.strokeStyle = '#6cf';
+    bc.lineWidth = 1;
+    bc.beginPath();
+    for (let i = 0; i < n; i++) {
+      const px = (i / n) * marginalBottomCanvas.width;
+      const py = maxV > 0 ? (m.colSum[i] / maxV) * (MARGINAL_THICKNESS - 4) : 0;
+      if (i === 0) bc.moveTo(px, py); else bc.lineTo(px, py);
+    }
+    bc.stroke();
+    if (m.colPeriod) {
+      bc.strokeStyle = 'rgba(255,80,80,0.6)';
+      for (let px = m.colPhase; px < n; px += m.colPeriod) {
+        const xx = (px / n) * marginalBottomCanvas.width;
+        bc.beginPath(); bc.moveTo(xx, 0); bc.lineTo(xx, MARGINAL_THICKNESS); bc.stroke();
+      }
+    }
+  }
+
+  if (positionReadout) {
+    const uStep = m.colPeriod && lastProjectedBins ? m.colPeriod * lastProjectedBins.binWidthU : null;
+    const vStep = m.rowPeriod && lastProjectedBins ? m.rowPeriod * lastProjectedBins.binWidthV : null;
+    positionReadout.textContent =
+      `col period: ${m.colPeriod ?? '—'} bins (phase ${m.colPhase.toFixed(1)})\n` +
+      `row period: ${m.rowPeriod ?? '—'} bins (phase ${m.rowPhase.toFixed(1)})\n` +
+      `implied grid step: U=${uStep?.toFixed(3) ?? '—'}  V=${vStep?.toFixed(3) ?? '—'}\n` +
+      `(expect both ≈ ${GRID_STEP})`;
+  }
+}
+
+function hideMarginalLines() {
+  marginalRightCanvas.style.display = 'none';
+  marginalBottomCanvas.style.display = 'none';
+}
+
+// main.ts's own mirrorRowsGrid isn't exported (it's local to that module) --
+// reimplemented here rather than exported for a one-line helper. Covers the
+// row-mirror half of the D4 (8-fold) symmetry ambiguity; pickBestCandidate's
+// own 4-way rotation search covers the rest -- {identity, row-mirror} x
+// {0,90,180,270} is 8 elements, and any single reflection composed with all
+// 4 rotations spans the full 8-element dihedral group, so together they
+// cover every possible axis swap/sign-flip of our (u,v) sampling grid
+// relative to the torus's own (row,col) convention -- no need to separately
+// worry about which sign/labeling lastRecoveredAxes's Drow/Dcol happen to be.
+function mirrorRowsGrid(sg: SampledGrid): SampledGrid {
+  return { ...sg, cells: sg.cells.slice().reverse() };
+}
+
+// Odd so that reversing the row (or col) array maps the middle index to
+// itself (mirrorRowsGrid(sg).cells[floor(n/2)] is exactly sg.cells[floor(n/2)]
+// reversed-in-place, not some OTHER row) -- keeps pickBestCandidate's
+// "match is the grid's center cell" guarantee pointing at the exact same
+// physical anchor point regardless of which of the 8 candidates wins,
+// without needing the homography-inverse correction the real line pipeline
+// needs (see scripts/test-lines-decode.ts's decodeViaLines comment) -- that
+// correction compensates for the sampled grid's origin floating at an
+// arbitrary offset from the camera's target, which doesn't apply here since
+// this grid is built centered on the camera's own floor anchor by construction.
+const DECODE_WINDOW = ORDER * 4 + 1;
+
+interface PositionDecodeResult {
+  row: number; col: number; consistency: number;
+  camPos: THREE.Vector3;
+}
+let lastPositionDecode: PositionDecodeResult | null = null;
+
+// Decodes the camera's absolute world position: samples a DECODE_WINDOW
+// square of bits at exact floor-cell centers around the camera (via inverse
+// projection straight from the analysis grayscale, NOT the lossy forward-
+// binned projectedPreviewData), decodes which torus (row,col) that window
+// sits at via the same pickBestCandidate machinery the real line pipeline
+// uses, then combines the decoded absolute cell position with its known
+// position RELATIVE to the camera to recover the camera's own absolute
+// position -- the only ground truth this touches is which torus (row,col) a
+// bit pattern implies (a property of the pattern itself, verifiable from the
+// image alone), never camPos.
+function runPositionDecode(gray: Float64Array, w: number, h: number, vFovRad: number) {
+  if (!lastRecoveredAxes || !lastMarginals || lastMarginals.colPeriod === null || lastMarginals.rowPeriod === null || !lastProjectedBins) {
+    lastPositionDecode = null;
+    return;
+  }
+  const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
+  const normal = Dnormal.clone();
+  if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
+  const invQuat = camQuat.clone().invert();
+  const halfV = vFovRad / 2;
+  const bin = binarize(gray);
+
+  // Sub-cell phase: findPhase locked onto the nearest cell-BOUNDARY peak (see
+  // computeProjectedMarginals) in BIN units of the projected buffer; running
+  // that bin position back through lastProjectedBins' own scale into world
+  // units, then folding to a single representative offset within one
+  // GRID_STEP of zero, gives exactly where a boundary sits relative to the
+  // camera along each axis -- a cell CENTER is exactly half a GRID_STEP past
+  // that. Every other sampled cell is just that anchor plus an integer
+  // GRID_STEP hop -- GRID_STEP itself is a known construction constant of
+  // the pattern (not something recovered), so hopping by exactly 1 avoids
+  // compounding the period measurement's own noise across many cells.
+  const uBoundaryRaw = lastProjectedBins.minU + lastMarginals.colPhase * lastProjectedBins.binWidthU;
+  const vBoundaryRaw = lastProjectedBins.minV + lastMarginals.rowPhase * lastProjectedBins.binWidthV;
+  const uAnchor = (uBoundaryRaw - Math.round(uBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
+  const vAnchor = (vBoundaryRaw - Math.round(vBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
+
+  const rows = DECODE_WINDOW, cols = DECODE_WINDOW;
+  const centerI = Math.floor(rows / 2), centerJ = Math.floor(cols / 2);
+  const p = new THREE.Vector3();
+  const local = new THREE.Vector3();
+  const cells: SampledCell[][] = [];
+  for (let i = 0; i < rows; i++) {
+    const v = vAnchor + (i - centerI) * GRID_STEP;
+    const rowCells: SampledCell[] = [];
+    for (let j = 0; j < cols; j++) {
+      const u = uAnchor + (j - centerJ) * GRID_STEP;
+      // Relative-to-camera world point at this cell's exact center (same
+      // "hit" construction as buildProjectedTexture/estimateFloorDistance:
+      // p.dot(normal) == -distance for every floor point), then rotated into
+      // camera-local space (inverse of cornerDir's forward rotation) and run
+      // through cornerDir's pinhole formula backwards to find the pixel it
+      // projects to.
+      p.copy(Drow).multiplyScalar(u).addScaledVector(Dcol, v).addScaledVector(normal, -distance);
+      local.copy(p).applyQuaternion(invQuat);
+      if (local.z >= 0) { rowCells.push({ x: NaN, y: NaN, bit: 0, valid: false, cornerCount: 0 }); continue; }
+      const ndcU = -local.x / (local.z * Math.tan(halfV) * RT_ASPECT);
+      const ndcV = -local.y / (local.z * Math.tan(halfV));
+      const px = ((ndcU + 1) / 2) * w, py = ((1 - ndcV) / 2) * h;
+      const xx = Math.round(px), yy = Math.round(py);
+      if (xx < 0 || xx >= w || yy < 0 || yy >= h) { rowCells.push({ x: px, y: py, bit: 0, valid: false, cornerCount: 0 }); continue; }
+      rowCells.push({ x: px, y: py, bit: bin[yy * w + xx], valid: true, cornerCount: 0 });
+    }
+    cells.push(rowCells);
+  }
+  const sg: SampledGrid = { rows, cols, cells, originRow: centerI, originCol: centerJ };
+  const result = pickBestCandidate([sg, mirrorRowsGrid(sg)], ORDER, debruijnLookup, torus, R, C);
+  if (!result.match) { lastPositionDecode = null; return; }
+
+  // worldX = c - C/2, worldZ = r - R/2 (GRID_STEP=1) -- the floor mesh's own
+  // world<->torus coordinate convention, reverse-engineered from its
+  // PlaneGeometry + rotation.x=-pi/2 + CanvasTexture setup (see the floor
+  // mesh construction above). result.match is the torus position of OUR
+  // sampled grid's (centerI,centerJ) cell -- i.e. of the point (uAnchor,vAnchor)
+  // relative to the camera -- so camPos = that cell's true world position
+  // minus its known camera-relative offset.
+  const worldPosTrue = new THREE.Vector3((result.match.col - C / 2) * GRID_STEP, 0, (result.match.row - R / 2) * GRID_STEP);
+  const hitRel = new THREE.Vector3().addScaledVector(Drow, uAnchor).addScaledVector(Dcol, vAnchor).addScaledVector(normal, -distance);
+  const camPosRecovered = worldPosTrue.sub(hitRel);
+  lastPositionDecode = { row: result.match.row, col: result.match.col, consistency: result.consistency, camPos: camPosRecovered };
 }
 
 // Recovered-pole visibility is handled per-frame in updateSphereOverlays,
@@ -1341,7 +1911,7 @@ function runAxesReconstruction() {
       const { gray: rawGray, w, h } = captureDistortedGrayscale();
       const gray = flipRowsF64(rawGray, w, h);
       const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
-      const votes = computeWorldVotes(gray, w, h, state.simMinMag, state.simGradRadius, state.coherenceRadius, camQuat, vFovRad, RT_ASPECT);
+      const votes = computeWorldVotes(gray, w, h, state.simGradRadius, state.coherenceRadius, camQuat, vFovRad, RT_ASPECT);
       lastVotes = votes;
       updateGradientCirclesDebug();
       const t1 = performance.now();
@@ -1400,7 +1970,20 @@ function runAxesReconstruction() {
       lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair && spacing
         ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: (spacing.distanceU + spacing.distanceV) / 2 }
         : null;
-      if (state.mode === 'projected') buildProjectedTexture();
+      // Unconditional now (previously gated to state.mode === 'projected'):
+      // position decode below depends on the marginal periodicity/phase this
+      // computes, regardless of which mode is currently on screen, not just
+      // on the visualization it was originally built for.
+      buildProjectedTexture();
+      runPositionDecode(gray, w, h, vFovRad);
+      updateRecoveredCamGizmo();
+      applyRecoveredFloorOverlay();
+      // lastRecoveredAxes just changed but captureDirty may not have (this
+      // capture didn't necessarily touch any camera/distortion slider), so
+      // the reconstructed-contamination overlay needs its own explicit
+      // refresh here rather than waiting on the dirty-gated block above.
+      if (state.mode === 'through') updateContaminationOverlays();
+      const t4 = performance.now();
 
       const lines = [`${votes.length} votes  (${fitVotes.length} fed to fit)`];
       if (rowDirRecovered && colDirRecovered) {
@@ -1421,8 +2004,21 @@ function runAxesReconstruction() {
       } else if (quadricPair) {
         lines.push(`spacing: no period found`);
       }
-      lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  spacing ${(t3 - t2).toFixed(0)}ms`);
+      lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  spacing ${(t3 - t2).toFixed(0)}ms  decode ${(t4 - t3).toFixed(0)}ms`);
       axesReadout.textContent = lines.join('\n');
+
+      if (lastPositionDecode) {
+        const rec = lastPositionDecode.camPos;
+        const errPos = rec.distanceTo(camPos);
+        positionReadout.textContent =
+          `torus cell: row ${lastPositionDecode.row}  col ${lastPositionDecode.col}\n` +
+          `consistency: ${(lastPositionDecode.consistency * 100).toFixed(1)}%\n` +
+          `recovered camPos: (${rec.x.toFixed(2)}, ${rec.y.toFixed(2)}, ${rec.z.toFixed(2)})\n` +
+          `true camPos: (${camPos.x.toFixed(2)}, ${camPos.y.toFixed(2)}, ${camPos.z.toFixed(2)})\n` +
+          `error: ${errPos.toFixed(3)} world units`;
+      } else {
+        positionReadout.textContent = 'position decode: no match (need periodicity + a successful orientation/distance fit)';
+      }
     } finally {
       captureAxesBtn.disabled = false;
       captureAxesBtn.textContent = prevLabel;
@@ -1468,6 +2064,7 @@ canvas.addEventListener('wheel', (e) => {
 
 function setMode(m: Mode) {
   state.mode = m;
+  persistControl('mode', m);
   for (const k of Object.keys(modeBtns) as Mode[]) modeBtns[k].classList.toggle('active', k === m);
   worldOrbit.enabled = m === 'world';
   insideHint.style.display = m === 'inside' ? 'block' : 'none';
@@ -1480,11 +2077,37 @@ function setMode(m: Mode) {
   // this mode, so build once on the transition rather than only on the next
   // dirty-gated update in animate().
   if (m === 'projected') buildProjectedTexture();
+  else hideMarginalLines();
+  contamToggles.style.display = m === 'through' ? 'flex' : 'none';
+  // updateDistortedPreview first: lastNoisedPreviewGray may still be null
+  // (cold start) or stale (overlay was off while a 'raw'/'none' view's
+  // early-return skipped computing it -- see updateDistortedPreview's
+  // needGrayForOverlay) at the moment either toggle first turns on.
+  if (m === 'through') { updateDistortedPreview(); updateContaminationOverlays(); }
 }
 modeBtns.world.addEventListener('click', () => setMode('world'));
 modeBtns.through.addEventListener('click', () => setMode('through'));
 modeBtns.inside.addEventListener('click', () => setMode('inside'));
 modeBtns.projected.addEventListener('click', () => setMode('projected'));
+
+toggleHideFieldBtn.addEventListener('click', () => {
+  state.hideField = !state.hideField;
+  toggleHideFieldBtn.classList.toggle('active', state.hideField);
+  updateDistortedPreview();
+  updateContaminationOverlays();
+});
+toggleTrueContamBtn.addEventListener('click', () => {
+  state.showTrueContamination = !state.showTrueContamination;
+  toggleTrueContamBtn.classList.toggle('active', state.showTrueContamination);
+  updateDistortedPreview();
+  updateContaminationOverlays();
+});
+toggleReconContamBtn.addEventListener('click', () => {
+  state.showReconstructedContamination = !state.showReconstructedContamination;
+  toggleReconContamBtn.classList.toggle('active', state.showReconstructedContamination);
+  updateDistortedPreview();
+  updateContaminationOverlays();
+});
 
 // ── Slider / checkbox wiring ─────────────────────────────────────────────
 
@@ -1535,14 +2158,14 @@ bindCheckbox('showFrustum', (v) => (state.showFrustum = v));
 bindCheckbox('showPatch', (v) => (state.showPatch = v));
 bindCheckbox('showFloor', (v) => (state.showFloor = v));
 bindCheckbox('showGizmoBody', (v) => (state.showGizmoBody = v));
+bindCheckbox('showRecoveredFloor', (v) => (state.showRecoveredFloor = v));
 
 bindSlider('simNoise', (v) => { state.simNoise = v; markCaptureDirty(); }, (v) => v.toFixed(0));
 bindSlider('simBlur', (v) => { state.simBlur = v; markCaptureDirty(); }, (v) => v.toFixed(0));
 bindSlider('simGradRadius', (v) => { state.simGradRadius = v; markCaptureDirty(); }, (v) => v.toFixed(0));
-bindSlider('simMinMag', (v) => { state.simMinMag = v; markCaptureDirty(); }, (v) => v.toFixed(0));
 bindSlider('captureSupersample', (v) => { state.captureSupersample = v; resizeCaptureBuffers(); }, (v) => `${v.toFixed(0)}x`);
 bindSlider('coherenceRadius', (v) => { state.coherenceRadius = v; markCaptureDirty(); }, (v) => v.toFixed(0));
-bindRadioGroup('fieldView', (v) => { state.fieldView = v as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'density' | 'effective'; markCaptureDirty(); });
+bindRadioGroup('fieldView', (v) => { state.fieldView = v as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'agreement' | 'effective'; markCaptureDirty(); });
 bindSlider('circleSamplePercentMin', (v) => { state.circleSamplePercentMin = v; updateGradientCirclesDebug(); }, (v) => `${v.toFixed(0)}%`);
 bindSlider('circleSamplePercentMax', (v) => { state.circleSamplePercentMax = v; updateGradientCirclesDebug(); }, (v) => `${v.toFixed(0)}%`);
 bindCheckbox('showRecoveredPoles', (v) => (state.showRecoveredPoles = v));
@@ -1700,6 +2323,8 @@ function animate() {
   // the patch mesh (it would occlude the very view it's built from) while
   // actually looking through the real gizmo camera.
   gizmoBody.visible = state.mode === 'world' && state.showGizmoBody;
+  updateRecoveredCamGizmo();
+  recoveredFloorOverlay.visible = state.mode === 'world' && state.showRecoveredFloor && !!lastPositionDecode;
   camHelper.visible = state.mode === 'world' && state.showFrustum;
   floorMesh.visible = state.showFloor;
 
@@ -1722,6 +2347,7 @@ function animate() {
     renderCamRT();
     updateDistortedPreview();
     if (state.mode === 'projected') buildProjectedTexture();
+    if (state.mode === 'through') updateContaminationOverlays();
   }
 
   // Auto-recompute: still throttled by an explicit interval, not run every
@@ -1756,6 +2382,8 @@ function animate() {
     if (winAspect > RT_ASPECT) { w = innerHeight * RT_ASPECT; x = (innerWidth - w) / 2; }
     else { h = innerWidth / RT_ASPECT; y = (innerHeight - h) / 2; }
     renderPreviewViewport(x, y, w, h);
+    if (state.showTrueContamination) renderTrueContamOverlay(x, y, w, h);
+    if (state.showReconstructedContamination) renderReconContamOverlay(x, y, w, h);
   } else if (state.mode === 'projected') {
     // Same letterbox as 'through' -- the projected grid is built at rtSize
     // dimensions, same aspect as the regular capture.
@@ -1764,6 +2392,7 @@ function animate() {
     if (winAspect > RT_ASPECT) { w = innerHeight * RT_ASPECT; x = (innerWidth - w) / 2; }
     else { h = innerWidth / RT_ASPECT; y = (innerHeight - h) / 2; }
     renderProjectedViewport(x, y, w, h);
+    drawMarginalLines(x, y, w, h);
   } else {
     insideCam.position.copy(camPos);
     euler.set(insidePitch, insideYaw, 0);
@@ -1773,7 +2402,12 @@ function animate() {
   }
 }
 
-setMode('world');
+// Same persistence as every slider/checkbox (see savedControls) -- only
+// honor a saved value if it's still a real Mode, same guard bindRadioGroup
+// uses for a renamed/removed option.
+const VALID_MODES: Mode[] = ['world', 'through', 'inside', 'projected'];
+const savedMode = savedControls['mode'];
+setMode(VALID_MODES.includes(savedMode as Mode) ? (savedMode as Mode) : 'world');
 animate();
 
 // ── Dev bridge ───────────────────────────────────────────────────────────

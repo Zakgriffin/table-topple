@@ -16,6 +16,22 @@
     position: fixed; z-index: 5; pointer-events: none;
     color: #fff; font-size: 12px; text-shadow: 0 0 4px #000;
   }
+  #marginalRight, #marginalBottom {
+    position: fixed; z-index: 5; pointer-events: none; display: none;
+    background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.25);
+  }
+  #contamToggles {
+    position: fixed; top: 16px; right: 16px; z-index: 10;
+    display: none; flex-direction: column; gap: 8px;
+  }
+  #contamToggles button {
+    padding: 8px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.25);
+    background: rgba(20,20,20,0.75); color: #ccc; font-family: monospace; font-size: 11px;
+    cursor: pointer; text-align: left; backdrop-filter: blur(4px);
+  }
+  #contamToggles button.active#toggleTrueContam { background: rgba(220,50,50,0.6); color: #fff; border-color: #e33; }
+  #contamToggles button.active#toggleReconContam { background: rgba(230,150,20,0.6); color: #fff; border-color: #e08c14; }
+  #contamToggles button.active#toggleHideField { background: rgba(90,90,90,0.7); color: #fff; border-color: #999; }
 
   #panel {
     position: fixed; top: 16px; left: 16px; z-index: 10;
@@ -67,6 +83,13 @@
 <canvas id="gl"></canvas>
 <div id="pipFrame"></div>
 <div id="pipLabel">through camera</div>
+<canvas id="marginalRight"></canvas>
+<canvas id="marginalBottom"></canvas>
+<div id="contamToggles">
+  <button id="toggleHideField">hide field</button>
+  <button id="toggleTrueContam">true contamination overlay (red)</button>
+  <button id="toggleReconContam">reconstructed contamination overlay (orange)</button>
+</div>
 <div id="insideHint">drag to look around &middot; scroll to zoom &middot; you are standing at the camera's optical center</div>
 
 <div id="panel">
@@ -102,8 +125,7 @@
   <div class="section">
     <h2>2D filter pipeline</h2>
     <div class="row"><span class="label">gradient radius</span><input type="range" id="simGradRadius" min="1" max="6" step="1" value="1"><span class="val" id="simGradRadiusVal"></span></div>
-    <div class="row"><span class="label">noise floor</span><input type="range" id="simMinMag" min="0" max="40" step="1" value="4"><span class="val" id="simMinMagVal"></span></div>
-    <div class="row"><span class="label">density window</span><input type="range" id="coherenceRadius" min="0" max="20" step="1" value="1"><span class="val" id="coherenceRadiusVal"></span></div>
+    <div class="row"><span class="label">agreement window</span><input type="range" id="coherenceRadius" min="0" max="20" step="1" value="1"><span class="val" id="coherenceRadiusVal"></span></div>
   </div>
 
   <div class="section">
@@ -114,8 +136,8 @@
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised" checked> noised (final image the algorithm sees)</label>
     <div class="fieldViewDivider">&darr; 2D filter pipeline starts here &darr;</div>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewGradient" value="gradient"> gradient field (hue=direction, sat=magnitude)</label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewDensity" value="density"> gradient density (local crowding, not yet applied to fit)</label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewEffective" value="effective"> effective gradient field (gradient &times; density)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewAgreement" value="agreement"> gradient agreement (vector-sum coherence, drives the fit)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewEffective" value="effective"> effective gradient field (gradient &times; agreement)</label>
   </div>
 
   <div class="section">
@@ -127,6 +149,7 @@
     <label class="chk"><input type="checkbox" id="showPatch" checked> live viewport image patch</label>
     <label class="chk"><input type="checkbox" id="showFloor" checked> floor</label>
     <label class="chk"><input type="checkbox" id="showGizmoBody" checked> camera box</label>
+    <label class="chk"><input type="checkbox" id="showRecoveredFloor" checked> recovered floor overlay (decoded position)</label>
   </div>
 
   <div class="section">
@@ -141,6 +164,11 @@
     <label class="chk"><input type="checkbox" id="axesAutoCapture"> auto-recompute</label>
     <div class="row"><span class="label">interval (ms)</span><input type="range" id="axesCaptureInterval" min="50" max="2000" step="50" value="500"><span class="val" id="axesCaptureIntervalVal"></span></div>
     <div id="axesReadout">not yet computed</div>
+  </div>
+
+  <div class="section">
+    <h2>position decode</h2>
+    <div id="positionReadout" style="font-size: 11px; color: #9cf; line-height: 1.5; white-space: pre-line;">not yet computed (switch to Projected Cam)</div>
   </div>
 
   <div class="section">

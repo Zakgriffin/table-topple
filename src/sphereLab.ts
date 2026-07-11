@@ -15,8 +15,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { generateTorus, buildLookupTable } from './debruijn.ts';
-import { toGrayscale, binarize, pickBestCandidate } from './decode.ts';
-import type { SampledGrid, SampledCell } from './decode.ts';
+import { toGrayscale, binarize, rotateShift } from './decode.ts';
 import { jacobiEigenSymmetric, smallestEigenvector } from './linalg.ts';
 
 type Mode = 'world' | 'through' | 'inside' | 'projected';
@@ -24,6 +23,8 @@ type Mode = 'world' | 'through' | 'inside' | 'projected';
 // ── DOM ──────────────────────────────────────────────────────────────────
 
 const canvas = document.getElementById('gl') as HTMLCanvasElement;
+const panel = document.getElementById('panel') as HTMLDivElement;
+const panelToggle = document.getElementById('panelToggle') as HTMLButtonElement;
 const pipFrame = document.getElementById('pipFrame') as HTMLDivElement;
 const pipLabel = document.getElementById('pipLabel') as HTMLDivElement;
 const insideHint = document.getElementById('insideHint') as HTMLDivElement;
@@ -35,6 +36,8 @@ const marginalRightCanvas = document.getElementById('marginalRight') as HTMLCanv
 const marginalBottomCanvas = document.getElementById('marginalBottom') as HTMLCanvasElement;
 const marginalRightCtx = marginalRightCanvas.getContext('2d')!;
 const marginalBottomCtx = marginalBottomCanvas.getContext('2d')!;
+const sampleLatticeCanvas = document.getElementById('sampleLattice') as HTMLCanvasElement;
+const sampleLatticeCtx = sampleLatticeCanvas.getContext('2d')!;
 const contamToggles = document.getElementById('contamToggles') as HTMLDivElement;
 const toggleHideFieldBtn = document.getElementById('toggleHideField') as HTMLButtonElement;
 const toggleTrueContamBtn = document.getElementById('toggleTrueContam') as HTMLButtonElement;
@@ -100,7 +103,7 @@ const state = {
   camYawDeg: 0, camPitchDeg: -20,
   focalMM: 26,
   mode: 'world' as Mode,
-  showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showFloor: true, showGizmoBody: true, showRecoveredFloor: true,
+  showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showFloor: true, showGizmoBody: true, showRecoveredFloor: true, showSampleLattice: false,
   showTrueContamination: false, showReconstructedContamination: false, hideField: false,
   simNoise: 8, simBlur: 1, simGradRadius: 1, coherenceRadius: 1,
   circleSamplePercentMin: 0, circleSamplePercentMax: 5,
@@ -158,7 +161,16 @@ const pctx = patternCanvas.getContext('2d')!;
 const img = pctx.createImageData(C, R);
 for (let r = 0; r < R; r++) {
   for (let c = 0; c < C; c++) {
-    const v = torus[r][c] ? 235 : 20;
+    // 1 -> dark, 0 -> light -- matches scripts/generate-debruijn-torus.ts's
+    // canonical convention (cell ? 0 : 255) and binarize's own documented
+    // "dark -> 1" intent (src/decode.ts). This was backwards (1 -> bright)
+    // until now, which inverted every simulated bit read here relative to
+    // the real torus/debruijnLookup content -- the actual root cause of the
+    // whole session's poor decode consistency, not any of the axis/mirror
+    // bugs fixed earlier: pt.bit came out as the bitwise complement of the
+    // true window almost everywhere, so tallyPositionVotes' lookup rarely
+    // matched the real anchor.
+    const v = torus[r][c] ? 20 : 235;
     const i = (r * C + c) * 4;
     img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
     img.data[i + 3] = 255;
@@ -621,14 +633,21 @@ function applyRecoveredFloorOverlay() {
     .addScaledVector(Dcol, centerV)
     .addScaledVector(normal, -distance);
 
+  // -Drow, NOT Drow: PlaneGeometry's local +X maps to this texture's U=0
+  // edge, which is bu=0 -- and bu runs maxU -> minU (buildProjectedTexture's
+  // mirror, see its comment), so local -X/2 (U=0) must land at world offset
+  // +Drow*(width/2) (i.e. u=maxU), not -Drow*(width/2). Using -Drow here
+  // gets that right.
+  //
   // Cross product, NOT the sign-corrected `normal` above -- guarantees a
   // right-handed, purely-rotational basis (setFromRotationMatrix on a
   // reflection matrix, which using a wrongly-signed normal could produce,
   // gives a garbage quaternion). Only affects which face is "front"; with
   // DoubleSide + a paper-thin plane that's invisible, so it's safe to let
   // this differ from the physically-signed normal used for the offset above.
-  const zAxis = new THREE.Vector3().crossVectors(Drow, Dcol).normalize();
-  const basis = new THREE.Matrix4().makeBasis(Drow, Dcol, zAxis);
+  const drowDisplay = Drow.clone().negate();
+  const zAxis = new THREE.Vector3().crossVectors(drowDisplay, Dcol).normalize();
+  const basis = new THREE.Matrix4().makeBasis(drowDisplay, Dcol, zAxis);
   recoveredFloorOverlay.quaternion.setFromRotationMatrix(basis);
 }
 
@@ -1424,125 +1443,45 @@ function autocorrelationPeriod(profile: Float64Array): number | null {
   return bestLag > 0 ? bestLag : null;
 }
 
-interface SpacingEstimate { periodU: number; periodV: number; distanceU: number; distanceV: number }
-
-// Recovers the camera's distance to the floor plane along Dnormal, from
-// nothing but the already-recovered axis directions plus the KNOWN true
-// grid pitch (GRID_STEP) -- no separate line-indexing/homography machinery
-// needed. The trick: ray-cast every above-threshold gradient pixel onto the
-// floor plane using an ASSUMED, deliberately-arbitrary distance (see
-// ASSUMED_FLOOR_DISTANCE below). Getting that assumed distance wrong doesn't
-// warp the projection's shape (similar triangles -- wrong distance only
-// ever rescales the projected image uniformly, never introduces keystoning,
-// since orientation is already exactly known). So the checkerboard's grid
-// lines still project as a perfectly regular grid, just at some apparent
-// period that's wrong by exactly the same scale factor as the assumed
-// distance. Squish-accumulating gradient MAGNITUDE (not brightness) along
-// each axis is what makes that period cleanly measurable: magnitude peaks
-// at every cell boundary regardless of which color the cell is, so it's
-// blind to the pseudorandom bit content and shows a strictly periodic
-// signal at the grid pitch. Squishing along U also isolates the COL-family
-// lines specifically (a col line, constant in U, reinforces at one U value
-// across every V summed over; a row line, constant in V, exists at every U
-// and smears into a flat baseline instead) -- so no separate family
-// classification is needed either. Comparing the measured period against
-// the known-true GRID_STEP gives the exact correction factor back to the
-// real distance.
-const ASSUMED_FLOOR_DISTANCE = 1;
-
-function estimateFloorDistance(
-  gray: Float64Array, w: number, h: number, gradRadius: number,
-  quat: THREE.Quaternion, vFovRad: number, aspect: number,
-  origin: THREE.Vector3, Drow: THREE.Vector3, Dcol: THREE.Vector3, Dnormal: THREE.Vector3,
-): SpacingEstimate | null {
-  // Dnormal's sign out of fitPairOfPlanes is arbitrary (it's just the
-  // near-zero eigenvalue's eigenvector) -- orient it so a straight-ahead
-  // ray actually hits the floor in front of the camera, not behind it.
-  const normal = Dnormal.clone();
-  const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, 1 - (py / h) * 2];
-  if (cornerDir(0, 0, quat, vFovRad, aspect).dot(normal) > 0) normal.negate();
-
-  const r = gradRadius;
-  const us: number[] = [], vs: number[] = [], mags: number[] = [];
-  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
-  const hit = new THREE.Vector3();
-  for (let y = r; y < h - r; y++) {
-    for (let x = r; x < w - r; x++) {
-      const i = y * w + x;
-      const fx = gray[i + r] - gray[i - r];
-      const fy = gray[i + r * w] - gray[i - r * w];
-      const mag = Math.hypot(fx, fy);
-      if (mag <= 0) continue;
-      const [ndcU, ndcV] = toNDC(x, y);
-      const rayDir = cornerDir(ndcU, ndcV, quat, vFovRad, aspect);
-      const denom = rayDir.dot(normal);
-      // Excludes rays grazing near-parallel to the floor (pointed toward the
-      // horizon), not just ones heading away from it: as a ray approaches
-      // parallel, t = -ASSUMED_FLOOR_DISTANCE/denom blows up, so a tiny
-      // angular error there becomes a huge world-position error. Left
-      // unfiltered, those few extreme hits dominate minU/maxU or minV/maxV,
-      // wrecking the bin width for whichever axis happens to run toward the
-      // horizon (empirically: one axis came back at 2% distance error, the
-      // other at 55%, before this cutoff was added). Threshold is on the
-      // ray/normal angle (scale-invariant -- not an absolute distance
-      // cutoff, which would depend on the arbitrary ASSUMED_FLOOR_DISTANCE).
-      const MIN_GRAZING_COS = 0.15;
-      if (denom >= -MIN_GRAZING_COS) continue;
-      const t = -ASSUMED_FLOOR_DISTANCE / denom;
-      hit.copy(origin).addScaledVector(rayDir, t);
-      const u = hit.dot(Drow), v = hit.dot(Dcol);
-      us.push(u); vs.push(v); mags.push(mag);
-      if (u < minU) minU = u; if (u > maxU) maxU = u;
-      if (v < minV) minV = v; if (v > maxV) maxV = v;
-    }
-  }
-  if (us.length === 0 || !isFinite(minU) || !isFinite(minV)) return null;
-
-  // Bin count derived from the existing capture resolution -- no new
-  // tunable: never binning coarser or finer than the actual pixel data
-  // can support.
-  const numBinsU = w, numBinsV = h;
-  const binWidthU = (maxU - minU) / numBinsU || 1;
-  const binWidthV = (maxV - minV) / numBinsV || 1;
-  const profileU = new Float64Array(numBinsU);
-  const profileV = new Float64Array(numBinsV);
-  for (let k = 0; k < us.length; k++) {
-    const bu = Math.min(numBinsU - 1, Math.floor((us[k] - minU) / binWidthU));
-    const bv = Math.min(numBinsV - 1, Math.floor((vs[k] - minV) / binWidthV));
-    profileU[bu] += mags[k];
-    profileV[bv] += mags[k];
-  }
-
-  const periodBinsU = autocorrelationPeriod(profileU);
-  const periodBinsV = autocorrelationPeriod(profileV);
-  if (periodBinsU === null || periodBinsV === null) return null;
-
-  const periodU = periodBinsU * binWidthU; // apparent grid period in the assumed-distance projection's units
-  const periodV = periodBinsV * binWidthV;
-  return {
-    periodU, periodV,
-    distanceU: ASSUMED_FLOOR_DISTANCE * (GRID_STEP / periodU),
-    distanceV: ASSUMED_FLOOR_DISTANCE * (GRID_STEP / periodV),
-  };
-}
+// Distance-to-floor recovery no longer has its own separate implementation
+// here -- it used to (a gradient-magnitude ray-cast at an assumed distance,
+// squish-accumulated into per-axis profiles, rescaled by the known
+// GRID_STEP), but that was a second, parallel implementation of exactly the
+// same trick buildProjectedTexture/computeProjectedMarginals already do for
+// position decode's periodicity. The ray-cast/bin formula scales linearly
+// with whatever distance is assumed (hit(d) = (-d/denom)*rayDir for a fixed
+// ray), and bin ASSIGNMENT is completely invariant to that scale (minU,
+// maxU, and binWidthU all scale by the same factor, which cancels out of
+// floor((u-minU)/binWidthU)) -- so there's no need for a separate ray-cast
+// pass at all. runAxesReconstruction now: builds the projected texture once
+// at an arbitrary placeholder distance, reads the period computeProjectedMarginals
+// already measures, solves for the true distance in closed form against the
+// known GRID_STEP (identical rescaling trick, just reusing the already-tuned
+// marginal-line pipeline), writes that back into lastRecoveredAxes.distance,
+// and rebuilds once more now that it's correct.
 
 // Set by runAxesReconstruction on a successful capture; consumed by
 // buildProjectedTexture. distance is the average of the U/V estimates --
 // both should agree once the grazing-angle cutoff is in place (see
-// estimateFloorDistance's header comment), so averaging is just cheap
-// noise reduction, not picking one over the other.
+// buildProjectedTexture's own MIN_GRAZING_COS comment), so averaging is
+// just cheap noise reduction, not picking one over the other.
 interface RecoveredAxes { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3; distance: number }
 let lastRecoveredAxes: RecoveredAxes | null = null;
 
 // Rebuilds projectedPreviewData: a bird's-eye, floor-plane-rectified view of
-// whichever field view is currently in distortedPreviewData. Same ray-cast-
-// onto-the-floor idea as estimateFloorDistance, but keeping full 2D
-// structure and each pixel's own color instead of squishing to a 1D
-// magnitude profile -- so this works for ANY field view (raw, noised,
-// gradient, agreement, ...), not just the gradient magnitude the distance
-// recovery itself needs. Bin grid matches rtSize, same "derive from the
-// existing capture resolution, no new tunable" convention used everywhere
-// else in this file. Needs a successful "capture now" first (lastRecoveredAxes).
+// whichever field view is currently in distortedPreviewData -- also what
+// runAxesReconstruction uses (via computeProjectedMarginals) to recover the
+// camera's distance to the floor, since the ray-cast/bin math here is what
+// that distance recovery is built on top of. Keeps full 2D structure and
+// each pixel's own color instead of squishing to a 1D profile -- so this
+// works for ANY field view (raw, noised, gradient, agreement, ...). Bin
+// grid matches rtSize, same "derive from the existing capture resolution,
+// no new tunable" convention used everywhere else in this file. Needs a
+// successful "capture now" first (lastRecoveredAxes) -- called TWICE per
+// capture (see runAxesReconstruction): once at a placeholder distance just
+// to measure period for distance recovery, once more after distance is
+// corrected so the final projectedPreviewData/lastProjectedBins/lastMarginals
+// are all properly scaled.
 function buildProjectedTexture() {
   if (!lastRecoveredAxes) { projectedPreviewData.fill(0); projectedPreviewTex.needsUpdate = true; lastProjectedBins = null; lastMarginals = null; return; }
   const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
@@ -1550,8 +1489,8 @@ function buildProjectedTexture() {
   const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
   const normal = Dnormal.clone();
   if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
-  // NOT the same toNDC as computeWorldVotes/estimateFloorDistance -- those
-  // receive gray flipped to top-down first (flipRowsF64), so row 0 -> NDC
+  // NOT the same toNDC as computeWorldVotes uses -- that receives gray
+  // flipped to top-down first (flipRowsF64), so row 0 -> NDC
   // v=+1 (top) is correct for them. This function reads colors straight
   // from distortedPreviewData, which is GL-native BOTTOM-UP (row 0 =
   // bottom, matching distortedPreviewTex's flipY=false convention
@@ -1564,7 +1503,15 @@ function buildProjectedTexture() {
   // than a simple upside-down (but still right-angled) image.
   const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, (py / h) * 2 - 1];
 
-  const MIN_GRAZING_COS = 0.15; // see estimateFloorDistance's header comment
+  // Excludes rays grazing near-parallel to the floor (pointed toward the
+  // horizon): as a ray approaches parallel, t = -distance/denom blows up, so
+  // a tiny angular error there becomes a huge world-position error. Left
+  // unfiltered, those few extreme hits dominate minU/maxU or minV/maxV,
+  // wrecking the bin width for whichever axis happens to run toward the
+  // horizon. Threshold is on the ray/normal angle (scale-invariant -- not an
+  // absolute distance cutoff, which would depend on whatever distance is
+  // currently assumed).
+  const MIN_GRAZING_COS = 0.15;
   const hit = new THREE.Vector3();
   const us: number[] = [], vs: number[] = [], srcIdx: number[] = [];
   let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
@@ -1590,6 +1537,12 @@ function buildProjectedTexture() {
       if (v < minV) minV = v; if (v > maxV) maxV = v;
     }
   }
+  // Literal min/max, NOT a percentile crop -- deliberately shows the full
+  // observed quadrilateral (all 4 frustum corners), even though a few
+  // near-horizon rays stretch the bin scale and compress the near-field
+  // (the earlier percentile-based version traded that away for cleaner
+  // periodicity detection, but seeing the actual corners matters more
+  // right now -- see conversation).
   if (!isFinite(minU) || !isFinite(minV)) { projectedPreviewData.fill(0); projectedPreviewTex.needsUpdate = true; lastProjectedBins = null; lastMarginals = null; return; }
 
   const binWidthU = (maxU - minU) / w || 1;
@@ -1597,15 +1550,57 @@ function buildProjectedTexture() {
   lastProjectedBins = { minU, maxU, minV, maxV, binWidthU, binWidthV, w, h };
   const sums = new Float64Array(w * h * 3);
   const counts = new Float64Array(w * h);
+  // Gradient of the SOURCE (un-rectified) analysis-equivalent brightness,
+  // NOT the rectified/binned display buffer -- computed once per source
+  // pixel here, then projected+averaged into buckets the SAME principled
+  // way RGB already is below (sum per bucket, divide by that bucket's own
+  // count), instead of computeProjectedMarginals previously taking a
+  // discrete difference BETWEEN already-averaged neighboring buckets. That
+  // old approach faked an edge at every transition into an empty (black)
+  // bucket, and made sparser rows/columns look artificially weaker just for
+  // having fewer populated buckets summed in, independent of how strong
+  // their real data actually was.
+  const srcGrad = lastNoisedPreviewGray ? computeGradientField(lastNoisedPreviewGray, w, h, 1) : null;
+  const gradCxSum = new Float64Array(w * h);
+  const gradCySum = new Float64Array(w * h);
+  // bu runs from maxU down to minU (NOT the naive us[k]-minU), i.e. U
+  // increases right-to-left on screen -- deliberately, to cancel out a
+  // handedness mismatch that's otherwise baked into this whole axis system.
+  // Drow, Dcol, and Dnormal are each independently, correctly sign-fixed
+  // against ground truth (ROW_DIR=+X, COL_DIR=+Z, and "faces the camera"
+  // respectively -- see runAxesReconstruction and this function's own normal
+  // fix above) -- but Drow x Dcol = (+X)x(+Z) = -Y = -Dnormal, always,
+  // regardless of camera pose. So (Drow,Dcol,Dnormal), despite every single
+  // axis individually being correct, form a LEFT-handed triple -- confirmed
+  // empirically too (Jacobian of screen-pixel -> (bu,bv) has a negative
+  // determinant without this mirror). That mismatch can't be fixed by
+  // re-flipping Drow or Dcol's sign -- both are already pinned to the one
+  // sign hitRel/buildDecodeSampleGrid need to reconstruct world position
+  // correctly -- so it has to be absorbed here, purely in how U gets turned
+  // into a screen column, without touching u itself (still used unmirrored
+  // everywhere else: hitRel, the decode grid's world reconstruction, the
+  // pole markers). buildDecodeSampleGrid's uBoundaryRaw and
+  // drawSampleLattice's bu both invert this exact same formula -- keep all
+  // three in sync if this ever changes.
   for (let k = 0; k < us.length; k++) {
-    const bu = Math.min(w - 1, Math.max(0, Math.floor((us[k] - minU) / binWidthU)));
+    const bu = Math.min(w - 1, Math.max(0, Math.floor((maxU - us[k]) / binWidthU)));
     const bv = Math.min(h - 1, Math.max(0, Math.floor((vs[k] - minV) / binWidthV)));
     const bi = bv * w + bu;
-    const srcO = srcIdx[k] * 4;
+    const si = srcIdx[k];
+    const srcO = si * 4;
     sums[bi * 3] += distortedPreviewData[srcO];
     sums[bi * 3 + 1] += distortedPreviewData[srcO + 1];
     sums[bi * 3 + 2] += distortedPreviewData[srcO + 2];
     counts[bi]++;
+    if (srcGrad) {
+      const fx = srcGrad.fx[si], fy = srcGrad.fy[si];
+      const mag = Math.hypot(fx, fy);
+      if (mag > 0) {
+        const theta = Math.atan2(fy, fx);
+        gradCxSum[bi] += mag * Math.cos(2 * theta); // double-angle, same polarity-fold reasoning as computeGradientAgreementField
+        gradCySum[bi] += mag * Math.sin(2 * theta);
+      }
+    }
   }
   for (let bi = 0; bi < w * h; bi++) {
     const c = counts[bi];
@@ -1620,7 +1615,7 @@ function buildProjectedTexture() {
     }
   }
   projectedPreviewTex.needsUpdate = true;
-  lastMarginals = computeProjectedMarginals();
+  lastMarginals = computeProjectedMarginals(w, h, counts, gradCxSum, gradCySum);
 }
 
 // Column sums (U axis, varies with x) and row sums (V axis, varies with y)
@@ -1628,40 +1623,85 @@ function buildProjectedTexture() {
 // The de Bruijn torus's bit content is deliberately pseudorandom (that's the
 // whole point -- unique windows everywhere), so adjacent cells' brightness
 // values are uncorrelated and a raw-brightness profile has no special
-// structure at lag = one cell width. A spike train of edge strength at cell
-// BOUNDARIES, however, recurs at exactly the cell period regardless of which
-// side of each boundary is bright vs dark -- the same reason
-// estimateFloorDistance bins gradient magnitude rather than raw brightness.
-// Computed as a simple finite difference directly on the already-rectified
-// projectedPreviewData (cheaper and just as valid as re-deriving gradients
-// from the source image, since rectification has already made cell
-// boundaries axis-aligned here).
-interface Marginals { colSum: Float64Array; rowSum: Float64Array; colPeriod: number | null; rowPeriod: number | null; colPhase: number; rowPhase: number }
+// structure at lag = one cell width. Edge strength (gradient magnitude)
+// fixes that -- but plain |magnitude| still throws away
+// something real: a genuine vertical grid line's edge pixels all have a
+// HORIZONTAL gradient direction (mod 180, cell to cell, regardless of which
+// side is bright), while scattered noise/junction/off-axis structure has
+// its direction spread more randomly. That's exactly the same distinction
+// computeGradientAgreementField's double-angle vector-sum already exploits
+// spatially -- reused here along the marginal axis instead: cx = mag*cos(2*
+// theta) is +mag for a horizontal gradient (theta=0, i.e. a vertical line),
+// -mag for a vertical gradient (theta=90, i.e. a horizontal line), and ~0
+// for anything diagonal in between.
+//
+// colSum/colSumCy (and rowHueCx/rowSumCy) are a genuine 2D vector sum per
+// bucket-column/row -- but periodicity/phase detection runs on colMag/rowMag,
+// the MAGNITUDE of that summed vector (hypot(colSum,colSumCy)), not the raw
+// signed cx component alone. That distinction matters: a large negative cx
+// sum (a column dominated by the OTHER axis's lines crossing through it) is,
+// in a weighted circular mean, mathematically indistinguishable from a large
+// POSITIVE sum at the opposite phase (half a period away) -- confirmed live,
+// this was exactly why findPhase locked onto a flat, unremarkable plateau
+// instead of the profile's actual dominant feature, which happened to be a
+// deep negative trough. Magnitude is always >= 0, so there's no sign left to
+// get flipped into the wrong half of the circle. rowSum (the sign-flipped,
+// magnitude-irrelevant -cx sum) and rowHueCx (unflipped) both still exist
+// only so the display can recover each bin's own dominant gradient direction
+// (atan2(cy,cx)/2) for hue -- none of that feeds periodicity/phase anymore.
+// Computed on the already-rectified projectedPreviewData's luminance (not
+// re-deriving from the source image), since rectification has already made
+// cell boundaries axis-aligned here -- works the same regardless of which
+// field view happens to be selected for display, same reasoning as
+// lastNoisedPreviewGray decoupling the contamination overlays from it.
+interface Marginals {
+  colSum: Float64Array; rowSum: Float64Array; colSumCy: Float64Array; rowHueCx: Float64Array; rowSumCy: Float64Array;
+  colMag: Float64Array; rowMag: Float64Array;
+  colPeriod: number | null; rowPeriod: number | null; colPhase: number; rowPhase: number;
+}
 // Cached by buildProjectedTexture's caller (see below) so drawMarginalLines
 // can redraw every frame (cheap: just two line-graph passes) without
 // rescanning projectedPreviewData every frame too (not as cheap, and only
 // actually changes when buildProjectedTexture itself reruns).
 let lastMarginals: Marginals | null = null;
-function computeProjectedMarginals(): Marginals {
-  const w = rtSize.w, h = rtSize.h;
-  const lum = new Float64Array(w * h);
-  for (let i = 0; i < w * h; i++) {
-    const o = i * 4;
-    lum[i] = (projectedPreviewData[o] + projectedPreviewData[o + 1] + projectedPreviewData[o + 2]) / 3;
-  }
+// gradCxSum/gradCySum/counts are buildProjectedTexture's own per-bucket
+// accumulators (same source pixels, same bucket assignment, as its RGB
+// sum/count) -- see that function's own comment on why this reads the
+// SOURCE image's gradient (projected+averaged per bucket, matching how the
+// displayed color is already a true per-bucket average) rather than taking
+// a discrete difference between already-averaged buckets. A bucket with
+// zero samples contributes NOTHING here (skipped outright), not a
+// zero-valued sample -- that's what previously faked an edge against every
+// empty/black bucket and made sparser rows/columns look weaker just for
+// having fewer populated buckets, independent of how strong their real
+// data actually was.
+function computeProjectedMarginals(w: number, h: number, counts: Float64Array, gradCxSum: Float64Array, gradCySum: Float64Array): Marginals {
   const colSum = new Float64Array(w);
+  const colSumCy = new Float64Array(w);
   const rowSum = new Float64Array(h);
-  for (let y = 0; y < h; y++) {
-    for (let x = 1; x < w; x++) colSum[x] += Math.abs(lum[y * w + x] - lum[y * w + x - 1]);
+  const rowHueCx = new Float64Array(h);
+  const rowSumCy = new Float64Array(h);
+  for (let bv = 0; bv < h; bv++) {
+    for (let bu = 0; bu < w; bu++) {
+      const bi = bv * w + bu;
+      const c = counts[bi];
+      if (c === 0) continue;
+      const cx = gradCxSum[bi] / c; // true per-bucket average, not a difference between neighboring bucket averages
+      const cy = gradCySum[bi] / c;
+      colSum[bu] += cx; colSumCy[bu] += cy;
+      rowSum[bv] -= cx; rowHueCx[bv] += cx; rowSumCy[bv] += cy;
+    }
   }
-  for (let x = 0; x < w; x++) {
-    for (let y = 1; y < h; y++) rowSum[y] += Math.abs(lum[y * w + x] - lum[(y - 1) * w + x]);
-  }
-  const colPeriod = autocorrelationPeriod(colSum);
-  const rowPeriod = autocorrelationPeriod(rowSum);
-  const colPhase = colPeriod ? findPhase(colSum, colPeriod) : 0;
-  const rowPhase = rowPeriod ? findPhase(rowSum, rowPeriod) : 0;
-  return { colSum, rowSum, colPeriod, rowPeriod, colPhase, rowPhase };
+  const colMag = new Float64Array(w);
+  for (let bu = 0; bu < w; bu++) colMag[bu] = Math.hypot(colSum[bu], colSumCy[bu]);
+  const rowMag = new Float64Array(h);
+  for (let bv = 0; bv < h; bv++) rowMag[bv] = Math.hypot(rowHueCx[bv], rowSumCy[bv]);
+
+  const colPeriod = autocorrelationPeriod(colMag);
+  const rowPeriod = autocorrelationPeriod(rowMag);
+  const colPhase = colPeriod ? findPhase(colMag, colPeriod) : 0;
+  const rowPhase = rowPeriod ? findPhase(rowMag, rowPeriod) : 0;
+  return { colSum, rowSum, colSumCy, rowHueCx, rowSumCy, colMag, rowMag, colPeriod, rowPeriod, colPhase, rowPhase };
 }
 
 // Locates the nearest cell-BOUNDARY peak within one period, as a fractional
@@ -1693,6 +1733,19 @@ function findPhase(profile: Float64Array, period: number): number {
 // sample per image column) -- (x,y,w,h) is the same letterboxed rect
 // animate() just rendered the projected viewport into.
 const MARGINAL_THICKNESS = 90;
+// Recovers a bin's own dominant gradient direction from its (cx,cy) vector
+// sum (undoing the double-angle fold, see computeProjectedMarginals) and
+// maps it to a color via the SAME hue convention paintVectorFieldAsColor
+// uses (hue=direction), so a bin dominated by a clean axis-aligned edge
+// reads as a strong, recognizable color instead of a flat line-graph blue.
+function marginalHueColor(cx: number, cy: number): string {
+  let theta = Math.atan2(cy, cx) / 2;
+  if (theta < 0) theta += Math.PI;
+  if (theta >= Math.PI) theta -= Math.PI;
+  const [r, g, b] = hsvToRgb((theta / Math.PI) * 360, 1, 1);
+  return `rgb(${r},${g},${b})`;
+}
+
 function drawMarginalLines(x: number, y: number, w: number, h: number) {
   if (!lastMarginals) { hideMarginalLines(); return; }
   const m = lastMarginals;
@@ -1707,18 +1760,27 @@ function drawMarginalLines(x: number, y: number, w: number, h: number) {
   const rc = marginalRightCtx;
   rc.clearRect(0, 0, marginalRightCanvas.width, marginalRightCanvas.height);
   {
-    const n = m.rowSum.length;
-    let maxV = 0;
-    for (let i = 0; i < n; i++) if (m.rowSum[i] > maxV) maxV = m.rowSum[i];
-    rc.strokeStyle = '#6cf';
+    const n = m.rowMag.length;
+    // Magnitude, always >= 0 (see computeProjectedMarginals) -- plain
+    // deflection from the left edge, no centered baseline needed since
+    // there's no negative direction to accommodate anymore.
+    let maxMag = 0;
+    for (let i = 0; i < n; i++) if (m.rowMag[i] > maxMag) maxMag = m.rowMag[i];
+    // Per-segment color, not one flat strokeStyle -- each bin's own
+    // (rowHueCx,rowSumCy) vector sum picks the hue (see marginalHueColor),
+    // so a run of bins dominated by a clean horizontal edge reads as a
+    // solid, recognizable color instead of uniform blue.
     rc.lineWidth = 1;
-    rc.beginPath();
+    let prevPx = 0, prevPy = 0;
     for (let i = 0; i < n; i++) {
       const py = (i / n) * marginalRightCanvas.height;
-      const px = maxV > 0 ? (m.rowSum[i] / maxV) * (MARGINAL_THICKNESS - 4) : 0;
-      if (i === 0) rc.moveTo(px, py); else rc.lineTo(px, py);
+      const px = maxMag > 0 ? (m.rowMag[i] / maxMag) * (MARGINAL_THICKNESS - 4) : 0;
+      if (i > 0) {
+        rc.strokeStyle = marginalHueColor(m.rowHueCx[i], m.rowSumCy[i]);
+        rc.beginPath(); rc.moveTo(prevPx, prevPy); rc.lineTo(px, py); rc.stroke();
+      }
+      prevPx = px; prevPy = py;
     }
-    rc.stroke();
     if (m.rowPeriod) {
       rc.strokeStyle = 'rgba(255,80,80,0.6)';
       for (let py = m.rowPhase; py < n; py += m.rowPeriod) {
@@ -1738,18 +1800,28 @@ function drawMarginalLines(x: number, y: number, w: number, h: number) {
   const bc = marginalBottomCtx;
   bc.clearRect(0, 0, marginalBottomCanvas.width, marginalBottomCanvas.height);
   {
-    const n = m.colSum.length;
-    let maxV = 0;
-    for (let i = 0; i < n; i++) if (m.colSum[i] > maxV) maxV = m.colSum[i];
-    bc.strokeStyle = '#6cf';
+    const n = m.colMag.length;
+    // Magnitude, always >= 0 -- see the matching comment in the
+    // marginalRight block above. Deflection grows DOWN, away from the image
+    // (which sits above this strip), matching the right strip's "grows away
+    // from the image" (rightward) convention: py=0 (top of strip, adjacent
+    // to the image) at zero magnitude, py=THICKNESS (bottom, outer edge) at
+    // max.
+    let maxMag = 0;
+    for (let i = 0; i < n; i++) if (m.colMag[i] > maxMag) maxMag = m.colMag[i];
+    // Per-segment color -- see the matching comment in the marginalRight
+    // block above; each bin's own (colSum,colSumCy) vector sum picks the hue.
     bc.lineWidth = 1;
-    bc.beginPath();
+    let prevPx = 0, prevPy = 0;
     for (let i = 0; i < n; i++) {
       const px = (i / n) * marginalBottomCanvas.width;
-      const py = maxV > 0 ? (m.colSum[i] / maxV) * (MARGINAL_THICKNESS - 4) : 0;
-      if (i === 0) bc.moveTo(px, py); else bc.lineTo(px, py);
+      const py = maxMag > 0 ? (m.colMag[i] / maxMag) * (MARGINAL_THICKNESS - 4) : 0;
+      if (i > 0) {
+        bc.strokeStyle = marginalHueColor(m.colSum[i], m.colSumCy[i]);
+        bc.beginPath(); bc.moveTo(prevPx, prevPy); bc.lineTo(px, py); bc.stroke();
+      }
+      prevPx = px; prevPy = py;
     }
-    bc.stroke();
     if (m.colPeriod) {
       bc.strokeStyle = 'rgba(255,80,80,0.6)';
       for (let px = m.colPhase; px < n; px += m.colPeriod) {
@@ -1759,15 +1831,44 @@ function drawMarginalLines(x: number, y: number, w: number, h: number) {
     }
   }
 
-  if (positionReadout) {
-    const uStep = m.colPeriod && lastProjectedBins ? m.colPeriod * lastProjectedBins.binWidthU : null;
-    const vStep = m.rowPeriod && lastProjectedBins ? m.rowPeriod * lastProjectedBins.binWidthV : null;
-    positionReadout.textContent =
-      `col period: ${m.colPeriod ?? '—'} bins (phase ${m.colPhase.toFixed(1)})\n` +
-      `row period: ${m.rowPeriod ?? '—'} bins (phase ${m.rowPhase.toFixed(1)})\n` +
-      `implied grid step: U=${uStep?.toFixed(3) ?? '—'}  V=${vStep?.toFixed(3) ?? '—'}\n` +
-      `(expect both ≈ ${GRID_STEP})`;
+  updatePositionReadoutText();
+}
+
+// Builds positionReadout's full text from lastMarginals + lastPositionDecode.
+// Called both every frame from drawMarginalLines (so it stays live while
+// tuning in 'projected' mode) AND once at the end of runAxesReconstruction
+// (so a capture triggered from a DIFFERENT mode still updates it -- this
+// function is the only place that writes positionReadout.textContent;
+// two separate assignments used to fight over it, silently clobbering each
+// other every frame, which is why the "world-axis swap" diagnostic line
+// never actually appeared on screen despite being computed correctly).
+function updatePositionReadoutText() {
+  if (!positionReadout) return;
+  if (!lastMarginals) { positionReadout.textContent = 'not yet computed (switch to Projected Cam or capture now)'; return; }
+  const m = lastMarginals;
+  const uStep = m.colPeriod && lastProjectedBins ? m.colPeriod * lastProjectedBins.binWidthU : null;
+  const vStep = m.rowPeriod && lastProjectedBins ? m.rowPeriod * lastProjectedBins.binWidthV : null;
+  const periodicityLines =
+    `col period: ${m.colPeriod ?? '—'} bins (phase ${m.colPhase.toFixed(1)})\n` +
+    `row period: ${m.rowPeriod ?? '—'} bins (phase ${m.rowPhase.toFixed(1)})\n` +
+    `implied grid step: U=${uStep?.toFixed(3) ?? '—'}  V=${vStep?.toFixed(3) ?? '—'}\n` +
+    `(expect both ≈ ${GRID_STEP})`;
+  let decodeLines: string;
+  if (lastPositionDecode) {
+    const rec = lastPositionDecode.camPos;
+    const errPos = rec.distanceTo(camPos);
+    decodeLines =
+      `torus cell: row ${lastPositionDecode.row}  col ${lastPositionDecode.col}\n` +
+      `consistency: ${(lastPositionDecode.consistency * 100).toFixed(1)}%\n` +
+      `recovered camPos: (${rec.x.toFixed(2)}, ${rec.y.toFixed(2)}, ${rec.z.toFixed(2)})\n` +
+      `true camPos: (${camPos.x.toFixed(2)}, ${camPos.y.toFixed(2)}, ${camPos.z.toFixed(2)})\n` +
+      `error: ${errPos.toFixed(3)} world units\n` +
+      `world-axis swap: ${lastPositionDecode.worldAxisSwapped ? 'YES' : 'no'} ` +
+      `(unswapped err ${lastPositionDecode.camPosErrUnswapped.toFixed(2)}, swapped err ${lastPositionDecode.camPosErrSwapped.toFixed(2)} -- ground-truth diagnostic, lab-only)`;
+  } else {
+    decodeLines = 'position decode: no match (need periodicity + a successful orientation/distance fit)';
   }
+  positionReadout.textContent = `${periodicityLines}\n\n${decodeLines}`;
 }
 
 function hideMarginalLines() {
@@ -1775,51 +1876,124 @@ function hideMarginalLines() {
   marginalBottomCanvas.style.display = 'none';
 }
 
-// main.ts's own mirrorRowsGrid isn't exported (it's local to that module) --
-// reimplemented here rather than exported for a one-line helper. Covers the
-// row-mirror half of the D4 (8-fold) symmetry ambiguity; pickBestCandidate's
-// own 4-way rotation search covers the rest -- {identity, row-mirror} x
-// {0,90,180,270} is 8 elements, and any single reflection composed with all
-// 4 rotations spans the full 8-element dihedral group, so together they
-// cover every possible axis swap/sign-flip of our (u,v) sampling grid
-// relative to the torus's own (row,col) convention -- no need to separately
-// worry about which sign/labeling lastRecoveredAxes's Drow/Dcol happen to be.
-function mirrorRowsGrid(sg: SampledGrid): SampledGrid {
-  return { ...sg, cells: sg.cells.slice().reverse() };
+function hideSampleLattice() {
+  sampleLatticeCanvas.style.display = 'none';
 }
 
-// Odd so that reversing the row (or col) array maps the middle index to
-// itself (mirrorRowsGrid(sg).cells[floor(n/2)] is exactly sg.cells[floor(n/2)]
-// reversed-in-place, not some OTHER row) -- keeps pickBestCandidate's
-// "match is the grid's center cell" guarantee pointing at the exact same
-// physical anchor point regardless of which of the 8 candidates wins,
-// without needing the homography-inverse correction the real line pipeline
-// needs (see scripts/test-lines-decode.ts's decodeViaLines comment) -- that
-// correction compensates for the sampled grid's origin floating at an
-// arbitrary offset from the camera's target, which doesn't apply here since
-// this grid is built centered on the camera's own floor anchor by construction.
-const DECODE_WINDOW = ORDER * 4 + 1;
+// One small filled circle per runPositionDecode sample point (see
+// buildDecodeSampleGrid), positioned at wherever that point's world (u,v)
+// lands in the CURRENT "Projected Cam" rectification -- a linear map of a
+// uniform integer grid, so they land in a uniform rectangular lattice, one
+// dot per sampled cell. Each circle's fill is read straight from
+// distortedPreviewData at that same point's source pixel, so it shows
+// exactly what color/brightness whichever field view is currently selected
+// actually has at the spot each decode sample reads from.
+function drawSampleLattice(x: number, y: number, w: number, h: number) {
+  if (!state.showSampleLattice) { hideSampleLattice(); return; }
+  // Reuses the grid runPositionDecode most recently built (needs `gray`,
+  // which isn't available in this render-only path) rather than rebuilding
+  // it here.
+  const grid = lastDecodeGrid;
+  if (!grid || !lastProjectedBins) { hideSampleLattice(); return; }
+  const { maxU, binWidthU, minV, binWidthV, w: bw, h: bh } = lastProjectedBins;
 
-interface PositionDecodeResult {
-  row: number; col: number; consistency: number;
-  camPos: THREE.Vector3;
+  sampleLatticeCanvas.style.display = 'block';
+  sampleLatticeCanvas.style.left = x + 'px';
+  sampleLatticeCanvas.style.top = y + 'px';
+  sampleLatticeCanvas.width = Math.round(w);
+  sampleLatticeCanvas.height = Math.round(h);
+  sampleLatticeCanvas.style.width = w + 'px';
+  sampleLatticeCanvas.style.height = h + 'px';
+  const ctx = sampleLatticeCtx;
+  ctx.clearRect(0, 0, sampleLatticeCanvas.width, sampleLatticeCanvas.height);
+
+  const radius = 3;
+  for (let i = 0; i < grid.points.length; i++) {
+    const row = grid.points[i];
+    for (let j = 0; j < row.length; j++) {
+      const pt = row[j];
+      if (!pt.valid) continue;
+      // bu runs maxU -> minU, matching buildProjectedTexture's mirror -- see
+      // its comment.
+      const bu = (maxU - pt.u) / binWidthU;
+      const bv = (pt.v - minV) / binWidthV;
+      if (bu < 0 || bu >= bw || bv < 0 || bv >= bh) continue;
+      // X maps directly (bu=0 -> left, matching distortedPreviewTex/
+      // projectedPreviewTex's UV convention), but Y is GL-native bottom-up
+      // (bv=0 -> bottom of the rendered image, see buildProjectedTexture's
+      // own comment on this exact convention) while this canvas is CSS-
+      // style top-down -- flip.
+      const cx = (bu / bw) * sampleLatticeCanvas.width;
+      const cy = (1 - bv / bh) * sampleLatticeCanvas.height;
+      // Fill = the actual BINARIZED bit this cell sampled (black/white,
+      // same convention as the real tracker's patch dots, src/main.ts:
+      // bit=1 is dark), not whichever field view happens to be on screen --
+      // this is what the decode itself sees. Stroke = decode correctness,
+      // same idea as that tracker's per-cell patch highlighting -- green if
+      // this cell's bit matches the real torus content at the position the
+      // winning decode implies, red if not, dim gray if there's no decode
+      // (or this specific cell) to check yet.
+      const debug = lastDecodeCorrectness ? lastDecodeCorrectness[i][j] : null;
+      ctx.beginPath();
+      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
+      ctx.fillStyle = debug ? (debug.bit ? '#000' : '#fff') : '#888';
+      ctx.fill();
+      ctx.strokeStyle = debug ? (debug.correct ? '#0f0' : '#f00') : 'rgba(0,0,0,0.6)';
+      ctx.lineWidth = debug ? 2 : 1;
+      ctx.stroke();
+    }
+  }
 }
-let lastPositionDecode: PositionDecodeResult | null = null;
 
-// Decodes the camera's absolute world position: samples a DECODE_WINDOW
-// square of bits at exact floor-cell centers around the camera (via inverse
-// projection straight from the analysis grayscale, NOT the lossy forward-
-// binned projectedPreviewData), decodes which torus (row,col) that window
-// sits at via the same pickBestCandidate machinery the real line pipeline
-// uses, then combines the decoded absolute cell position with its known
-// position RELATIVE to the camera to recover the camera's own absolute
-// position -- the only ground truth this touches is which torus (row,col) a
-// bit pattern implies (a property of the pattern itself, verifiable from the
-// image alone), never camPos.
-function runPositionDecode(gray: Float64Array, w: number, h: number, vFovRad: number) {
+// Local reimplementation of decode.ts's packPatchCells (not exported there,
+// and small enough not to be worth exporting for one caller) -- packs an
+// order x order window into a lookup key under one of 4 reading
+// orientations, matching src/debruijn.ts's windowKey order (top-to-bottom,
+// left-to-right, MSB-first) for orientation 0; the others apply the same
+// index rotation packPatchCells itself uses.
+function packPatchCellsLocal(cells: number[][], order: number, orientation: number): number {
+  let key = 0;
+  for (let i = 0; i < order; i++) {
+    for (let j = 0; j < order; j++) {
+      let bit: number;
+      if (orientation === 1) bit = cells[order - 1 - j][i];
+      else if (orientation === 2) bit = cells[order - 1 - i][order - 1 - j];
+      else if (orientation === 3) bit = cells[j][order - 1 - i];
+      else bit = cells[i][j];
+      key = (key << 1) | bit;
+    }
+  }
+  return key >>> 0;
+}
+
+// u,v are the sample's world position (relative to camera, in Drow/Dcol
+// units); px,py are where that point projects to in the CURRENT capture's
+// pixel space, in the same TOP-DOWN row convention captureDistortedGrayscale's
+// flipped output uses (row 0 = top) -- NOT distortedPreviewData's own
+// GL-native bottom-up convention (see flipRowsF64 elsewhere in this file).
+// valid is false when the point is behind the camera or projects outside
+// the image entirely (px/py meaningless, possibly NaN, in that case) --
+// bit is meaningless too when !valid.
+interface DecodeSamplePoint { u: number; v: number; px: number; py: number; valid: boolean; bit: number }
+interface DecodeSampleGrid { rows: number; cols: number; zeroI: number; zeroJ: number; points: DecodeSamplePoint[][] }
+
+// Builds a sampling grid covering the FULL observed quadrilateral (per
+// lastProjectedBins' minU/maxU/minV/maxV -- the same extent "Projected Cam"
+// itself renders), not a small fixed window around one anchor. Every
+// integer GRID_STEP hop from the phase-anchored sub-cell offset, in both
+// directions, until the whole observed extent is covered -- "behind
+// camera" and "off-frame" points still get marked invalid (skipped below),
+// but those are genuinely outside the visible quadrilateral by
+// definition (see this function's header comment on what "behind camera"
+// means), not an arbitrary window boundary excluding real, visible floor.
+// zeroI/zeroJ mark whichever sampled cell sits closest to the camera
+// itself (world u=0,v=0) -- used as the position-recovery reference point,
+// since cells far from the camera accumulate more drift error (confirmed
+// empirically: correctness degrades with distance from center) than cells
+// right next to it.
+function buildDecodeSampleGrid(gray: Float64Array, w: number, h: number, vFovRad: number): DecodeSampleGrid | null {
   if (!lastRecoveredAxes || !lastMarginals || lastMarginals.colPeriod === null || lastMarginals.rowPeriod === null || !lastProjectedBins) {
-    lastPositionDecode = null;
-    return;
+    return null;
   }
   const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
   const normal = Dnormal.clone();
@@ -1838,54 +2012,231 @@ function runPositionDecode(gray: Float64Array, w: number, h: number, vFovRad: nu
   // GRID_STEP hop -- GRID_STEP itself is a known construction constant of
   // the pattern (not something recovered), so hopping by exactly 1 avoids
   // compounding the period measurement's own noise across many cells.
-  const uBoundaryRaw = lastProjectedBins.minU + lastMarginals.colPhase * lastProjectedBins.binWidthU;
+  // colPhase is a bu bin-index, and bu runs maxU -> minU (see
+  // buildProjectedTexture's comment on why) -- so bu=0 is u=maxU, not minU.
+  const uBoundaryRaw = lastProjectedBins.maxU - lastMarginals.colPhase * lastProjectedBins.binWidthU;
   const vBoundaryRaw = lastProjectedBins.minV + lastMarginals.rowPhase * lastProjectedBins.binWidthV;
-  const uAnchor = (uBoundaryRaw - Math.round(uBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
-  const vAnchor = (vBoundaryRaw - Math.round(vBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
+  const uPhase = (uBoundaryRaw - Math.round(uBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
+  const vPhase = (vBoundaryRaw - Math.round(vBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
 
-  const rows = DECODE_WINDOW, cols = DECODE_WINDOW;
-  const centerI = Math.floor(rows / 2), centerJ = Math.floor(cols / 2);
+  const { minU, maxU, minV, maxV } = lastProjectedBins;
+  const kMinU = Math.floor((minU - uPhase) / GRID_STEP), kMaxU = Math.ceil((maxU - uPhase) / GRID_STEP);
+  const kMinV = Math.floor((minV - vPhase) / GRID_STEP), kMaxV = Math.ceil((maxV - vPhase) / GRID_STEP);
+  const cols = kMaxU - kMinU + 1, rows = kMaxV - kMinV + 1;
+  const zeroI = Math.min(rows - 1, Math.max(0, Math.round(-vPhase / GRID_STEP) - kMinV));
+  const zeroJ = Math.min(cols - 1, Math.max(0, Math.round(-uPhase / GRID_STEP) - kMinU));
+
+  // No separate "is this behind the camera" check -- every (u,v) here is
+  // already constrained to lastProjectedBins' own min/max, which
+  // buildProjectedTexture only ever populates from rays it confirmed are
+  // in front of the camera AND past its grazing-angle cutoff (see that
+  // function's MIN_GRAZING_COS). A point that's actually behind the camera
+  // or too grazing simply won't project to a real, in-frame pixel below --
+  // that's the only check that actually matters for "can this cell be
+  // sampled at all", and we need to compute the pixel position anyway to
+  // know where to read the bit from. Number.isFinite guards the one
+  // remaining numerical edge case (local.z landing exactly on 0, an
+  // infinite/NaN projection) from slipping past the plain range check --
+  // NaN fails `< 0` and `>= w` alike, so without this it would read as
+  // in-bounds.
   const p = new THREE.Vector3();
   const local = new THREE.Vector3();
-  const cells: SampledCell[][] = [];
+  const points: DecodeSamplePoint[][] = [];
   for (let i = 0; i < rows; i++) {
-    const v = vAnchor + (i - centerI) * GRID_STEP;
-    const rowCells: SampledCell[] = [];
+    const v = vPhase + (kMinV + i) * GRID_STEP;
+    const rowPoints: DecodeSamplePoint[] = [];
     for (let j = 0; j < cols; j++) {
-      const u = uAnchor + (j - centerJ) * GRID_STEP;
+      const u = uPhase + (kMinU + j) * GRID_STEP;
       // Relative-to-camera world point at this cell's exact center (same
-      // "hit" construction as buildProjectedTexture/estimateFloorDistance:
+      // "hit" construction as buildProjectedTexture:
       // p.dot(normal) == -distance for every floor point), then rotated into
       // camera-local space (inverse of cornerDir's forward rotation) and run
       // through cornerDir's pinhole formula backwards to find the pixel it
       // projects to.
       p.copy(Drow).multiplyScalar(u).addScaledVector(Dcol, v).addScaledVector(normal, -distance);
       local.copy(p).applyQuaternion(invQuat);
-      if (local.z >= 0) { rowCells.push({ x: NaN, y: NaN, bit: 0, valid: false, cornerCount: 0 }); continue; }
       const ndcU = -local.x / (local.z * Math.tan(halfV) * RT_ASPECT);
       const ndcV = -local.y / (local.z * Math.tan(halfV));
       const px = ((ndcU + 1) / 2) * w, py = ((1 - ndcV) / 2) * h;
+      const valid = Number.isFinite(px) && Number.isFinite(py) && px >= 0 && px < w && py >= 0 && py < h;
+      if (!valid) { rowPoints.push({ u, v, px, py, valid: false, bit: 0 }); continue; }
       const xx = Math.round(px), yy = Math.round(py);
-      if (xx < 0 || xx >= w || yy < 0 || yy >= h) { rowCells.push({ x: px, y: py, bit: 0, valid: false, cornerCount: 0 }); continue; }
-      rowCells.push({ x: px, y: py, bit: bin[yy * w + xx], valid: true, cornerCount: 0 });
+      rowPoints.push({ u, v, px, py, valid: true, bit: bin[yy * w + xx] });
     }
-    cells.push(rowCells);
+    points.push(rowPoints);
   }
-  const sg: SampledGrid = { rows, cols, cells, originRow: centerI, originCol: centerJ };
-  const result = pickBestCandidate([sg, mirrorRowsGrid(sg)], ORDER, debruijnLookup, torus, R, C);
-  if (!result.match) { lastPositionDecode = null; return; }
+  return { rows, cols, zeroI, zeroJ, points };
+}
 
-  // worldX = c - C/2, worldZ = r - R/2 (GRID_STEP=1) -- the floor mesh's own
-  // world<->torus coordinate convention, reverse-engineered from its
-  // PlaneGeometry + rotation.x=-pi/2 + CanvasTexture setup (see the floor
-  // mesh construction above). result.match is the torus position of OUR
-  // sampled grid's (centerI,centerJ) cell -- i.e. of the point (uAnchor,vAnchor)
-  // relative to the camera -- so camPos = that cell's true world position
-  // minus its known camera-relative offset.
-  const worldPosTrue = new THREE.Vector3((result.match.col - C / 2) * GRID_STEP, 0, (result.match.row - R / 2) * GRID_STEP);
-  const hitRel = new THREE.Vector3().addScaledVector(Drow, uAnchor).addScaledVector(Dcol, vAnchor).addScaledVector(normal, -distance);
-  const camPosRecovered = worldPosTrue.sub(hitRel);
-  lastPositionDecode = { row: result.match.row, col: result.match.col, consistency: result.consistency, camPos: camPosRecovered };
+interface PositionDecodeResult {
+  row: number; col: number; consistency: number; votes: number; totalWindows: number;
+  camPos: THREE.Vector3;
+  // Diagnostic only (see runPositionDecode's comment on worldAxisSwapped):
+  // ground-truth distance each of the two world-axis candidates lands at.
+  // Not something a real (non-lab) decode could compute.
+  camPosErrUnswapped: number; camPosErrSwapped: number; worldAxisSwapped: boolean;
+}
+let lastPositionDecode: PositionDecodeResult | null = null;
+
+// Per DecodeSampleGrid cell (ORIGINAL, non-mirrored indexing) -- bit is what
+// was actually sampled there, correct is whether it matches the real torus
+// content at the position the winning vote implies. null where the sample
+// itself was invalid or no decode exists yet. Rebuilt every
+// runPositionDecode call; consumed by drawSampleLattice to fill/stroke each
+// dot, same idea as the real tracker's per-cell patch highlighting
+// (src/main.ts, Patch.correct) -- see that file's togglePatches block.
+interface DecodeCellDebug { bit: number; correct: boolean }
+let lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null = null;
+// The grid runPositionDecode most recently built, cached so drawSampleLattice
+// can reuse its (u,v,px,py) geometry without rebuilding it (which needs
+// `gray`, not available in the render path) or duplicating this math.
+let lastDecodeGrid: DecodeSampleGrid | null = null;
+
+// Every valid order x order window in the grid (NOT just non-overlapping
+// tiles -- a sliding window, one step at a time, so a window that just
+// misses a clean read by starting one cell over still gets its own
+// independent chance), at each of the 4 reading rotations, either finds an
+// EXACT match in the de Bruijn lookup table or doesn't (no partial credit --
+// a single wrong bit anywhere in the 16 sends the packed key to some
+// unrelated, essentially random torus position, or occasionally to nothing
+// at all). Every window that DOES find a match casts one vote for the torus
+// anchor (grid cell (0,0)'s implied position) that match implies. Unlike
+// pickBestCandidate's own correlation-based scoring (checks only the single
+// best-looking anchor against the whole grid), this tallies literal vote
+// counts across every anchor any window proposed, and the anchor with the
+// most votes wins -- unambiguous "most patches agree" rather than "best of
+// whichever candidates got an exact hit at all."
+interface VoteResult { mirrored: boolean; orientation: number; anchorRow: number; anchorCol: number; votes: number; totalWindows: number }
+function tallyPositionVotes(grid: DecodeSampleGrid): VoteResult | null {
+  const tally = new Map<string, number>();
+  let totalWindows = 0;
+  const block: number[][] = Array.from({ length: ORDER }, () => new Array(ORDER).fill(0));
+  for (const mirrored of [false, true]) {
+    const at = (i: number, j: number) => mirrored ? grid.points[grid.rows - 1 - i][j] : grid.points[i][j];
+    for (let i0 = 0; i0 + ORDER <= grid.rows; i0++) {
+      for (let j0 = 0; j0 + ORDER <= grid.cols; j0++) {
+        let complete = true;
+        for (let di = 0; di < ORDER && complete; di++) {
+          for (let dj = 0; dj < ORDER; dj++) {
+            const pt = at(i0 + di, j0 + dj);
+            if (!pt.valid) { complete = false; break; }
+            block[di][dj] = pt.bit;
+          }
+        }
+        if (!complete) continue;
+        totalWindows++;
+        for (let o = 0; o < 4; o++) {
+          const key = packPatchCellsLocal(block, ORDER, o);
+          const packed = debruijnLookup[key];
+          if (packed === -1) continue;
+          const matchRow = Math.floor(packed / C), matchCol = packed % C;
+          const [dr, dc] = rotateShift(i0, j0, o);
+          const anchorRow = ((matchRow - dr) % R + R) % R;
+          const anchorCol = ((matchCol - dc) % C + C) % C;
+          const voteKey = `${mirrored ? 1 : 0},${o},${anchorRow},${anchorCol}`;
+          tally.set(voteKey, (tally.get(voteKey) ?? 0) + 1);
+        }
+      }
+    }
+  }
+  let best: VoteResult | null = null;
+  for (const [key, votes] of tally) {
+    if (best && votes <= best.votes) continue;
+    const [m, o, ar, ac] = key.split(',').map(Number);
+    best = { mirrored: m === 1, orientation: o, anchorRow: ar, anchorCol: ac, votes, totalWindows };
+  }
+  return best;
+}
+
+// Decodes the camera's absolute world position: samples every valid floor
+// cell across the ENTIRE observed quadrilateral (via inverse projection
+// straight from the analysis grayscale, NOT the lossy forward-binned
+// projectedPreviewData), decodes which torus (row,col) it sits at via
+// tallyPositionVotes' literal per-window vote count, then combines the
+// decoded absolute cell position with its known position RELATIVE to the
+// camera to recover the camera's own absolute position -- the only ground
+// truth this touches is which torus (row,col) a bit pattern implies (a
+// property of the pattern itself, verifiable from the image alone), never
+// camPos.
+function runPositionDecode(gray: Float64Array, w: number, h: number, vFovRad: number) {
+  const grid = buildDecodeSampleGrid(gray, w, h, vFovRad);
+  lastDecodeGrid = grid;
+  if (!grid) { lastPositionDecode = null; lastDecodeCorrectness = null; return; }
+  const winner = tallyPositionVotes(grid);
+  if (!winner) { lastPositionDecode = null; lastDecodeCorrectness = null; return; }
+
+  // Per-cell correctness across the FULL grid (not just the cells that
+  // happened to be part of a voting window) -- same math scoreCorrelation
+  // uses internally: given the winning anchor + orientation, every cell's
+  // implied torus position is anchor + rotateShift(i,j,o).
+  const { mirrored, orientation: o, anchorRow, anchorCol } = winner;
+  const correctness: (DecodeCellDebug | null)[][] = Array.from({ length: grid.rows }, () => new Array(grid.cols).fill(null));
+  let correctCount = 0, wrongCount = 0;
+  for (let i = 0; i < grid.rows; i++) {
+    for (let j = 0; j < grid.cols; j++) {
+      // mirrorRowsGrid-equivalent: mirrored candidate's cell (i,j) is
+      // ORIGINAL cell (rows-1-i, j).
+      const pt = mirrored ? grid.points[grid.rows - 1 - i][j] : grid.points[i][j];
+      if (!pt.valid) continue;
+      const [dr, dc] = rotateShift(i, j, o);
+      const torusRow = ((anchorRow + dr) % R + R) % R;
+      const torusCol = ((anchorCol + dc) % C + C) % C;
+      const correct = pt.bit === torus[torusRow][torusCol];
+      correctness[i][j] = { bit: pt.bit, correct };
+      correct ? correctCount++ : wrongCount++;
+    }
+  }
+  lastDecodeCorrectness = correctness;
+  const consistency = correctCount + wrongCount > 0 ? correctCount / (correctCount + wrongCount) : 0;
+
+  // worldX = c + 0.5 - C/2, worldZ = r + 0.5 - R/2 (GRID_STEP=1) -- the floor
+  // mesh's own world<->torus CELL CENTER convention, reverse-engineered from
+  // its PlaneGeometry + rotation.x=-pi/2 + CanvasTexture setup (see the floor
+  // mesh construction above) and confirmed empirically via raycast against
+  // the real floorMesh (the +0.5-less formula lands exactly on a cell
+  // CORNER, uv fraction (0,0); the +0.5 one lands exactly on the cell
+  // CENTER, uv fraction (0.5,0.5)). Missing that +0.5 here previously left
+  // every recovered camPos off by almost exactly half a GRID_STEP in both
+  // X and Z. Uses the cell nearest the camera itself
+  // (grid.zeroI/zeroJ) as the reference point, not an arbitrary corner --
+  // minimizes the drift error that grows with distance from the camera
+  // (confirmed empirically via lastDecodeCorrectness's own distance-vs-
+  // correctness breakdown).
+  const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes!; // buildDecodeSampleGrid returning non-null guarantees this
+  const normal = Dnormal.clone();
+  if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
+  const refI = mirrored ? grid.rows - 1 - grid.zeroI : grid.zeroI;
+  const [drRef, dcRef] = rotateShift(refI, grid.zeroJ, o);
+  const refTorusRow = ((anchorRow + drRef) % R + R) % R;
+  const refTorusCol = ((anchorCol + dcRef) % C + C) % C;
+  const refPt = grid.points[grid.zeroI][grid.zeroJ];
+  const hitRel = new THREE.Vector3().addScaledVector(Drow, refPt.u).addScaledVector(Dcol, refPt.v).addScaledVector(normal, -distance);
+
+  // tallyPositionVotes' D4 search (row-mirror x 4 orientations) already
+  // resolves any ambiguity in how OUR sampling grid's own (i,j) axes relate
+  // to the TORUS's native (row,col) -- refTorusRow/refTorusCol ARE genuinely
+  // "torus row" and "torus col" for the reference cell. What it does NOT
+  // resolve is whether the FLOOR MESH's own construction actually assigns
+  // world X to torus COLUMN and world Z to torus ROW, or the other way
+  // around -- that's a fixed fact about the mesh (see the comment above),
+  // not a per-frame ambiguity, and vote count can't tell us which: it's
+  // computed entirely within the decode's own row/col index space and never
+  // touches world X/Z, so it comes out IDENTICAL either way. The only way
+  // to tell, in this lab (NOT available to a real, non-cheating tracker),
+  // is ground truth -- pick whichever candidate lands closer to the real
+  // camPos.
+  const worldPosTrueUnswapped = new THREE.Vector3((refTorusCol + 0.5 - C / 2) * GRID_STEP, 0, (refTorusRow + 0.5 - R / 2) * GRID_STEP);
+  const worldPosTrueSwapped = new THREE.Vector3((refTorusRow + 0.5 - R / 2) * GRID_STEP, 0, (refTorusCol + 0.5 - C / 2) * GRID_STEP);
+  const camPosUnswapped = worldPosTrueUnswapped.sub(hitRel); // .sub() only mutates the receiver, hitRel is safe to reuse below
+  const camPosSwapped = worldPosTrueSwapped.sub(hitRel);
+  const errUnswapped = camPosUnswapped.distanceTo(camPos);
+  const errSwapped = camPosSwapped.distanceTo(camPos);
+  const swapped = errSwapped < errUnswapped;
+  lastPositionDecode = {
+    row: refTorusRow, col: refTorusCol, consistency, votes: winner.votes, totalWindows: winner.totalWindows,
+    camPos: swapped ? camPosSwapped : camPosUnswapped,
+    camPosErrUnswapped: errUnswapped, camPosErrSwapped: errSwapped, worldAxisSwapped: swapped,
+  };
 }
 
 // Recovered-pole visibility is handled per-frame in updateSphereOverlays,
@@ -1909,6 +2260,23 @@ function runAxesReconstruction() {
       // physically-correct order -- see its comment) but returns GL-native
       // (bottom-up) row order; computeWorldVotes's NDC math needs top-down.
       const { gray: rawGray, w, h } = captureDistortedGrayscale();
+      // buildProjectedTexture (called below) now needs lastNoisedPreviewGray
+      // for its own per-source-pixel gradient (see its own comment) -- but
+      // updateDistortedPreview only ever SETS that when the current field
+      // view is 'noised'/'gradient'/'agreement'/'effective' or a
+      // contamination overlay is on (an early-return skips it otherwise, to
+      // avoid the antialiasing/blur/downsample/noise cost when displaying
+      // something cheaper like 'raw'). That's fine for the passive per-frame
+      // preview it was written for, but buildProjectedTexture needs it
+      // EVERY capture regardless of what's currently selected for display --
+      // confirmed live: leaving this out silently left lastNoisedPreviewGray
+      // null whenever fieldView happened to be 'raw', collapsing distance/
+      // period recovery entirely (autocorrelation on an all-zero signal).
+      // rawGray is already bottom-up (matching distortedPreviewData's own
+      // convention, which is what lastNoisedPreviewGray needs to align with)
+      // and freshly captured through the exact same distortion pipeline, so
+      // just use it directly rather than depending on the preview path.
+      lastNoisedPreviewGray = rawGray;
       const gray = flipRowsF64(rawGray, w, h);
       const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
       const votes = computeWorldVotes(gray, w, h, state.simGradRadius, state.coherenceRadius, camQuat, vFovRad, RT_ASPECT);
@@ -1927,12 +2295,6 @@ function runAxesReconstruction() {
       const quadricPair = fitPairOfPlanes(fitVotes);
       const t2 = performance.now();
 
-      if (quadricPair) {
-        recoveredRowPoleA.position.copy(quadricPair.Drow).multiplyScalar(SPHERE_RADIUS);
-        recoveredRowPoleB.position.copy(quadricPair.Drow).multiplyScalar(-SPHERE_RADIUS);
-        recoveredColPoleA.position.copy(quadricPair.Dcol).multiplyScalar(SPHERE_RADIUS);
-        recoveredColPoleB.position.copy(quadricPair.Dcol).multiplyScalar(-SPHERE_RADIUS);
-      }
       axesComputed = !!quadricPair;
 
       // fitPairOfPlanes can't tell from the math alone which of its two
@@ -1940,41 +2302,101 @@ function runAxesReconstruction() {
       // ambiguity, not a bug in the fit itself -- see its header comment).
       // Resolved here, ONCE, against ground truth (fine for this testbed,
       // which has it available) -- and reused everywhere downstream
-      // (distance recovery, lastRecoveredAxes, the readout) so they all
-      // agree on the same labeling. Previously this correction only
-      // affected the readout's displayed text, while lastRecoveredAxes kept
-      // whatever raw (possibly swapped) labels the fit produced --
-      // "Projected Cam" then used those unswapped axes, which showed up as
-      // a fully swapped u/v projection despite the readout itself looking
-      // correct.
+      // (pole markers, distance recovery, lastRecoveredAxes, the readout) so
+      // they all agree on the same labeling. Previously this correction only
+      // affected the readout's displayed text, while lastRecoveredAxes AND
+      // the red/blue pole markers below kept whatever raw (possibly swapped)
+      // labels the fit produced -- "Projected Cam" showed a fully swapped
+      // u/v projection despite the readout looking correct, and the pole
+      // markers could show up on the wrong axis even once that was fixed,
+      // since they were still being set from quadricPair.Drow/Dcol directly
+      // further up rather than from this corrected pair.
+      //
+      // Picks whichever labeling minimizes TOTAL error against both ground-
+      // truth axes (Drow-vs-ROW_DIR + Dcol-vs-COL_DIR, or the swapped pairing)
+      // rather than just comparing both candidates to ROW_DIR alone. The two
+      // are mathematically equivalent here -- Drow/Dcol come out of a
+      // symmetric eigendecomposition so they're already exactly orthogonal,
+      // same as ROW_DIR/COL_DIR by construction, so agreement on one axis
+      // guarantees agreement on the other -- but this version states the
+      // actual intent directly instead of leaning on that orthogonality fact.
+      //
+      // angleBetweenDegV takes Math.abs() of the dot product, so it (by
+      // design) can't tell a candidate from its own negation -- it only
+      // resolves row-vs-col, not which way each one points. Drow/Dcol's
+      // individual signs are otherwise arbitrary (whatever the eigensolver's
+      // b1/b2 happened to come out as), unlike Dnormal, whose sign IS fixed
+      // elsewhere in this file (against the non-cheating fact that the floor
+      // must face the camera). Left uncorrected, this flipped u and/or v's
+      // sign in buildProjectedTexture's u = hit.dot(Drow)/v = hit.dot(Dcol)
+      // (the "Projected Cam" view coming out mirrored relative to the true
+      // top-down pattern), and fed straight into runPositionDecode's hitRel,
+      // injecting a large systematic camPos error along whichever axis was
+      // flipped -- while per-cell bit correctness stayed unaffected, since
+      // tallyPositionVotes' own D4 (mirror x 4 rotations) search already
+      // absorbs any axis-sign ambiguity when matching bits to the known
+      // pattern. Ground truth again (testbed-only, same as the swap above):
+      // flip each axis independently if it landed antiparallel to its true
+      // world direction -- negating one axis alone can't break their
+      // orthogonality (dot(-a,b) = -dot(a,b), still 0 if it started at 0).
       let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
       if (quadricPair) {
-        const errRowFromRow = angleBetweenDegV(quadricPair.Drow, ROW_DIR);
-        const errColFromRow = angleBetweenDegV(quadricPair.Dcol, ROW_DIR);
-        const flipped = errRowFromRow > errColFromRow;
+        const errUnswapped = angleBetweenDegV(quadricPair.Drow, ROW_DIR) + angleBetweenDegV(quadricPair.Dcol, COL_DIR);
+        const errSwapped = angleBetweenDegV(quadricPair.Drow, COL_DIR) + angleBetweenDegV(quadricPair.Dcol, ROW_DIR);
+        const flipped = errSwapped < errUnswapped;
         rowDirRecovered = flipped ? quadricPair.Dcol : quadricPair.Drow;
         colDirRecovered = flipped ? quadricPair.Drow : quadricPair.Dcol;
+        if (rowDirRecovered.dot(ROW_DIR) < 0) rowDirRecovered.negate();
+        if (colDirRecovered.dot(COL_DIR) < 0) colDirRecovered.negate();
+
+        recoveredRowPoleA.position.copy(rowDirRecovered).multiplyScalar(SPHERE_RADIUS);
+        recoveredRowPoleB.position.copy(rowDirRecovered).multiplyScalar(-SPHERE_RADIUS);
+        recoveredColPoleA.position.copy(colDirRecovered).multiplyScalar(SPHERE_RADIUS);
+        recoveredColPoleB.position.copy(colDirRecovered).multiplyScalar(-SPHERE_RADIUS);
       }
 
       // Distance-to-floor recovery needs the axes above, so it only runs on
-      // a successful orientation fit -- see estimateFloorDistance's header
-      // comment for the squish-accumulate + autocorrelation approach.
-      const spacing = rowDirRecovered && colDirRecovered && quadricPair
-        ? estimateFloorDistance(gray, w, h, state.simGradRadius, camQuat, vFovRad, RT_ASPECT, camPos, rowDirRecovered, colDirRecovered, quadricPair.Dnormal)
+      // a successful orientation fit. Builds the projected texture once at
+      // an arbitrary PLACEHOLDER distance purely to get computeProjectedMarginals'
+      // period measurement -- the ray-cast/bin formula scales linearly with
+      // whatever distance is assumed, and bin ASSIGNMENT is completely
+      // invariant to that scale (see the big comment above, right before
+      // this function, for the full derivation), so any placeholder works
+      // and no separate ray-cast implementation is needed just for distance.
+      const PLACEHOLDER_DISTANCE = 1;
+      lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair
+        ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: PLACEHOLDER_DISTANCE }
+        : null;
+      if (lastRecoveredAxes) buildProjectedTexture();
+
+      // Closed-form correction: the true period must equal the known
+      // GRID_STEP, so the ratio between that and what was actually measured
+      // (at the placeholder distance) gives the exact rescale factor back to
+      // the real distance -- same trick the old estimateFloorDistance used,
+      // just reusing this already-tuned marginal-line measurement instead of
+      // a second, separate gradient-magnitude implementation.
+      const marginals = lastMarginals, bins = lastProjectedBins;
+      const spacing = lastRecoveredAxes && marginals && bins && marginals.colPeriod !== null && marginals.rowPeriod !== null
+        ? {
+          distanceU: PLACEHOLDER_DISTANCE * (GRID_STEP / (marginals.colPeriod * bins.binWidthU)),
+          distanceV: PLACEHOLDER_DISTANCE * (GRID_STEP / (marginals.rowPeriod * bins.binWidthV)),
+        }
         : null;
       const t3 = performance.now();
 
-      // Feeds "Projected Cam" mode (see buildProjectedTexture) -- averaging
-      // the U/V distance estimates is just noise reduction, not picking one
-      // over the other (both should agree once past the grazing-angle cutoff).
-      lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair && spacing
-        ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: (spacing.distanceU + spacing.distanceV) / 2 }
-        : null;
-      // Unconditional now (previously gated to state.mode === 'projected'):
-      // position decode below depends on the marginal periodicity/phase this
-      // computes, regardless of which mode is currently on screen, not just
-      // on the visualization it was originally built for.
-      buildProjectedTexture();
+      if (lastRecoveredAxes && spacing) {
+        // Feeds "Projected Cam" mode (see buildProjectedTexture) -- averaging
+        // the U/V distance estimates is just noise reduction, not picking one
+        // over the other (both should agree once past the grazing-angle cutoff).
+        lastRecoveredAxes.distance = (spacing.distanceU + spacing.distanceV) / 2;
+        // Rebuilds projectedPreviewData/lastProjectedBins/lastMarginals now
+        // that distance is correct -- position decode below (and "Projected
+        // Cam" itself) need the properly-scaled versions, not the
+        // placeholder-distance ones from the first pass above.
+        buildProjectedTexture();
+      } else {
+        lastRecoveredAxes = null;
+      }
       runPositionDecode(gray, w, h, vFovRad);
       updateRecoveredCamGizmo();
       applyRecoveredFloorOverlay();
@@ -2006,19 +2428,11 @@ function runAxesReconstruction() {
       }
       lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  spacing ${(t3 - t2).toFixed(0)}ms  decode ${(t4 - t3).toFixed(0)}ms`);
       axesReadout.textContent = lines.join('\n');
-
-      if (lastPositionDecode) {
-        const rec = lastPositionDecode.camPos;
-        const errPos = rec.distanceTo(camPos);
-        positionReadout.textContent =
-          `torus cell: row ${lastPositionDecode.row}  col ${lastPositionDecode.col}\n` +
-          `consistency: ${(lastPositionDecode.consistency * 100).toFixed(1)}%\n` +
-          `recovered camPos: (${rec.x.toFixed(2)}, ${rec.y.toFixed(2)}, ${rec.z.toFixed(2)})\n` +
-          `true camPos: (${camPos.x.toFixed(2)}, ${camPos.y.toFixed(2)}, ${camPos.z.toFixed(2)})\n` +
-          `error: ${errPos.toFixed(3)} world units`;
-      } else {
-        positionReadout.textContent = 'position decode: no match (need periodicity + a successful orientation/distance fit)';
-      }
+      // drawMarginalLines also calls this every frame, but ONLY while in
+      // 'projected' mode -- needed here too so a capture triggered from a
+      // different mode still updates positionReadout instead of leaving it
+      // stale until the user happens to switch to Projected Cam.
+      updatePositionReadoutText();
     } finally {
       captureAxesBtn.disabled = false;
       captureAxesBtn.textContent = prevLabel;
@@ -2077,7 +2491,7 @@ function setMode(m: Mode) {
   // this mode, so build once on the transition rather than only on the next
   // dirty-gated update in animate().
   if (m === 'projected') buildProjectedTexture();
-  else hideMarginalLines();
+  else { hideMarginalLines(); hideSampleLattice(); }
   contamToggles.style.display = m === 'through' ? 'flex' : 'none';
   // updateDistortedPreview first: lastNoisedPreviewGray may still be null
   // (cold start) or stale (overlay was off while a 'raw'/'none' view's
@@ -2089,6 +2503,17 @@ modeBtns.world.addEventListener('click', () => setMode('world'));
 modeBtns.through.addEventListener('click', () => setMode('through'));
 modeBtns.inside.addEventListener('click', () => setMode('inside'));
 modeBtns.projected.addEventListener('click', () => setMode('projected'));
+
+// Same persistence as every slider/checkbox/mode -- a collapsed panel
+// shouldn't pop back open on a dev-server restart or reload.
+function setPanelCollapsed(collapsed: boolean) {
+  panel.classList.toggle('collapsed', collapsed);
+  panelToggle.classList.toggle('collapsed', collapsed);
+  panelToggle.textContent = collapsed ? '›' : '‹';
+  persistControl('panelCollapsed', collapsed ? '1' : '0');
+}
+panelToggle.addEventListener('click', () => setPanelCollapsed(!panel.classList.contains('collapsed')));
+setPanelCollapsed(savedControls['panelCollapsed'] === '1');
 
 toggleHideFieldBtn.addEventListener('click', () => {
   state.hideField = !state.hideField;
@@ -2159,6 +2584,7 @@ bindCheckbox('showPatch', (v) => (state.showPatch = v));
 bindCheckbox('showFloor', (v) => (state.showFloor = v));
 bindCheckbox('showGizmoBody', (v) => (state.showGizmoBody = v));
 bindCheckbox('showRecoveredFloor', (v) => (state.showRecoveredFloor = v));
+bindCheckbox('showSampleLattice', (v) => (state.showSampleLattice = v));
 
 bindSlider('simNoise', (v) => { state.simNoise = v; markCaptureDirty(); }, (v) => v.toFixed(0));
 bindSlider('simBlur', (v) => { state.simBlur = v; markCaptureDirty(); }, (v) => v.toFixed(0));
@@ -2385,14 +2811,30 @@ function animate() {
     if (state.showTrueContamination) renderTrueContamOverlay(x, y, w, h);
     if (state.showReconstructedContamination) renderReconContamOverlay(x, y, w, h);
   } else if (state.mode === 'projected') {
-    // Same letterbox as 'through' -- the projected grid is built at rtSize
-    // dimensions, same aspect as the regular capture.
-    const winAspect = innerWidth / innerHeight;
-    let w = innerWidth, h = innerHeight, x = 0, y = 0;
-    if (winAspect > RT_ASPECT) { w = innerHeight * RT_ASPECT; x = (innerWidth - w) / 2; }
-    else { h = innerWidth / RT_ASPECT; y = (innerHeight - h) / 2; }
-    renderProjectedViewport(x, y, w, h);
+    // Reserves MARGINAL_THICKNESS px on the right and bottom BEFORE fitting
+    // the letterbox rect, unlike 'through' above -- otherwise, whichever
+    // dimension isn't letterboxed (the common case: window wider than
+    // RT_ASPECT means h fills innerHeight exactly, y=0) leaves zero room for
+    // marginalBottomCanvas below it, pushing that graph fully off-screen.
+    const availW = innerWidth - MARGINAL_THICKNESS;
+    const availH = innerHeight - MARGINAL_THICKNESS;
+    const winAspect = availW / availH;
+    let w = availW, h = availH, x = 0, y = 0;
+    if (winAspect > RT_ASPECT) { w = availH * RT_ASPECT; x = (availW - w) / 2; }
+    else { h = availW / RT_ASPECT; y = (availH - h) / 2; }
+    // renderProjectedViewport ultimately calls renderer.setViewport/setScissor,
+    // which (like WebGL generally) measure y from the BOTTOM of the canvas --
+    // y above is a CSS-style top-down offset (correct as-is for
+    // drawMarginalLines/style.top). Same conversion renderPreviewViewport's
+    // PIP call already applies (innerHeight - y - h). Harmless no-op in the
+    // 'through' branch above (its margin is symmetric top/bottom, so y and
+    // its flip are equal there) but NOT a no-op here: the reserved margin is
+    // bottom-only, so skipping this shifted the rendered image down into
+    // marginalBottomCanvas's strip -- reported live as "the bottom plot
+    // still overlaps the quad a bit".
+    renderProjectedViewport(x, innerHeight - y - h, w, h);
     drawMarginalLines(x, y, w, h);
+    drawSampleLattice(x, y, w, h);
   } else {
     insideCam.position.copy(camPos);
     euler.set(insidePitch, insideYaw, 0);

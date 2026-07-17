@@ -111,6 +111,7 @@ const state = {
   showAxisVectors: false,
   showTopCircles: true,
   weightSharpenPower: 4,
+  orientationLM: true,
   fieldView: 'noised' as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'agreement' | 'effective',
   axesAutoCapture: false, axesCaptureIntervalMs: 500,
   viewportW: 512, viewportH: 384, captureSupersample: 2, aspectLocked: false,
@@ -1454,6 +1455,165 @@ function angleBetweenDegV(a: THREE.Vector3, b: THREE.Vector3): number {
   return THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(Math.abs(a.dot(b)), -1, 1)));
 }
 
+// ── Orientation refinement (Levenberg-Marquardt) ─────────────────────────
+//
+// fitPairOfPlanes minimizes an ALGEBRAIC residual (n^T M n, a linear-algebra
+// proxy with no direct angular meaning) via one closed-form eigensolve --
+// fast, but only an approximation of what actually matters: whether each
+// vote's normal ends up truly perpendicular to the recovered Drow or Dcol.
+// This refines that closed-form answer against the real GEOMETRIC residual,
+// the same "cheap algebraic init + iterative nonlinear geometric refine"
+// pattern used throughout classical multi-view geometry (DLT+bundle
+// adjustment, EPnP+LM, IPPE, etc. -- see conversation).
+//
+// Residual, per vote: decompose n onto the (Drow,Dcol) plane as
+// (a,b) = (n.Drow, n.Dcol), and let psi = atan2(b,a). n should be
+// perpendicular to EITHER Drow (a=0) OR Dcol (b=0) -- both "good" and
+// indistinguishable from this objective alone (see below) -- which are
+// exactly the points where psi is a multiple of 90 degrees; diagonal
+// (a=b, 45 degrees off both) is the worst case. sin(4*psi) folds this into
+// one smooth scalar: 0 at all 4 good angles, extremal at all 4 bad ones --
+// the same "double the angle to fold a symmetry away" trick used elsewhere
+// in this file (computeGradientAgreementField etc.), just QUADRUPLED
+// instead of doubled, since there are two separate symmetries to fold here
+// (n vs -n, AND Drow-aligned vs Dcol-aligned both counting as "good").
+//
+// This objective is PROVABLY BLIND to which of the 8 combinations of
+// {Drow<->Dcol swap, Drow sign, Dcol sign} is "true": swapping a<->b sends
+// psi -> pi/2 - psi, and negating either sends psi -> (const) - psi; both
+// map sin(4*psi) -> -sin(4*psi), which leaves its SQUARE (what LM actually
+// minimizes) unchanged. So this refinement cannot resolve, and does not
+// attempt to resolve, the row/col-swap or axis-sign ambiguity -- that's
+// still handled exactly as before (ground truth, testbed-only), just
+// applied to the REFINED Drow/Dcol below instead of fitPairOfPlanes' raw
+// output.
+function fourFoldResidual(n: THREE.Vector3, Drow: THREE.Vector3, Dcol: THREE.Vector3): number {
+  const psi = Math.atan2(n.dot(Dcol), n.dot(Drow));
+  return Math.sin(4 * psi);
+}
+
+interface OrientationFit { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 }
+
+// Weighted sum of squared residuals -- the scalar Levenberg-Marquardt
+// actually works to shrink. Same effective-gradient weight fitPairOfPlanes
+// itself uses (mag * agreement), unsharpened -- sharpening was
+// fitPairOfPlanes' own way of trusting its strongest votes more within a
+// single closed-form solve; here weight just scales each vote's
+// contribution to the sum, no separate tuning knob needed for a small
+// iterative refinement.
+function orientationCost(votes: Vote[], Drow: THREE.Vector3, Dcol: THREE.Vector3): number {
+  let cost = 0;
+  for (const { n, weight } of votes) {
+    const r = weight * fourFoldResidual(n, Drow, Dcol);
+    cost += r * r;
+  }
+  return cost;
+}
+
+// Tiny 3x3 linear solve via Cramer's rule -- fine at this fixed size (the
+// LM normal equations below), no need for a general solver.
+function solve3x3(A: number[][], b: number[]): number[] | null {
+  const det = A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1])
+    - A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0])
+    + A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
+  if (Math.abs(det) < 1e-18) return null;
+  const replaceCol = (col: number) => {
+    const M = A.map((row) => row.slice());
+    for (let i = 0; i < 3; i++) M[i][col] = b[i];
+    return M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1])
+      - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0])
+      + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
+  };
+  return [replaceCol(0) / det, replaceCol(1) / det, replaceCol(2) / det];
+}
+
+// Refines fitPairOfPlanes' closed-form (Drow,Dcol,Dnormal) against the true
+// geometric alignment residual above, via Levenberg-Marquardt over a
+// 3-parameter Lie-algebra (axis-angle) perturbation of the current
+// orientation -- the standard manifold-optimization pattern for refining a
+// rotation: at each step, express the next candidate as a SMALL rotation
+// composed onto the current one (qNext = exp(delta) * qCurrent), rather
+// than optimizing quaternion components directly under a unit-norm
+// constraint. Jacobian is numerical (forward differences) -- simpler to get
+// right than the analytic derivative through the vote's own construction,
+// at the cost of a few extra residual evaluations per iteration; this is a
+// 3-parameter problem evaluated over at most a couple thousand votes, so
+// that cost is not a concern yet (see conversation on expected perf).
+function refineOrientationLM(votes: Vote[], initial: OrientationFit, maxIterations = 20): OrientationFit & { iterations: number; initialCost: number; finalCost: number } {
+  const q = new THREE.Quaternion(); // identity: candidate axes start as initial's, rotated by q as q moves off identity
+  const Drow0 = initial.Drow.clone(), Dcol0 = initial.Dcol.clone(), Dnormal0 = initial.Dnormal.clone();
+  const candidateDrow = (qq: THREE.Quaternion) => Drow0.clone().applyQuaternion(qq);
+  const candidateDcol = (qq: THREE.Quaternion) => Dcol0.clone().applyQuaternion(qq);
+
+  const initialCost = orientationCost(votes, Drow0, Dcol0);
+  let cost = initialCost;
+  let lambda = 1e-3;
+  const EPS = 1e-5; // finite-difference step, radians
+  const axes = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+
+  let iterations = 0;
+  for (; iterations < maxIterations; iterations++) {
+    const Drow = candidateDrow(q), Dcol = candidateDcol(q);
+    const n = votes.length;
+    const residuals = new Float64Array(n);
+    for (let i = 0; i < n; i++) residuals[i] = votes[i].weight * fourFoldResidual(votes[i].n, Drow, Dcol);
+
+    // Numerical Jacobian: d(residual_i)/d(perturbation along world axis k),
+    // via a small rotation about each of the 3 world axes LEFT-composed
+    // onto q (i.e. applied in the global frame, on top of the current
+    // estimate -- qPlus.multiply(q) in THREE's convention applies q first,
+    // then the perturbation).
+    const J: Float64Array[] = [new Float64Array(n), new Float64Array(n), new Float64Array(n)];
+    for (let k = 0; k < 3; k++) {
+      const qPlus = new THREE.Quaternion().setFromAxisAngle(axes[k], EPS).multiply(q);
+      const DrowP = candidateDrow(qPlus), DcolP = candidateDcol(qPlus);
+      for (let i = 0; i < n; i++) {
+        const rP = votes[i].weight * fourFoldResidual(votes[i].n, DrowP, DcolP);
+        J[k][i] = (rP - residuals[i]) / EPS;
+      }
+    }
+
+    // Normal equations (JtJ + lambda*diag(JtJ)) delta = -Jtr, 3x3.
+    const JtJ = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+    const Jtr = [0, 0, 0];
+    for (let a = 0; a < 3; a++) {
+      for (let b = 0; b < 3; b++) {
+        let s = 0;
+        for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
+        JtJ[a][b] = s;
+      }
+      let s = 0;
+      for (let i = 0; i < n; i++) s += J[a][i] * residuals[i];
+      Jtr[a] = s;
+    }
+    const A = JtJ.map((row, a) => row.map((v, b) => v + (a === b ? lambda * (JtJ[a][a] || 1) : 0)));
+    const rhs = Jtr.map((v) => -v);
+    const delta = solve3x3(A, rhs);
+    if (!delta) break; // singular normal equations -- shouldn't happen for a well-posed, direction-diverse vote set, but bail cleanly if it does
+
+    const deltaVec = new THREE.Vector3(delta[0], delta[1], delta[2]);
+    const deltaAngle = deltaVec.length();
+    if (deltaAngle < 1e-10) break; // converged: no meaningful step left
+    const deltaAxis = deltaVec.normalize(); // mutates deltaVec in place; deltaAngle already captured above
+    const qTry = new THREE.Quaternion().setFromAxisAngle(deltaAxis, deltaAngle).multiply(q).normalize();
+
+    const DrowTry = candidateDrow(qTry), DcolTry = candidateDcol(qTry);
+    const tryCost = orientationCost(votes, DrowTry, DcolTry);
+    if (tryCost < cost) {
+      q.copy(qTry);
+      cost = tryCost;
+      lambda = Math.max(lambda * 0.5, 1e-8);
+    } else {
+      lambda = Math.min(lambda * 3, 1e8);
+    }
+  }
+
+  return {
+    Drow: candidateDrow(q), Dcol: candidateDcol(q), Dnormal: Dnormal0.clone().applyQuaternion(q),
+    iterations, initialCost, finalCost: cost,
+  };
+}
+
 // De-means the profile, then finds the lag (in bins) of the strongest
 // non-trivial autocorrelation peak -- i.e. the period of whatever periodic
 // signal dominates it. Searches from a small minimum lag (skipping the
@@ -1550,7 +1710,15 @@ function buildProjectedTexture() {
   // currently assumed).
   const MIN_GRAZING_COS = 0.15;
   const hit = new THREE.Vector3();
+  const hit2 = new THREE.Vector3();
   const us: number[] = [], vs: number[] = [], srcIdx: number[] = [];
+  // Per-sample gradient, ALREADY expressed in the (u,v) frame -- see the big
+  // comment below, right where these get consumed, for the full derivation.
+  // Computed here (not in the bucket loop below) because it needs the same
+  // per-pixel ray-cast this loop is already doing, one extra time for a
+  // tangent-shifted screen pixel.
+  const gradCxAtSample: number[] = [], gradCyAtSample: number[] = [];
+  const srcGrad = lastNoisedPreviewGray ? computeGradientField(lastNoisedPreviewGray, w, h, 1) : null;
   let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
@@ -1572,6 +1740,84 @@ function buildProjectedTexture() {
       us.push(u); vs.push(v); srcIdx.push(y * w + x);
       if (u < minU) minU = u; if (u > maxU) maxU = u;
       if (v < minV) minV = v; if (v > maxV) maxV = v;
+
+      // A gradient is a covector: it does NOT carry over unchanged when you
+      // relocate it into a different coordinate frame (screen pixels here,
+      // (u,v) world-floor coordinates below) -- it transforms by the local
+      // Jacobian of the map between them, which perspective makes vary
+      // continuously across the image (most anisotropically exactly near
+      // grazing angles, i.e. exactly where periodicity/phase were breaking
+      // down -- see conversation). computeWorldVotes already handles this
+      // correctly for ORIENTATION recovery, by casting a tangent-shifted
+      // screen pixel through the real camera model and cross-producting the
+      // two resulting 3D rays instead of trusting the raw screen-space
+      // angle. This does the analogous thing one step further, all the way
+      // to the floor: cast that same tangent-shifted pixel through to its
+      // OWN (u,v) hit point, and use the (u,v)-space DISPLACEMENT between
+      // the two hits as the tangent direction, instead of the raw
+      // screen-space one -- no Jacobian ever needs to be written down
+      // explicitly, it falls out of doing the same ray-cast twice.
+      let cxAtSample = 0, cyAtSample = 0;
+      if (srcGrad) {
+        const si = y * w + x;
+        const fx = srcGrad.fx[si], fy = srcGrad.fy[si];
+        const mag = Math.hypot(fx, fy);
+        if (mag > 0) {
+          const theta = Math.atan2(fy, fx);
+          // Tangent direction (along the edge, perpendicular to the
+          // gradient) -- same construction computeWorldVotes uses.
+          const tdx = -Math.sin(theta), tdy = Math.cos(theta);
+          const [ndcU2, ndcV2] = toNDC(x + tdx, y + tdy);
+          const rayDir2 = cornerDir(ndcU2, ndcV2, camQuat, vFovRad, RT_ASPECT);
+          const denom2 = rayDir2.dot(normal);
+          if (denom2 < -MIN_GRAZING_COS) {
+            const t2 = -distance / denom2;
+            hit2.copy(rayDir2).multiplyScalar(t2);
+            const u2 = hit2.dot(Drow), v2 = hit2.dot(Dcol);
+            const du = u2 - u, dv = v2 - v;
+            // Direction only for now, NOT also rescaling magnitude by
+            // 1/hypot(du,dv) -- tried that (see conversation), but hypot(du,dv)
+            // is "how many (u,v) world-units one screen pixel spans here",
+            // which can be tiny for heavily-OVERSAMPLED near-camera pixels
+            // (confirmed live: magUV spiked to 1076 vs an average of 56 on
+            // the working baseline pose), and those few extreme outliers
+            // dominated colSum/rowSum and broke periodicity worse than the
+            // original bug. A correct version needs to cap that rescaling
+            // against the bucket width, which isn't known until AFTER this
+            // whole loop finishes (minU/maxU aren't final yet) -- a real
+            // two-pass restructure, not a quick clamp here.
+            if (Math.hypot(du, dv) > 1e-9) {
+              // (du,dv) is a TANGENT vector (the pushforward of a screen
+              // direction), which transports validly through ANY invertible
+              // map, conformal or not -- straightforward "where does this
+              // direction end up". A GRADIENT is a COVECTOR: it transforms
+              // by the inverse-transpose of the local Jacobian, not by
+              // rotating the transported tangent 90 degrees -- that
+              // rotate-the-tangent step is only valid for CONFORMAL
+              // (angle-preserving) maps, and perspective projection isn't
+              // conformal (that's the entire reason this correction exists
+              // -- different axes get squeezed by different amounts). Tried
+              // it anyway first: it's not just a sign error, cos(2*)/sin(2*)
+              // are pi-periodic so a naive sign flip on the atan2 arguments
+              // provably can't fix it (confirmed live: identical, still-
+              // broken output before and after flipping the sign).
+              //
+              // Sidesteps the whole covector-transform question the same
+              // way computeWorldVotes does (cross-producting rays instead of
+              // rotating a gradient): build the double-angle fold directly
+              // from the TANGENT's own angle, algebraically equivalent to
+              // the original gradient-angle formula (tangent angle = grad
+              // angle + pi/2, so cos(2*tangent) = -cos(2*grad), etc.) but
+              // using only the one quantity that's actually valid to
+              // transport here.
+              const phiUV = Math.atan2(dv, du);
+              cxAtSample = -mag * Math.cos(2 * phiUV); // double-angle, same polarity-fold reasoning as computeGradientAgreementField
+              cyAtSample = -mag * Math.sin(2 * phiUV);
+            }
+          }
+        }
+      }
+      gradCxAtSample.push(cxAtSample); gradCyAtSample.push(cyAtSample);
     }
   }
   // Literal min/max, NOT a percentile crop -- deliberately shows the full
@@ -1589,15 +1835,15 @@ function buildProjectedTexture() {
   const counts = new Float64Array(w * h);
   // Gradient of the SOURCE (un-rectified) analysis-equivalent brightness,
   // NOT the rectified/binned display buffer -- computed once per source
-  // pixel here, then projected+averaged into buckets the SAME principled
-  // way RGB already is below (sum per bucket, divide by that bucket's own
-  // count), instead of computeProjectedMarginals previously taking a
-  // discrete difference BETWEEN already-averaged neighboring buckets. That
-  // old approach faked an edge at every transition into an empty (black)
-  // bucket, and made sparser rows/columns look artificially weaker just for
-  // having fewer populated buckets summed in, independent of how strong
-  // their real data actually was.
-  const srcGrad = lastNoisedPreviewGray ? computeGradientField(lastNoisedPreviewGray, w, h, 1) : null;
+  // pixel (gradCxAtSample/gradCyAtSample above, already re-expressed in the
+  // (u,v) frame -- see that big comment), then projected+averaged into
+  // buckets the SAME principled way RGB already is below (sum per bucket,
+  // divide by that bucket's own count), instead of computeProjectedMarginals
+  // previously taking a discrete difference BETWEEN already-averaged
+  // neighboring buckets. That old approach faked an edge at every transition
+  // into an empty (black) bucket, and made sparser rows/columns look
+  // artificially weaker just for having fewer populated buckets summed in,
+  // independent of how strong their real data actually was.
   const gradCxSum = new Float64Array(w * h);
   const gradCySum = new Float64Array(w * h);
   // bu runs from maxU down to minU (NOT the naive us[k]-minU), i.e. U
@@ -1629,15 +1875,8 @@ function buildProjectedTexture() {
     sums[bi * 3 + 1] += distortedPreviewData[srcO + 1];
     sums[bi * 3 + 2] += distortedPreviewData[srcO + 2];
     counts[bi]++;
-    if (srcGrad) {
-      const fx = srcGrad.fx[si], fy = srcGrad.fy[si];
-      const mag = Math.hypot(fx, fy);
-      if (mag > 0) {
-        const theta = Math.atan2(fy, fx);
-        gradCxSum[bi] += mag * Math.cos(2 * theta); // double-angle, same polarity-fold reasoning as computeGradientAgreementField
-        gradCySum[bi] += mag * Math.sin(2 * theta);
-      }
-    }
+    gradCxSum[bi] += gradCxAtSample[k];
+    gradCySum[bi] += gradCyAtSample[k];
   }
   for (let bi = 0; bi < w * h; bi++) {
     const c = counts[bi];
@@ -2332,6 +2571,16 @@ function runAxesReconstruction() {
       const quadricPair = fitPairOfPlanes(fitVotes);
       const t2 = performance.now();
 
+      // Refines fitPairOfPlanes' closed-form (algebraic-residual) answer
+      // against the true geometric alignment residual -- see
+      // refineOrientationLM's own header comment. Toggle-able (state.
+      // orientationLM) specifically so this can be A/B compared live
+      // against the unrefined fit, the same way every other change this
+      // session has been verified rather than assumed.
+      const refinedFit = quadricPair && state.orientationLM ? refineOrientationLM(fitVotes, quadricPair) : null;
+      const orientationFit = refinedFit ?? quadricPair;
+      const t2b = performance.now();
+
       axesComputed = !!quadricPair;
 
       // fitPairOfPlanes can't tell from the math alone which of its two
@@ -2377,12 +2626,12 @@ function runAxesReconstruction() {
       // world direction -- negating one axis alone can't break their
       // orthogonality (dot(-a,b) = -dot(a,b), still 0 if it started at 0).
       let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
-      if (quadricPair) {
-        const errUnswapped = angleBetweenDegV(quadricPair.Drow, ROW_DIR) + angleBetweenDegV(quadricPair.Dcol, COL_DIR);
-        const errSwapped = angleBetweenDegV(quadricPair.Drow, COL_DIR) + angleBetweenDegV(quadricPair.Dcol, ROW_DIR);
+      if (orientationFit) {
+        const errUnswapped = angleBetweenDegV(orientationFit.Drow, ROW_DIR) + angleBetweenDegV(orientationFit.Dcol, COL_DIR);
+        const errSwapped = angleBetweenDegV(orientationFit.Drow, COL_DIR) + angleBetweenDegV(orientationFit.Dcol, ROW_DIR);
         const flipped = errSwapped < errUnswapped;
-        rowDirRecovered = flipped ? quadricPair.Dcol : quadricPair.Drow;
-        colDirRecovered = flipped ? quadricPair.Drow : quadricPair.Dcol;
+        rowDirRecovered = flipped ? orientationFit.Dcol : orientationFit.Drow;
+        colDirRecovered = flipped ? orientationFit.Drow : orientationFit.Dcol;
         if (rowDirRecovered.dot(ROW_DIR) < 0) rowDirRecovered.negate();
         if (colDirRecovered.dot(COL_DIR) < 0) colDirRecovered.negate();
 
@@ -2401,8 +2650,8 @@ function runAxesReconstruction() {
       // this function, for the full derivation), so any placeholder works
       // and no separate ray-cast implementation is needed just for distance.
       const PLACEHOLDER_DISTANCE = 1;
-      lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair
-        ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: PLACEHOLDER_DISTANCE }
+      lastRecoveredAxes = rowDirRecovered && colDirRecovered && orientationFit
+        ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: orientationFit.Dnormal, distance: PLACEHOLDER_DISTANCE }
         : null;
       if (lastRecoveredAxes) buildProjectedTexture();
 
@@ -2452,6 +2701,12 @@ function runAxesReconstruction() {
       } else {
         lines.push(`degenerate fit`);
       }
+      if (refinedFit) {
+        // Ground-truth-free cost values (the algebraic-vs-geometric residual
+        // this refinement actually optimizes) -- the row/col err % above is
+        // the ground-truth-based check on top, only available in this lab.
+        lines.push(`LM: ${refinedFit.iterations} iters, cost ${refinedFit.initialCost.toExponential(2)} -> ${refinedFit.finalCost.toExponential(2)}`);
+      }
       if (spacing) {
         // Ground truth: the floor sits at world y=0, so the camera's true
         // distance to it along the true normal is just its own height.
@@ -2463,7 +2718,7 @@ function runAxesReconstruction() {
       } else if (quadricPair) {
         lines.push(`spacing: no period found`);
       }
-      lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  spacing ${(t3 - t2).toFixed(0)}ms  decode ${(t4 - t3).toFixed(0)}ms`);
+      lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  LM ${(t2b - t2).toFixed(0)}ms  spacing ${(t3 - t2b).toFixed(0)}ms  decode ${(t4 - t3).toFixed(0)}ms`);
       axesReadout.textContent = lines.join('\n');
       // drawMarginalLines also calls this every frame, but ONLY while in
       // 'projected' mode -- needed here too so a capture triggered from a
@@ -2622,6 +2877,7 @@ bindCheckbox('showFloor', (v) => (state.showFloor = v));
 bindCheckbox('showGizmoBody', (v) => (state.showGizmoBody = v));
 bindCheckbox('showRecoveredFloor', (v) => (state.showRecoveredFloor = v));
 bindCheckbox('showSampleLattice', (v) => (state.showSampleLattice = v));
+bindCheckbox('orientationLM', (v) => (state.orientationLM = v));
 
 bindSlider('simNoise', (v) => { state.simNoise = v; markCaptureDirty(); }, (v) => v.toFixed(0));
 bindSlider('simBlur', (v) => { state.simBlur = v; markCaptureDirty(); }, (v) => v.toFixed(0));

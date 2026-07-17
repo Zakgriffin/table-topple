@@ -2374,7 +2374,16 @@ function drawMarginalLines(x: number, y: number, w: number, h: number) {
     rc.lineWidth = 1;
     let prevPx = 0, prevPy = 0;
     for (let i = 0; i < n; i++) {
-      const py = (i / n) * marginalRightCanvas.height;
+      // i indexes rowMag the same GL-native bottom-up way bv does
+      // everywhere else (see drawSampleLattice's own comment) -- bv=0
+      // displays at the visual BOTTOM of the adjacent image
+      // (projectedPreviewTex.flipY=false), so this strip needs the same
+      // (1 - i/n) flip drawSampleLattice already applies, or its red
+      // boundary lines end up drawn in the opposite vertical order from
+      // the image and sample dots beside them -- confirmed live: the
+      // column (U) strip needed no such flip and lined up correctly, only
+      // this row (V) strip was inverted.
+      const py = (1 - i / n) * marginalRightCanvas.height;
       const px = maxMag > 0 ? (m.rowMag[i] / maxMag) * (MARGINAL_THICKNESS - 4) : 0;
       if (i > 0) {
         rc.strokeStyle = marginalHueColor(m.rowHueCx[i], m.rowSumCy[i]);
@@ -2385,7 +2394,7 @@ function drawMarginalLines(x: number, y: number, w: number, h: number) {
     if (m.rowPeriod) {
       rc.strokeStyle = 'rgba(255,80,80,0.6)';
       for (let py = m.rowPhase; py < n; py += m.rowPeriod) {
-        const yy = (py / n) * marginalRightCanvas.height;
+        const yy = (1 - py / n) * marginalRightCanvas.height;
         rc.beginPath(); rc.moveTo(0, yy); rc.lineTo(MARGINAL_THICKNESS, yy); rc.stroke();
       }
     }

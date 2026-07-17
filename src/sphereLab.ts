@@ -520,7 +520,11 @@ function paintContaminationOverlay(alpha: Float64Array, color: readonly [number,
   for (let i = 0; i < alpha.length; i++) {
     const o = i * 4;
     out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2];
-    out[o + 3] = Math.round(alpha[i] * 255);
+    // alpha can now exceed 1 (computeGradientAgreementField is unnormalized,
+    // see its comment) -- clamp before writing into this Uint8Array, which
+    // wraps (mod 256) rather than clamping on its own, unlike
+    // Uint8ClampedArray.
+    out[o + 3] = Math.min(255, Math.round(alpha[i] * 255));
   }
 }
 
@@ -838,33 +842,49 @@ function downsampleBoxAverage(src: Float64Array, srcW: number, srcH: number, sca
   return dst;
 }
 
-// Two-pass (horizontal then vertical) box blur -- O(radius) per pixel per
-// pass instead of src/lines.ts's boxBlur, which is a single O(radius^2)
-// pass (fine there: it only ever runs at small radius on an
-// already-small image). Here it runs on a captureSupersample x buffer at a
-// correspondingly larger radius, where the quadratic cost is what pegged
-// the main thread at radius 6 on a 1024x768 buffer (~130M ops single-pass
-// vs ~27M split two ways) -- this is the actual fix for that freeze, not
-// just a smaller cap.
+// Two-pass (horizontal then vertical) box blur -- O(w*h) total, independent
+// of radius, instead of src/lines.ts's boxBlur, which is a single
+// O(radius^2) pass (fine there: it only ever runs at small radius on an
+// already-small image). An earlier version of this function resummed each
+// pixel's whole clamped window from scratch (O(radius) per pixel per pass,
+// O(w*h*radius) total) -- fine at small radius, but this runs on a
+// captureSupersample x buffer at a correspondingly larger radius, where
+// that cost showed up as the top frame in a profile of "capture now".
+// Below instead keeps a running sum per row/column and slides it by one
+// pixel at a time: entering pixel added, leaving pixel subtracted, O(1)
+// work per step regardless of radius. The clamped-window edge behavior
+// (shrunken, correctly-divided average for the first/last `radius`
+// pixels) is unchanged -- lo/hi still track the live window bounds, just
+// incrementally instead of recomputed from x/y each time.
 function separableBoxBlur(src: Float64Array, w: number, h: number, radius: number): Float64Array {
   if (radius <= 0) return src.slice();
   const tmp = new Float64Array(w * h);
   const out = new Float64Array(w * h);
   for (let y = 0; y < h; y++) {
     const row = y * w;
+    let lo = 0, hi = Math.min(w - 1, radius);
+    let sum = 0;
+    for (let i = lo; i <= hi; i++) sum += src[row + i];
     for (let x = 0; x < w; x++) {
-      const lo = Math.max(0, x - radius), hi = Math.min(w - 1, x + radius);
-      let sum = 0;
-      for (let xx = lo; xx <= hi; xx++) sum += src[row + xx];
       tmp[row + x] = sum / (hi - lo + 1);
+      if (x + 1 >= w) continue;
+      const nextHi = Math.min(w - 1, x + 1 + radius);
+      if (nextHi > hi) { hi = nextHi; sum += src[row + hi]; }
+      const nextLo = Math.max(0, x + 1 - radius);
+      if (nextLo > lo) { sum -= src[row + lo]; lo = nextLo; }
     }
   }
   for (let x = 0; x < w; x++) {
+    let lo = 0, hi = Math.min(h - 1, radius);
+    let sum = 0;
+    for (let i = lo; i <= hi; i++) sum += tmp[i * w + x];
     for (let y = 0; y < h; y++) {
-      const lo = Math.max(0, y - radius), hi = Math.min(h - 1, y + radius);
-      let sum = 0;
-      for (let yy = lo; yy <= hi; yy++) sum += tmp[yy * w + x];
       out[y * w + x] = sum / (hi - lo + 1);
+      if (y + 1 >= h) continue;
+      const nextHi = Math.min(h - 1, y + 1 + radius);
+      if (nextHi > hi) { hi = nextHi; sum += tmp[hi * w + x]; }
+      const nextLo = Math.max(0, y + 1 - radius);
+      if (nextLo > lo) { sum -= tmp[lo * w + x]; lo = nextLo; }
     }
   }
   return out;
@@ -1128,14 +1148,35 @@ function computeGradientField(gray: Float64Array, w: number, h: number, gradRadi
 // incoherent noise gradients mostly cancel each other out on aggregation
 // rather than needing to be gated out beforehand. Reuses coherenceRadius
 // ("agreement window" in the UI) as the "what counts as nearby" aggregation
-// window. Normalized to this frame's own max, same convention used
-// everywhere else in this file.
+// window.
+//
+// Normalized against this frame's own RAW (unsmoothed) max magnitude, NOT
+// the max of the smoothed field itself -- confirmed empirically (see
+// conversation) that the smoothed max is not a stable reference: it drops
+// sharply as aggRadius grows, since even the single most locally-coherent
+// pixel's window picks up some real disagreement once the window is big
+// enough. Dividing by THAT shrinking max inflated every other pixel's
+// normalized score at the same time real corner contamination was
+// (correctly) shrinking -- contamination visibly "spread" onto clean
+// running edges as the window grew, not because those edges got any less
+// directionally consistent. Tried skipping normalization entirely too
+// (also see conversation): that failed the opposite way -- badnessAlpha's
+// small residual on a genuinely clean edge (~0.01-0.05, from ordinary
+// sensor noise) got multiplied by raw gradient magnitude (tens to hundreds
+// in this scene), swamping the actual signal and saturating alpha to
+// "opaque" on nearly every edge in the frame, even at aggRadius=0.
+// The raw max magnitude is stable across aggRadius (it doesn't depend on
+// the smoothing window at all) while still keeping output bounded to
+// roughly [0,1] -- hypot(avg(cx),avg(cy)) <= avg(mag) <= this max, by the
+// same convexity argument the old max-of-smoothed version relied on.
 function computeGradientAgreementField(field: GradientField, aggRadius: number): Float64Array {
   const { fx, fy, w, h } = field;
   const n = w * h;
   const cx = new Float64Array(n), cy = new Float64Array(n);
+  let maxRawMag = 0;
   for (let i = 0; i < n; i++) {
     const mag = Math.hypot(fx[i], fy[i]);
+    if (mag > maxRawMag) maxRawMag = mag;
     if (mag === 0) continue;
     const theta = Math.atan2(fy[i], fx[i]);
     cx[i] = mag * Math.cos(2 * theta);
@@ -1144,12 +1185,8 @@ function computeGradientAgreementField(field: GradientField, aggRadius: number):
   const sx = separableBoxBlur(cx, w, h, aggRadius);
   const sy = separableBoxBlur(cy, w, h, aggRadius);
   const agreement = new Float64Array(n);
-  let maxAgreement = 0;
-  for (let i = 0; i < n; i++) {
-    agreement[i] = Math.hypot(sx[i], sy[i]);
-    if (agreement[i] > maxAgreement) maxAgreement = agreement[i];
-  }
-  if (maxAgreement > 0) for (let i = 0; i < n; i++) agreement[i] /= maxAgreement;
+  for (let i = 0; i < n; i++) agreement[i] = Math.hypot(sx[i], sy[i]);
+  if (maxRawMag > 0) for (let i = 0; i < n; i++) agreement[i] /= maxRawMag;
   return agreement;
 }
 

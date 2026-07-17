@@ -1821,22 +1821,95 @@ function refineOrientationAndPositionLM(
 // up to half the profile length (beyond that too little overlap remains to
 // trust the estimate). O(n * maxLag); cheap at the profile sizes here (a
 // handful of ms even at n=2000).
+//
+// Two extra steps beyond a textbook autocorrelation, both needed to survive
+// steep-pitch/off-axis poses where the profile carries a strong SMOOTH,
+// BROADBAND component (the frustum wedge's occupancy envelope -- more rows
+// contribute gradient energy to buckets near the middle of the visible
+// footprint than near its grazing edges) on top of the genuine periodic
+// ripple:
+//   1. Detrend first (subtract a wide box-smoothed version of the profile).
+//      A smooth envelope is, by construction, always most self-similar at
+//      the smallest possible lag -- its own autocorrelation is a
+//      monotonically DECAYING ramp with no real peak, just an edge sitting
+//      at minLag. Left in, that edge can outscore the true periodic peak
+//      outright (confirmed live: colMag's raw lag-2 "correlation" tracked a
+//      smoothly yaw-varying quantity with no periodic meaning at all, while
+//      the genuine grid-period peak at the true period weakened in relative
+//      terms at the same poses).
+//   2. Require the winning lag to be a genuine LOCAL peak (score strictly
+//      greater than both neighbors), not just whatever lag happens to score
+//      highest overall -- a monotonic decay ramp's "best" point is always
+//      its first sample (minLag), which step 1 usually removes but doesn't
+//      always fully suppress (confirmed live: one pose's ramp survived
+//      detrending and still out-scored the true period peak). Requiring a
+//      local peak rejects that ramp-edge on structural grounds regardless
+//      of its remaining amplitude, since a ramp edge only ever falls off to
+//      one side. Falls back to the plain global max if no lag qualifies as
+//      a local peak (nothing periodic to find either way).
 function autocorrelationPeriod(profile: Float64Array): number | null {
   const n = profile.length;
+
+  // Step 1: detrend -- subtract a wide box-smoothed version so only
+  // shorter-range (periodic-scale) structure survives into the correlation.
+  const detrendWin = 41;
+  const half = Math.floor(detrendWin / 2);
+  const detrended = new Float64Array(n);
+  for (let i = 0; i < n; i++) {
+    const lo = Math.max(0, i - half), hi = Math.min(n - 1, i + half);
+    let s = 0, c = 0;
+    for (let j = lo; j <= hi; j++) { s += profile[j]; c++; }
+    detrended[i] = profile[i] - s / c;
+  }
+
   let mean = 0;
-  for (let i = 0; i < n; i++) mean += profile[i];
+  for (let i = 0; i < n; i++) mean += detrended[i];
   mean /= n;
   const centered = new Float64Array(n);
-  for (let i = 0; i < n; i++) centered[i] = profile[i] - mean;
+  for (let i = 0; i < n; i++) centered[i] = detrended[i] - mean;
 
   const minLag = Math.max(2, Math.floor(n * 0.005));
   const maxLag = Math.floor(n / 2);
-  let bestLag = -1, bestScore = -Infinity;
+  const scores = new Float64Array(maxLag - minLag);
+  let bestLagAny = -1, bestScoreAny = -Infinity;
   for (let lag = minLag; lag < maxLag; lag++) {
     let sum = 0;
     for (let i = 0; i < n - lag; i++) sum += centered[i] * centered[i + lag];
-    if (sum > bestScore) { bestScore = sum; bestLag = lag; }
+    scores[lag - minLag] = sum;
+    if (sum > bestScoreAny) { bestScoreAny = sum; bestLagAny = lag; }
   }
+
+  // Step 2: collect every genuine local peak (strictly greater than both
+  // neighbors), then prefer the SMALLEST-lag one that's still comparably
+  // strong -- not simply the single highest-scoring peak. A true fundamental
+  // period's harmonics (2x, 3x, ...) are also local peaks by construction
+  // (twice a real period is still a lag where the signal realigns with
+  // itself), and their score is frequently close to -- sometimes even a
+  // little above -- the fundamental's own, especially once the profile has
+  // any asymmetry. Picking the highest-scoring peak outright confirmed live
+  // to land on exactly 2x the true period at two poses once step 1's ramp-
+  // edge candidate was suppressed (their real local peak was still there,
+  // just outscored by its own octave). Threshold is deliberately loose
+  // (half the best peak's score) since the goal is only to distinguish
+  // "real peak, possibly a harmonic" from "noise floor," not to rank peaks
+  // finely -- once something clears that bar, smallest-lag-first is the
+  // tiebreaker that picks the fundamental over its harmonics.
+  let bestScorePeak = -Infinity;
+  const peaks: number[] = [];
+  for (let lag = minLag + 1; lag < maxLag - 1; lag++) {
+    const s = scores[lag - minLag];
+    if (s > scores[lag - minLag - 1] && s > scores[lag - minLag + 1]) {
+      peaks.push(lag);
+      if (s > bestScorePeak) bestScorePeak = s;
+    }
+  }
+  const peakThreshold = bestScorePeak * 0.5;
+  let bestLagPeak = -1;
+  for (const lag of peaks) {
+    if (scores[lag - minLag] >= peakThreshold) { bestLagPeak = lag; break; } // peaks[] is in ascending-lag order
+  }
+
+  const bestLag = bestLagPeak > 0 ? bestLagPeak : bestLagAny;
   return bestLag > 0 ? bestLag : null;
 }
 

@@ -1910,7 +1910,30 @@ function autocorrelationPeriod(profile: Float64Array): number | null {
   }
 
   const bestLag = bestLagPeak > 0 ? bestLagPeak : bestLagAny;
-  return bestLag > 0 ? bestLag : null;
+  if (bestLag <= 0) return null;
+
+  // Step 3: sub-bin refinement -- integer-lag precision is a real limit at
+  // high camera altitudes, where the visible floor extent (and so the
+  // bucket grid's world-units-per-bin) grows large enough that a whole grid
+  // cell only spans a handful of bins. A true period like 4.2 bins has
+  // nowhere to go in an integer search except round to 3, 4, or 5 -- a
+  // 20%+ error that lands directly in the recovered distance (confirmed
+  // live: colPeriod=3 measured against an expected ~4.2 at one high-altitude
+  // pose, with distance off by a correlated ~22%). Standard parabolic fit
+  // through the winning bin and its two immediate neighbors' scores
+  // recovers the peak's true (non-integer) location cheaply, without
+  // needing a finer bucket grid -- same trick pitch/frequency estimators
+  // use to beat their own bin resolution.
+  const i = bestLag - minLag;
+  if (i > 0 && i < scores.length - 1) {
+    const y0 = scores[i - 1], y1 = scores[i], y2 = scores[i + 1];
+    const denom = y0 - 2 * y1 + y2;
+    if (denom !== 0) {
+      const delta = 0.5 * (y0 - y2) / denom;
+      if (Math.abs(delta) < 1) return bestLag + delta; // sanity bound -- a real peak's vertex stays within the sampled interval
+    }
+  }
+  return bestLag;
 }
 
 // Distance-to-floor recovery no longer has its own separate implementation
@@ -1938,22 +1961,22 @@ function autocorrelationPeriod(profile: Float64Array): number | null {
 interface RecoveredAxes { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3; distance: number }
 let lastRecoveredAxes: RecoveredAxes | null = null;
 
-// Rebuilds projectedPreviewData: a bird's-eye, floor-plane-rectified view of
-// whichever field view is currently in distortedPreviewData -- also what
-// runAxesReconstruction uses (via computeProjectedMarginals) to recover the
-// camera's distance to the floor, since the ray-cast/bin math here is what
-// that distance recovery is built on top of. Keeps full 2D structure and
-// each pixel's own color instead of squishing to a 1D profile -- so this
-// works for ANY field view (raw, noised, gradient, agreement, ...). Bin
-// grid matches rtSize, same "derive from the existing capture resolution,
-// no new tunable" convention used everywhere else in this file. Needs a
-// successful "capture now" first (lastRecoveredAxes) -- called TWICE per
-// capture (see runAxesReconstruction): once at a placeholder distance just
-// to measure period for distance recovery, once more after distance is
-// corrected so the final projectedPreviewData/lastProjectedBins/lastMarginals
-// are all properly scaled.
-function buildProjectedTexture() {
-  if (!lastRecoveredAxes) { projectedPreviewData.fill(0); projectedPreviewTex.needsUpdate = true; lastProjectedBins = null; lastMarginals = null; return; }
+// Casts one ray per SCREEN pixel (always at rtSize resolution -- that's the
+// actual captured pixel grid regardless of how finely the result gets
+// bucketed) and bins the hits into a bucketW x bucketH grid, independent of
+// the screen resolution. Split out of buildProjectedTexture so the
+// period-measurement refinement pass below (see runAxesReconstruction) can
+// re-bucket the SAME rays at a finer resolution than the rtSize-sized
+// display texture uses -- needed because a fixed bucket count tied to
+// display resolution means a grid cell can shrink to just a handful of bins
+// at high camera altitudes (confirmed live: colPeriod measured 3 bins
+// against an expected ~4.2 at one high-altitude pose, a 20%+ error that
+// propagated straight into the recovered distance -- not a peak-picking bug,
+// genuinely too few samples per cycle for ANY discrete-lag method to trust).
+function castAndBucketProjectedSamples(bucketW: number, bucketH: number): {
+  bins: ProjectedBins; sums: Float64Array; counts: Float64Array; gradCxSum: Float64Array; gradCySum: Float64Array;
+} | null {
+  if (!lastRecoveredAxes) return null;
   const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
   const w = rtSize.w, h = rtSize.h;
   const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
@@ -2103,13 +2126,13 @@ function buildProjectedTexture() {
   // -- cropping 2% or even 20% of the distribution barely moved the extent
   // in the case it was meant to fix. Reverted rather than carry unproven
   // complexity -- see conversation.
-  if (!isFinite(minU) || !isFinite(minV)) { projectedPreviewData.fill(0); projectedPreviewTex.needsUpdate = true; lastProjectedBins = null; lastMarginals = null; return; }
+  if (!isFinite(minU) || !isFinite(minV)) return null;
 
-  const binWidthU = (maxU - minU) / w || 1;
-  const binWidthV = (maxV - minV) / h || 1;
-  lastProjectedBins = { minU, maxU, minV, maxV, binWidthU, binWidthV, w, h };
-  const sums = new Float64Array(w * h * 3);
-  const counts = new Float64Array(w * h);
+  const binWidthU = (maxU - minU) / bucketW || 1;
+  const binWidthV = (maxV - minV) / bucketH || 1;
+  const bins: ProjectedBins = { minU, maxU, minV, maxV, binWidthU, binWidthV, w: bucketW, h: bucketH };
+  const sums = new Float64Array(bucketW * bucketH * 3);
+  const counts = new Float64Array(bucketW * bucketH);
   // Gradient of the SOURCE (un-rectified) analysis-equivalent brightness,
   // NOT the rectified/binned display buffer -- computed once per source
   // pixel (gradCxAtSample/gradCyAtSample above, already re-expressed in the
@@ -2121,8 +2144,8 @@ function buildProjectedTexture() {
   // into an empty (black) bucket, and made sparser rows/columns look
   // artificially weaker just for having fewer populated buckets summed in,
   // independent of how strong their real data actually was.
-  const gradCxSum = new Float64Array(w * h);
-  const gradCySum = new Float64Array(w * h);
+  const gradCxSum = new Float64Array(bucketW * bucketH);
+  const gradCySum = new Float64Array(bucketW * bucketH);
   // bu runs from maxU down to minU (NOT the naive us[k]-minU), i.e. U
   // increases right-to-left on screen -- deliberately, to cancel out a
   // handedness mismatch that's otherwise baked into this whole axis system.
@@ -2143,9 +2166,9 @@ function buildProjectedTexture() {
   // drawSampleLattice's bu both invert this exact same formula -- keep all
   // three in sync if this ever changes.
   for (let k = 0; k < us.length; k++) {
-    const bu = Math.min(w - 1, Math.max(0, Math.floor((maxU - us[k]) / binWidthU)));
-    const bv = Math.min(h - 1, Math.max(0, Math.floor((vs[k] - minV) / binWidthV)));
-    const bi = bv * w + bu;
+    const bu = Math.min(bucketW - 1, Math.max(0, Math.floor((maxU - us[k]) / binWidthU)));
+    const bv = Math.min(bucketH - 1, Math.max(0, Math.floor((vs[k] - minV) / binWidthV)));
+    const bi = bv * bucketW + bu;
     const si = srcIdx[k];
     const srcO = si * 4;
     sums[bi * 3] += distortedPreviewData[srcO];
@@ -2155,7 +2178,32 @@ function buildProjectedTexture() {
     gradCxSum[bi] += gradCxAtSample[k];
     gradCySum[bi] += gradCyAtSample[k];
   }
-  for (let bi = 0; bi < w * h; bi++) {
+  return { bins, sums, counts, gradCxSum, gradCySum };
+}
+
+// Rebuilds projectedPreviewData: a bird's-eye, floor-plane-rectified view of
+// whichever field view is currently in distortedPreviewData -- also what
+// runAxesReconstruction uses (via computeProjectedMarginals) to recover the
+// camera's distance to the floor, since the ray-cast/bin math here is what
+// that distance recovery is built on top of. Keeps full 2D structure and
+// each pixel's own color instead of squishing to a 1D profile -- so this
+// works for ANY field view (raw, noised, gradient, agreement, ...). Bin grid
+// matches rtSize, same "derive from the existing capture resolution, no new
+// tunable" convention used everywhere else in this file for the DISPLAY
+// texture specifically -- the higher-resolution period-measurement pass
+// (castAndBucketProjectedSamples, called directly, bypassing this wrapper)
+// uses a separate bucket count and never touches projectedPreviewData at
+// all. Needs a successful "capture now" first (lastRecoveredAxes) -- called
+// TWICE per capture (see runAxesReconstruction): once at a placeholder
+// distance just to seed the period-measurement refinement pass, once more
+// after distance is corrected so the final projectedPreviewData/
+// lastProjectedBins/lastMarginals are all properly scaled.
+function buildProjectedTexture() {
+  const result = lastRecoveredAxes ? castAndBucketProjectedSamples(rtSize.w, rtSize.h) : null;
+  if (!result) { projectedPreviewData.fill(0); projectedPreviewTex.needsUpdate = true; lastProjectedBins = null; lastMarginals = null; return; }
+  const { bins, sums, counts, gradCxSum, gradCySum } = result;
+  lastProjectedBins = bins;
+  for (let bi = 0; bi < bins.w * bins.h; bi++) {
     const c = counts[bi];
     const o = bi * 4;
     if (c > 0) {
@@ -2168,7 +2216,7 @@ function buildProjectedTexture() {
     }
   }
   projectedPreviewTex.needsUpdate = true;
-  lastMarginals = computeProjectedMarginals(w, h, counts, gradCxSum, gradCySum);
+  lastMarginals = computeProjectedMarginals(bins.w, bins.h, counts, gradCxSum, gradCySum);
 }
 
 // Column sums (U axis, varies with x) and row sums (V axis, varies with y)
@@ -2947,11 +2995,52 @@ function runAxesReconstruction() {
         : null;
       const t3 = performance.now();
 
+      let refinedSpacing: { distanceU: number; distanceV: number } | null = null;
       if (lastRecoveredAxes && spacing) {
         // Feeds "Projected Cam" mode (see buildProjectedTexture) -- averaging
         // the U/V distance estimates is just noise reduction, not picking one
         // over the other (both should agree once past the grazing-angle cutoff).
         lastRecoveredAxes.distance = (spacing.distanceU + spacing.distanceV) / 2;
+
+        // Sub-bin refinement pass: at high camera altitudes the visible
+        // floor extent can grow large enough that rtSize's fixed bucket
+        // count leaves only a handful of buckets per grid cell (confirmed
+        // live: colPeriod measured 3 bins against an expected ~4.2 at one
+        // high-altitude pose, a 20%+ error that landed straight in the
+        // recovered distance -- not a peak-picking bug, genuinely too few
+        // samples per cycle for any discrete-lag autocorrelation to trust,
+        // see autocorrelationPeriod's own comment). Re-buckets the SAME
+        // rays -- now cast at the just-computed rough distance instead of
+        // the arbitrary placeholder above -- into a resolution sized to
+        // keep a fixed target of buckets per cell, independent of display
+        // resolution, then repeats the identical closed-form distance
+        // correction against this far more reliable period measurement.
+        const roughBins = lastProjectedBins;
+        if (roughBins) {
+          const TARGET_BUCKETS_PER_CELL = 20;
+          const MAX_REFINE_BUCKETS = 2048; // memory cap: sums+counts+gradCxSum+gradCySum is ~48 bytes/bucket, so this bounds the transient allocation to a couple hundred MB even at a wildly-wrong rough distance
+          // roughBins' extent is still in PLACEHOLDER_DISTANCE-scale units
+          // (u,v scale linearly with whatever distance was assumed for the
+          // ray-cast that produced it) -- rescale by the correction factor
+          // just applied to get the TRUE extent, without wasting a whole
+          // extra ray-cast pass just to remeasure it.
+          const rescale = lastRecoveredAxes.distance / PLACEHOLDER_DISTANCE;
+          const trueExtentU = (roughBins.maxU - roughBins.minU) * rescale;
+          const trueExtentV = (roughBins.maxV - roughBins.minV) * rescale;
+          const refineW = Math.min(MAX_REFINE_BUCKETS, Math.max(rtSize.w, Math.ceil(trueExtentU / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
+          const refineH = Math.min(MAX_REFINE_BUCKETS, Math.max(rtSize.h, Math.ceil(trueExtentV / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
+          const roughDistance = lastRecoveredAxes.distance;
+          const refined = castAndBucketProjectedSamples(refineW, refineH); // reads lastRecoveredAxes.distance, i.e. roughDistance, not the placeholder
+          const refinedMarginals = refined ? computeProjectedMarginals(refineW, refineH, refined.counts, refined.gradCxSum, refined.gradCySum) : null;
+          if (refined && refinedMarginals && refinedMarginals.colPeriod !== null && refinedMarginals.rowPeriod !== null) {
+            refinedSpacing = {
+              distanceU: roughDistance * (GRID_STEP / (refinedMarginals.colPeriod * refined.bins.binWidthU)),
+              distanceV: roughDistance * (GRID_STEP / (refinedMarginals.rowPeriod * refined.bins.binWidthV)),
+            };
+            lastRecoveredAxes.distance = (refinedSpacing.distanceU + refinedSpacing.distanceV) / 2;
+          }
+        }
+
         // Rebuilds projectedPreviewData/lastProjectedBins/lastMarginals now
         // that distance is correct -- position decode below (and "Projected
         // Cam" itself) need the properly-scaled versions, not the
@@ -2960,6 +3049,7 @@ function runAxesReconstruction() {
       } else {
         lastRecoveredAxes = null;
       }
+      const t3b = performance.now();
       runPositionDecode(gray, w, h, vFovRad);
 
       // Phase 3 (Option B): refines the decode's own coarse camPos AND the
@@ -3032,14 +3122,20 @@ function runAxesReconstruction() {
         const distU = spacing.distanceU, distV = spacing.distanceV;
         const errU = (Math.abs(distU - trueDist) / trueDist) * 100;
         const errV = (Math.abs(distV - trueDist) / trueDist) * 100;
-        lines.push(`dist U ${distU.toFixed(2)} (${errU.toFixed(1)}% err)  dist V ${distV.toFixed(2)} (${errV.toFixed(1)}% err)  true ${trueDist.toFixed(2)}`);
+        lines.push(`dist U ${distU.toFixed(2)} (${errU.toFixed(1)}% err)  dist V ${distV.toFixed(2)} (${errV.toFixed(1)}% err)  true ${trueDist.toFixed(2)}  [rough, rtSize buckets]`);
+        if (refinedSpacing) {
+          const rDistU = refinedSpacing.distanceU, rDistV = refinedSpacing.distanceV;
+          const rErrU = (Math.abs(rDistU - trueDist) / trueDist) * 100;
+          const rErrV = (Math.abs(rDistV - trueDist) / trueDist) * 100;
+          lines.push(`dist U ${rDistU.toFixed(2)} (${rErrU.toFixed(1)}% err)  dist V ${rDistV.toFixed(2)} (${rErrV.toFixed(1)}% err)  [refined, adaptive buckets]`);
+        }
       } else if (quadricPair) {
         lines.push(`spacing: no period found`);
       }
       if (lastPositionLMResult) {
         lines.push(`photoLM: ${lastPositionLMResult.iterations} iters, cost ${lastPositionLMResult.initialCost.toExponential(2)} -> ${lastPositionLMResult.finalCost.toExponential(2)}`);
       }
-      lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  LM ${(t2b - t2).toFixed(0)}ms  spacing ${(t3 - t2b).toFixed(0)}ms  decode ${(t4 - t3).toFixed(0)}ms`);
+      lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  LM ${(t2b - t2).toFixed(0)}ms  spacing ${(t3 - t2b).toFixed(0)}ms  refine ${(t3b - t3).toFixed(0)}ms  decode ${(t4 - t3b).toFixed(0)}ms`);
       axesReadout.textContent = lines.join('\n');
       // drawMarginalLines also calls this every frame, but ONLY while in
       // 'projected' mode -- needed here too so a capture triggered from a

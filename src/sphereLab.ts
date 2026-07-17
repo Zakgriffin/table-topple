@@ -112,6 +112,7 @@ const state = {
   showTopCircles: true,
   weightSharpenPower: 4,
   orientationLM: true,
+  positionLM: true,
   fieldView: 'noised' as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'agreement' | 'effective',
   axesAutoCapture: false, axesCaptureIntervalMs: 500,
   viewportW: 512, viewportH: 384, captureSupersample: 2, aspectLocked: false,
@@ -1510,21 +1511,32 @@ function orientationCost(votes: Vote[], Drow: THREE.Vector3, Dcol: THREE.Vector3
   return cost;
 }
 
-// Tiny 3x3 linear solve via Cramer's rule -- fine at this fixed size (the
-// LM normal equations below), no need for a general solver.
-function solve3x3(A: number[][], b: number[]): number[] | null {
-  const det = A[0][0] * (A[1][1] * A[2][2] - A[1][2] * A[2][1])
-    - A[0][1] * (A[1][0] * A[2][2] - A[1][2] * A[2][0])
-    + A[0][2] * (A[1][0] * A[2][1] - A[1][1] * A[2][0]);
-  if (Math.abs(det) < 1e-18) return null;
-  const replaceCol = (col: number) => {
-    const M = A.map((row) => row.slice());
-    for (let i = 0; i < 3; i++) M[i][col] = b[i];
-    return M[0][0] * (M[1][1] * M[2][2] - M[1][2] * M[2][1])
-      - M[0][1] * (M[1][0] * M[2][2] - M[1][2] * M[2][0])
-      + M[0][2] * (M[1][0] * M[2][1] - M[1][1] * M[2][0]);
-  };
-  return [replaceCol(0) / det, replaceCol(1) / det, replaceCol(2) / det];
+// General NxN linear solve via Gaussian elimination with partial pivoting --
+// small, fixed-size systems only (LM normal equations below, at most a
+// handful of parameters across Phases 1-3), no need for anything more
+// sophisticated. Supersedes an earlier Cramer's-rule version hardcoded to
+// 3x3 (Phase 1's rotation-only refinement) -- Phase 2 widens the parameter
+// count to 5 (rotation + phase), so this needed to generalize anyway.
+function solveLinearSystem(A: number[][], b: number[]): number[] | null {
+  const n = A.length;
+  const M = A.map((row, i) => [...row, b[i]]);
+  for (let col = 0; col < n; col++) {
+    let pivot = col;
+    for (let row = col + 1; row < n; row++) if (Math.abs(M[row][col]) > Math.abs(M[pivot][col])) pivot = row;
+    if (Math.abs(M[pivot][col]) < 1e-18) return null;
+    [M[col], M[pivot]] = [M[pivot], M[col]];
+    for (let row = col + 1; row < n; row++) {
+      const f = M[row][col] / M[col][col];
+      for (let k = col; k <= n; k++) M[row][k] -= f * M[col][k];
+    }
+  }
+  const x = new Array(n).fill(0);
+  for (let row = n - 1; row >= 0; row--) {
+    let s = M[row][n];
+    for (let k = row + 1; k < n; k++) s -= M[row][k] * x[k];
+    x[row] = s / M[row][row];
+  }
+  return x;
 }
 
 // Refines fitPairOfPlanes' closed-form (Drow,Dcol,Dnormal) against the true
@@ -1588,7 +1600,7 @@ function refineOrientationLM(votes: Vote[], initial: OrientationFit, maxIteratio
     }
     const A = JtJ.map((row, a) => row.map((v, b) => v + (a === b ? lambda * (JtJ[a][a] || 1) : 0)));
     const rhs = Jtr.map((v) => -v);
-    const delta = solve3x3(A, rhs);
+    const delta = solveLinearSystem(A, rhs);
     if (!delta) break; // singular normal equations -- shouldn't happen for a well-posed, direction-diverse vote set, but bail cleanly if it does
 
     const deltaVec = new THREE.Vector3(delta[0], delta[1], delta[2]);
@@ -1611,6 +1623,188 @@ function refineOrientationLM(votes: Vote[], initial: OrientationFit, maxIteratio
   return {
     Drow: candidateDrow(q), Dcol: candidateDcol(q), Dnormal: Dnormal0.clone().applyQuaternion(q),
     iterations, initialCost, finalCost: cost,
+  };
+}
+
+
+// ── Phase 3 (Option B): joint orientation + ABSOLUTE position refinement ─
+// EXPERIMENTAL / standalone, not wired into the pipeline yet -- same
+// discipline as Phase 2. Where Option A's wrapped-distance residual is
+// pattern-AGNOSTIC (every grid line looks the same to it, so it has no way
+// to distinguish the true line from a neighboring wrong one -- confirmed
+// live this is exactly what broke the V axis at a harder pose, converging
+// confidently to the wrong local minimum), this compares against the
+// KNOWN, globally-unique bit content directly: predicted brightness at a
+// candidate ABSOLUTE world position vs the actually-observed brightness.
+// That breaks the symmetry a wrapped residual can't -- a wrong cell
+// alignment predicts the wrong BIT, not just "some distance off".
+//
+// The raw predicted bit is a step function (constant except exactly AT a
+// cell boundary) -- a naive finite-difference Jacobian against it would be
+// zero almost everywhere, giving LM nothing to work with. predictedBilinear
+// below smooths this via bilinear interpolation between the 4 nearest
+// cells, the simplest thing that actually has a usable gradient everywhere
+// -- NOT yet the full coarse-to-fine image pyramid from the original plan
+// (see conversation); that's a bigger step, added only if bilinear alone
+// turns out to have too narrow a basin of convergence once tested.
+
+// torus[r][c] convention: 1 -> dark (20), 0 -> light (235) -- see the floor
+// texture's own comment, matching scripts/generate-debruijn-torus.ts and
+// binarize's "dark -> 1" intent (both established earlier this session).
+function torusBrightness(row: number, col: number): number {
+  const r = ((row % R) + R) % R, c = ((col % C) + C) % C;
+  return torus[r][c] ? 20 : 235;
+}
+
+// Bilinear blend of the 4 torus cells nearest (worldX,worldZ) -- smooth,
+// differentiable prediction of what the sensor should see there. Cell c's
+// CENTER sits at integer "cell-index" coordinate xf = worldX + C/2 - 0.5
+// (established earlier this session, confirmed via raycast against the
+// real floor mesh: an integer xf lands exactly on a cell's UV center).
+function predictedBilinear(worldX: number, worldZ: number): number {
+  const xf = worldX + C / 2 - 0.5, zf = worldZ + R / 2 - 0.5;
+  const c0 = Math.floor(xf), r0 = Math.floor(zf);
+  const fx = xf - c0, fz = zf - r0;
+  const b00 = torusBrightness(r0, c0), b10 = torusBrightness(r0, c0 + 1);
+  const b01 = torusBrightness(r0 + 1, c0), b11 = torusBrightness(r0 + 1, c0 + 1);
+  return b00 * (1 - fx) * (1 - fz) + b10 * fx * (1 - fz) + b01 * (1 - fx) * fz + b11 * fx * fz;
+}
+
+// Photometric sample: just a screen pixel + its OBSERVED brightness --
+// unlike Option A's edge-focused votes, this deliberately does NOT need a
+// gradient/tangent at all, and should NOT be edge-weighted the same way:
+// edge pixels are exactly where the observed image is blurriest/most
+// ambiguous (mid-transition between two cells), while flat, confidently-one-
+// cell interior pixels are where a photometric comparison is most reliable.
+// Sampled on a regular screen-space stride instead of by gradient magnitude
+// for that reason -- roughly uniform coverage across the visible floor,
+// not concentrated on the hardest-to-match pixels.
+interface PhotometricSample { px: number; py: number; observed: number }
+
+function computePhotometricSamples(gray: Float64Array, w: number, h: number, stride: number): PhotometricSample[] {
+  const samples: PhotometricSample[] = [];
+  for (let y = 0; y < h; y += stride) {
+    for (let x = 0; x < w; x += stride) {
+      samples.push({ px: x, py: y, observed: gray[y * w + x] });
+    }
+  }
+  return samples;
+}
+
+interface PositionFit extends OrientationFit { worldX0: number; worldZ0: number; distance: number }
+
+// Joint LM over 5 parameters: 3-DOF rotation (same Lie-algebra perturbation
+// as Phases 1-2) + worldX0/worldZ0, the ABSOLUTE world position of the
+// (u=0,v=0) floor-intersection point (i.e. roughly where the camera sits
+// over the floor) -- NOT a wrapped sub-cell phase like Option A, a genuine
+// absolute coordinate, since the photometric residual needs to know WHICH
+// cell, not just how far from the nearest boundary.
+function refineOrientationAndPositionLM(
+  samples: PhotometricSample[], w: number, h: number,
+  initial: OrientationFit, distance: number, initialWorldX0: number, initialWorldZ0: number,
+  camQuat: THREE.Quaternion, vFovRad: number, aspect: number,
+  maxIterations = 20,
+): PositionFit & { iterations: number; initialCost: number; finalCost: number } {
+  const q = new THREE.Quaternion();
+  const Drow0 = initial.Drow.clone(), Dcol0 = initial.Dcol.clone(), Dnormal0 = initial.Dnormal.clone();
+  let worldX0 = initialWorldX0, worldZ0 = initialWorldZ0;
+  const MIN_GRAZING_COS = 0.15;
+  const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, (py / h) * 2 - 1];
+
+  const candidateNormal = (qq: THREE.Quaternion) => {
+    const n = Dnormal0.clone().applyQuaternion(qq);
+    if (cornerDir(0, 0, camQuat, vFovRad, aspect).dot(n) > 0) n.negate();
+    return n;
+  };
+
+  function residualsFor(qq: THREE.Quaternion, wx0: number, wz0: number): Float64Array {
+    const Drow = Drow0.clone().applyQuaternion(qq), Dcol = Dcol0.clone().applyQuaternion(qq);
+    const normal = candidateNormal(qq);
+    const out: number[] = [];
+    for (const s of samples) {
+      const [ndcU, ndcV] = toNDC(s.px, s.py);
+      const rayDir = cornerDir(ndcU, ndcV, camQuat, vFovRad, aspect);
+      const denom = rayDir.dot(normal);
+      if (denom >= -MIN_GRAZING_COS) continue;
+      const hit = rayDir.multiplyScalar(-distance / denom);
+      const u = hit.dot(Drow), v = hit.dot(Dcol);
+      const predicted = predictedBilinear(wx0 + u, wz0 + v);
+      out.push(predicted - s.observed);
+    }
+    return new Float64Array(out);
+  }
+
+  const cost = (r: Float64Array) => { let s = 0; for (let i = 0; i < r.length; i++) s += r[i] * r[i]; return s; };
+  const initialCost = cost(residualsFor(q, worldX0, worldZ0));
+  let curCost = initialCost;
+  let lambda = 1e-3;
+  const EPS_ROT = 1e-5, EPS_POS = 1e-3;
+  const axes = [new THREE.Vector3(1, 0, 0), new THREE.Vector3(0, 1, 0), new THREE.Vector3(0, 0, 1)];
+  const P = 5;
+
+  let iterations = 0;
+  for (; iterations < maxIterations; iterations++) {
+    const r0 = residualsFor(q, worldX0, worldZ0);
+    const n = r0.length;
+    if (n === 0) break;
+
+    const J: Float64Array[] = [];
+    for (let k = 0; k < 3; k++) {
+      const qPlus = new THREE.Quaternion().setFromAxisAngle(axes[k], EPS_ROT).multiply(q);
+      const rP = residualsFor(qPlus, worldX0, worldZ0);
+      const len = Math.min(n, rP.length);
+      const col = new Float64Array(n);
+      for (let i = 0; i < len; i++) col[i] = (rP[i] - r0[i]) / EPS_ROT;
+      J.push(col);
+    }
+    for (const [dx, dz] of [[EPS_POS, 0], [0, EPS_POS]]) {
+      const rP = residualsFor(q, worldX0 + dx, worldZ0 + dz);
+      const len = Math.min(n, rP.length);
+      const col = new Float64Array(n);
+      const eps = dx || dz;
+      for (let i = 0; i < len; i++) col[i] = (rP[i] - r0[i]) / eps;
+      J.push(col);
+    }
+
+    const JtJ: number[][] = Array.from({ length: P }, () => new Array(P).fill(0));
+    const Jtr: number[] = new Array(P).fill(0);
+    for (let a = 0; a < P; a++) {
+      for (let b = 0; b < P; b++) {
+        let s = 0; for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
+        JtJ[a][b] = s;
+      }
+      let s = 0; for (let i = 0; i < n; i++) s += J[a][i] * r0[i];
+      Jtr[a] = s;
+    }
+    const A = JtJ.map((row, a) => row.map((v, b) => v + (a === b ? lambda * (JtJ[a][a] || 1) : 0)));
+    const rhs = Jtr.map((v) => -v);
+    const delta = solveLinearSystem(A, rhs);
+    if (!delta) break;
+
+    const deltaRotVec = new THREE.Vector3(delta[0], delta[1], delta[2]);
+    const deltaRotAngle = deltaRotVec.length();
+    const deltaWX = delta[3], deltaWZ = delta[4];
+    if (deltaRotAngle < 1e-10 && Math.abs(deltaWX) < 1e-10 && Math.abs(deltaWZ) < 1e-10) break;
+
+    const qTry = deltaRotAngle > 1e-12
+      ? new THREE.Quaternion().setFromAxisAngle(deltaRotVec.normalize(), deltaRotAngle).multiply(q).normalize()
+      : q.clone();
+    const wx0Try = worldX0 + deltaWX, wz0Try = worldZ0 + deltaWZ;
+
+    const tryCost = cost(residualsFor(qTry, wx0Try, wz0Try));
+    if (tryCost < curCost) {
+      q.copy(qTry); worldX0 = wx0Try; worldZ0 = wz0Try;
+      curCost = tryCost;
+      lambda = Math.max(lambda * 0.5, 1e-8);
+    } else {
+      lambda = Math.min(lambda * 3, 1e8);
+    }
+  }
+
+  return {
+    Drow: Drow0.clone().applyQuaternion(q), Dcol: Dcol0.clone().applyQuaternion(q), Dnormal: candidateNormal(q),
+    worldX0, worldZ0, distance,
+    iterations, initialCost, finalCost: curCost,
   };
 }
 
@@ -2684,6 +2878,47 @@ function runAxesReconstruction() {
         lastRecoveredAxes = null;
       }
       runPositionDecode(gray, w, h, vFovRad);
+
+      // Phase 3 (Option B): refines the decode's own coarse camPos AND the
+      // already-refined orientation jointly, against the actual known bit
+      // content instead of a pattern-agnostic distance-to-boundary signal
+      // -- see refineOrientationAndPositionLM's header comment for why this
+      // exists (Option A's wrapped residual couldn't tell the true grid
+      // line from a neighboring wrong one when samples were sparse on one
+      // axis; this can, since a wrong cell alignment predicts the wrong
+      // BIT, not just "some distance off"). Only runs if decode produced
+      // something to refine FROM -- same "cheap coarse init + iterative
+      // geometric refine" relationship as every other LM stage here, not a
+      // replacement for the decode step. Toggle-able for direct A/B
+      // comparison, same reasoning as orientationLM.
+      let lastPositionLMResult: (PositionFit & { iterations: number; initialCost: number; finalCost: number }) | null = null;
+      if (state.positionLM && lastRecoveredAxes && lastPositionDecode && lastNoisedPreviewGray) {
+        const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
+        const normalForInit = Dnormal.clone();
+        if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(normalForInit) > 0) normalForInit.negate();
+        // worldPos(u=0,v=0) = camPos + normal*(-distance) EXACTLY, not just
+        // approximately camPos.x/z -- Drow/Dcol/normal is a complete
+        // orthonormal basis and every hit point satisfies hit.normal=
+        // -distance by construction (see refineOrientationAndPositionLM's
+        // own comment), so this is the correct non-cheating initializer.
+        const initialWorldX0 = lastPositionDecode.camPos.x + normalForInit.x * -distance;
+        const initialWorldZ0 = lastPositionDecode.camPos.z + normalForInit.z * -distance;
+        const photoSamples = computePhotometricSamples(lastNoisedPreviewGray, w, h, 4);
+        lastPositionLMResult = refineOrientationAndPositionLM(
+          photoSamples, w, h, { Drow, Dcol, Dnormal }, distance, initialWorldX0, initialWorldZ0, camQuat, vFovRad, RT_ASPECT,
+        );
+        lastRecoveredAxes.Drow = lastPositionLMResult.Drow;
+        lastRecoveredAxes.Dcol = lastPositionLMResult.Dcol;
+        lastRecoveredAxes.Dnormal = lastPositionLMResult.Dnormal;
+        const refinedNormal = lastPositionLMResult.Dnormal.clone();
+        if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(refinedNormal) > 0) refinedNormal.negate();
+        lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormal.x * distance;
+        lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormal.z * distance;
+        // Rebuilds with the now Option-B-refined orientation, so "Projected
+        // Cam" and the marginal graphs reflect the final answer, not the
+        // pre-refinement one.
+        buildProjectedTexture();
+      }
       updateRecoveredCamGizmo();
       applyRecoveredFloorOverlay();
       // lastRecoveredAxes just changed but captureDirty may not have (this
@@ -2717,6 +2952,9 @@ function runAxesReconstruction() {
         lines.push(`dist U ${distU.toFixed(2)} (${errU.toFixed(1)}% err)  dist V ${distV.toFixed(2)} (${errV.toFixed(1)}% err)  true ${trueDist.toFixed(2)}`);
       } else if (quadricPair) {
         lines.push(`spacing: no period found`);
+      }
+      if (lastPositionLMResult) {
+        lines.push(`photoLM: ${lastPositionLMResult.iterations} iters, cost ${lastPositionLMResult.initialCost.toExponential(2)} -> ${lastPositionLMResult.finalCost.toExponential(2)}`);
       }
       lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  LM ${(t2b - t2).toFixed(0)}ms  spacing ${(t3 - t2b).toFixed(0)}ms  decode ${(t4 - t3).toFixed(0)}ms`);
       axesReadout.textContent = lines.join('\n');
@@ -2878,6 +3116,7 @@ bindCheckbox('showGizmoBody', (v) => (state.showGizmoBody = v));
 bindCheckbox('showRecoveredFloor', (v) => (state.showRecoveredFloor = v));
 bindCheckbox('showSampleLattice', (v) => (state.showSampleLattice = v));
 bindCheckbox('orientationLM', (v) => (state.orientationLM = v));
+bindCheckbox('positionLM', (v) => (state.positionLM = v));
 
 bindSlider('simNoise', (v) => { state.simNoise = v; markCaptureDirty(); }, (v) => v.toFixed(0));
 bindSlider('simBlur', (v) => { state.simBlur = v; markCaptureDirty(); }, (v) => v.toFixed(0));

@@ -106,7 +106,13 @@ const state = {
   showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showFloor: true, showGizmoBody: true, showRecoveredFloor: true, showSampleLattice: false,
   showTrueContamination: false, showReconstructedContamination: false, hideField: false,
   simNoise: 8, simBlur: 1, simGradRadius: 1, coherenceRadius: 1,
-  circleSamplePercentMin: 0, circleSamplePercentMax: 5,
+  // max was 5 -- bumped after finding live that 1% (drifted there via
+  // localStorage during testing, not this default) starved fitPairOfPlanes
+  // to ~1500 of 150000 votes, which was fine at easy poses but produced a
+  // badly wrong orientation fit (70-90 degree error) at harder ones. 10%
+  // fixed that cleanly across the whole pitch range tested -- see
+  // conversation.
+  circleSamplePercentMin: 0, circleSamplePercentMax: 10,
   showRecoveredPoles: true,
   showAxisVectors: false,
   showTopCircles: true,
@@ -2014,12 +2020,16 @@ function buildProjectedTexture() {
       gradCxAtSample.push(cxAtSample); gradCyAtSample.push(cyAtSample);
     }
   }
-  // Literal min/max, NOT a percentile crop -- deliberately shows the full
-  // observed quadrilateral (all 4 frustum corners), even though a few
-  // near-horizon rays stretch the bin scale and compress the near-field
-  // (the earlier percentile-based version traded that away for cleaner
-  // periodicity detection, but seeing the actual corners matters more
-  // right now -- see conversation).
+  // Literal min/max, NOT a percentile crop -- tried percentile cropping to
+  // fix a pitch-cliff collapse diagnosed earlier in this session (a few
+  // outlier grazing rays inflating minU/maxU, wrecking bin resolution), but
+  // it turned out not to be the actual mechanism behind either failure mode
+  // actually found in testing: one was really an orientation-fit problem
+  // (circleSamplePercentMax had drifted too narrow), the other had a
+  // perfectly reasonable extent already (10ish units) and still collapsed
+  // -- cropping 2% or even 20% of the distribution barely moved the extent
+  // in the case it was meant to fix. Reverted rather than carry unproven
+  // complexity -- see conversation.
   if (!isFinite(minU) || !isFinite(minV)) { projectedPreviewData.fill(0); projectedPreviewTex.needsUpdate = true; lastProjectedBins = null; lastMarginals = null; return; }
 
   const binWidthU = (maxU - minU) / w || 1;

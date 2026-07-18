@@ -186,16 +186,67 @@ export function generateTorus(order: number): DebruijnTorus {
   return { order, N, R, C, taps, torus };
 }
 
+// For orders where the FULL R x C torus is too large to use directly as a
+// floor pattern (order 5: R=18631 C=1801, ~33.5M cells) AND has no known
+// efficient construction that's unique under D4 rotation/reflection (see
+// scripts/search-order5-torus.ts's header comment), a cheap search over many
+// (taps, sub-region offset) pairs found a small crop with a low residual
+// collision rate instead. This rebuilds that ONE known-good candidate
+// deterministically from its taps (same LFSR construction as generateTorus,
+// just skipping the random search since we already know which taps to use),
+// then crops out just the searched cropSize x cropSize sub-region and treats
+// it as its own self-contained R=C=cropSize board. Safe as long as callers
+// never tile/repeat this floor past its own extent — windowKey's modular
+// wrap only ever gets exercised within the crop, same as generateTorus's own
+// single, non-tiled full torus.
+export interface TorusCandidate { taps: number[]; r0: number; c0: number; cropSize: number }
+
+// Found by scripts/search-order5-torus.ts, checkpointed in
+// scripts/best-order5-candidate.json — reflCount=425 rotCount=277 bothCount=6
+// anyCount=696/63504 (1.096%), vs. order 4's measured 98.1% collision rate.
+export const ORDER5_CANDIDATE: TorusCandidate = {
+  taps: [25, 1, 3, 5, 7, 9, 10, 12, 14, 16, 18, 20, 22, 23],
+  r0: 7419, c0: 1166, cropSize: 256,
+};
+
+export function buildTorusFromCandidate(order: number, { taps, r0, c0, cropSize }: TorusCandidate): DebruijnTorus {
+  const N = order * order;
+  const seq = tryTaps(taps, N);
+  if (!seq) throw new Error(`Candidate taps ${JSON.stringify(taps)} are not a valid maximal-length degree-${N} LFSR.`);
+  const { R: fullR, C: fullC } = bestCoprimeSplit(2 ** N - 1);
+  const fullTorus = buildTorus(seq, fullR, fullC);
+  const torus = Array.from({ length: cropSize }, (_, i) =>
+    Uint8Array.from({ length: cropSize }, (_, j) => fullTorus[(r0 + i) % fullR][(c0 + j) % fullC]));
+  return { order, N, R: cropSize, C: cropSize, taps, torus };
+}
+
 // Builds a direct-indexed lookup table: window key -> packed (row * C + col).
 // Every key is guaranteed unique (by construction, re-verified above for
 // tractable sizes), so this is a simple one-pass fill, no collision handling.
 // Unfilled entries (should be none, aside from window-key 0 which never
 // occurs since m-sequences never contain the all-zero window) are left as -1.
+// Only practical up to about order 4 (N=16, 2^16=65536 entries, 256KB) — see
+// buildLookupTableSparse for orders where 2^N is too large to index densely.
 export function buildLookupTable({ torus, R, C, order, N }: DebruijnTorus): Int32Array {
   const table = new Int32Array(2 ** N).fill(-1);
   for (let r = 0; r < R; r++) {
     for (let c = 0; c < C; c++) {
       table[windowKey(torus, R, C, r, c, order)] = r * C + c;
+    }
+  }
+  return table;
+}
+
+// Same lookup, but as a Map rather than a direct-indexed array — for order 5,
+// keys range over 2^25 (a dense Int32Array there would be a fixed ~134MB
+// regardless of how few of those keys are actually used), while the cropped
+// board built by buildTorusFromCandidate only ever has cropSize^2 real
+// entries (65536 for the 256x256 crop, a few MB as a Map).
+export function buildLookupTableSparse({ torus, R, C, order }: DebruijnTorus): Map<number, number> {
+  const table = new Map<number, number>();
+  for (let r = 0; r < R; r++) {
+    for (let c = 0; c < C; c++) {
+      table.set(windowKey(torus, R, C, r, c, order), r * C + c);
     }
   }
   return table;

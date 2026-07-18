@@ -1,0 +1,266 @@
+// Great Sphere Lab's orientation + position recovery pipeline
+// (src/sphereLab.ts, plus shared src/decode.ts and src/linalg.ts helpers).
+//
+// This is a SEPARATE system from pipeline-call-graph.dot (the real,
+// production line-based tracker in src/main.ts). Sphere Lab is a simulated
+// testbed: it renders a synthetic camera view of the De Bruijn floor with
+// tunable blur/noise, then recovers that camera's orientation and absolute
+// position from the rendered image alone, checking the result against known
+// ground truth. The two pipelines share almost no code (only src/decode.ts's
+// toGrayscale/binarize/rotateShift and src/linalg.ts's eigensolvers).
+//
+// Read this top-to-bottom by CLUSTER, not just by following arrows: almost
+// every function here is called from one place -- runAxesReconstruction,
+// the ~370-line orchestrator -- so the interesting structure is the ORDER
+// and CONDITIONS under which it calls each stage, not a branching call
+// tree. Edges leaving runAxesReconstruction are labeled with their step
+// number in execution order; dotted orange edges are conditional on a UI
+// toggle or mode, evaluated fresh on every capture.
+//
+// Import into any Graphviz-based viewer, e.g.:
+//   - https://dreampuf.github.io/GraphvizOnline/ (paste directly)
+//   - https://edotor.net/ (paste directly)
+//   - VS Code "Graphviz Interactive Preview" extension
+//   - local: `dot -Tsvg sphere-lab-pose-pipeline.dot -o sphere-lab-pose-pipeline.svg`
+//
+// Each node's second (small) line is a one-sentence description; hovering a
+// node in an SVG-rendering viewer shows a fuller tooltip.
+
+digraph SphereLabPosePipeline {
+  rankdir=TB;
+  fontname="Helvetica";
+  labelloc="t";
+  label="Great Sphere Lab — Orientation + Position Recovery Pipeline";
+  fontsize=22;
+  node [shape=box, style="rounded,filled", fontname="Helvetica", fontsize=11, margin="0.15,0.1"];
+  edge [color="#888888", arrowsize=0.7];
+
+  // ── Setup (once, page load) ──────────────────────────────────────────────
+  subgraph cluster_setup {
+    label="Setup — once at load (src/debruijn.ts)";
+    style="rounded,filled"; color="#ddd8c4"; fillcolor="#f5f2e6";
+    generateTorus [label="generateTorus(order)\n{ order 4: random-search LFSR torus, every window unique }", fillcolor="#efe9d0", tooltip="Order 4 only: searches for a maximal-length LFSR tap set whose full R x C torus fold has every 4x4 window unique, then builds it. This is the pattern actually painted on the floor mesh."];
+    buildTorusFromCandidate [label="buildTorusFromCandidate(5, ORDER5_CANDIDATE)\n{ order 5: rebuild known-good taps, crop a 256x256 low-collision region }", fillcolor="#efe9d0", tooltip="Order 5 only: the full 33.5M-cell torus has no known collision-free construction, so this rebuilds one specific pre-searched (taps, offset) candidate deterministically and crops out just its 256x256 sub-region (1.096% residual D4-symmetry collision rate) as a self-contained board."];
+    buildLookupTableSparse [label="buildLookupTableSparse(torus)\n{ Map: packed window key -> (row,col) }", fillcolor="#efe9d0", tooltip="Builds a Map from every packed order x order bit-window key to its (row,col) board position. A Map rather than order 4's dense Int32Array, since order 5's key space (2^25) would need a fixed ~134MB array regardless of how few keys are actually used."];
+  }
+
+  // ── Orchestrator ──────────────────────────────────────────────────────────
+  runAxesReconstruction [label="runAxesReconstruction()\n{ THE per-capture orchestrator -- every stage below, in order }", shape=box, style="rounded,filled,bold", fillcolor="#f2a35c", fontsize=13, margin="0.2,0.15", tooltip="Bound to the 'capture now' button (and optional auto-recompute interval). Runs one full capture -> Phase 1 orientation -> distance/period recovery -> position decode -> Phase 3 joint refinement pass, guarded against overlapping re-entry while a previous pass is still in flight."];
+
+  // ── Capture simulation ───────────────────────────────────────────────────
+  subgraph cluster_capture {
+    label="Capture simulation — per capture (src/sphereLab.ts)";
+    style="rounded,filled"; color="#c9d9e8"; fillcolor="#eaf2f9";
+    renderCamRT [label="renderCamRT()\n{ renders gizmoCam into an offscreen supersampled target }", fillcolor="#d7e7f5", tooltip="Renders the simulated camera's view of the scene into camRT at captureSupersample x the final analysis resolution, so later blur/downsample stages have real high-frequency detail to band-limit rather than compounding pixel-grid aliasing that's already baked in."];
+    captureDistortedGrayscale [label="captureDistortedGrayscale()\n{ render -> AA filter -> lens blur -> downsample -> sensor noise }", fillcolor="#bcd6ee", tooltip="THE real analysis-resolution capture, in physically-motivated order: supersampled render, sensor AA/optical low-pass filter, user-tunable lens blur, box-average downsample to final resolution, then sensor noise added last (noise is a discretization-stage artifact). Returns GL-native bottom-up row order."];
+    toGrayscale_cap [label="toGrayscale(rgba)\n{ RGBA -> luma (src/decode.ts) }", fillcolor="#d7e7f5", tooltip="Standard luma-weighted RGBA to grayscale conversion, shared with the real tracker."];
+    applyAntialiasFilter [label="applyAntialiasFilter(gray,...)\n{ fixed-strength sensor AA filter }", fillcolor="#d7e7f5", tooltip="Simulates a sensor's dedicated anti-aliasing/optical low-pass filter -- strength is fully determined by captureSupersample (just enough to band-limit for that decimation factor), not an independent tunable."];
+    lensBlur [label="separableBoxBlur(gray, simBlur)\n{ user-tunable lens defocus }", fillcolor="#d7e7f5", tooltip="Two-pass O(w*h) separable box blur simulating lens defocus/diffraction, applied at supersampled resolution before downsampling -- the user-controlled state.simBlur slider."];
+    downsampleBoxAverage [label="downsampleBoxAverage(gray,...)\n{ proper box-filter decimation, not point sampling }", fillcolor="#d7e7f5", tooltip="Band-limiting box-average decimation from the supersampled buffer down to true analysis resolution -- a real box filter, not picking one of every N pixels, which would reintroduce aliasing."];
+    addGaussianNoise [label="addGaussianNoise(gray, simNoise)\n{ Box-Muller sensor noise, seeded/reproducible }", fillcolor="#d7e7f5", tooltip="Adds seeded Gaussian noise (Box-Muller, mulberry32 PRNG) in place, simulating sensor shot noise -- applied last, after discretization, matching where real sensor noise actually enters."];
+    flipRowsF64 [label="flipRowsF64(gray,...)\n{ GL bottom-up -> top-down row order }", fillcolor="#d7e7f5", tooltip="captureDistortedGrayscale returns GL-native bottom-up rows (matching the display texture convention); computeWorldVotes' NDC math needs top-down, so runAxesReconstruction flips explicitly right before using it for votes."];
+  }
+
+  // ── Phase 1: vote-based orientation ──────────────────────────────────────
+  subgraph cluster_phase1 {
+    label="Phase 1 — vote-based orientation fit (src/sphereLab.ts)";
+    style="rounded,filled"; color="#cfe3c8"; fillcolor="#e9f4e4";
+    computeWorldVotes [label="computeWorldVotes(gray,...)\n{ one plane-normal vote per qualifying pixel }", fillcolor="#cde8c3", tooltip="For every pixel with nonzero (walked, agreement-weighted) gradient: finds its tangent direction, casts two rays (the pixel and a tangent-shifted neighbor) through the real camera model via cornerDir, and cross-products them into a 3D plane-normal vote. Each floor line's normal is perpendicular to both the row and column axis, so accumulating enough of these constrains the whole orientation."];
+    computeGradientField [label="computeGradientField(gray,r)\n{ central-difference (fx,fy) per pixel }", fillcolor="#d9edd1", tooltip="Simple central-difference gradient at radius r -- the raw signal every downstream field (agreement, effective, walked, votes) is built from."];
+    computeGradientAgreementField [label="computeGradientAgreementField(field,r)\n{ local double-angle vector-sum coherence, [0,1] }", fillcolor="#d9edd1", tooltip="Magnitude of the local VECTOR SUM of gradients (double-angle folded so opposite-polarity edges on the same line don't falsely cancel), normalized against the frame's own raw max magnitude. Low where gradients disagree (junctions/corners), high on clean running edges -- corner/junction contamination suppression."];
+    computeEffectiveGradientField [label="computeEffectiveGradientField(field,agreement)\n{ field * agreement, componentwise }", fillcolor="#d9edd1", tooltip="The gradient field's own vector, scaled by agreement's scalar. Direction is unchanged (scaling by a non-negative scalar can't rotate a vector); magnitude shrinks wherever agreement is low. This is what actually gets walked and voted on, not the raw gradient."];
+    guidedTangentDirection [label="guidedTangentDirection(fx,fy,...)\n{ per-pixel: walk along the tangent, average out noise }", fillcolor="#d9edd1", tooltip="Walks outward both ways along the seed pixel's own tangent direction, accumulating a running double-angle-averaged direction and bailing out (with grace-sample tolerance) on magnitude collapse or excess directional deviation. Output magnitude stays the seed's own value -- only direction is walk-refined. Called once per qualifying pixel by both computeWorldVotes and computeWalkedGradientField."];
+    cornerDir_votes [label="cornerDir(u,v,quat,...)\n{ NDC -> world ray through the real camera model }", fillcolor="#d9edd1", tooltip="Converts a normalized device coordinate through the camera's actual FOV/aspect/orientation into a world-space ray direction. The single shared primitive nearly everything in this pipeline uses to go from image-space to 3D."];
+    votesInMagnitudeBand [label="votesInMagnitudeBand(votes,min%,max%)\n{ top-N% by weight -- feeds the fit AND the overlay }", fillcolor="#cde8c3", tooltip="Sorts all votes by weight and slices to the (circleSamplePercentMin, circleSamplePercentMax) band. Not just a debug-overlay knob: fitPairOfPlanes only ever sees this same slice, so the on-screen debug rings always show exactly what's driving the fit."];
+    fitPairOfPlanes [label="fitPairOfPlanes(votes)\n{ closed-form: 6x6 weighted quadric, two eigensolves }", fillcolor="#cde8c3", tooltip="Builds a weight-sharpened 6x6 matrix from each vote's normal outer-product monomials, takes its smallest eigenvector as a symmetric 3x3 quadric M, then eigendecomposes M: the near-zero eigenvector is Dnormal, and the other two eigenvectors' sum/difference give Drow/Dcol (their bisectors) -- a single closed-form pass, no iteration."];
+    smallestEigenvector_p1 [label="smallestEigenvector(M)\n{ linalg.ts }", fillcolor="#d5e6ea", tooltip="Eigenvector of the smallest eigenvalue of a symmetric matrix -- the least-squares null space of the accumulated homogeneous constraints."];
+    jacobiEigenSymmetric_p1 [label="jacobiEigenSymmetric(A)\n{ linalg.ts }", fillcolor="#dcebee", tooltip="Classic cyclic Jacobi eigenvalue algorithm for small symmetric matrices -- used both inside smallestEigenvector and directly again on the resulting 3x3 quadric M."];
+    refineOrientationLM [label="refineOrientationLM(votes,initial)\n{ LM refine against the TRUE geometric residual }", fillcolor="#cde8c3", tooltip="fitPairOfPlanes minimizes an algebraic proxy with no direct angular meaning; this refines it against the real 'is each vote's normal actually perpendicular to Drow or Dcol' residual via Levenberg-Marquardt over a 3-parameter axis-angle rotation perturbation, numerical Jacobian. Toggle: state.orientationLM."];
+    orientationCost [label="orientationCost(votes,Drow,Dcol)\n{ weighted sum of squared fourFoldResidual }", fillcolor="#d9edd1", tooltip="The scalar LM actually minimizes."];
+    fourFoldResidual [label="fourFoldResidual(n,Drow,Dcol)\n{ sin(4*psi) -- 0 exactly on either axis }", fillcolor="#d9edd1", tooltip="psi = atan2(n.Dcol, n.Drow); sin(4*psi) is zero when n is perpendicular to EITHER Drow or Dcol (both equally 'good', indistinguishable from this objective) and extremal at the diagonal worst case. Provably blind to the row/col-swap and axis-sign ambiguities by construction -- those are resolved elsewhere, against ground truth."];
+    solveLinearSystem_p1 [label="solveLinearSystem(A,b)\n{ Gaussian elim + partial pivoting, shared }", fillcolor="#d9edd1", tooltip="General small NxN linear solve, shared by every LM stage's normal-equations step (Phase 1's 3-parameter and Phase 3's 5-parameter)."];
+    angleBetweenDegV [label="angleBetweenDegV(a,b)\n{ ground-truth row/col swap + sign fix (testbed only) }", fillcolor="#cde8c3", tooltip="fitPairOfPlanes/refineOrientationLM can't tell which recovered axis is 'row' vs 'col', or each one's sign, from the math alone -- that ambiguity is real and provably unresolvable by the fit objective. This testbed-only step compares both labelings (and each axis's sign) against known ground-truth ROW_DIR/COL_DIR and picks whichever total error is lower, feeding the result everywhere downstream (pole markers, Projected Cam, lastRecoveredAxes, position decode)."];
+  }
+
+  // ── Distance & period recovery ───────────────────────────────────────────
+  subgraph cluster_distance {
+    label="Distance & period recovery (src/sphereLab.ts)";
+    style="rounded,filled"; color="#f0d9b0"; fillcolor="#fbeed8";
+    buildProjectedTexture [label="buildProjectedTexture()\n{ rebuilds \"Projected Cam\" + feeds period detection }", fillcolor="#f7e2b8", tooltip="Forward-projects every source pixel into a floor-plane-rectified bird's-eye bin grid at rtSize resolution, averaging however many source pixels land in each bin for display (projectedPreviewData / lastProjectedBins), and separately accumulating per-bucket gradient sums into lastMarginals via computeProjectedMarginals. Called up to 4 times per capture at different distance estimates -- see runAxesReconstruction's numbered edges."];
+    castAndBucketProjectedSamples [label="castAndBucketProjectedSamples(bucketW,bucketH)\n{ forward ray-cast every source pixel -> world bin, average }", fillcolor="#f2c98a", tooltip="For every source pixel: ray-casts through the real camera model to its floor-plane hit point, converts to (u,v) via dot products with Drow/Dcol, and accumulates RGB + a re-expressed (u,v)-frame gradient into whichever bin that (u,v) falls in. Excludes near-grazing rays (MIN_GRAZING_COS) to keep one outlier ray from wrecking the whole bin extent. bin ASSIGNMENT is scale-invariant to whatever distance is currently assumed, which is what lets a placeholder distance work for period measurement."];
+    cornerDir_proj [label="cornerDir(u,v,quat,...)\n{ shared, see above }", fillcolor="#f7e2b8", tooltip="Same shared NDC -> world ray primitive as Phase 1."];
+    computeGradientField_proj [label="computeGradientField(lastNoisedPreviewGray,1)\n{ shared, radius 1 }", fillcolor="#f7e2b8", tooltip="The tangent-shift gradient re-expression castAndBucketProjectedSamples needs is built from a fixed-radius-1 gradient field over the last noised capture, so a gradient covector can be correctly transported into (u,v)-space alongside each ray-cast rather than reusing the raw screen-space angle (perspective isn't conformal)."];
+    computeProjectedMarginals [label="computeProjectedMarginals(w,h,counts,gradCxSum,gradCySum)\n{ column/row edge-strength profiles -> period + phase }", fillcolor="#f2c98a", tooltip="Per-bucket-average gradient (double-angle folded, so alternating-polarity checkerboard edges don't falsely cancel) summed along each column (U) and row (V) into two 1D profiles, then period+phase extracted from each."];
+    autocorrelationPeriod [label="autocorrelationPeriod(profile)\n{ detrend + require a genuine local peak }", fillcolor="#f7e2b8", tooltip="De-means and detrends (subtracts a wide box-smoothed version, since the frustum's occupancy envelope is a smooth broadband component that would otherwise fake a monotonic-ramp 'peak' at minimum lag) then finds the strongest lag that's a genuine local peak (beats both neighbors), falling back to the plain global max if none qualifies."];
+    findPhase [label="findPhase(profile,period)\n{ weighted circular mean -> sub-bin boundary phase }", fillcolor="#f7e2b8", tooltip="Locates the nearest cell-boundary peak within one period as a fractional bin index, via a weighted circular mean rather than a literal peak search -- robust to a noisy/asymmetric profile."];
+    measurePeriodDistance [label="measurePeriodDistance(distance,extentU,extentV)\n{ re-bucket at adaptive resolution for a trustworthy period }", fillcolor="#f2c98a", tooltip="A fixed rtSize-resolution bucket grid leaves too few buckets per cell at high camera altitude for autocorrelation to trust (confirmed live: 20%+ distance error from under-sampling, not a peak-picking bug). Re-buckets at a resolution targeting ~20 buckets/cell (capped for memory), applies the same 'true period must equal GRID_STEP' closed-form rescale. Called twice: once after Phase 1's rough orientation, once again after Phase 3 improves it."];
+  }
+
+  // ── Position decode ───────────────────────────────────────────────────────
+  subgraph cluster_decode {
+    label="Position decode (src/sphereLab.ts, src/decode.ts)";
+    style="rounded,filled"; color="#e3c6dd"; fillcolor="#f6e9f3";
+    runPositionDecode [label="runPositionDecode(gray,w,h,vFovRad)\n{ orchestrates grid sampling -> vote tally -> absolute camPos }", fillcolor="#eed4e8", tooltip="Samples the full visible floor quadrilateral, decodes which torus (row,col) it sits at by literal vote count, then combines that with the cell's known position relative to the camera to recover the camera's own absolute world position. Only touches ground truth to pick between the two world-axis labelings (see worldAxisSwapped) -- never reads camPos to decode."];
+    buildDecodeSampleGrid [label="buildDecodeSampleGrid(gray,w,h,vFovRad)\n{ world cell centers -> ONE nearest raw pixel each }", fillcolor="#eed4e8", tooltip="For every integer GRID_STEP hop from the phase-anchored sub-cell offset (from lastMarginals' colPhase/rowPhase) covering the whole observed quadrilateral: inverse-projects that world cell center into screen space and reads exactly one nearest pixel from the raw analysis grayscale -- backward projection, single sample, NOT the same forward-averaged buffer buildProjectedTexture displays. This single-sample fragility is what makes far cells (small on-screen footprint) unreliable even when orientation/position are accurate."];
+    binarize_decode [label="binarize(gray)\n{ global mean threshold, src/decode.ts }", fillcolor="#e3dbf5", tooltip="Binarizes the raw analysis grayscale via a single global mean threshold, shared with the real tracker."];
+    tallyPositionVotes [label="tallyPositionVotes(grid)\n{ every sliding window x4 orientation x2 mirror -> exact-match vote }", fillcolor="#eed4e8", tooltip="Every valid order x order sliding window (not just tile-aligned), at both mirror states and all 4 rotation orientations, looked up in the lookup table; every exact match casts one vote for the anchor position it implies. The anchor with the most literal votes wins -- unambiguous 'most patches agree', not just the single best-looking candidate."];
+    packPatchCellsLocal [label="packPatchCellsLocal(cells,order,o)\n{ pack a cell block under one reading orientation }", fillcolor="#e9e2f7", tooltip="Packs an order x order block into a lookup key under one of 4 rotation readings -- sphereLab's own local copy of decode.ts's packPatchCells."];
+    rotateShift_decode [label="rotateShift(da,db,orientation)\n{ src/decode.ts, shared }", fillcolor="#e3dbf5", tooltip="Rotates a (row shift, col shift) vector to match a reading orientation -- used to convert a matched window's position back to the anchor cell's own position."];
+    debruijnLookup_node [label="debruijnLookup\n{ the Map built once at Setup }", shape=cylinder, fillcolor="#e3dbf5", tooltip="The Map<key, packedPosition> built once at page load by buildLookupTableSparse, queried once per (window, orientation) combination during tallyPositionVotes."];
+  }
+
+  // ── Phase 3: joint photometric refinement ────────────────────────────────
+  subgraph cluster_phase3 {
+    label="Phase 3 (Option B) — joint photometric orientation + position refinement (src/sphereLab.ts)";
+    style="rounded,filled"; color="#e8c9c2"; fillcolor="#faeae7";
+    computePhotometricSamples [label="computePhotometricSamples(gray,w,h,stride)\n{ regular-stride raw brightness samples, NOT edge-weighted }", fillcolor="#f6d9d1", tooltip="Unlike Phase 1's edge/gradient votes, this deliberately samples flat interior pixels on a uniform screen-space stride -- edge pixels are exactly where a photometric brightness comparison is least reliable (mid-transition between two cells)."];
+    refineOrientationAndPositionLM [label="refineOrientationAndPositionLM(samples,...)\n{ 5-param LM: 3-DOF rotation + absolute worldX0/worldZ0 }", fillcolor="#f3b9ac", tooltip="Jointly refines rotation AND the camera's absolute (worldX0,worldZ0) against predicted-vs-observed brightness -- unlike a wrapped sub-cell-phase residual (pattern-agnostic, can't distinguish the true grid line from a neighboring wrong one), a wrong cell alignment here predicts the wrong BIT outright, breaking that symmetry. Toggle: state.positionLM. Confirmed live: drops orientation error from ~2.3/2.0 degrees to ~0.41/0.36 on the same capture."];
+    predictedBilinear [label="predictedBilinear(worldX,worldZ)\n{ bilinear blend of the 4 nearest torus cells }", fillcolor="#f6d9d1", tooltip="Smooths the raw step-function torus pattern into something with a usable gradient everywhere (a naive finite-difference Jacobian against a step function would be zero almost everywhere) -- not yet a full coarse-to-fine pyramid, just bilinear."];
+    torusBrightness [label="torusBrightness(row,col)\n{ torus[r][c] -> 20 or 235 }", fillcolor="#f6d9d1", tooltip="Wraps a torus cell's binary value into the same brightness convention the floor texture itself uses (1 -> dark/20, 0 -> light/235)."];
+    cornerDir_phase3 [label="cornerDir(u,v,quat,...)\n{ shared, see above }", fillcolor="#f6d9d1", tooltip="Same shared NDC -> world ray primitive."];
+    solveLinearSystem_p3 [label="solveLinearSystem(A,b)\n{ shared, 5x5 this time }", fillcolor="#f6d9d1", tooltip="Same shared solver as Phase 1, now for the 5-parameter (3 rotation + 2 position) normal equations."];
+  }
+
+  // ── Debug / visualization side-effects ───────────────────────────────────
+  subgraph cluster_debug {
+    label="Debug / visualization side-effects — consume the result, don't feed back (src/sphereLab.ts)";
+    style="rounded,filled"; color="#d9d9d9"; fillcolor="#f2f2f2";
+    updateGradientCirclesDebug [label="updateGradientCirclesDebug()\n{ great-circle overlay for the current vote band }", fillcolor="#e6e6e6", tooltip="Redraws the sphere's great-circle overlay from whichever magnitude band votesInMagnitudeBand currently selects -- purely visual, re-derived from lastVotes."];
+    updateRecoveredCamGizmo [label="updateRecoveredCamGizmo()\n{ green gizmo box at the decoded camPos }", fillcolor="#e6e6e6", tooltip="Positions the green recovered-camera gizmo at lastPositionDecode.camPos with the (assumed-known) true camQuat orientation, so any visible gap from the yellow ground-truth gizmo is purely positional error."];
+    applyRecoveredFloorOverlay [label="applyRecoveredFloorOverlay()\n{ places a textured plane at the recovered floor pose }", fillcolor="#e6e6e6", tooltip="Sizes and positions a semi-transparent plane matching Projected Cam's own bin extent, oriented via the recovered Drow/Dcol/Dnormal, for a direct visual comparison against the true floor mesh."];
+    updateContaminationOverlays [label="updateContaminationOverlays()\n{ red/orange overlay: badness vs. the true/reconstructed field }", fillcolor="#e6e6e6", tooltip="Only runs in 'through' (camera) view mode. Recomputes whichever of the 3 direction-based fields (raw/effective/walked) matches the currently-selected field view and scores each pixel's deviation from either the true tangent direction (cheat) or the reconstructed one (non-cheat), painting an alpha-blended overlay."];
+    computeWalkedGradientField [label="computeWalkedGradientField(field)\n{ runs guidedTangentDirection over a whole field }", fillcolor="#e6e6e6", tooltip="Factored out so the 'walked' preview and the contamination overlays share the exact same per-pixel walk as computeWorldVotes, rather than risking silent drift between duplicated loops."];
+    drawSampleLattice [label="drawSampleLattice(x,y,w,h)\n{ on-demand: dots at each decode sample, colored by correctness }", fillcolor="#e6e6e6", tooltip="One dot per buildDecodeSampleGrid sample point, positioned via the SAME world-to-bin mapping Projected Cam uses (so position always looks aligned), filled with the sampled bit and stroked green/red by lastDecodeCorrectness -- drawn on demand while the sample-lattice toggle is on, not part of runAxesReconstruction itself."];
+    drawMarginalLines [label="drawMarginalLines(x,y,w,h)\n{ on-demand: the two marginal-accumulation line graphs }", fillcolor="#e6e6e6", tooltip="Redraws the column/row gradient-profile graphs from lastMarginals every frame while in Projected Cam mode -- cheap, so not gated behind the capture cycle."];
+    updatePositionReadoutText [label="updatePositionReadoutText()\n{ formats the on-screen distance/period readout }", fillcolor="#e6e6e6", tooltip="Formats lastMarginals + lastProjectedBins into the human-readable distance/period text shown beside Projected Cam."];
+  }
+
+  // ── Shared linear algebra ────────────────────────────────────────────────
+  subgraph cluster_linalg {
+    label="Shared linear algebra (src/linalg.ts)";
+    style="rounded,filled"; color="#cddbe0"; fillcolor="#e8f1f3";
+    smallestEigenvector [label="smallestEigenvector(M)\n{ eigenvector of the SMALLEST eigenvalue }", fillcolor="#d5e6ea", tooltip="Returns the eigenvector of a symmetric matrix's smallest eigenvalue -- the least-squares null space of a set of homogeneous linear constraints."];
+    jacobiEigenSymmetric [label="jacobiEigenSymmetric(A)\n{ classic cyclic Jacobi eigenvalue algorithm }", fillcolor="#dcebee", tooltip="Classic cyclic Jacobi eigenvalue algorithm for small (3x3) symmetric matrices."];
+  }
+
+  // ── Edges: setup ──────────────────────────────────────────────────────────
+  generateTorus -> buildLookupTableSparse [style=dashed, label="  order 4", fontsize=9];
+  buildTorusFromCandidate -> buildLookupTableSparse [style=dashed, label="  order 5", fontsize=9];
+
+  // ── Edges: capture simulation internals ──────────────────────────────────
+  captureDistortedGrayscale -> renderCamRT;
+  captureDistortedGrayscale -> toGrayscale_cap;
+  captureDistortedGrayscale -> applyAntialiasFilter;
+  captureDistortedGrayscale -> lensBlur;
+  captureDistortedGrayscale -> downsampleBoxAverage;
+  captureDistortedGrayscale -> addGaussianNoise;
+
+  // ── Edges: runAxesReconstruction's own sequence (THE spine) ──────────────
+  // constraint=false on steps 3 onward: those all skip past the very next
+  // band (Capture) straight to something further down (Phase 1, Distance,
+  // Decode, Phase 3, or Debug) -- left constrained, EVERY one of the
+  // orchestrator's ~17 targets would compete to sit immediately below it at
+  // the same rank, fighting the invisible spine below instead of stacking
+  // in sequence. Steps 1-2 (into Capture, the true next band) are left
+  // constrained since they agree with the spine rather than fight it.
+  runAxesReconstruction -> captureDistortedGrayscale [label="  1", fontsize=10];
+  runAxesReconstruction -> flipRowsF64 [label="  2", fontsize=10];
+  runAxesReconstruction -> computeWorldVotes [label="  3", fontsize=10, constraint=false];
+  runAxesReconstruction -> updateGradientCirclesDebug [label="  4", fontsize=10, color="#aaaaaa", constraint=false];
+  runAxesReconstruction -> votesInMagnitudeBand [label="  5", fontsize=10, constraint=false];
+  runAxesReconstruction -> fitPairOfPlanes [label="  6", fontsize=10, constraint=false];
+  runAxesReconstruction -> refineOrientationLM [label="  7  if orientationLM", fontsize=10, style=dotted, color="#e08a2e", constraint=false];
+  runAxesReconstruction -> angleBetweenDegV [label="  8  row/col + sign", fontsize=10, constraint=false];
+  runAxesReconstruction -> buildProjectedTexture [label="  9  1st: placeholder dist=1", fontsize=10, constraint=false];
+  runAxesReconstruction -> measurePeriodDistance [label="  10  sub-bin refine", fontsize=10, constraint=false];
+  runAxesReconstruction -> buildProjectedTexture [label="  11  2nd: rough dist corrected", fontsize=10, constraint=false];
+  runAxesReconstruction -> runPositionDecode [label="  12", fontsize=10, constraint=false];
+  runAxesReconstruction -> computePhotometricSamples [label="  13  if positionLM", fontsize=10, style=dotted, color="#e08a2e", constraint=false];
+  runAxesReconstruction -> refineOrientationAndPositionLM [label="  14  if positionLM", fontsize=10, style=dotted, color="#e08a2e", constraint=false];
+  runAxesReconstruction -> buildProjectedTexture [label="  15  3rd: post-Phase-3, if positionLM", fontsize=10, style=dotted, color="#e08a2e", constraint=false];
+  runAxesReconstruction -> measurePeriodDistance [label="  16  2nd call, if positionLM", fontsize=10, style=dotted, color="#e08a2e", constraint=false];
+  runAxesReconstruction -> buildProjectedTexture [label="  17  4th: final, if positionLM", fontsize=10, style=dotted, color="#e08a2e", constraint=false];
+  runAxesReconstruction -> updateRecoveredCamGizmo [label="  18", fontsize=10, color="#aaaaaa", constraint=false];
+  runAxesReconstruction -> applyRecoveredFloorOverlay [label="  19", fontsize=10, color="#aaaaaa", constraint=false];
+  runAxesReconstruction -> updateContaminationOverlays [label="  20  if mode='through'", fontsize=10, style=dotted, color="#e08a2e", constraint=false];
+  runAxesReconstruction -> updatePositionReadoutText [label="  21", fontsize=10, color="#aaaaaa", constraint=false];
+
+  // ── Edges: Phase 1 internals ──────────────────────────────────────────────
+  computeWorldVotes -> computeGradientField;
+  computeWorldVotes -> computeGradientAgreementField;
+  computeWorldVotes -> computeEffectiveGradientField;
+  computeWorldVotes -> guidedTangentDirection [label="  per pixel", fontsize=9];
+  computeWorldVotes -> cornerDir_votes [label="  x2 per pixel", fontsize=9];
+  fitPairOfPlanes -> smallestEigenvector_p1;
+  fitPairOfPlanes -> jacobiEigenSymmetric_p1 [label="  again, on 3x3 M", fontsize=9];
+  smallestEigenvector_p1 -> jacobiEigenSymmetric_p1;
+  refineOrientationLM -> orientationCost;
+  refineOrientationLM -> solveLinearSystem_p1 [label="  per LM iteration", fontsize=9];
+  orientationCost -> fourFoldResidual;
+
+  // ── Edges: distance/period internals ─────────────────────────────────────
+  buildProjectedTexture -> castAndBucketProjectedSamples;
+  buildProjectedTexture -> computeProjectedMarginals;
+  castAndBucketProjectedSamples -> cornerDir_proj [label="  per source pixel", fontsize=9];
+  castAndBucketProjectedSamples -> computeGradientField_proj;
+  computeProjectedMarginals -> autocorrelationPeriod [label="  col + row", fontsize=9];
+  computeProjectedMarginals -> findPhase [label="  col + row", fontsize=9];
+  measurePeriodDistance -> castAndBucketProjectedSamples [label="  adaptive resolution", fontsize=9];
+  measurePeriodDistance -> computeProjectedMarginals;
+
+  // ── Edges: position decode internals ─────────────────────────────────────
+  runPositionDecode -> buildDecodeSampleGrid;
+  runPositionDecode -> tallyPositionVotes;
+  buildDecodeSampleGrid -> binarize_decode;
+  tallyPositionVotes -> packPatchCellsLocal [label="  x4 orient x2 mirror", fontsize=9];
+  tallyPositionVotes -> debruijnLookup_node [label="  per window", fontsize=9];
+  tallyPositionVotes -> rotateShift_decode;
+
+  // ── Edges: Phase 3 internals ──────────────────────────────────────────────
+  refineOrientationAndPositionLM -> predictedBilinear [label="  per sample per iteration", fontsize=9];
+  refineOrientationAndPositionLM -> cornerDir_phase3 [label="  per sample per iteration", fontsize=9];
+  refineOrientationAndPositionLM -> solveLinearSystem_p3 [label="  per LM iteration", fontsize=9];
+  predictedBilinear -> torusBrightness [label="  x4 neighbors", fontsize=9];
+
+  // ── Edges: debug internals ────────────────────────────────────────────────
+  // constraint=false throughout: these all point BACKWARD (a later-stacked
+  // Debug-cluster function reaching up into an earlier stage's shared
+  // utility), which would otherwise drag Debug back up the page fighting
+  // the invisible spine below.
+  updateGradientCirclesDebug -> votesInMagnitudeBand [style=dashed, label="  re-slices lastVotes", fontsize=9, constraint=false];
+  updateContaminationOverlays -> computeGradientField [style=dashed, constraint=false];
+  updateContaminationOverlays -> computeGradientAgreementField [style=dashed, constraint=false];
+  updateContaminationOverlays -> computeEffectiveGradientField [style=dashed, constraint=false];
+  updateContaminationOverlays -> computeWalkedGradientField [style=dashed, constraint=false];
+  computeWalkedGradientField -> guidedTangentDirection [label="  per pixel", fontsize=9, constraint=false];
+  drawSampleLattice -> castAndBucketProjectedSamples [style=dashed, label="  reuses lastProjectedBins", fontsize=9, color="#bbbbbb", constraint=false];
+  drawMarginalLines -> castAndBucketProjectedSamples [style=dashed, label="  reuses lastMarginals", fontsize=9, color="#bbbbbb", constraint=false];
+
+  // ── Invisible rank-forcing spine ──────────────────────────────────────────
+  // Purely a layout aid: chains one anchor node per cluster, in pipeline
+  // order, so `dot` stacks the clusters as strict top-to-bottom bands
+  // (Setup, Orchestrator, Capture, Phase 1, Distance, Decode, Phase 3,
+  // Debug, Shared) instead of spreading the orchestrator's ~17-way fan-out
+  // out sideways. invis edges still count toward ranking even though they
+  // draw nothing -- every REAL edge above is untouched and will simply route
+  // (including upward, e.g. Debug's calls back into Phase 1's field
+  // functions) wherever it needs to within this fixed vertical order.
+  buildLookupTableSparse -> runAxesReconstruction [style=invis, weight=10];
+  flipRowsF64 -> computeWorldVotes [style=invis, weight=10];
+  angleBetweenDegV -> buildProjectedTexture [style=invis, weight=10];
+  measurePeriodDistance -> runPositionDecode [style=invis, weight=10];
+  tallyPositionVotes -> computePhotometricSamples [style=invis, weight=10];
+  refineOrientationAndPositionLM -> updateGradientCirclesDebug [style=invis, weight=10];
+  updatePositionReadoutText -> smallestEigenvector [style=invis, weight=10];
+
+  // ── Legend ────────────────────────────────────────────────────────────────
+  subgraph cluster_legend {
+    label="Legend";
+    style="rounded,filled"; color="#cccccc"; fillcolor="#f7f7f7"; fontsize=10;
+    legend_call [label="solid arrow = direct function call", shape=plaintext, fillcolor="none"];
+    legend_seq [label="numbered edge = runAxesReconstruction's own execution order", shape=plaintext, fillcolor="none"];
+    legend_cond [label="dotted orange edge = conditional on a UI toggle/mode (orientationLM, positionLM, mode='through')", shape=plaintext, fillcolor="none"];
+    legend_sched [label="dashed gray arrow = re-derives/reuses cached state, not a fresh compute", shape=plaintext, fillcolor="none"];
+    legend_debug [label="gray cluster = visualization/UI side-effect, consumes the result but doesn't feed back into it", shape=plaintext, fillcolor="none"];
+  }
+}

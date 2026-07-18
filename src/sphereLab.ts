@@ -14,7 +14,7 @@
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
-import { generateTorus, buildLookupTable } from './debruijn.ts';
+import { generateTorus, buildLookupTableSparse, buildTorusFromCandidate, ORDER5_CANDIDATE } from './debruijn.ts';
 import { toGrayscale, binarize, rotateShift } from './decode.ts';
 import { jacobiEigenSymmetric, smallestEigenvector } from './linalg.ts';
 
@@ -42,6 +42,12 @@ const contamToggles = document.getElementById('contamToggles') as HTMLDivElement
 const toggleHideFieldBtn = document.getElementById('toggleHideField') as HTMLButtonElement;
 const toggleTrueContamBtn = document.getElementById('toggleTrueContam') as HTMLButtonElement;
 const toggleReconContamBtn = document.getElementById('toggleReconContam') as HTMLButtonElement;
+const gradientArrowCanvas = document.getElementById('gradientArrowOverlay') as HTMLCanvasElement;
+const gradientArrowCtx = gradientArrowCanvas.getContext('2d')!;
+const toggleGradientArrowBtn = document.getElementById('toggleGradientArrow') as HTMLButtonElement;
+const toggleGradientArrowModeBtn = document.getElementById('toggleGradientArrowMode') as HTMLButtonElement;
+const toggleTangentWalkPathBtn = document.getElementById('toggleTangentWalkPath') as HTMLButtonElement;
+const arrowToggles = document.getElementById('arrowToggles') as HTMLDivElement;
 
 const modeBtns: Record<Mode, HTMLButtonElement> = {
   world: document.getElementById('modeWorld') as HTMLButtonElement,
@@ -105,6 +111,8 @@ const state = {
   mode: 'world' as Mode,
   showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showFloor: true, showGizmoBody: true, showRecoveredFloor: true, showSampleLattice: false,
   showTrueContamination: false, showReconstructedContamination: false, hideField: false,
+  showGradientArrow: false, showGradientArrowPerpendicular: false, gradientArrowScale: 2,
+  showTangentWalkPath: false,
   simNoise: 8, simBlur: 1, simGradRadius: 1, coherenceRadius: 1,
   // Guided tangent-walk gradient direction (see conversation) -- fixes
   // per-pixel gradient direction being noise-fragile enough that the
@@ -163,11 +171,16 @@ scene.add(sun);
 // repeat-wrapping the texture reproduces the true infinite pattern with no
 // seam — the same fact the real tracker relies on to work from any crop).
 const ORDER = parseInt(new URLSearchParams(location.search).get('order') ?? '4', 10);
-const debruijn = generateTorus(ORDER);
+// Order 5's full R x C torus (~33.5M cells) has no known efficient
+// construction free of D4 rotation/reflection collisions, so it isn't used
+// directly -- ORDER5_CANDIDATE is a searched 256x256 sub-region with a low
+// (1.096%) residual collision rate instead (see buildTorusFromCandidate's
+// header comment in debruijn.ts).
+const debruijn = ORDER === 5 ? buildTorusFromCandidate(5, ORDER5_CANDIDATE) : generateTorus(ORDER);
 const { R, C, torus } = debruijn;
 // For decoding an ORDER x ORDER sampled bit window back into an absolute
 // torus (row,col) position -- see runPositionDecode.
-const debruijnLookup = buildLookupTable(debruijn);
+const debruijnLookup = buildLookupTableSparse(debruijn);
 // One instance of the torus, sized in world units at GRID_STEP per cell —
 // NOT tiled. Half-extents, since grid lines/great circles below are indexed
 // out from the origin at the pattern's center.
@@ -558,6 +571,13 @@ const RECON_CONTAM_COLOR = [235, 150, 20] as const;
 // whatever's already on screen.
 function updateContaminationOverlays() {
   if (!state.showTrueContamination && !state.showReconstructedContamination) return;
+  // Only meaningful for the three DIRECTION fields (gradient/effective/
+  // walked) -- 'agreement' is scalar-only (no direction to score badness
+  // against), and the pre-filter views (raw/antialiased/downsampled/noised)
+  // aren't gradient fields at all. The toggle buttons are disabled outside
+  // this set (see updateContaminationAvailability), so this is a defensive
+  // backstop, not the primary gate.
+  if (state.fieldView !== 'gradient' && state.fieldView !== 'effective' && state.fieldView !== 'walked') return;
   // Real analysis-equivalent brightness, NOT whatever field view happens to
   // be on screen (see lastNoisedPreviewGray's comment) -- null only if
   // updateDistortedPreview hasn't run at all yet (cold start), in which case
@@ -566,11 +586,17 @@ function updateContaminationOverlays() {
   const w = rtSize.w, h = rtSize.h;
   const lum = lastNoisedPreviewGray;
   const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
-  // Same field, same agreement computeWorldVotes itself uses to weight
-  // votes -- shared across both overlays below since neither the true nor
-  // the reconstructed reference directions affect this computation at all.
-  const field = computeGradientField(lum, w, h, Math.round(state.simGradRadius));
-  const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
+  // Picks the SAME field the currently-selected view displays (and, for
+  // 'walked', the SAME field computeWorldVotes actually casts votes from --
+  // see its own comment) rather than always scoring the raw gradient
+  // regardless of what's on screen, so flipping between the three views
+  // shows what each one's own contamination actually looks like, not one
+  // fixed computation relabeled three ways.
+  const rawField = computeGradientField(lum, w, h, Math.round(state.simGradRadius));
+  const agreement = computeGradientAgreementField(rawField, Math.round(state.coherenceRadius));
+  const field = state.fieldView === 'gradient' ? rawField
+    : state.fieldView === 'effective' ? computeEffectiveGradientField(rawField, agreement)
+    : computeWalkedGradientField(computeEffectiveGradientField(rawField, agreement));
 
   if (state.showTrueContamination) {
     const alpha = computeContaminationAlpha(field, agreement, ROW_DIR, COL_DIR, camQuat, vFovRad, RT_ASPECT);
@@ -1011,7 +1037,26 @@ function captureDistortedGrayscale(): { gray: Float64Array; w: number; h: number
 // wrong thing, or nothing at all).
 let lastNoisedPreviewGray: Float64Array | null = null;
 
+// Whichever GradientField is CURRENTLY on screen (gradient/walked/effective
+// only -- 'agreement' is scalar, everything else isn't a vector field at
+// all), reset every updateDistortedPreview call and set only in those three
+// branches below. Lets the gradient-arrow hover overlay (see
+// updateHoverOverlays) look up the exact (fx,fy) under the cursor
+// instead of trying to reverse-engineer a direction out of the hue-encoded
+// display pixels.
+let lastDisplayedVectorField: GradientField | null = null;
+
+// The EFFECTIVE (agreement-scaled, pre-walk) field specifically -- cached
+// whenever fieldView is 'effective' OR 'walked' (both branches compute it as
+// an intermediate step either way), since the tangent-walk-path hover
+// overlay always needs to seed its recomputed walk from this field, never
+// from the already-walked result, regardless of which of the two views is
+// actually being displayed (see updateHoverOverlays).
+let lastEffectiveField: GradientField | null = null;
+
 function updateDistortedPreview() {
+  lastDisplayedVectorField = null;
+  lastEffectiveField = null;
   const { w: cw, h: ch } = captureRTSize;
   const rawRGBA = new Uint8Array(cw * ch * 4);
   renderer.readRenderTargetPixels(camRT, 0, 0, cw, ch, rawRGBA);
@@ -1075,6 +1120,7 @@ function updateDistortedPreview() {
       distortedPreviewTex.needsUpdate = true;
     } else if (state.fieldView === 'gradient') {
       const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
+      lastDisplayedVectorField = field;
       paintVectorFieldAsColor(field, distortedPreviewData);
       distortedPreviewTex.needsUpdate = true;
     } else if (state.fieldView === 'walked') {
@@ -1087,17 +1133,10 @@ function updateDistortedPreview() {
       const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
       const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
       const effective = computeEffectiveGradientField(field, agreement);
-      const { fx, fy, r } = effective;
-      const walkedFx = new Float64Array(fx.length), walkedFy = new Float64Array(fy.length);
-      for (let y = r; y < rtSize.h - r; y++) {
-        for (let x = r; x < rtSize.w - r; x++) {
-          const i = y * rtSize.w + x;
-          if (fx[i] === 0 && fy[i] === 0) continue;
-          const walked = guidedTangentDirection(fx, fy, rtSize.w, rtSize.h, x, y, fx[i], fy[i]);
-          walkedFx[i] = walked.fx; walkedFy[i] = walked.fy;
-        }
-      }
-      paintVectorFieldAsColor({ fx: walkedFx, fy: walkedFy, w: rtSize.w, h: rtSize.h, r }, distortedPreviewData);
+      lastEffectiveField = effective;
+      const walked = computeWalkedGradientField(effective);
+      lastDisplayedVectorField = walked;
+      paintVectorFieldAsColor(walked, distortedPreviewData);
       distortedPreviewTex.needsUpdate = true;
     } else if (state.fieldView === 'agreement') {
       const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
@@ -1108,6 +1147,8 @@ function updateDistortedPreview() {
       const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
       const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
       const effective = computeEffectiveGradientField(field, agreement);
+      lastEffectiveField = effective;
+      lastDisplayedVectorField = effective;
       paintVectorFieldAsColor(effective, distortedPreviewData);
       distortedPreviewTex.needsUpdate = true;
     }
@@ -1390,6 +1431,27 @@ function guidedTangentDirection(
   // through to the output for free, with no separate weighting step needed
   // downstream.
   return { fx: Math.cos(avgTheta) * seedMag, fy: Math.sin(avgTheta) * seedMag };
+}
+
+// Runs guidedTangentDirection at every pixel of a field, producing a new
+// GradientField of walked (fx,fy) -- factored out since both the 'walked'
+// field-view preview and the true/reconstructed contamination overlays (see
+// updateContaminationOverlays) need the exact same per-pixel walk, and
+// duplicating that loop would risk them silently drifting apart again the
+// way the contamination overlay already had from computeWorldVotes (see
+// conversation).
+function computeWalkedGradientField(field: GradientField): GradientField {
+  const { fx, fy, w, h, r } = field;
+  const walkedFx = new Float64Array(fx.length), walkedFy = new Float64Array(fy.length);
+  for (let y = r; y < h - r; y++) {
+    for (let x = r; x < w - r; x++) {
+      const i = y * w + x;
+      if (fx[i] === 0 && fy[i] === 0) continue;
+      const walked = guidedTangentDirection(fx, fy, w, h, x, y, fx[i], fy[i]);
+      walkedFx[i] = walked.fx; walkedFy[i] = walked.fy;
+    }
+  }
+  return { fx: walkedFx, fy: walkedFy, w, h, r };
 }
 
 // gray is expected to already be captureDistortedGrayscale's output --
@@ -2926,8 +2988,8 @@ function tallyPositionVotes(grid: DecodeSampleGrid): VoteResult | null {
         totalWindows++;
         for (let o = 0; o < 4; o++) {
           const key = packPatchCellsLocal(block, ORDER, o);
-          const packed = debruijnLookup[key];
-          if (packed === -1) continue;
+          const packed = debruijnLookup.get(key);
+          if (packed === undefined) continue;
           const matchRow = Math.floor(packed / C), matchCol = packed % C;
           const [dr, dc] = rotateShift(i0, j0, o);
           const anchorRow = ((matchRow - dr) % R + R) % R;
@@ -3433,6 +3495,8 @@ function setMode(m: Mode) {
   if (m === 'projected') buildProjectedTexture();
   else { hideMarginalLines(); hideSampleLattice(); }
   contamToggles.style.display = m === 'through' ? 'flex' : 'none';
+  arrowToggles.style.display = m === 'through' ? 'flex' : 'none';
+  if (m !== 'through') clearGradientArrowOverlay();
   // updateDistortedPreview first: lastNoisedPreviewGray may still be null
   // (cold start) or stale (overlay was off while a 'raw'/'none' view's
   // early-return skipped computing it -- see updateDistortedPreview's
@@ -3455,6 +3519,244 @@ function setPanelCollapsed(collapsed: boolean) {
 panelToggle.addEventListener('click', () => setPanelCollapsed(!panel.classList.contains('collapsed')));
 setPanelCollapsed(savedControls['panelCollapsed'] === '1');
 
+// Letterbox rect for the fixed-aspect gizmo camera within whatever shape the
+// window currently is -- shared by animate()'s 'through' branch (to render
+// into it) and updateHoverOverlays (to map a mouse position back to a
+// field pixel), so the two can never disagree about where Through-Cam
+// actually is on screen.
+function computeThroughRect(): { x: number; y: number; w: number; h: number } {
+  const winAspect = innerWidth / innerHeight;
+  let w = innerWidth, h = innerHeight, x = 0, y = 0;
+  if (winAspect > RT_ASPECT) { w = innerHeight * RT_ASPECT; x = (innerWidth - w) / 2; }
+  else { h = innerWidth / RT_ASPECT; y = (innerHeight - h) / 2; }
+  return { x, y, w, h };
+}
+
+// Draws one arrow from the center of whichever field pixel is currently
+// under the mouse, in that pixel's (fx,fy) direction, length proportional to
+// its magnitude (state.gradientArrowScale is the proportionality constant,
+// not a screen/field resolution correction -- keeps the arrow's behavior
+// predictable regardless of how viewportW/H compares to the window size).
+// Only meaningful for the 3 actual vector fields (gradient/walked/effective)
+// -- 'agreement' is scalar, and the pre-filter views aren't fields at all --
+// so this clears and bails whenever the current view/mode/toggle doesn't
+// support it, same gating updateContaminationAvailability already uses.
+function clearGradientArrowOverlay() {
+  gradientArrowCtx.clearRect(0, 0, gradientArrowCanvas.width, gradientArrowCanvas.height);
+}
+// Draws one arrow from (px,py) toward (px+dirVecX*scale, py+dirVecY*scale) --
+// dirVecX/Y already carries both direction AND magnitude (a raw screen-space
+// delta, not a unit vector), same "length = magnitude * scale" contract for
+// both arrows. Dark outline pass first, since the fill color deliberately
+// matches whatever hue the background field-view painted at this pixel (see
+// updateHoverOverlays), which would otherwise make it nearly
+// invisible against a similarly-colored patch of the field.
+function drawOneArrow(px: number, py: number, dirVecX: number, dirVecY: number, color: string) {
+  const tipX = px + dirVecX * state.gradientArrowScale, tipY = py + dirVecY * state.gradientArrowScale;
+  const headLen = 8, headAngle = Math.PI / 7;
+  const backAngle = Math.atan2(tipY - py, tipX - px);
+  const headPath = new Path2D();
+  headPath.moveTo(tipX, tipY);
+  headPath.lineTo(tipX - headLen * Math.cos(backAngle - headAngle), tipY - headLen * Math.sin(backAngle - headAngle));
+  headPath.lineTo(tipX - headLen * Math.cos(backAngle + headAngle), tipY - headLen * Math.sin(backAngle + headAngle));
+  headPath.closePath();
+
+  const ctx = gradientArrowCtx;
+  ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 4;
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(tipX, tipY); ctx.stroke();
+  ctx.fill(headPath);
+  ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
+
+  ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(tipX, tipY); ctx.stroke();
+  ctx.fill(headPath);
+  ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2); ctx.fill();
+}
+
+// Diagnostic-only re-run of guidedTangentDirection's walk that also records
+// which pixels actually got incorporated into the running average (not just
+// the final direction) -- a SEPARATE, recomputed-on-hover copy rather than
+// instrumenting the real guidedTangentDirection (called on every qualifying
+// pixel in the real pipeline every capture; recording a path there would add
+// real per-pixel allocation cost to the hot path just for this debug
+// feature). Must stay in exact lockstep with guidedTangentDirection's own
+// logic -- same stop conditions, same grace handling -- or this would show a
+// walk that isn't the one the real pipeline actually ran. Records the seed
+// pixel itself first, then every sample that passed BOTH checks (magnitude
+// and deviation) and so actually got folded into sumCos/sumSin -- a
+// tolerated-but-skipped sample (within grace) is deliberately NOT included,
+// since it never influenced the result either.
+function computeTangentWalkIncludedPixels(
+  fx: Float64Array, fy: Float64Array, w: number, h: number,
+  x: number, y: number, seedFx: number, seedFy: number,
+): { x: number; y: number }[] {
+  const included: { x: number; y: number }[] = [{ x, y }];
+  const seedTheta = Math.atan2(seedFy, seedFx);
+  const tdx = -Math.sin(seedTheta), tdy = Math.cos(seedTheta);
+  const seedMag = Math.hypot(seedFx, seedFy);
+  let sumCos = Math.cos(2 * seedTheta) * seedMag;
+  let sumSin = Math.sin(2 * seedTheta) * seedMag;
+  let runningMag = seedMag;
+  let sampleCount = 1;
+  const maxSteps = state.tangentWalkMaxSteps;
+  const devCos = Math.cos(2 * THREE.MathUtils.degToRad(state.tangentWalkDeviationDeg));
+  const magFraction = state.tangentWalkMagFraction;
+  const grace = state.tangentWalkGraceSamples;
+  for (const sign of [1, -1]) {
+    let violations = 0;
+    for (let k = 1; k <= maxSteps; k++) {
+      const sx = Math.round(x + sign * k * tdx), sy = Math.round(y + sign * k * tdy);
+      if (sx < 0 || sx >= w || sy < 0 || sy >= h) break;
+      const si = sy * w + sx;
+      const sfx = fx[si], sfy = fy[si];
+      const mag = Math.hypot(sfx, sfy);
+      if (mag === 0 || mag < runningMag * magFraction) {
+        violations++;
+        if (violations >= grace) break;
+        continue;
+      }
+      const theta = Math.atan2(sfy, sfx);
+      const c2 = Math.cos(2 * theta), s2 = Math.sin(2 * theta);
+      const avgLen = Math.hypot(sumCos, sumSin);
+      const cosDeviation = avgLen > 0 ? (c2 * sumCos + s2 * sumSin) / avgLen : 1;
+      if (cosDeviation < devCos) {
+        violations++;
+        if (violations >= grace) break;
+        continue;
+      }
+      violations = 0;
+      sumCos += c2 * mag; sumSin += s2 * mag;
+      runningMag = (runningMag * sampleCount + mag) / (sampleCount + 1);
+      sampleCount++;
+      included.push({ x: sx, y: sy });
+    }
+  }
+  return included;
+}
+
+// One tight stroked box per included pixel's on-screen footprint -- the seed
+// (always included[0]) stroked in white and slightly thicker so the walk's
+// starting point stays identifiable among however many other pixels it
+// picked up.
+function drawTangentWalkOutline(
+  rect: { x: number; y: number; w: number; h: number }, fieldW: number, fieldH: number,
+  fx: Float64Array, fy: Float64Array, included: { x: number; y: number }[],
+) {
+  const cellW = rect.w / fieldW, cellH = rect.h / fieldH;
+  const ctx = gradientArrowCtx;
+  for (let idx = 0; idx < included.length; idx++) {
+    const { x: fc, y: fr } = included[idx];
+    const boxLeft = rect.x + fc * cellW;
+    // Same bottom-up field-row -> top-down screen-Y flip as everywhere else
+    // in this file's Through-Cam pixel math.
+    const boxTop = rect.y + rect.h - (fr + 1) * cellH;
+    const isSeed = idx === 0;
+    if (isSeed) {
+      // Inverted color of THIS pixel's own hue (same fold-angle -> hue
+      // convention as the arrows/paintVectorFieldAsColor, full saturation),
+      // not a fixed color -- guarantees contrast against whatever the
+      // background field-view painted right here, rather than picking one
+      // color that happens to clash with some hues and not others.
+      const si = fr * fieldW + fc;
+      let hueTheta = Math.atan2(fy[si], fx[si]);
+      if (hueTheta < 0) hueTheta += Math.PI;
+      if (hueTheta >= Math.PI) hueTheta -= Math.PI;
+      const [rr, gg, bb] = hsvToRgb((hueTheta / Math.PI) * 360, 1, 1);
+      ctx.strokeStyle = `rgb(${255 - rr},${255 - gg},${255 - bb})`;
+      ctx.lineWidth = 2.5;
+    } else {
+      ctx.strokeStyle = '#000';
+      ctx.lineWidth = 1.5;
+    }
+    ctx.strokeRect(boxLeft + 0.5, boxTop + 0.5, Math.max(1, cellW - 1), Math.max(1, cellH - 1));
+  }
+}
+
+// Single per-hover entry point: clears the overlay canvas ONCE, then draws
+// whichever of the two independent hover diagnostics (arrows, tangent-walk
+// outline) are currently toggled on, sharing one field-pixel lookup between
+// them. Arrows read lastDisplayedVectorField (whatever's actually on
+// screen); the walk outline specifically needs lastEffectiveField instead,
+// even while 'walked' is the displayed view -- the real pipeline always
+// walks the EFFECTIVE (pre-walk) field, so seeding the recomputation from an
+// already-walked value would show a different, wrong walk.
+function updateHoverOverlays(clientX: number, clientY: number) {
+  const arrowsOn = state.showGradientArrow || state.showGradientArrowPerpendicular;
+  const walkOn = state.showTangentWalkPath;
+  if (state.mode !== 'through' || (!arrowsOn && !walkOn)) { clearGradientArrowOverlay(); return; }
+  const rect = computeThroughRect();
+  if (clientX < rect.x || clientX >= rect.x + rect.w || clientY < rect.y || clientY >= rect.y + rect.h) { clearGradientArrowOverlay(); return; }
+
+  const fieldW = rtSize.w, fieldH = rtSize.h;
+  const nx = (clientX - rect.x) / rect.w, ny = (clientY - rect.y) / rect.h;
+  const fieldCol = Math.min(fieldW - 1, Math.max(0, Math.floor(nx * fieldW)));
+  // fx/fy come from captureDistortedGrayscale's GL-native BOTTOM-UP row
+  // order (row 0 = bottom of the image, see its own comment), so row 0 must
+  // map to the BOTTOM of the on-screen rect, not the top -- flip.
+  const fieldRow = Math.min(fieldH - 1, Math.max(0, Math.floor((1 - ny) * fieldH)));
+  const i = fieldRow * fieldW + fieldCol;
+
+  clearGradientArrowOverlay();
+
+  if (arrowsOn && lastDisplayedVectorField) {
+    const { fx, fy } = lastDisplayedVectorField;
+    const gx = fx[i], gy = fy[i];
+    const mag = Math.hypot(gx, gy);
+    if (mag > 0) {
+      const px = rect.x + (fieldCol + 0.5) * (rect.w / fieldW);
+      const py = rect.y + rect.h - (fieldRow + 0.5) * (rect.h / fieldH);
+      // Color always follows the GRADIENT's own hue (matching
+      // paintVectorFieldAsColor's convention: mod-pi folded angle -> hue,
+      // since direction and its 180-degree flip are the same physical
+      // edge), regardless of which direction is being drawn -- so both
+      // arrows' color always matches whatever hue the background field-view
+      // painted at this exact pixel.
+      let hueTheta = Math.atan2(gy, gx);
+      if (hueTheta < 0) hueTheta += Math.PI;
+      if (hueTheta >= Math.PI) hueTheta -= Math.PI;
+      const [rr, gg, bb] = hsvToRgb((hueTheta / Math.PI) * 360, 1, 1);
+      const color = `rgb(${rr},${gg},${bb})`;
+
+      // Screen Y is flipped from field Y (same bottom-up reasoning as
+      // above), so the Y component of any drawn direction flips too -- X
+      // needs no flip.
+      if (state.showGradientArrow) {
+        const theta = Math.atan2(gy, gx);
+        drawOneArrow(px, py, Math.cos(theta) * mag, -Math.sin(theta) * mag, color);
+      }
+      if (state.showGradientArrowPerpendicular) {
+        // Perpendicular rotates the vector 90 degrees (-gy,gx) -- a genuine
+        // rotation of (gx,gy), same magnitude, same construction as the
+        // tangent direction computeWorldVotes/guidedTangentDirection walk
+        // along -- since that's the direction that actually runs ALONG a
+        // grid line, it's often more legible to look at than the gradient
+        // itself, which points ACROSS the line it belongs to. Independent
+        // toggle from the gradient arrow above, so both can be shown at once.
+        const theta = Math.atan2(gx, -gy);
+        drawOneArrow(px, py, Math.cos(theta) * mag, -Math.sin(theta) * mag, color);
+      }
+    }
+  }
+
+  if (walkOn && lastEffectiveField) {
+    const { fx, fy } = lastEffectiveField;
+    const seedFx = fx[i], seedFy = fy[i];
+    if (seedFx !== 0 || seedFy !== 0) {
+      const included = computeTangentWalkIncludedPixels(fx, fy, fieldW, fieldH, fieldCol, fieldRow, seedFx, seedFy);
+      drawTangentWalkOutline(rect, fieldW, fieldH, fx, fy, included);
+    }
+  }
+}
+let lastHoverClientX = -1, lastHoverClientY = -1;
+canvas.addEventListener('pointermove', (e) => {
+  lastHoverClientX = e.clientX; lastHoverClientY = e.clientY;
+  updateHoverOverlays(e.clientX, e.clientY);
+});
+canvas.addEventListener('pointerleave', () => {
+  lastHoverClientX = -1; lastHoverClientY = -1;
+  clearGradientArrowOverlay();
+});
+
 toggleHideFieldBtn.addEventListener('click', () => {
   state.hideField = !state.hideField;
   toggleHideFieldBtn.classList.toggle('active', state.hideField);
@@ -3472,6 +3774,21 @@ toggleReconContamBtn.addEventListener('click', () => {
   toggleReconContamBtn.classList.toggle('active', state.showReconstructedContamination);
   updateDistortedPreview();
   updateContaminationOverlays();
+});
+toggleGradientArrowBtn.addEventListener('click', () => {
+  state.showGradientArrow = !state.showGradientArrow;
+  toggleGradientArrowBtn.classList.toggle('active', state.showGradientArrow);
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+});
+toggleGradientArrowModeBtn.addEventListener('click', () => {
+  state.showGradientArrowPerpendicular = !state.showGradientArrowPerpendicular;
+  toggleGradientArrowModeBtn.classList.toggle('active', state.showGradientArrowPerpendicular);
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+});
+toggleTangentWalkPathBtn.addEventListener('click', () => {
+  state.showTangentWalkPath = !state.showTangentWalkPath;
+  toggleTangentWalkPathBtn.classList.toggle('active', state.showTangentWalkPath);
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 });
 
 // ── Slider / checkbox wiring ─────────────────────────────────────────────
@@ -3537,7 +3854,68 @@ bindSlider('tangentWalkMaxSteps', (v) => { state.tangentWalkMaxSteps = v; markCa
 bindSlider('tangentWalkDeviationDeg', (v) => { state.tangentWalkDeviationDeg = v; markCaptureDirty(); }, (v) => `${v.toFixed(0)}°`);
 bindSlider('tangentWalkMagFraction', (v) => { state.tangentWalkMagFraction = v; markCaptureDirty(); }, (v) => v.toFixed(2));
 bindSlider('tangentWalkGraceSamples', (v) => { state.tangentWalkGraceSamples = v; markCaptureDirty(); }, (v) => v.toFixed(0));
-bindRadioGroup('fieldView', (v) => { state.fieldView = v as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'walked' | 'agreement' | 'effective'; markCaptureDirty(); });
+// Contamination overlays only make sense against a DIRECTION field
+// (gradient/effective/walked) -- 'agreement' is scalar-only (no direction to
+// score badness against), and the pre-filter views (raw/antialiased/
+// downsampled/noised) aren't gradient fields at all. Disables both toggle
+// buttons outside that set and clears any overlay currently showing, rather
+// than leaving a stale frame on screen once updateContaminationOverlays
+// itself stops updating it (see that function's own early-return).
+function updateContaminationAvailability() {
+  const relevant = state.fieldView === 'gradient' || state.fieldView === 'effective' || state.fieldView === 'walked';
+  toggleTrueContamBtn.disabled = !relevant;
+  toggleReconContamBtn.disabled = !relevant;
+  if (!relevant) {
+    state.showTrueContamination = false;
+    state.showReconstructedContamination = false;
+    toggleTrueContamBtn.classList.remove('active');
+    toggleReconContamBtn.classList.remove('active');
+    trueContamData.fill(0); trueContamTex.needsUpdate = true;
+    reconContamData.fill(0); reconContamTex.needsUpdate = true;
+  }
+}
+// Same relevance rule as updateContaminationAvailability (a direction field
+// is required), applied to the hover-arrow toggle instead -- separate
+// function since it disables/clears a different button+overlay pair, but
+// deliberately mirrors that one so the two never disagree about which field
+// views are "real" vector fields.
+function updateGradientArrowAvailability() {
+  const relevant = state.fieldView === 'gradient' || state.fieldView === 'effective' || state.fieldView === 'walked';
+  toggleGradientArrowBtn.disabled = !relevant;
+  toggleGradientArrowModeBtn.disabled = !relevant;
+  if (!relevant) {
+    state.showGradientArrow = false;
+    state.showGradientArrowPerpendicular = false;
+    toggleGradientArrowBtn.classList.remove('active');
+    toggleGradientArrowModeBtn.classList.remove('active');
+    clearGradientArrowOverlay();
+  }
+}
+// The walk itself only ever runs on the EFFECTIVE field (see
+// computeWorldVotes/updateDistortedPreview's 'walked' branch) -- narrower
+// than the arrows' relevant set, since a walk over the raw, un-scaled
+// 'gradient' view wouldn't correspond to anything the real pipeline actually
+// computes.
+function updateTangentWalkPathAvailability() {
+  const relevant = state.fieldView === 'effective' || state.fieldView === 'walked';
+  toggleTangentWalkPathBtn.disabled = !relevant;
+  if (!relevant) {
+    state.showTangentWalkPath = false;
+    toggleTangentWalkPathBtn.classList.remove('active');
+    clearGradientArrowOverlay();
+  }
+}
+bindRadioGroup('fieldView', (v) => {
+  state.fieldView = v as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'walked' | 'agreement' | 'effective';
+  markCaptureDirty();
+  updateContaminationAvailability();
+  updateGradientArrowAvailability();
+  updateTangentWalkPathAvailability();
+});
+updateContaminationAvailability(); // set the correct initial disabled/enabled state for whichever fieldView loaded (saved or default)
+updateGradientArrowAvailability();
+updateTangentWalkPathAvailability();
+bindSlider('gradientArrowScale', (v) => { state.gradientArrowScale = v; updateHoverOverlays(lastHoverClientX, lastHoverClientY); }, (v) => v.toFixed(1));
 bindSlider('circleSamplePercentMin', (v) => { state.circleSamplePercentMin = v; updateGradientCirclesDebug(); }, (v) => `${v.toFixed(0)}%`);
 bindSlider('circleSamplePercentMax', (v) => { state.circleSamplePercentMax = v; updateGradientCirclesDebug(); }, (v) => `${v.toFixed(0)}%`);
 bindCheckbox('showRecoveredPoles', (v) => (state.showRecoveredPoles = v));
@@ -3681,6 +4059,10 @@ function resize() {
   insideCam.aspect = innerWidth / innerHeight;
   insideCam.updateProjectionMatrix();
   layoutPip();
+  gradientArrowCanvas.width = innerWidth;
+  gradientArrowCanvas.height = innerHeight;
+  gradientArrowCanvas.style.width = innerWidth + 'px';
+  gradientArrowCanvas.style.height = innerHeight + 'px';
 }
 addEventListener('resize', resize);
 resize();
@@ -3749,10 +4131,7 @@ function animate() {
     renderPreviewViewport(pipRect.x, innerHeight - pipRect.y - pipRect.h, pipRect.w, pipRect.h);
   } else if (state.mode === 'through') {
     // Letterbox the fixed-aspect gizmo camera into whatever the window shape is.
-    const winAspect = innerWidth / innerHeight;
-    let w = innerWidth, h = innerHeight, x = 0, y = 0;
-    if (winAspect > RT_ASPECT) { w = innerHeight * RT_ASPECT; x = (innerWidth - w) / 2; }
-    else { h = innerWidth / RT_ASPECT; y = (innerHeight - h) / 2; }
+    const { x, y, w, h } = computeThroughRect();
     renderPreviewViewport(x, y, w, h);
     if (state.showTrueContamination) renderTrueContamOverlay(x, y, w, h);
     if (state.showReconstructedContamination) renderReconContamOverlay(x, y, w, h);

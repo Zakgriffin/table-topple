@@ -1,0 +1,29 @@
+{
+  "type": "candidate",
+  "workerId": 2,
+  "weight": 11,
+  "seed": 2671150381,
+  "primeA": 686029,
+  "primeB": 704101,
+  "taps": [
+    25,
+    1,
+    4,
+    6,
+    7,
+    10,
+    11,
+    15,
+    16,
+    19,
+    21,
+    22
+  ],
+  "r0": 17719,
+  "c0": 1435,
+  "reflCount": 338,
+  "rotCount": 314,
+  "bothCount": 0,
+  "anyCount": 652,
+  "totalWindows": 63504
+}

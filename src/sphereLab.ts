@@ -1078,13 +1078,16 @@ function updateDistortedPreview() {
       paintVectorFieldAsColor(field, distortedPreviewData);
       distortedPreviewTex.needsUpdate = true;
     } else if (state.fieldView === 'walked') {
-      // Same per-pixel direction computeWorldVotes actually casts votes
-      // with (see guidedTangentDirection's own comment) -- lets 'gradient'
+      // Same field computeWorldVotes actually casts votes from (see its own
+      // comment) -- agreement-scaled BEFORE the walk, not multiplied in
+      // afterward, so this shows exactly what the fit sees. Lets 'gradient'
       // and this view be flipped between directly to see what the walk
       // changes, instead of only inferring it from the final orientation
       // error.
       const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
-      const { fx, fy, r } = field;
+      const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
+      const effective = computeEffectiveGradientField(field, agreement);
+      const { fx, fy, r } = effective;
       const walkedFx = new Float64Array(fx.length), walkedFy = new Float64Array(fy.length);
       for (let y = r; y < rtSize.h - r; y++) {
         for (let x = r; x < rtSize.w - r; x++) {
@@ -1381,10 +1384,11 @@ function guidedTangentDirection(
     }
   }
   const avgTheta = Math.atan2(sumSin, sumCos) / 2; // undo the doubling
-  // Magnitude stays the seed's own single-pixel value -- only DIRECTION is
-  // walk-refined here; "how strong is this pixel's edge" for vote-weight
-  // purposes is a separate question from "which way does it point,"
-  // already handled by computeGradientAgreementField's own weighting.
+  // Magnitude stays the seed's own value -- only DIRECTION is walk-refined
+  // here. Callers that seed this with an already agreement-scaled
+  // (fx,fy) (see computeWorldVotes) get that scaling carried straight
+  // through to the output for free, with no separate weighting step needed
+  // downstream.
   return { fx: Math.cos(avgTheta) * seedMag, fy: Math.sin(avgTheta) * seedMag };
 }
 
@@ -1403,22 +1407,35 @@ function computeWorldVotes(
   // but py (top-down) is down-positive -- same relationship the patch
   // mesh's own UV fix (elsewhere in this file) already established.
   const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, 1 - (py / h) * 2];
-  // Driving the fit with "effective gradient" (magnitude * agreement) instead
-  // of plain magnitude -- agreement is computeGradientAgreementField's
-  // dot-product/vector-sum measure (same thing "effective gradient field"
-  // visualizes), reused here as the actual vote weight rather than just a
-  // display.
+  // Agreement is folded in via computeEffectiveGradientField BEFORE the
+  // guided tangent walk runs, not multiplied into the weight afterward --
+  // corner/junction pixels are already suppressed by the time the walk
+  // starts, since agreement is specifically built to detect exactly that
+  // ("a blended gradient at a junction disagrees with its neighbors'
+  // directions and cancels toward low agreement," see
+  // computeGradientAgreementField's own comment). That means the walk's
+  // own stop conditions don't have to do double duty as the primary
+  // corner-detector anymore -- they're left to catch genuine noise-driven
+  // wandering, which is what they were actually meant for. Direction is
+  // unaffected by this reordering (scaling by a non-negative scalar can't
+  // rotate a vector), so the walk's TRAJECTORY -- which pixels it visits --
+  // is identical to walking the raw field; only how strongly each visited
+  // sample counts, and how quickly a corner trips the magnitude-collapse
+  // stop, changes. The walk's own output magnitude already IS this
+  // agreement-scaled value (guidedTangentDirection reuses whatever
+  // magnitude it's seeded with), so it directly becomes the vote weight
+  // below -- no separate "* agreement[i]" multiply, which would double-
+  // apply it.
   const field = computeGradientField(gray, w, h, gradientRadius);
-  const { fx, fy, r } = field;
   const agreement = computeGradientAgreementField(field, agreementRadius);
+  const effective = computeEffectiveGradientField(field, agreement);
+  const { fx, fy, r } = effective;
   for (let y = r; y < h - r; y++) {
     for (let x = r; x < w - r; x++) {
       const i = y * w + x;
-      const mag = Math.hypot(fx[i], fy[i]);
-      if (mag === 0) continue; // untouched border / exactly-flat pixel, not a tunable threshold
-      // Noise-robust direction (see guidedTangentDirection's own comment) --
-      // magnitude for vote weight below stays the seed's own single-pixel
-      // value, only direction comes from the walk.
+      if (fx[i] === 0 && fy[i] === 0) continue; // untouched border, exactly-flat, or fully corner-suppressed pixel
+      // Noise-robust direction AND magnitude both come from the walk now
+      // (see guidedTangentDirection's own comment).
       const walked = guidedTangentDirection(fx, fy, w, h, x, y, fx[i], fy[i]);
       let theta = Math.atan2(walked.fy, walked.fx);
       if (theta < 0) theta += Math.PI;
@@ -1433,7 +1450,7 @@ function computeWorldVotes(
       const n = ray1.clone().cross(ray2);
       if (n.lengthSq() < 1e-12) continue;
       n.normalize();
-      votes.push({ n, weight: mag * agreement[i] });
+      votes.push({ n, weight: Math.hypot(walked.fx, walked.fy) });
     }
   }
   return votes;

@@ -144,6 +144,14 @@
   </div>
 
   <div class="section">
+    <h2>guided tangent walk</h2>
+    <div class="row"><span class="label">max steps</span><input type="range" id="tangentWalkMaxSteps" min="0" max="30" step="1" value="12"><span class="val" id="tangentWalkMaxStepsVal"></span></div>
+    <div class="row"><span class="label">deviation (deg)</span><input type="range" id="tangentWalkDeviationDeg" min="1" max="90" step="1" value="45"><span class="val" id="tangentWalkDeviationDegVal"></span></div>
+    <div class="row"><span class="label">mag fraction</span><input type="range" id="tangentWalkMagFraction" min="0" max="1" step="0.05" value="0.15"><span class="val" id="tangentWalkMagFractionVal"></span></div>
+    <div class="row"><span class="label">grace samples</span><input type="range" id="tangentWalkGraceSamples" min="1" max="5" step="1" value="3"><span class="val" id="tangentWalkGraceSamplesVal"></span></div>
+  </div>
+
+  <div class="section">
     <h2>field view</h2>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewRaw" value="raw"> raw (no blur, no noise)</label>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewAntialiased" value="antialiased"> antialiased (sensor AA filter, no lens blur yet)</label>

@@ -106,6 +106,17 @@ const state = {
   showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showFloor: true, showGizmoBody: true, showRecoveredFloor: true, showSampleLattice: false,
   showTrueContamination: false, showReconstructedContamination: false, hideField: false,
   simNoise: 8, simBlur: 1, simGradRadius: 1, coherenceRadius: 1,
+  // Guided tangent-walk gradient direction (see conversation) -- fixes
+  // per-pixel gradient direction being noise-fragile enough that the
+  // closed-form orientation fit (fitPairOfPlanes) sometimes lands outside
+  // LM's basin of convergence at realistic noise levels (confirmed live:
+  // simNoise=8, the default above, produced a stable, reproducible ~75
+  // degree orientation error at one pose; simNoise=1 was reliable). First
+  // guesses (20deg/0.35/2) were confirmed live to be too strict -- most
+  // walks bailed out after 0-1 samples under simNoise=8's actual per-pixel
+  // jitter, never getting the chance to average anything out. These looser
+  // values fixed the same pose to a fraction of a degree.
+  tangentWalkMaxSteps: 12, tangentWalkDeviationDeg: 45, tangentWalkMagFraction: 0.15, tangentWalkGraceSamples: 3,
   // max was 5 -- bumped after finding live that 1% (drifted there via
   // localStorage during testing, not this default) starved fitPairOfPlanes
   // to ~1500 of 150000 votes, which was fine at easy poses but produced a
@@ -1257,6 +1268,107 @@ function fillGrayscalePreview(gray: Float64Array, out: Uint8Array) {
   }
 }
 
+// Guided tangent walk: instead of estimating a pixel's edge direction from
+// one small isotropic sample (fragile under noise -- confirmed live,
+// simNoise=8 produces a stable, reproducible ~75 degree orientation error
+// at one pose purely from per-pixel direction noise, not vote count, since
+// vote count is identical at simNoise=1 where the same pose is accurate to
+// a fraction of a degree), grow outward along the TANGENT direction (the
+// edge's own direction, perpendicular to the gradient) on both sides
+// independently, averaging each new sample's direction into a running
+// estimate. Averaging several independent samples of "which way does this
+// edge point," taken at different points along its own length, is the
+// direct fix for noise corrupting any ONE sample -- this is local
+// structure-tensor estimation (the same eigenvector-of-summed-outer-
+// products idea fitPairOfPlanes already does globally over all votes,
+// applied here locally per-pixel first); growing preferentially along the
+// tangent rather than isotropically is coherence-enhancing anisotropic
+// diffusion territory (Weickert) -- see conversation for the fuller
+// discussion and why isotropic growth alone fails (it eventually samples
+// neighboring grid lines running the OTHER direction too).
+//
+// Reuses the already-computed whole-image (fx,fy) field for every step
+// (same seed radius throughout) rather than re-differencing gray at each
+// stepped-to pixel -- cheap, and keeps every sample directly comparable.
+// Direction is FIXED for the whole walk, set once from the seed pixel's own
+// gradient (not adaptively re-steered sample to sample) -- v1; adaptive
+// tracking (following a walk that curves slightly under perspective
+// foreshortening) is a deferred follow-up, see conversation.
+//
+// Each side (+tangent, -tangent) grows and stops independently -- no
+// reason to discard good samples on one side just because the other hit a
+// wall. Two stop conditions, each needing tangentWalkGraceSamples
+// CONSECUTIVE violations (not one bad sample) before actually cutting off:
+// direction deviates from the running average by more than
+// tangentWalkDeviationDeg (wandered into competing structure -- a
+// neighboring grid line), or magnitude drops below tangentWalkMagFraction
+// of the running average (wandered into a flat, edge-less interior). The
+// grace window exists because a genuinely straight edge crossing a
+// PERPENDICULAR edge partway along its length shows a few confused samples
+// right at that intersection, then continues cleanly -- a single-sample
+// trip-wire would permanently truncate the walk exactly there instead of
+// pushing through, the same reasoning as Canny's hysteresis thresholding
+// bridging small gaps between genuinely-connected edge segments.
+//
+// Direction is accumulated via the double-angle fold (cos(2*theta),
+// sin(2*theta)) computeGradientAgreementField already uses for the same
+// reason: a black->white and a white->black edge along the SAME physical
+// line are 180 degrees apart in raw (fx,fy) but describe the same line, so
+// a raw vector sum would wrongly let them cancel where they should
+// reinforce.
+function guidedTangentDirection(
+  fx: Float64Array, fy: Float64Array, w: number, h: number,
+  x: number, y: number, seedFx: number, seedFy: number,
+): { fx: number; fy: number } {
+  const seedTheta = Math.atan2(seedFy, seedFx);
+  const tdx = -Math.sin(seedTheta), tdy = Math.cos(seedTheta);
+  const seedMag = Math.hypot(seedFx, seedFy);
+  let sumCos = Math.cos(2 * seedTheta) * seedMag;
+  let sumSin = Math.sin(2 * seedTheta) * seedMag;
+  let runningMag = seedMag;
+  let sampleCount = 1;
+  const maxSteps = state.tangentWalkMaxSteps;
+  // cos(2*threshold) once, so each step's check is a single dot-product
+  // comparison instead of an atan2 + subtraction per sample.
+  const devCos = Math.cos(2 * THREE.MathUtils.degToRad(state.tangentWalkDeviationDeg));
+  const magFraction = state.tangentWalkMagFraction;
+  const grace = state.tangentWalkGraceSamples;
+  for (const sign of [1, -1]) {
+    let violations = 0;
+    for (let k = 1; k <= maxSteps; k++) {
+      const sx = Math.round(x + sign * k * tdx), sy = Math.round(y + sign * k * tdy);
+      if (sx < 0 || sx >= w || sy < 0 || sy >= h) break;
+      const si = sy * w + sx;
+      const sfx = fx[si], sfy = fy[si];
+      const mag = Math.hypot(sfx, sfy);
+      if (mag === 0 || mag < runningMag * magFraction) {
+        violations++;
+        if (violations >= grace) break;
+        continue; // tolerate a short bad run (e.g. a corner crossing) without accumulating it
+      }
+      const theta = Math.atan2(sfy, sfx);
+      const c2 = Math.cos(2 * theta), s2 = Math.sin(2 * theta);
+      const avgLen = Math.hypot(sumCos, sumSin);
+      const cosDeviation = avgLen > 0 ? (c2 * sumCos + s2 * sumSin) / avgLen : 1;
+      if (cosDeviation < devCos) {
+        violations++;
+        if (violations >= grace) break;
+        continue;
+      }
+      violations = 0;
+      sumCos += c2 * mag; sumSin += s2 * mag;
+      runningMag = (runningMag * sampleCount + mag) / (sampleCount + 1);
+      sampleCount++;
+    }
+  }
+  const avgTheta = Math.atan2(sumSin, sumCos) / 2; // undo the doubling
+  // Magnitude stays the seed's own single-pixel value -- only DIRECTION is
+  // walk-refined here; "how strong is this pixel's edge" for vote-weight
+  // purposes is a separate question from "which way does it point,"
+  // already handled by computeGradientAgreementField's own weighting.
+  return { fx: Math.cos(avgTheta) * seedMag, fy: Math.sin(avgTheta) * seedMag };
+}
+
 // gray is expected to already be captureDistortedGrayscale's output --
 // blur is no longer applied here; it happens upstream, at supersampled
 // resolution, before that function's own downsample step (see its comment
@@ -1285,7 +1397,11 @@ function computeWorldVotes(
       const i = y * w + x;
       const mag = Math.hypot(fx[i], fy[i]);
       if (mag === 0) continue; // untouched border / exactly-flat pixel, not a tunable threshold
-      let theta = Math.atan2(fy[i], fx[i]);
+      // Noise-robust direction (see guidedTangentDirection's own comment) --
+      // magnitude for vote weight below stays the seed's own single-pixel
+      // value, only direction comes from the walk.
+      const walked = guidedTangentDirection(fx, fy, w, h, x, y, fx[i], fy[i]);
+      let theta = Math.atan2(walked.fy, walked.fx);
       if (theta < 0) theta += Math.PI;
       if (theta >= Math.PI) theta -= Math.PI;
       // tangent direction (along the line, perpendicular to the gradient),
@@ -2305,6 +2421,43 @@ function computeProjectedMarginals(w: number, h: number, counts: Float64Array, g
   return { colSum, rowSum, colSumCy, rowHueCx, rowSumCy, colMag, rowMag, colPeriod, rowPeriod, colPhase, rowPhase };
 }
 
+// Re-buckets castAndBucketProjectedSamples' rays at a resolution sized to
+// keep a fixed target of buckets per grid cell -- independent of rtSize
+// display resolution -- then applies the same closed-form "true period must
+// equal the known GRID_STEP" correction runAxesReconstruction's rough pass
+// already uses, against this far more reliable period measurement. Needed
+// because a fixed bucket count tied to display resolution leaves only a
+// handful of buckets per cell at high camera altitudes (confirmed live:
+// colPeriod measured 3 bins against an expected ~4.2 at one high-altitude
+// pose, a 20%+ error that landed straight in the recovered distance -- not
+// a peak-picking bug, genuinely too few samples per cycle for any
+// discrete-lag autocorrelation to trust, see autocorrelationPeriod's own
+// comment). Called twice per capture (see runAxesReconstruction): once
+// right after the rough placeholder-distance correction, and again after
+// Phase 3 improves orientation -- confirmed live that the SAME period
+// measurement, redone with Phase 3's ~0.4 degree orientation instead of
+// Phase 1's ~2 degree orientation, drops U/V distance error from ~3%/1% to
+// ~0.03%/0.36%, since a rotated (Drow,Dcol) basis distorts the ray-cast's
+// u,v values (and so the measured extent/period) asymmetrically between
+// the two axes -- orientation error was silently leaking into distance
+// error this whole time. extentU/extentV must already be in TRUE world
+// units at whatever distance is CURRENTLY on lastRecoveredAxes (the caller
+// is responsible for that -- see the two call sites for the two different
+// ways they satisfy it).
+function measurePeriodDistance(currentDistance: number, extentU: number, extentV: number): { distanceU: number; distanceV: number } | null {
+  const TARGET_BUCKETS_PER_CELL = 20;
+  const MAX_REFINE_BUCKETS = 2048; // memory cap: sums+counts+gradCxSum+gradCySum is ~48 bytes/bucket, so this bounds the transient allocation to a couple hundred MB even at a wildly-wrong distance estimate
+  const refineW = Math.min(MAX_REFINE_BUCKETS, Math.max(rtSize.w, Math.ceil(extentU / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
+  const refineH = Math.min(MAX_REFINE_BUCKETS, Math.max(rtSize.h, Math.ceil(extentV / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
+  const refined = castAndBucketProjectedSamples(refineW, refineH); // reads lastRecoveredAxes.distance, which must already equal currentDistance
+  const refinedMarginals = refined ? computeProjectedMarginals(refineW, refineH, refined.counts, refined.gradCxSum, refined.gradCySum) : null;
+  if (!refined || !refinedMarginals || refinedMarginals.colPeriod === null || refinedMarginals.rowPeriod === null) return null;
+  return {
+    distanceU: currentDistance * (GRID_STEP / (refinedMarginals.colPeriod * refined.bins.binWidthU)),
+    distanceV: currentDistance * (GRID_STEP / (refinedMarginals.rowPeriod * refined.bins.binWidthV)),
+  };
+}
+
 // Locates the nearest cell-BOUNDARY peak within one period, as a fractional
 // bin index in [0, period) -- a weighted circular mean (de-meaned profile as
 // weight, angle = 2*pi*i/period) rather than a literal peak search, so it's
@@ -3005,48 +3158,29 @@ function runAxesReconstruction() {
       const t3 = performance.now();
 
       let refinedSpacing: { distanceU: number; distanceV: number } | null = null;
+      let finalSpacing: { distanceU: number; distanceV: number } | null = null;
       if (lastRecoveredAxes && spacing) {
         // Feeds "Projected Cam" mode (see buildProjectedTexture) -- averaging
         // the U/V distance estimates is just noise reduction, not picking one
         // over the other (both should agree once past the grazing-angle cutoff).
         lastRecoveredAxes.distance = (spacing.distanceU + spacing.distanceV) / 2;
 
-        // Sub-bin refinement pass: at high camera altitudes the visible
-        // floor extent can grow large enough that rtSize's fixed bucket
-        // count leaves only a handful of buckets per grid cell (confirmed
-        // live: colPeriod measured 3 bins against an expected ~4.2 at one
-        // high-altitude pose, a 20%+ error that landed straight in the
-        // recovered distance -- not a peak-picking bug, genuinely too few
-        // samples per cycle for any discrete-lag autocorrelation to trust,
-        // see autocorrelationPeriod's own comment). Re-buckets the SAME
-        // rays -- now cast at the just-computed rough distance instead of
-        // the arbitrary placeholder above -- into a resolution sized to
-        // keep a fixed target of buckets per cell, independent of display
-        // resolution, then repeats the identical closed-form distance
-        // correction against this far more reliable period measurement.
+        // Sub-bin refinement pass -- see measurePeriodDistance's own comment
+        // for why this exists. roughBins' extent is still in
+        // PLACEHOLDER_DISTANCE-scale units (u,v scale linearly with whatever
+        // distance was assumed for the ray-cast that produced it) -- rescale
+        // by the correction factor just applied to get the TRUE extent,
+        // without wasting a whole extra ray-cast pass just to remeasure it.
         const roughBins = lastProjectedBins;
         if (roughBins) {
-          const TARGET_BUCKETS_PER_CELL = 20;
-          const MAX_REFINE_BUCKETS = 2048; // memory cap: sums+counts+gradCxSum+gradCySum is ~48 bytes/bucket, so this bounds the transient allocation to a couple hundred MB even at a wildly-wrong rough distance
-          // roughBins' extent is still in PLACEHOLDER_DISTANCE-scale units
-          // (u,v scale linearly with whatever distance was assumed for the
-          // ray-cast that produced it) -- rescale by the correction factor
-          // just applied to get the TRUE extent, without wasting a whole
-          // extra ray-cast pass just to remeasure it.
           const rescale = lastRecoveredAxes.distance / PLACEHOLDER_DISTANCE;
           const trueExtentU = (roughBins.maxU - roughBins.minU) * rescale;
           const trueExtentV = (roughBins.maxV - roughBins.minV) * rescale;
-          const refineW = Math.min(MAX_REFINE_BUCKETS, Math.max(rtSize.w, Math.ceil(trueExtentU / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
-          const refineH = Math.min(MAX_REFINE_BUCKETS, Math.max(rtSize.h, Math.ceil(trueExtentV / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
           const roughDistance = lastRecoveredAxes.distance;
-          const refined = castAndBucketProjectedSamples(refineW, refineH); // reads lastRecoveredAxes.distance, i.e. roughDistance, not the placeholder
-          const refinedMarginals = refined ? computeProjectedMarginals(refineW, refineH, refined.counts, refined.gradCxSum, refined.gradCySum) : null;
-          if (refined && refinedMarginals && refinedMarginals.colPeriod !== null && refinedMarginals.rowPeriod !== null) {
-            refinedSpacing = {
-              distanceU: roughDistance * (GRID_STEP / (refinedMarginals.colPeriod * refined.bins.binWidthU)),
-              distanceV: roughDistance * (GRID_STEP / (refinedMarginals.rowPeriod * refined.bins.binWidthV)),
-            };
-            lastRecoveredAxes.distance = (refinedSpacing.distanceU + refinedSpacing.distanceV) / 2;
+          const measured = measurePeriodDistance(roughDistance, trueExtentU, trueExtentV);
+          if (measured) {
+            refinedSpacing = measured;
+            lastRecoveredAxes.distance = (measured.distanceU + measured.distanceV) / 2;
           }
         }
 
@@ -3100,6 +3234,39 @@ function runAxesReconstruction() {
         // Cam" and the marginal graphs reflect the final answer, not the
         // pre-refinement one.
         buildProjectedTexture();
+
+        // Second distance refinement pass, now that orientation is Phase
+        // 3's much better estimate (~0.4 degree here vs Phase 1's ~2
+        // degree) instead of the cruder one the first pass (above,
+        // pre-Phase-3) had to use -- see measurePeriodDistance's own
+        // comment for why a rotated (Drow,Dcol) basis leaks into distance
+        // error asymmetrically between U and V. lastProjectedBins is
+        // already at the correct TRUE-world-unit scale here (no
+        // placeholder-rescale needed, unlike the first pass), since
+        // buildProjectedTexture just rebuilt it at the current distance.
+        const postPhase3Bins = lastProjectedBins;
+        if (postPhase3Bins) {
+          const extentU = postPhase3Bins.maxU - postPhase3Bins.minU;
+          const extentV = postPhase3Bins.maxV - postPhase3Bins.minV;
+          const currentDistance = lastRecoveredAxes.distance;
+          const measured = measurePeriodDistance(currentDistance, extentU, extentV);
+          if (measured) {
+            finalSpacing = measured;
+            lastRecoveredAxes.distance = (measured.distanceU + measured.distanceV) / 2;
+            // lastPositionDecode.camPos was set just above from worldX0/
+            // worldZ0 + normal*distance using the OLD (pre-this-pass)
+            // distance -- worldX0/worldZ0 themselves don't change when
+            // distance is corrected, but camPos does, so it has to be
+            // recomputed with the same formula or decode ends up reading a
+            // camPos inconsistent with the axes/distance buildProjectedTexture
+            // now uses (confirmed live: skipping this recompute dropped
+            // consistency from a clean 1.0 to chance-level ~0.5 at poses
+            // that had nothing wrong with them before this pass existed).
+            lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormal.x * lastRecoveredAxes.distance;
+            lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormal.z * lastRecoveredAxes.distance;
+            buildProjectedTexture();
+          }
+        }
       }
       updateRecoveredCamGizmo();
       applyRecoveredFloorOverlay();
@@ -3114,7 +3281,7 @@ function runAxesReconstruction() {
       if (rowDirRecovered && colDirRecovered) {
         const rowErr = angleBetweenDegV(rowDirRecovered, ROW_DIR);
         const colErr = angleBetweenDegV(colDirRecovered, COL_DIR);
-        lines.push(`row err ${rowErr.toFixed(2)}°  col err ${colErr.toFixed(2)}°`);
+        lines.push(`row err ${rowErr.toFixed(2)}°  col err ${colErr.toFixed(2)}°  [Phase 1, vote-based]`);
       } else {
         lines.push(`degenerate fit`);
       }
@@ -3138,11 +3305,30 @@ function runAxesReconstruction() {
           const rErrV = (Math.abs(rDistV - trueDist) / trueDist) * 100;
           lines.push(`dist U ${rDistU.toFixed(2)} (${rErrU.toFixed(1)}% err)  dist V ${rDistV.toFixed(2)} (${rErrV.toFixed(1)}% err)  [refined, adaptive buckets]`);
         }
+        if (finalSpacing) {
+          const fDistU = finalSpacing.distanceU, fDistV = finalSpacing.distanceV;
+          const fErrU = (Math.abs(fDistU - trueDist) / trueDist) * 100;
+          const fErrV = (Math.abs(fDistV - trueDist) / trueDist) * 100;
+          lines.push(`dist U ${fDistU.toFixed(2)} (${fErrU.toFixed(1)}% err)  dist V ${fDistV.toFixed(2)} (${fErrV.toFixed(1)}% err)  [final, post-Phase-3 orientation]`);
+        }
       } else if (quadricPair) {
         lines.push(`spacing: no period found`);
       }
       if (lastPositionLMResult) {
         lines.push(`photoLM: ${lastPositionLMResult.iterations} iters, cost ${lastPositionLMResult.initialCost.toExponential(2)} -> ${lastPositionLMResult.finalCost.toExponential(2)}`);
+        // The row/col err line above is Phase 1's OUTPUT only -- Phase 3
+        // (this block) goes on to overwrite lastRecoveredAxes.Drow/Dcol/
+        // Dnormal in place with its own, usually much better, jointly-
+        // refined estimate (confirmed live: 2.33/2.01 degrees pre-Phase-3
+        // vs 0.41/0.36 post, same capture) -- but nothing downstream ever
+        // re-reported that, so every orientation-error number this debug
+        // panel ever showed after Phase 3 landed was silently stale. This
+        // is the actual final orientation decode uses.
+        if (lastRecoveredAxes) {
+          const finalRowErr = angleBetweenDegV(lastRecoveredAxes.Drow, ROW_DIR);
+          const finalColErr = angleBetweenDegV(lastRecoveredAxes.Dcol, COL_DIR);
+          lines.push(`row err ${finalRowErr.toFixed(2)}°  col err ${finalColErr.toFixed(2)}°  [Phase 3, final]`);
+        }
       }
       lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  LM ${(t2b - t2).toFixed(0)}ms  spacing ${(t3 - t2b).toFixed(0)}ms  refine ${(t3b - t3).toFixed(0)}ms  decode ${(t4 - t3b).toFixed(0)}ms`);
       axesReadout.textContent = lines.join('\n');
@@ -3311,6 +3497,10 @@ bindSlider('simBlur', (v) => { state.simBlur = v; markCaptureDirty(); }, (v) => 
 bindSlider('simGradRadius', (v) => { state.simGradRadius = v; markCaptureDirty(); }, (v) => v.toFixed(0));
 bindSlider('captureSupersample', (v) => { state.captureSupersample = v; resizeCaptureBuffers(); }, (v) => `${v.toFixed(0)}x`);
 bindSlider('coherenceRadius', (v) => { state.coherenceRadius = v; markCaptureDirty(); }, (v) => v.toFixed(0));
+bindSlider('tangentWalkMaxSteps', (v) => { state.tangentWalkMaxSteps = v; markCaptureDirty(); }, (v) => v.toFixed(0));
+bindSlider('tangentWalkDeviationDeg', (v) => { state.tangentWalkDeviationDeg = v; markCaptureDirty(); }, (v) => `${v.toFixed(0)}°`);
+bindSlider('tangentWalkMagFraction', (v) => { state.tangentWalkMagFraction = v; markCaptureDirty(); }, (v) => v.toFixed(2));
+bindSlider('tangentWalkGraceSamples', (v) => { state.tangentWalkGraceSamples = v; markCaptureDirty(); }, (v) => v.toFixed(0));
 bindRadioGroup('fieldView', (v) => { state.fieldView = v as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'agreement' | 'effective'; markCaptureDirty(); });
 bindSlider('circleSamplePercentMin', (v) => { state.circleSamplePercentMin = v; updateGradientCirclesDebug(); }, (v) => `${v.toFixed(0)}%`);
 bindSlider('circleSamplePercentMax', (v) => { state.circleSamplePercentMax = v; updateGradientCirclesDebug(); }, (v) => `${v.toFixed(0)}%`);

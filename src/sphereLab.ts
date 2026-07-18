@@ -130,7 +130,7 @@ const state = {
   weightSharpenPower: 4,
   orientationLM: true,
   positionLM: true,
-  fieldView: 'noised' as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'agreement' | 'effective',
+  fieldView: 'noised' as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'walked' | 'agreement' | 'effective',
   axesAutoCapture: false, axesCaptureIntervalMs: 500,
   viewportW: 512, viewportH: 384, captureSupersample: 2, aspectLocked: false,
 };
@@ -1076,6 +1076,25 @@ function updateDistortedPreview() {
     } else if (state.fieldView === 'gradient') {
       const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
       paintVectorFieldAsColor(field, distortedPreviewData);
+      distortedPreviewTex.needsUpdate = true;
+    } else if (state.fieldView === 'walked') {
+      // Same per-pixel direction computeWorldVotes actually casts votes
+      // with (see guidedTangentDirection's own comment) -- lets 'gradient'
+      // and this view be flipped between directly to see what the walk
+      // changes, instead of only inferring it from the final orientation
+      // error.
+      const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
+      const { fx, fy, r } = field;
+      const walkedFx = new Float64Array(fx.length), walkedFy = new Float64Array(fy.length);
+      for (let y = r; y < rtSize.h - r; y++) {
+        for (let x = r; x < rtSize.w - r; x++) {
+          const i = y * rtSize.w + x;
+          if (fx[i] === 0 && fy[i] === 0) continue;
+          const walked = guidedTangentDirection(fx, fy, rtSize.w, rtSize.h, x, y, fx[i], fy[i]);
+          walkedFx[i] = walked.fx; walkedFy[i] = walked.fy;
+        }
+      }
+      paintVectorFieldAsColor({ fx: walkedFx, fy: walkedFy, w: rtSize.w, h: rtSize.h, r }, distortedPreviewData);
       distortedPreviewTex.needsUpdate = true;
     } else if (state.fieldView === 'agreement') {
       const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
@@ -3026,7 +3045,7 @@ function runAxesReconstruction() {
       // buildProjectedTexture (called below) now needs lastNoisedPreviewGray
       // for its own per-source-pixel gradient (see its own comment) -- but
       // updateDistortedPreview only ever SETS that when the current field
-      // view is 'noised'/'gradient'/'agreement'/'effective' or a
+      // view is 'noised'/'gradient'/'walked'/'agreement'/'effective' or a
       // contamination overlay is on (an early-return skips it otherwise, to
       // avoid the antialiasing/blur/downsample/noise cost when displaying
       // something cheaper like 'raw'). That's fine for the passive per-frame
@@ -3501,7 +3520,7 @@ bindSlider('tangentWalkMaxSteps', (v) => { state.tangentWalkMaxSteps = v; markCa
 bindSlider('tangentWalkDeviationDeg', (v) => { state.tangentWalkDeviationDeg = v; markCaptureDirty(); }, (v) => `${v.toFixed(0)}°`);
 bindSlider('tangentWalkMagFraction', (v) => { state.tangentWalkMagFraction = v; markCaptureDirty(); }, (v) => v.toFixed(2));
 bindSlider('tangentWalkGraceSamples', (v) => { state.tangentWalkGraceSamples = v; markCaptureDirty(); }, (v) => v.toFixed(0));
-bindRadioGroup('fieldView', (v) => { state.fieldView = v as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'agreement' | 'effective'; markCaptureDirty(); });
+bindRadioGroup('fieldView', (v) => { state.fieldView = v as 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient' | 'walked' | 'agreement' | 'effective'; markCaptureDirty(); });
 bindSlider('circleSamplePercentMin', (v) => { state.circleSamplePercentMin = v; updateGradientCirclesDebug(); }, (v) => `${v.toFixed(0)}%`);
 bindSlider('circleSamplePercentMax', (v) => { state.circleSamplePercentMax = v; updateGradientCirclesDebug(); }, (v) => `${v.toFixed(0)}%`);
 bindCheckbox('showRecoveredPoles', (v) => (state.showRecoveredPoles = v));

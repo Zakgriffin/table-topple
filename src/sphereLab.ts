@@ -15,7 +15,7 @@
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
 import { generateTorus, buildLookupTableSparse, buildTorusFromCandidate, ORDER5_CANDIDATE } from './debruijn.ts';
-import { toGrayscale, binarize, rotateShift } from './decode.ts';
+import { toGrayscale, binarize } from './decode.ts';
 import { jacobiEigenSymmetric, smallestEigenvector } from './linalg.ts';
 
 type Mode = 'world' | 'through' | 'inside' | 'projected';
@@ -48,6 +48,8 @@ const toggleGradientArrowBtn = document.getElementById('toggleGradientArrow') as
 const toggleGradientArrowModeBtn = document.getElementById('toggleGradientArrowMode') as HTMLButtonElement;
 const toggleTangentWalkPathBtn = document.getElementById('toggleTangentWalkPath') as HTMLButtonElement;
 const arrowToggles = document.getElementById('arrowToggles') as HTMLDivElement;
+const cameraDetailsSection = document.getElementById('cameraDetailsSection') as HTMLDivElement;
+const simDistortionSection = document.getElementById('simDistortionSection') as HTMLDivElement;
 
 const modeBtns: Record<Mode, HTMLButtonElement> = {
   world: document.getElementById('modeWorld') as HTMLButtonElement,
@@ -110,6 +112,17 @@ const state = {
   focalMM: 26,
   mode: 'world' as Mode,
   showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showFloor: true, showGizmoBody: true, showRecoveredFloor: true, showSampleLattice: false,
+  floorCellOutlineSubdiv: 0,
+  // Real-world capture: swaps the analysis pipeline's image source from the
+  // simulated render to whatever photo was last relayed from
+  // mobile-capture.html (see ingestRealCapture) -- see getAnalysisVFovRad
+  // for why FOV also branches on this. No manual swap/sign toggles needed
+  // anymore -- runAxesReconstruction pins camera-vs-pattern handedness
+  // geometrically (see its own comment), and decode's own whole-grid
+  // rotation search resolves the remaining 4-way rotation ambiguity
+  // automatically.
+  useRealCapture: false,
+  realCaptureFovDeg: 65,
   showTrueContamination: false, showReconstructedContamination: false, hideField: false,
   showGradientArrow: false, showGradientArrowPerpendicular: false, gradientArrowScale: 2,
   showTangentWalkPath: false,
@@ -125,6 +138,10 @@ const state = {
   // jitter, never getting the chance to average anything out. These looser
   // values fixed the same pose to a fraction of a degree.
   tangentWalkMaxSteps: 12, tangentWalkDeviationDeg: 45, tangentWalkMagFraction: 0.15, tangentWalkGraceSamples: 3,
+  // Off by default -- keeps the original fixed-direction walk (validated
+  // extensively earlier this session) as the baseline, with adaptive as an
+  // explicit opt-in rather than a silent behavior change.
+  tangentWalkAdaptive: false,
   // max was 5 -- bumped after finding live that 1% (drifted there via
   // localStorage during testing, not this default) starved fitPairOfPlanes
   // to ~1500 of 150000 votes, which was fine at easy poses but produced a
@@ -170,11 +187,11 @@ scene.add(sun);
 // -- Floor: the actual De Bruijn torus, tiled seamlessly (it IS a torus, so
 // repeat-wrapping the texture reproduces the true infinite pattern with no
 // seam — the same fact the real tracker relies on to work from any crop).
-const ORDER = parseInt(new URLSearchParams(location.search).get('order') ?? '4', 10);
+const ORDER = parseInt(new URLSearchParams(location.search).get('order') ?? '5', 10);
 // Order 5's full R x C torus (~33.5M cells) has no known efficient
 // construction free of D4 rotation/reflection collisions, so it isn't used
 // directly -- ORDER5_CANDIDATE is a searched 256x256 sub-region with a low
-// (1.096%) residual collision rate instead (see buildTorusFromCandidate's
+// (1.027%) residual collision rate instead (see buildTorusFromCandidate's
 // header comment in debruijn.ts).
 const debruijn = ORDER === 5 ? buildTorusFromCandidate(5, ORDER5_CANDIDATE) : generateTorus(ORDER);
 const { R, C, torus } = debruijn;
@@ -188,27 +205,64 @@ const HALF_C = (C * GRID_STEP) / 2;
 const HALF_R = (R * GRID_STEP) / 2;
 
 const patternCanvas = document.createElement('canvas');
-patternCanvas.width = C; patternCanvas.height = R;
 const pctx = patternCanvas.getContext('2d')!;
-const img = pctx.createImageData(C, R);
-for (let r = 0; r < R; r++) {
-  for (let c = 0; c < C; c++) {
-    // 1 -> dark, 0 -> light -- matches scripts/generate-debruijn-torus.ts's
-    // canonical convention (cell ? 0 : 255) and binarize's own documented
-    // "dark -> 1" intent (src/decode.ts). This was backwards (1 -> bright)
-    // until now, which inverted every simulated bit read here relative to
-    // the real torus/debruijnLookup content -- the actual root cause of the
-    // whole session's poor decode consistency, not any of the axis/mirror
-    // bugs fixed earlier: pt.bit came out as the bitwise complement of the
-    // true window almost everywhere, so tallyPositionVotes' lookup rarely
-    // matched the real anchor.
-    const v = torus[r][c] ? 20 : 235;
-    const i = (r * C + c) * 4;
-    img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
-    img.data[i + 3] = 255;
+
+// Cell subdivision, directly driven by state.floorCellOutlineSubdiv (0:
+// off, exactly today's 1-texture-pixel-per-cell flat color) -- BORDER is
+// the outermost ring's thickness in subdivided pixels, always the OPPOSITE
+// of the cell's own color (white cell -> black border, black cell -> white
+// border), with the remaining inner SUBDIV-2*BORDER square left as the
+// cell's true color. At subdiv 1-2, BORDER(1) alone already covers the
+// whole cell (no room left for an inner square), so the cell renders as
+// solid opposite-color -- a real, continuous endpoint of the same formula
+// rather than a case worth special-casing away, not the same thing as the
+// dedicated subdiv=0 "off" path above it.
+// Real experiment, not just cosmetic: this is the actual rendered floor the
+// gizmo camera captures, so turning it up guarantees an edge at EVERY cell
+// boundary regardless of whether the two neighboring cells happen to share
+// a bit value -- today, two adjacent same-color cells contribute zero
+// gradient signal at their shared edge, so this tests whether that missing
+// signal is limiting orientation recovery. Sampling at cell CENTERS
+// (decode, photometric refinement) is unaffected either way, since the
+// border only touches the outermost ring, never the center.
+const FLOOR_OUTLINE_BORDER = 1;
+
+function rebuildFloorTexture() {
+  const subdiv = state.floorCellOutlineSubdiv;
+  const s = subdiv > 0 ? subdiv : 1;
+  const width = C * s, height = R * s;
+  patternCanvas.width = width; patternCanvas.height = height;
+  const img = pctx.createImageData(width, height);
+  for (let r = 0; r < R; r++) {
+    for (let c = 0; c < C; c++) {
+      // 1 -> dark, 0 -> light -- matches scripts/generate-debruijn-torus.ts's
+      // canonical convention (cell ? 0 : 255) and binarize's own documented
+      // "dark -> 1" intent (src/decode.ts). This was backwards (1 -> bright)
+      // until now, which inverted every simulated bit read here relative to
+      // the real torus/debruijnLookup content -- the actual root cause of the
+      // whole session's poor decode consistency, not any of the axis/mirror
+      // bugs fixed earlier: pt.bit came out as the bitwise complement of the
+      // true window almost everywhere, so tallyPositionVotes' lookup rarely
+      // matched the real anchor.
+      const inner = torus[r][c] ? 20 : 235;
+      const outer = torus[r][c] ? 235 : 20;
+      for (let sy = 0; sy < s; sy++) {
+        const py = r * s + sy;
+        const borderY = subdiv > 0 && (sy < FLOOR_OUTLINE_BORDER || sy >= s - FLOOR_OUTLINE_BORDER);
+        for (let sx = 0; sx < s; sx++) {
+          const px = c * s + sx;
+          const borderX = subdiv > 0 && (sx < FLOOR_OUTLINE_BORDER || sx >= s - FLOOR_OUTLINE_BORDER);
+          const v = (borderX || borderY) ? outer : inner;
+          const i = (py * width + px) * 4;
+          img.data[i] = img.data[i + 1] = img.data[i + 2] = v;
+          img.data[i + 3] = 255;
+        }
+      }
+    }
   }
+  pctx.putImageData(img, 0, 0);
+  floorTex.needsUpdate = true;
 }
-pctx.putImageData(img, 0, 0);
 
 const floorTex = new THREE.CanvasTexture(patternCanvas);
 floorTex.wrapS = THREE.RepeatWrapping;
@@ -216,6 +270,7 @@ floorTex.wrapT = THREE.RepeatWrapping;
 floorTex.magFilter = THREE.NearestFilter;
 floorTex.colorSpace = THREE.SRGBColorSpace;
 floorTex.repeat.set(1, 1); // exactly one instance of the torus, not tiled
+rebuildFloorTexture(); // paint the initial pattern now that floorTex/patternCanvas both exist
 
 const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.95 });
 const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(C * GRID_STEP, R * GRID_STEP), floorMat);
@@ -256,10 +311,11 @@ const gizmoAxes = new THREE.AxesHelper(0.6);
 gizmoBody.add(gizmoAxes);
 
 // Same shape/size as the yellow ground-truth gizmoBody above, in green, at
-// the DECODED position from runPositionDecode -- uses the real camQuat for
-// orientation (camQuat is a known input to the whole recovery pipeline, not
-// something being solved for here) so any visible gap against the yellow box
-// is purely positional error. Hidden until a successful decode exists.
+// the DECODED position AND orientation from runPositionDecode -- both
+// position and orientation are fully solved from the pattern (see
+// solveRecoveredCamQuat), so any visible gap against the yellow box is the
+// recovery pipeline's true end-to-end error. Hidden until a successful
+// decode exists.
 const recoveredCamGizmo = new THREE.Mesh(
   new THREE.BoxGeometry(0.3, 0.25, 0.4),
   new THREE.MeshStandardMaterial({ color: 0x33dd55 }),
@@ -271,7 +327,7 @@ recoveredCamGizmo.add(recoveredCamAxes);
 function updateRecoveredCamGizmo() {
   if (lastPositionDecode) {
     recoveredCamGizmo.position.copy(lastPositionDecode.camPos);
-    recoveredCamGizmo.quaternion.copy(camQuat);
+    recoveredCamGizmo.quaternion.copy(lastPositionDecode.recoveredCamQuat);
   }
   recoveredCamGizmo.visible = state.mode === 'world' && state.showGizmoBody && !!lastPositionDecode;
 }
@@ -387,14 +443,19 @@ function markCaptureDirty() {
 }
 
 // Called once at startup (implicitly, via the viewportW/H/captureSupersample
-// slider bindings firing on load) and again whenever those sliders change.
+// slider bindings firing on load) and again whenever those sliders change --
+// or, with an explicit override, whenever a real capture arrives at a
+// different resolution than whatever's currently allocated (see
+// ingestRealCapture), so Through-Cam/Projected-Cam/Inside-Sphere all end up
+// showing the real photo at its OWN true width/height rather than a version
+// resampled to fit the simulated-camera sliders' resolution.
 // camRT.setSize() resizes the render target in place; distortedPreviewTex
 // keeps its own object identity (so previewQuadMat/patchMat, which hold a
 // reference to it, don't need to be touched) by having its .image swapped
 // for a new {data,width,height} triple -- DataTexture has no other resize path.
-function resizeCaptureBuffers() {
+function resizeCaptureBuffers(explicitSize?: { w: number; h: number }) {
   captureDirty = true;
-  rtSize = { w: Math.round(state.viewportW), h: Math.round(state.viewportH) };
+  rtSize = explicitSize ?? { w: Math.round(state.viewportW), h: Math.round(state.viewportH) };
   RT_ASPECT = rtSize.w / rtSize.h;
   captureRTSize = { w: rtSize.w * state.captureSupersample, h: rtSize.h * state.captureSupersample };
   camRT.setSize(captureRTSize.w, captureRTSize.h);
@@ -585,7 +646,7 @@ function updateContaminationOverlays() {
   if (!lastNoisedPreviewGray) return;
   const w = rtSize.w, h = rtSize.h;
   const lum = lastNoisedPreviewGray;
-  const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
+  const vFovRad = getAnalysisVFovRad();
   // Picks the SAME field the currently-selected view displays (and, for
   // 'walked', the SAME field computeWorldVotes actually casts votes from --
   // see its own comment) rather than always scoring the raw gradient
@@ -605,7 +666,7 @@ function updateContaminationOverlays() {
   }
   if (state.showReconstructedContamination) {
     if (lastRecoveredAxes) {
-      const alpha = computeContaminationAlpha(field, agreement, lastRecoveredAxes.Drow, lastRecoveredAxes.Dcol, camQuat, vFovRad, RT_ASPECT);
+      const alpha = computeContaminationAlpha(field, agreement, lastRecoveredAxes.Drow, lastRecoveredAxes.Dcol, MATH_QUAT, vFovRad, RT_ASPECT);
       paintContaminationOverlay(alpha, RECON_CONTAM_COLOR, reconContamData);
       toggleReconContamBtn.textContent = 'reconstructed contamination overlay (orange)';
     } else {
@@ -665,10 +726,18 @@ recoveredFloorOverlay.layers.set(DEBUG_LAYER);
 // visibility is handled separately in animate(), same split as gizmoBody.
 function applyRecoveredFloorOverlay() {
   if (!lastPositionDecode || !lastRecoveredAxes || !lastProjectedBins) return;
-  const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
-  const normal = Dnormal.clone();
-  const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
-  if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
+  const { Drow: DrowMath, Dcol: DcolMath, Dnormal, distance } = lastRecoveredAxes;
+  const normalMath = Dnormal.clone();
+  const vFovRad = getAnalysisVFovRad();
+  if (cornerDir(0, 0, MATH_QUAT, vFovRad, RT_ASPECT).dot(normalMath) > 0) normalMath.negate();
+  // lastRecoveredAxes lives in MATH_QUAT's fixed math frame, not true world
+  // space -- rotate into world space (via the orientation runPositionDecode
+  // already solved from the pattern) before placing anything into the actual
+  // 3D scene, same reasoning as runPositionDecode's own hitRelWorld.
+  const { recoveredCamQuat } = lastPositionDecode;
+  const Drow = DrowMath.clone().applyQuaternion(recoveredCamQuat);
+  const Dcol = DcolMath.clone().applyQuaternion(recoveredCamQuat);
+  const normal = normalMath.clone().applyQuaternion(recoveredCamQuat);
   const { minU, maxU, minV, maxV } = lastProjectedBins;
   const width = maxU - minU, height = maxV - minV;
   if (!(width > 0) || !(height > 0)) return;
@@ -809,6 +878,32 @@ function cornerDir(u: number, v: number, quat: THREE.Quaternion, vFovRad: number
   const yc = Math.tan(halfV) * v;
   const xc = Math.tan(halfV) * aspect * u;
   return new THREE.Vector3(xc, yc, -1).normalize().applyQuaternion(quat);
+}
+
+// Central place for "what FOV should ray-casting assume" -- real-capture
+// mode uses the direct FOV input (state.realCaptureFovDeg) instead of the
+// simulated camera's focalMM-derived one, since there's no simulated lens
+// to derive a FOV from and reverse-engineering a real phone's FOV through
+// the 35mm-equivalent focalMM convention isn't a fair ask. Every ray-casting
+// entry point in the analysis pipeline (not just runAxesReconstruction)
+// needs this same answer, so this is the one place that decides it.
+//
+// realCaptureFovDeg is HORIZONTAL (sensor-WIDTH-based, matching every FOV
+// figure a camera spec sheet or calibration shot actually gives you), but
+// this function's own name says it returns VERTICAL -- THREE.js's
+// camera.fov (what the simulated branch reads) is always vertical by
+// convention, and everything downstream expects that same convention
+// regardless of capture source. So real-capture mode needs the exact same
+// horizontal -> vertical conversion updateGizmo() already applies for the
+// simulated camera, via the CURRENT aspect ratio (RT_ASPECT tracks the real
+// photo's own true aspect once resizeCaptureBuffers has run -- see
+// ingestRealCapture -- so this stays correct across portrait/landscape shots).
+function getAnalysisVFovRad(): number {
+  if (state.useRealCapture) {
+    const hFovRad = THREE.MathUtils.degToRad(state.realCaptureFovDeg);
+    return 2 * Math.atan(Math.tan(hFovRad / 2) / RT_ASPECT);
+  }
+  return THREE.MathUtils.degToRad(gizmoCam.fov);
 }
 
 // ── Spherical-Hough prototype ────────────────────────────────────────────
@@ -1037,6 +1132,63 @@ function captureDistortedGrayscale(): { gray: Float64Array; w: number; h: number
 // wrong thing, or nothing at all).
 let lastNoisedPreviewGray: Float64Array | null = null;
 
+// Real-capture ingestion: the last photo relayed from mobile-capture.html
+// (see initDevBridge's 'realCapture' handler below), pre-resampled to
+// rtSize.w x rtSize.h and stored in the SAME GL-native bottom-up row order
+// captureDistortedGrayscale produces, so runAxesReconstruction's downstream
+// code (flipRowsF64 etc.) doesn't need to know or care which source it came
+// from -- see getAnalysisVFovRad's header comment for the analogous FOV split.
+let lastRealCaptureGray: Float64Array | null = null;
+let lastRealCaptureW = 0, lastRealCaptureH = 0;
+
+// Decodes an incoming data URL, resamples it (via drawImage's own scaling)
+// to the current analysis resolution, converts to grayscale, and flips it
+// to bottom-up -- a normal <canvas> 2D context (unlike a WebGL readback) is
+// natively TOP-DOWN, opposite of captureDistortedGrayscale's contract, so
+// this flip is what makes runAxesReconstruction's later flipRowsF64 land
+// back on the correct (top-down) orientation for computeWorldVotes either
+// way. Resampling to whatever aspect ratio the viewportW/H sliders currently
+// define means a real photo's own aspect ratio isn't preserved automatically
+// -- set those sliders to roughly match your phone's photo shape first.
+async function ingestRealCapture(dataUrl: string): Promise<void> {
+  const img = new Image();
+  await new Promise<void>((resolve, reject) => {
+    img.onload = () => resolve();
+    img.onerror = () => reject(new Error('failed to decode incoming capture image'));
+    img.src = dataUrl;
+  });
+  const w = img.naturalWidth, h = img.naturalHeight;
+  // Resize every shared analysis/display buffer to the photo's OWN true
+  // dimensions instead of resampling it to fit whatever the viewportW/H
+  // sliders currently say -- Through-Cam, Projected Cam, and Inside Sphere
+  // all read from these same buffers, so this is what makes them show the
+  // real capture at its real resolution rather than a version squeezed into
+  // the simulated camera's shape. Skipped when the incoming photo already
+  // matches (e.g. repeated shots from the same phone in the same
+  // orientation), since resizeCaptureBuffers disposes and reallocates every
+  // GPU texture -- real but pointless churn to redo on every single shot.
+  if (w !== rtSize.w || h !== rtSize.h) resizeCaptureBuffers({ w, h });
+
+  const tmpCanvas = document.createElement('canvas');
+  tmpCanvas.width = w; tmpCanvas.height = h;
+  const tctx = tmpCanvas.getContext('2d')!;
+  tctx.drawImage(img, 0, 0);
+  const topDown = tctx.getImageData(0, 0, w, h).data;
+  const grayTopDown = toGrayscale(topDown, w, h);
+  // A normal <canvas> 2D context (unlike a WebGL readback) is natively
+  // TOP-DOWN, opposite of captureDistortedGrayscale's contract -- flip so
+  // this lines up with distortedPreviewData/camRT's bottom-up convention
+  // the same way the analysis-only lastRealCaptureGray already needs to.
+  lastRealCaptureGray = flipRowsF64(grayTopDown, w, h);
+  lastRealCaptureW = w; lastRealCaptureH = h;
+
+  // Refresh the live views immediately rather than waiting for the next
+  // throttled animate() tick -- "I just took a photo" should feel instant.
+  updateDistortedPreview();
+  if (state.mode === 'projected') buildProjectedTexture();
+  if (state.useRealCapture) runAxesReconstruction();
+}
+
 // Whichever GradientField is CURRENTLY on screen (gradient/walked/effective
 // only -- 'agreement' is scalar, everything else isn't a vector field at
 // all), reset every updateDistortedPreview call and set only in those three
@@ -1054,21 +1206,56 @@ let lastDisplayedVectorField: GradientField | null = null;
 // actually being displayed (see updateHoverOverlays).
 let lastEffectiveField: GradientField | null = null;
 
+// Shared tail for both capture sources: given a final analysis-resolution
+// grayscale (already whatever it's going to be -- simulated-and-distorted,
+// or a real photo), paints whichever of the 4 direction/scalar field views
+// is currently selected. Only fires for fieldView in
+// {gradient,walked,agreement,effective} -- the plain grayscale views
+// (raw/antialiased/downsampled/noised) are painted directly by each caller
+// instead, since only the simulated path actually has distinct stages to
+// tell apart there; a real photo has no such staging, so all 4 of those
+// just show the same image (see updateDistortedPreview's real branch).
+function paintFieldViewFromGray(gray: Float64Array) {
+  const w = rtSize.w, h = rtSize.h;
+  if (state.fieldView === 'gradient') {
+    const field = computeGradientField(gray, w, h, Math.round(state.simGradRadius));
+    lastDisplayedVectorField = field;
+    paintVectorFieldAsColor(field, distortedPreviewData);
+    distortedPreviewTex.needsUpdate = true;
+  } else if (state.fieldView === 'walked') {
+    // Same field computeWorldVotes actually casts votes from (see its own
+    // comment) -- agreement-scaled BEFORE the walk, not multiplied in
+    // afterward, so this shows exactly what the fit sees. Lets 'gradient'
+    // and this view be flipped between directly to see what the walk
+    // changes, instead of only inferring it from the final orientation
+    // error.
+    const field = computeGradientField(gray, w, h, Math.round(state.simGradRadius));
+    const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
+    const effective = computeEffectiveGradientField(field, agreement);
+    lastEffectiveField = effective;
+    const walked = computeWalkedGradientField(effective);
+    lastDisplayedVectorField = walked;
+    paintVectorFieldAsColor(walked, distortedPreviewData);
+    distortedPreviewTex.needsUpdate = true;
+  } else if (state.fieldView === 'agreement') {
+    const field = computeGradientField(gray, w, h, Math.round(state.simGradRadius));
+    const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
+    paintScalarFieldAsGray(agreement, distortedPreviewData);
+    distortedPreviewTex.needsUpdate = true;
+  } else if (state.fieldView === 'effective') {
+    const field = computeGradientField(gray, w, h, Math.round(state.simGradRadius));
+    const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
+    const effective = computeEffectiveGradientField(field, agreement);
+    lastEffectiveField = effective;
+    lastDisplayedVectorField = effective;
+    paintVectorFieldAsColor(effective, distortedPreviewData);
+    distortedPreviewTex.needsUpdate = true;
+  }
+}
+
 function updateDistortedPreview() {
   lastDisplayedVectorField = null;
   lastEffectiveField = null;
-  const { w: cw, h: ch } = captureRTSize;
-  const rawRGBA = new Uint8Array(cw * ch * 4);
-  renderer.readRenderTargetPixels(camRT, 0, 0, cw, ch, rawRGBA);
-  const hiResGray = toGrayscale(rawRGBA, cw, ch);
-
-  // Contamination overlays need the real noised grayscale even when it isn't
-  // otherwise needed for display (hidden, or an early field view like 'raw')
-  // -- see lastNoisedPreviewGray's comment. When neither overlay is active
-  // this stays false and every early-return below still fires exactly as
-  // before, preserving the "stop as soon as the selected view is ready"
-  // perf win this function was originally written for.
-  const needGrayForOverlay = state.showTrueContamination || state.showReconstructedContamination;
 
   if (state.hideField) {
     // Solid black -- isolates the contamination overlay(s) with nothing else
@@ -1079,11 +1266,36 @@ function updateDistortedPreview() {
       distortedPreviewData[i] = 0; distortedPreviewData[i + 1] = 0; distortedPreviewData[i + 2] = 0; distortedPreviewData[i + 3] = 255;
     }
     distortedPreviewTex.needsUpdate = true;
-    if (!needGrayForOverlay) return;
-    // Still need the real "noised" grayscale below for the overlay(s) --
-    // every paint call from here on is gated by !state.hideField so nothing
-    // ever gets painted over the blanked buffer.
   }
+  const needGrayForOverlay = state.showTrueContamination || state.showReconstructedContamination;
+  if (state.hideField && !needGrayForOverlay) return;
+  // Still need the real grayscale below for the overlay(s) even when
+  // hidden -- every paint call from here on is gated by !state.hideField so
+  // nothing ever gets painted over the blanked buffer.
+
+  if (state.useRealCapture) {
+    // A real photo has no separate raw/antialiased/downsampled/noised
+    // stages to visualize -- those only exist to show the SIMULATED
+    // distortion pipeline building up. All 4 just show the real image
+    // directly; gradient/walked/agreement/effective are still computed live
+    // from it exactly like the simulated path.
+    if (!lastRealCaptureGray) return;
+    if (!state.hideField) {
+      if (state.fieldView === 'raw' || state.fieldView === 'antialiased' || state.fieldView === 'downsampled' || state.fieldView === 'noised') {
+        fillGrayscalePreview(lastRealCaptureGray, distortedPreviewData);
+        distortedPreviewTex.needsUpdate = true;
+      } else {
+        paintFieldViewFromGray(lastRealCaptureGray);
+      }
+    }
+    lastNoisedPreviewGray = lastRealCaptureGray;
+    return;
+  }
+
+  const { w: cw, h: ch } = captureRTSize;
+  const rawRGBA = new Uint8Array(cw * ch * 4);
+  renderer.readRenderTargetPixels(camRT, 0, 0, cw, ch, rawRGBA);
+  const hiResGray = toGrayscale(rawRGBA, cw, ch);
 
   if (!state.hideField && state.fieldView === 'raw') {
     const raw = downsampleBoxAverage(hiResGray, cw, ch, state.captureSupersample, rtSize.w, rtSize.h);
@@ -1118,39 +1330,8 @@ function updateDistortedPreview() {
     if (state.fieldView === 'noised') {
       fillGrayscalePreview(noised, distortedPreviewData);
       distortedPreviewTex.needsUpdate = true;
-    } else if (state.fieldView === 'gradient') {
-      const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
-      lastDisplayedVectorField = field;
-      paintVectorFieldAsColor(field, distortedPreviewData);
-      distortedPreviewTex.needsUpdate = true;
-    } else if (state.fieldView === 'walked') {
-      // Same field computeWorldVotes actually casts votes from (see its own
-      // comment) -- agreement-scaled BEFORE the walk, not multiplied in
-      // afterward, so this shows exactly what the fit sees. Lets 'gradient'
-      // and this view be flipped between directly to see what the walk
-      // changes, instead of only inferring it from the final orientation
-      // error.
-      const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
-      const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
-      const effective = computeEffectiveGradientField(field, agreement);
-      lastEffectiveField = effective;
-      const walked = computeWalkedGradientField(effective);
-      lastDisplayedVectorField = walked;
-      paintVectorFieldAsColor(walked, distortedPreviewData);
-      distortedPreviewTex.needsUpdate = true;
-    } else if (state.fieldView === 'agreement') {
-      const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
-      const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
-      paintScalarFieldAsGray(agreement, distortedPreviewData);
-      distortedPreviewTex.needsUpdate = true;
-    } else if (state.fieldView === 'effective') {
-      const field = computeGradientField(noised, rtSize.w, rtSize.h, Math.round(state.simGradRadius));
-      const agreement = computeGradientAgreementField(field, Math.round(state.coherenceRadius));
-      const effective = computeEffectiveGradientField(field, agreement);
-      lastEffectiveField = effective;
-      lastDisplayedVectorField = effective;
-      paintVectorFieldAsColor(effective, distortedPreviewData);
-      distortedPreviewTex.needsUpdate = true;
+    } else {
+      paintFieldViewFromGray(noised);
     }
   }
   lastNoisedPreviewGray = noised;
@@ -1433,6 +1614,103 @@ function guidedTangentDirection(
   return { fx: Math.cos(avgTheta) * seedMag, fy: Math.sin(avgTheta) * seedMag };
 }
 
+// Adaptive variant of guidedTangentDirection -- re-steers at every step
+// using the CURRENT running-average direction instead of always sampling
+// along a fixed straight line from the seed, so the walk can genuinely bend
+// to follow a curving edge. state.tangentWalkAdaptive toggles between the
+// two live (see guidedTangentDirectionForWalk below) specifically so the
+// original fixed version stays fully intact and directly A/B-comparable,
+// not just recoverable via git history. Three deliberate design choices
+// here (see conversation):
+//   1. Incremental position: each step moves ONE unit from the walker's own
+//      PREVIOUS (floating-point) position along the latest accepted-average
+//      tangent, rather than sampling at seed + k*(the ORIGINAL seed
+//      tangent, fixed for the whole walk).
+//   2. Steers by the FULL running circular average (the same reference
+//      already used for the deviation check below) -- smooth/stable, reacts
+//      slowly to real curvature by design rather than chasing recent noise.
+//   3. The two walk directions (+1/-1 along the seed's own initial tangent)
+//      are fully independent: each starts fresh from the seed's own
+//      angle/magnitude, rather than direction -1 continuing from whatever
+//      direction +1 already accumulated (which is what the fixed version
+//      above actually does, since sumCos/sumSin there are shared across
+//      both passes of its `for (const sign of [1,-1])` loop).
+// A rejected-but-tolerated sample (within grace) still advances the
+// walker's position -- same "keep walking through a corner without letting
+// it corrupt the average" principle the fixed version uses, generalized
+// from an integer step count to a floating-point position.
+function guidedTangentDirectionAdaptive(
+  fx: Float64Array, fy: Float64Array, w: number, h: number,
+  x: number, y: number, seedFx: number, seedFy: number,
+): { fx: number; fy: number } {
+  const seedTheta = Math.atan2(seedFy, seedFx);
+  const seedMag = Math.hypot(seedFx, seedFy);
+  const seedCos = Math.cos(2 * seedTheta) * seedMag, seedSin = Math.sin(2 * seedTheta) * seedMag;
+  const maxSteps = state.tangentWalkMaxSteps;
+  const devCos = Math.cos(2 * THREE.MathUtils.degToRad(state.tangentWalkDeviationDeg));
+  const magFraction = state.tangentWalkMagFraction;
+  const grace = state.tangentWalkGraceSamples;
+
+  // Grand total across both directions, with the seed's own contribution
+  // counted exactly once at the end -- each direction's sumCos/sumSin below
+  // starts pre-seeded with it (so IT steers/deviation-checks correctly from
+  // the very first step), so subtracting it back out before combining
+  // avoids double-counting.
+  let totalCos = 0, totalSin = 0;
+  for (const sign of [1, -1]) {
+    let sumCos = seedCos, sumSin = seedSin, runningMag = seedMag, sampleCount = 1;
+    let curX = x, curY = y;
+    let violations = 0;
+    for (let k = 1; k <= maxSteps; k++) {
+      const avgTheta = Math.atan2(sumSin, sumCos) / 2;
+      const tdx = -Math.sin(avgTheta), tdy = Math.cos(avgTheta);
+      curX += sign * tdx; curY += sign * tdy;
+      const sx = Math.round(curX), sy = Math.round(curY);
+      if (sx < 0 || sx >= w || sy < 0 || sy >= h) break;
+      const si = sy * w + sx;
+      const sfx = fx[si], sfy = fy[si];
+      const mag = Math.hypot(sfx, sfy);
+      if (mag === 0 || mag < runningMag * magFraction) {
+        violations++;
+        if (violations >= grace) break;
+        continue;
+      }
+      const theta = Math.atan2(sfy, sfx);
+      const c2 = Math.cos(2 * theta), s2 = Math.sin(2 * theta);
+      const avgLen = Math.hypot(sumCos, sumSin);
+      const cosDeviation = avgLen > 0 ? (c2 * sumCos + s2 * sumSin) / avgLen : 1;
+      if (cosDeviation < devCos) {
+        violations++;
+        if (violations >= grace) break;
+        continue;
+      }
+      violations = 0;
+      sumCos += c2 * mag; sumSin += s2 * mag;
+      runningMag = (runningMag * sampleCount + mag) / (sampleCount + 1);
+      sampleCount++;
+    }
+    totalCos += sumCos - seedCos;
+    totalSin += sumSin - seedSin;
+  }
+  totalCos += seedCos; totalSin += seedSin;
+  const avgTheta = Math.atan2(totalSin, totalCos) / 2;
+  return { fx: Math.cos(avgTheta) * seedMag, fy: Math.sin(avgTheta) * seedMag };
+}
+
+// Single dispatch point used by every REAL (non-diagnostic) caller --
+// computeWorldVotes and computeWalkedGradientField both go through this
+// instead of naming guidedTangentDirection/guidedTangentDirectionAdaptive
+// directly, so state.tangentWalkAdaptive is the only thing that needs to
+// change to flip the whole pipeline between them.
+function guidedTangentDirectionForWalk(
+  fx: Float64Array, fy: Float64Array, w: number, h: number,
+  x: number, y: number, seedFx: number, seedFy: number,
+): { fx: number; fy: number } {
+  return state.tangentWalkAdaptive
+    ? guidedTangentDirectionAdaptive(fx, fy, w, h, x, y, seedFx, seedFy)
+    : guidedTangentDirection(fx, fy, w, h, x, y, seedFx, seedFy);
+}
+
 // Runs guidedTangentDirection at every pixel of a field, producing a new
 // GradientField of walked (fx,fy) -- factored out since both the 'walked'
 // field-view preview and the true/reconstructed contamination overlays (see
@@ -1447,7 +1725,7 @@ function computeWalkedGradientField(field: GradientField): GradientField {
     for (let x = r; x < w - r; x++) {
       const i = y * w + x;
       if (fx[i] === 0 && fy[i] === 0) continue;
-      const walked = guidedTangentDirection(fx, fy, w, h, x, y, fx[i], fy[i]);
+      const walked = guidedTangentDirectionForWalk(fx, fy, w, h, x, y, fx[i], fy[i]);
       walkedFx[i] = walked.fx; walkedFy[i] = walked.fy;
     }
   }
@@ -1498,7 +1776,7 @@ function computeWorldVotes(
       if (fx[i] === 0 && fy[i] === 0) continue; // untouched border, exactly-flat, or fully corner-suppressed pixel
       // Noise-robust direction AND magnitude both come from the walk now
       // (see guidedTangentDirection's own comment).
-      const walked = guidedTangentDirection(fx, fy, w, h, x, y, fx[i], fy[i]);
+      const walked = guidedTangentDirectionForWalk(fx, fy, w, h, x, y, fx[i], fy[i]);
       let theta = Math.atan2(walked.fy, walked.fx);
       if (theta < 0) theta += Math.PI;
       if (theta >= Math.PI) theta -= Math.PI;
@@ -2193,9 +2471,9 @@ function castAndBucketProjectedSamples(bucketW: number, bucketH: number): {
   if (!lastRecoveredAxes) return null;
   const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
   const w = rtSize.w, h = rtSize.h;
-  const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
+  const vFovRad = getAnalysisVFovRad();
   const normal = Dnormal.clone();
-  if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
+  if (cornerDir(0, 0, MATH_QUAT, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
   // NOT the same toNDC as computeWorldVotes uses -- that receives gray
   // flipped to top-down first (flipRowsF64), so row 0 -> NDC
   // v=+1 (top) is correct for them. This function reads colors straight
@@ -2233,7 +2511,7 @@ function castAndBucketProjectedSamples(bucketW: number, bucketH: number): {
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
       const [ndcU, ndcV] = toNDC(x, y);
-      const rayDir = cornerDir(ndcU, ndcV, camQuat, vFovRad, RT_ASPECT);
+      const rayDir = cornerDir(ndcU, ndcV, MATH_QUAT, vFovRad, RT_ASPECT);
       const denom = rayDir.dot(normal);
       if (denom >= -MIN_GRAZING_COS) continue;
       const t = -distance / denom;
@@ -2278,7 +2556,7 @@ function castAndBucketProjectedSamples(bucketW: number, bucketH: number): {
           // gradient) -- same construction computeWorldVotes uses.
           const tdx = -Math.sin(theta), tdy = Math.cos(theta);
           const [ndcU2, ndcV2] = toNDC(x + tdx, y + tdy);
-          const rayDir2 = cornerDir(ndcU2, ndcV2, camQuat, vFovRad, RT_ASPECT);
+          const rayDir2 = cornerDir(ndcU2, ndcV2, MATH_QUAT, vFovRad, RT_ASPECT);
           const denom2 = rayDir2.dot(normal);
           if (denom2 < -MIN_GRAZING_COS) {
             const t2 = -distance / denom2;
@@ -2556,6 +2834,56 @@ function measurePeriodDistance(currentDistance: number, extentU: number, extentV
   };
 }
 
+// Computes bins/marginals from a bucket count that's PROPORTIONAL to each
+// axis's own world extent (same target-buckets-per-cell idea
+// measurePeriodDistance already uses, for the same underlying reason),
+// instead of buildProjectedTexture's own bucketW=rtSize.w/bucketH=rtSize.h --
+// which are fine for THAT function's actual job (sizing the "Projected Cam"
+// display texture to a sensible pixel resolution) but wrong for feeding
+// buildDecodeSampleGrid's phase anchor, since rtSize.w/rtSize.h are FIXED
+// display dimensions with no relationship to which world direction (Drow's
+// extent or Dcol's) currently plays "U" vs "V" -- under real-capture's
+// manual swap toggle, that assignment can flip while rtSize's own width/
+// height obviously can't follow it. Confirmed live this doesn't corrupt
+// period (period, in world units, already comes out correct either way) but
+// DOES corrupt phase: two flip-toggle combinations that read the identical
+// physical world direction (verified by construction, not by eye) reported
+// different sub-cell phase for it, and forcing equal bucket counts measurably
+// closed most of the gap.
+//
+// Deliberately returns its result rather than writing lastProjectedBins/
+// lastMarginals -- those two are the DISPLAY pipeline's own state ("Projected
+// Cam"'s background texture AND drawSampleLattice's dot positioning both read
+// them, and need to agree with EACH OTHER above all else). An earlier version
+// of this function overwrote them directly, on the theory that decode and
+// display could just share one "more correct" copy -- but buildProjectedTexture
+// gets called again independently from several OTHER places (mode switches,
+// slider updates), none of which know to redo this axis-symmetric pass
+// afterward, so lastProjectedBins would silently drift back to the plain
+// rtSize-shaped version while lastDecodeGrid.points[][].u/v stayed anchored
+// to whatever THIS function last computed -- drawSampleLattice would then
+// position dots (from the stale decode grid) against the wrong (reset)
+// bucket layout: exactly the "sample dots drawn outside the visible
+// quadrilateral, filled gray because lastDecodeCorrectness didn't line up
+// either" bug this comment is now here to prevent a repeat of. Keeping
+// decode's bins entirely local (computed fresh inside buildDecodeSampleGrid,
+// never written back to shared state) means display's copy is never at risk
+// of being clobbered, and decode always uses its own current, correct pass.
+function computeDecodeMarginals(): { bins: ProjectedBins; marginals: Marginals } | null {
+  if (!lastRecoveredAxes || !lastProjectedBins) return null;
+  const TARGET_BUCKETS_PER_CELL = 20;
+  const MAX_REFINE_BUCKETS = 2048;
+  const floor = Math.max(rtSize.w, rtSize.h); // shared floor for BOTH axes -- an axis-specific one (like measurePeriodDistance's own rtSize.w/rtSize.h floors) would just reintroduce the same swap-dependent asymmetry this function exists to remove, whenever the extent-proportional term is small enough for the floor to bind.
+  const extentU = lastProjectedBins.maxU - lastProjectedBins.minU;
+  const extentV = lastProjectedBins.maxV - lastProjectedBins.minV;
+  const bucketW = Math.min(MAX_REFINE_BUCKETS, Math.max(floor, Math.ceil(extentU / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
+  const bucketH = Math.min(MAX_REFINE_BUCKETS, Math.max(floor, Math.ceil(extentV / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
+  const result = castAndBucketProjectedSamples(bucketW, bucketH);
+  if (!result) return null;
+  const marginals = computeProjectedMarginals(bucketW, bucketH, result.counts, result.gradCxSum, result.gradCySum);
+  return { bins: result.bins, marginals };
+}
+
 // Locates the nearest cell-BOUNDARY peak within one period, as a fractional
 // bin index in [0, period) -- a weighted circular mean (de-meaned profile as
 // weight, angle = 2*pi*i/period) rather than a literal peak search, so it's
@@ -2717,15 +3045,29 @@ function updatePositionReadoutText() {
   let decodeLines: string;
   if (lastPositionDecode) {
     const rec = lastPositionDecode.camPos;
-    const errPos = rec.distanceTo(camPos);
-    decodeLines =
-      `torus cell: row ${lastPositionDecode.row}  col ${lastPositionDecode.col}\n` +
-      `consistency: ${(lastPositionDecode.consistency * 100).toFixed(1)}%\n` +
-      `recovered camPos: (${rec.x.toFixed(2)}, ${rec.y.toFixed(2)}, ${rec.z.toFixed(2)})\n` +
-      `true camPos: (${camPos.x.toFixed(2)}, ${camPos.y.toFixed(2)}, ${camPos.z.toFixed(2)})\n` +
-      `error: ${errPos.toFixed(3)} world units\n` +
-      `world-axis swap: ${lastPositionDecode.worldAxisSwapped ? 'YES' : 'no'} ` +
-      `(unswapped err ${lastPositionDecode.camPosErrUnswapped.toFixed(2)}, swapped err ${lastPositionDecode.camPosErrSwapped.toFixed(2)} -- ground-truth diagnostic, lab-only)`;
+    if (state.useRealCapture) {
+      // No ground truth for a real photo -- camPos and recoveredCamQuat here
+      // are both recovered entirely from the pattern itself (see
+      // solveRecoveredCamQuat), nothing to compare them against.
+      decodeLines =
+        `torus cell: row ${lastPositionDecode.row}  col ${lastPositionDecode.col}\n` +
+        `consistency: ${(lastPositionDecode.consistency * 100).toFixed(1)}%\n` +
+        `recovered camPos: (${rec.x.toFixed(2)}, ${rec.y.toFixed(2)}, ${rec.z.toFixed(2)})`;
+    } else {
+      const errPos = rec.distanceTo(camPos);
+      // Ground-truth diagnostic, lab-only: recoveredCamQuat is solved with
+      // zero knowledge of the real camQuat, so a small angle here is a
+      // genuine end-to-end validation of solveRecoveredCamQuat, not
+      // something a real (non-lab) decode could ever check for itself.
+      const errOrientationDeg = THREE.MathUtils.radToDeg(camQuat.angleTo(lastPositionDecode.recoveredCamQuat));
+      decodeLines =
+        `torus cell: row ${lastPositionDecode.row}  col ${lastPositionDecode.col}\n` +
+        `consistency: ${(lastPositionDecode.consistency * 100).toFixed(1)}%\n` +
+        `recovered camPos: (${rec.x.toFixed(2)}, ${rec.y.toFixed(2)}, ${rec.z.toFixed(2)})\n` +
+        `true camPos: (${camPos.x.toFixed(2)}, ${camPos.y.toFixed(2)}, ${camPos.z.toFixed(2)})\n` +
+        `error: ${errPos.toFixed(3)} world units\n` +
+        `orientation error: ${errOrientationDeg.toFixed(2)}° (recoveredCamQuat vs true camQuat -- ground-truth diagnostic, lab-only)`;
+    }
   } else {
     decodeLines = 'position decode: no match (need periodicity + a successful orientation/distance fit)';
   }
@@ -2753,8 +3095,11 @@ function drawSampleLattice(x: number, y: number, w: number, h: number) {
   if (!state.showSampleLattice) { hideSampleLattice(); return; }
   // Reuses the grid runPositionDecode most recently built (needs `gray`,
   // which isn't available in this render-only path) rather than rebuilding
-  // it here.
-  const grid = lastDecodeGrid;
+  // it here -- lastDecodeRotated specifically (already rotated to whichever
+  // orientation won), since lastDecodeCorrectness indexes by THAT grid, not
+  // lastDecodeGrid's own pre-rotation indexing -- see lastDecodeRotated's
+  // own comment.
+  const grid = lastDecodeRotated;
   if (!grid || !lastProjectedBins) { hideSampleLattice(); return; }
   const { maxU, binWidthU, minV, binWidthV, w: bw, h: bh } = lastProjectedBins;
 
@@ -2769,10 +3114,9 @@ function drawSampleLattice(x: number, y: number, w: number, h: number) {
   ctx.clearRect(0, 0, sampleLatticeCanvas.width, sampleLatticeCanvas.height);
 
   const radius = 3;
-  for (let i = 0; i < grid.points.length; i++) {
-    const row = grid.points[i];
-    for (let j = 0; j < row.length; j++) {
-      const pt = row[j];
+  for (let i = 0; i < grid.rows; i++) {
+    for (let j = 0; j < grid.cols; j++) {
+      const pt = grid.points[i][j];
       if (!pt.valid) continue;
       // bu runs maxU -> minU, matching buildProjectedTexture's mirror -- see
       // its comment.
@@ -2806,25 +3150,53 @@ function drawSampleLattice(x: number, y: number, w: number, h: number) {
   }
 }
 
-// Local reimplementation of decode.ts's packPatchCells (not exported there,
-// and small enough not to be worth exporting for one caller) -- packs an
-// order x order window into a lookup key under one of 4 reading
-// orientations, matching src/debruijn.ts's windowKey order (top-to-bottom,
-// left-to-right, MSB-first) for orientation 0; the others apply the same
-// index rotation packPatchCells itself uses.
-function packPatchCellsLocal(cells: number[][], order: number, orientation: number): number {
-  let key = 0;
-  for (let i = 0; i < order; i++) {
-    for (let j = 0; j < order; j++) {
-      let bit: number;
-      if (orientation === 1) bit = cells[order - 1 - j][i];
-      else if (orientation === 2) bit = cells[order - 1 - i][order - 1 - j];
-      else if (orientation === 3) bit = cells[j][order - 1 - i];
-      else bit = cells[i][j];
-      key = (key << 1) | bit;
+// Replaces the old packPatchCellsLocal (4 per-window reading orientations) +
+// rotateShiftLocal (the mirrored/orientation shift correction that needed --
+// see git history for that whole derivation). Both existed to search an 8-
+// element group (4 rotations x mirror) because nothing upstream pinned
+// camera-vs-pattern HANDEDNESS -- runAxesReconstruction now does exactly
+// that once, right after the plane fit (see its own comment), so the only
+// remaining ambiguity is genuinely just the 4-element rotation subgroup: a
+// reflection can never be the right answer anymore, by construction, not by
+// searching for and rejecting it. That collapses "pack each window 4 ways,
+// derive a correction for how each composes with a row-mirror" into "rotate
+// the whole grid (once, per candidate) and read it plainly" -- rotatedDims/
+// readRotated below are the standard 4 rotations of a 2D array, nothing
+// domain-specific, and the anchor math in tallyPositionVotes becomes a
+// plain "matchRow - i0" now that there's no mirrored term to compose with.
+function rotatedDims(rows: number, cols: number, o: number): [number, number] {
+  return (o === 1 || o === 3) ? [cols, rows] : [rows, cols];
+}
+function readRotated(grid: DecodeSampleGrid, o: number, a: number, b: number): DecodeSamplePoint {
+  const { rows: R, cols: C, points } = grid;
+  if (o === 1) return points[R - 1 - b][a];
+  if (o === 2) return points[R - 1 - a][C - 1 - b];
+  if (o === 3) return points[b][C - 1 - a];
+  return points[a][b];
+}
+// Materializes the rotation readRotated reads lazily -- every
+// DecodeSamplePoint (u, v, bit, valid, everything) carries over UNCHANGED in
+// content, just relabeled to a new (row,col); rotating doesn't re-sample
+// anything. zeroI/zeroJ get found by scanning for whichever point is
+// nearest u=v=0 in the rotated array, rather than deriving them from the
+// original grid's own zeroI/zeroJ via the rotation formula -- this only has
+// to agree on WHAT zeroI/zeroJ means (nearest the camera), not duplicate
+// HOW the original one was computed.
+function rotateGrid(grid: DecodeSampleGrid, o: number): DecodeSampleGrid {
+  if (o === 0) return grid;
+  const [rr, cc] = rotatedDims(grid.rows, grid.cols, o);
+  const points: DecodeSamplePoint[][] = Array.from({ length: rr }, (_, a) =>
+    Array.from({ length: cc }, (_, b) => readRotated(grid, o, a, b)));
+  let zeroI = 0, zeroJ = 0, bestD2 = Infinity;
+  for (let a = 0; a < rr; a++) {
+    for (let b = 0; b < cc; b++) {
+      const pt = points[a][b];
+      if (!pt.valid) continue;
+      const d2 = pt.u * pt.u + pt.v * pt.v;
+      if (d2 < bestD2) { bestD2 = d2; zeroI = a; zeroJ = b; }
     }
   }
-  return key >>> 0;
+  return { rows: rr, cols: cc, zeroI, zeroJ, points };
 }
 
 // u,v are the sample's world position (relative to camera, in Drow/Dcol
@@ -2838,9 +3210,11 @@ function packPatchCellsLocal(cells: number[][], order: number, orientation: numb
 interface DecodeSamplePoint { u: number; v: number; px: number; py: number; valid: boolean; bit: number }
 interface DecodeSampleGrid { rows: number; cols: number; zeroI: number; zeroJ: number; points: DecodeSamplePoint[][] }
 
-// Builds a sampling grid covering the FULL observed quadrilateral (per
-// lastProjectedBins' minU/maxU/minV/maxV -- the same extent "Projected Cam"
-// itself renders), not a small fixed window around one anchor. Every
+// Builds a sampling grid covering the FULL observed quadrilateral (per its
+// own computeDecodeMarginals bins' minU/maxU/minV/maxV -- the same extent
+// "Projected Cam" itself renders, just independently re-bucketed -- see
+// computeDecodeMarginals's comment), not a small fixed window around one
+// anchor. Every
 // integer GRID_STEP hop from the phase-anchored sub-cell offset, in both
 // directions, until the whole observed extent is covered -- "behind
 // camera" and "off-frame" points still get marked invalid (skipped below),
@@ -2853,34 +3227,43 @@ interface DecodeSampleGrid { rows: number; cols: number; zeroI: number; zeroJ: n
 // empirically: correctness degrades with distance from center) than cells
 // right next to it.
 function buildDecodeSampleGrid(gray: Float64Array, w: number, h: number, vFovRad: number): DecodeSampleGrid | null {
-  if (!lastRecoveredAxes || !lastMarginals || lastMarginals.colPeriod === null || lastMarginals.rowPeriod === null || !lastProjectedBins) {
+  if (!lastRecoveredAxes) return null;
+  // Own, axis-symmetric-bucket bins/marginals -- deliberately NOT
+  // lastProjectedBins/lastMarginals (the display pipeline's own state, which
+  // other unrelated buildProjectedTexture() callers can and do reset between
+  // one decode call and the next) -- see computeDecodeMarginals's own
+  // comment for why sharing that global caused a real, visible bug
+  // (drawSampleLattice positioning dots against a since-reset bucket layout).
+  const decodeMarginals = computeDecodeMarginals();
+  if (!decodeMarginals || decodeMarginals.marginals.colPeriod === null || decodeMarginals.marginals.rowPeriod === null) {
     return null;
   }
+  const { bins, marginals } = decodeMarginals;
   const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
   const normal = Dnormal.clone();
-  if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
-  const invQuat = camQuat.clone().invert();
+  if (cornerDir(0, 0, MATH_QUAT, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
+  const invQuat = MATH_QUAT.clone().invert();
   const halfV = vFovRad / 2;
   const bin = binarize(gray);
 
   // Sub-cell phase: findPhase locked onto the nearest cell-BOUNDARY peak (see
   // computeProjectedMarginals) in BIN units of the projected buffer; running
-  // that bin position back through lastProjectedBins' own scale into world
-  // units, then folding to a single representative offset within one
-  // GRID_STEP of zero, gives exactly where a boundary sits relative to the
-  // camera along each axis -- a cell CENTER is exactly half a GRID_STEP past
-  // that. Every other sampled cell is just that anchor plus an integer
-  // GRID_STEP hop -- GRID_STEP itself is a known construction constant of
-  // the pattern (not something recovered), so hopping by exactly 1 avoids
-  // compounding the period measurement's own noise across many cells.
+  // that bin position back through bins' own scale into world units, then
+  // folding to a single representative offset within one GRID_STEP of zero,
+  // gives exactly where a boundary sits relative to the camera along each
+  // axis -- a cell CENTER is exactly half a GRID_STEP past that. Every other
+  // sampled cell is just that anchor plus an integer GRID_STEP hop --
+  // GRID_STEP itself is a known construction constant of the pattern (not
+  // something recovered), so hopping by exactly 1 avoids compounding the
+  // period measurement's own noise across many cells.
   // colPhase is a bu bin-index, and bu runs maxU -> minU (see
   // buildProjectedTexture's comment on why) -- so bu=0 is u=maxU, not minU.
-  const uBoundaryRaw = lastProjectedBins.maxU - lastMarginals.colPhase * lastProjectedBins.binWidthU;
-  const vBoundaryRaw = lastProjectedBins.minV + lastMarginals.rowPhase * lastProjectedBins.binWidthV;
+  const uBoundaryRaw = bins.maxU - marginals.colPhase * bins.binWidthU;
+  const vBoundaryRaw = bins.minV + marginals.rowPhase * bins.binWidthV;
   const uPhase = (uBoundaryRaw - Math.round(uBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
   const vPhase = (vBoundaryRaw - Math.round(vBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
 
-  const { minU, maxU, minV, maxV } = lastProjectedBins;
+  const { minU, maxU, minV, maxV } = bins;
   const kMinU = Math.floor((minU - uPhase) / GRID_STEP), kMaxU = Math.ceil((maxU - uPhase) / GRID_STEP);
   const kMinV = Math.floor((minV - vPhase) / GRID_STEP), kMaxV = Math.ceil((maxV - vPhase) / GRID_STEP);
   const cols = kMaxU - kMinU + 1, rows = kMaxV - kMinV + 1;
@@ -2888,11 +3271,11 @@ function buildDecodeSampleGrid(gray: Float64Array, w: number, h: number, vFovRad
   const zeroJ = Math.min(cols - 1, Math.max(0, Math.round(-uPhase / GRID_STEP) - kMinU));
 
   // No separate "is this behind the camera" check -- every (u,v) here is
-  // already constrained to lastProjectedBins' own min/max, which
-  // buildProjectedTexture only ever populates from rays it confirmed are
-  // in front of the camera AND past its grazing-angle cutoff (see that
-  // function's MIN_GRAZING_COS). A point that's actually behind the camera
-  // or too grazing simply won't project to a real, in-frame pixel below --
+  // already constrained to bins' own min/max, which castAndBucketProjectedSamples
+  // only ever populates from rays it confirmed are in front of the camera
+  // AND past its grazing-angle cutoff (see that function's MIN_GRAZING_COS).
+  // A point that's actually behind the camera or too grazing simply won't
+  // project to a real, in-frame pixel below --
   // that's the only check that actually matters for "can this cell be
   // sampled at all", and we need to compute the pixel position anyway to
   // know where to read the bit from. Number.isFinite guards the one
@@ -2932,81 +3315,168 @@ function buildDecodeSampleGrid(gray: Float64Array, w: number, h: number, vFovRad
 interface PositionDecodeResult {
   row: number; col: number; consistency: number; votes: number; totalWindows: number;
   camPos: THREE.Vector3;
-  // Diagnostic only (see runPositionDecode's comment on worldAxisSwapped):
-  // ground-truth distance each of the two world-axis candidates lands at.
-  // Not something a real (non-lab) decode could compute.
-  camPosErrUnswapped: number; camPosErrSwapped: number; worldAxisSwapped: boolean;
+  // The camera's TRUE world orientation, solved entirely from the pattern --
+  // see solveRecoveredCamQuat. Anything placed into the actual 3D scene (the
+  // overlay mesh, the recovered-camera gizmo, the recovered pole markers)
+  // needs this to convert lastRecoveredAxes' Drow/Dcol/Dnormal (expressed in
+  // MATH_QUAT's fixed math frame) into true world space first.
+  recoveredCamQuat: THREE.Quaternion;
 }
 let lastPositionDecode: PositionDecodeResult | null = null;
 
-// Per DecodeSampleGrid cell (ORIGINAL, non-mirrored indexing) -- bit is what
-// was actually sampled there, correct is whether it matches the real torus
-// content at the position the winning vote implies. null where the sample
-// itself was invalid or no decode exists yet. Rebuilt every
-// runPositionDecode call; consumed by drawSampleLattice to fill/stroke each
-// dot, same idea as the real tracker's per-cell patch highlighting
-// (src/main.ts, Patch.correct) -- see that file's togglePatches block.
+// Per rotated-grid cell (see lastDecodeRotated) -- bit is what was actually
+// sampled there, correct is whether it matches the real torus content at
+// the position the winning vote implies. null where the sample itself was
+// invalid or no decode exists yet. Rebuilt every runPositionDecode call;
+// consumed by drawSampleLattice to fill/stroke each dot, same idea as the
+// real tracker's per-cell patch highlighting (src/main.ts, Patch.correct)
+// -- see that file's togglePatches block.
 interface DecodeCellDebug { bit: number; correct: boolean }
 let lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null = null;
-// The grid runPositionDecode most recently built, cached so drawSampleLattice
-// can reuse its (u,v,px,py) geometry without rebuilding it (which needs
-// `gray`, not available in the render path) or duplicating this math.
+// The grid runPositionDecode most recently built (pre-rotation, orientation
+// 0), cached so drawSampleLattice can reuse its (u,v,px,py) geometry
+// without rebuilding it (which needs `gray`, not available in the render
+// path) or duplicating this math.
 let lastDecodeGrid: DecodeSampleGrid | null = null;
+// grid, rotated to whichever orientation actually won -- this is what
+// lastDecodeCorrectness indexes by, NOT lastDecodeGrid directly (see
+// runPositionDecode). Any caller that positions something using one of
+// these two grids while reading data from the other will draw one cell's
+// fill/stroke at a DIFFERENT cell's screen position -- confirmed live, back
+// when this same mismatch existed via a `mirrored` flag instead of a
+// rotated grid: "gray dots, and the colored ones read totally wrong
+// values" whenever the winning orientation wasn't the trivial one.
+let lastDecodeRotated: DecodeSampleGrid | null = null;
 
-// Every valid order x order window in the grid (NOT just non-overlapping
-// tiles -- a sliding window, one step at a time, so a window that just
-// misses a clean read by starting one cell over still gets its own
-// independent chance), at each of the 4 reading rotations, either finds an
-// EXACT match in the de Bruijn lookup table or doesn't (no partial credit --
-// a single wrong bit anywhere in the 16 sends the packed key to some
-// unrelated, essentially random torus position, or occasionally to nothing
-// at all). Every window that DOES find a match casts one vote for the torus
-// anchor (grid cell (0,0)'s implied position) that match implies. Unlike
-// pickBestCandidate's own correlation-based scoring (checks only the single
-// best-looking anchor against the whole grid), this tallies literal vote
-// counts across every anchor any window proposed, and the anchor with the
-// most votes wins -- unambiguous "most patches agree" rather than "best of
-// whichever candidates got an exact hit at all."
-interface VoteResult { mirrored: boolean; orientation: number; anchorRow: number; anchorCol: number; votes: number; totalWindows: number }
+// Every valid order x order window, in EACH of the 4 whole-grid rotations
+// (NOT non-overlapping tiles -- a sliding window, one step at a time, so a
+// window that just misses a clean read by starting one cell over still gets
+// its own independent chance), either finds an EXACT match in the de Bruijn
+// lookup table or doesn't (no partial credit -- a single wrong bit anywhere
+// in the 25 sends the packed key to some unrelated, essentially random
+// torus position, or occasionally to nothing at all). Every window that
+// DOES find a match casts one vote for the torus anchor (the ROTATED grid's
+// own (0,0), which readRotated/rotateGrid already made a plain, un-rotated
+// read of by construction -- no shift correction needed here beyond the
+// window's own origin). Unlike pickBestCandidate's own correlation-based
+// scoring (checks only the single best-looking anchor against the whole
+// grid), this tallies literal vote counts across every anchor any window
+// proposed, and the anchor with the most votes wins -- unambiguous "most
+// patches agree" rather than "best of whichever candidates got an exact hit
+// at all."
+interface VoteResult { orientation: number; anchorRow: number; anchorCol: number; votes: number; totalWindows: number }
 function tallyPositionVotes(grid: DecodeSampleGrid): VoteResult | null {
   const tally = new Map<string, number>();
   let totalWindows = 0;
   const block: number[][] = Array.from({ length: ORDER }, () => new Array(ORDER).fill(0));
-  for (const mirrored of [false, true]) {
-    const at = (i: number, j: number) => mirrored ? grid.points[grid.rows - 1 - i][j] : grid.points[i][j];
-    for (let i0 = 0; i0 + ORDER <= grid.rows; i0++) {
-      for (let j0 = 0; j0 + ORDER <= grid.cols; j0++) {
+  for (let o = 0; o < 4; o++) {
+    const [rr, cc] = rotatedDims(grid.rows, grid.cols, o);
+    for (let i0 = 0; i0 + ORDER <= rr; i0++) {
+      for (let j0 = 0; j0 + ORDER <= cc; j0++) {
         let complete = true;
         for (let di = 0; di < ORDER && complete; di++) {
           for (let dj = 0; dj < ORDER; dj++) {
-            const pt = at(i0 + di, j0 + dj);
+            const pt = readRotated(grid, o, i0 + di, j0 + dj);
             if (!pt.valid) { complete = false; break; }
             block[di][dj] = pt.bit;
           }
         }
         if (!complete) continue;
         totalWindows++;
-        for (let o = 0; o < 4; o++) {
-          const key = packPatchCellsLocal(block, ORDER, o);
-          const packed = debruijnLookup.get(key);
-          if (packed === undefined) continue;
-          const matchRow = Math.floor(packed / C), matchCol = packed % C;
-          const [dr, dc] = rotateShift(i0, j0, o);
-          const anchorRow = ((matchRow - dr) % R + R) % R;
-          const anchorCol = ((matchCol - dc) % C + C) % C;
-          const voteKey = `${mirrored ? 1 : 0},${o},${anchorRow},${anchorCol}`;
-          tally.set(voteKey, (tally.get(voteKey) ?? 0) + 1);
-        }
+        // Plain windowKey-style pack (top-to-bottom, left-to-right, MSB
+        // first) -- no per-window orientation needed anymore, the
+        // whole-grid rotation above already did that job once.
+        let key = 0;
+        for (let di = 0; di < ORDER; di++) for (let dj = 0; dj < ORDER; dj++) key = (key << 1) | block[di][dj];
+        key = key >>> 0;
+        const packed = debruijnLookup.get(key);
+        if (packed === undefined) continue;
+        const matchRow = Math.floor(packed / C), matchCol = packed % C;
+        const anchorRow = ((matchRow - i0) % R + R) % R;
+        const anchorCol = ((matchCol - j0) % C + C) % C;
+        const voteKey = `${o},${anchorRow},${anchorCol}`;
+        tally.set(voteKey, (tally.get(voteKey) ?? 0) + 1);
       }
     }
   }
   let best: VoteResult | null = null;
   for (const [key, votes] of tally) {
     if (best && votes <= best.votes) continue;
-    const [m, o, ar, ac] = key.split(',').map(Number);
-    best = { mirrored: m === 1, orientation: o, anchorRow: ar, anchorCol: ac, votes, totalWindows };
+    const [o, ar, ac] = key.split(',').map(Number);
+    best = { orientation: o, anchorRow: ar, anchorCol: ac, votes, totalWindows };
   }
   return best;
+}
+
+// Solves for the camera's ACTUAL world orientation, entirely from the
+// pattern -- no external source of truth needed, and none of the recovery
+// math above this point ever depended on knowing it. Everything through
+// tallyPositionVotes' winning (orientation, anchorRow, anchorCol) operates in
+// MATH_QUAT's fixed, arbitrary reference frame; this is the missing step that
+// turns "camera-relative recovered geometry" into "where the camera actually
+// is/points in the fixed world frame floorMesh itself lives in", for BOTH
+// modes uniformly, rather than assuming MATH_QUAT already equals that world
+// frame (only ever true by construction in simulated mode, which is exactly
+// why simulated mode alone looked fine before this existed).
+//
+// Mechanism: take two grid cells whose TRUE torus (row,col) tallyPositionVotes'
+// bit-matching already pinned down -- the reference cell (rotated.zeroI/zeroJ)
+// plus one valid step away along each rotated axis -- and compute, for each,
+// both (a) its position in the fixed math frame (camera-relative, via
+// Drow/Dcol/normal + the cell's own sampled u,v) and (b) its TRUE, ABSOLUTE
+// world position (via the floor's fixed, known torus-cell -> world-XZ
+// formula, the same one runPositionDecode's own worldPosTrue uses). The
+// DIRECTION between those two cells, computed both ways, gives two
+// corresponding unit-vector pairs -- exactly enough to solve the rotation
+// that carries one onto the other (the classic "recover orientation from
+// corresponding vectors" problem: build an orthonormal basis from each pair
+// via their own cross product -- which keeps handedness consistent
+// automatically, so the result is always a proper rotation, never a
+// reflection -- then compose mathBasis^-1 into worldBasis). That rotation IS
+// the camera's true world orientation. Returns null only if the sampled grid
+// is too sparse to find a second valid cell along either rotated axis
+// (degenerate, almost-single-cell decode).
+function solveRecoveredCamQuat(
+  rotated: DecodeSampleGrid, anchorRow: number, anchorCol: number,
+  Drow: THREE.Vector3, Dcol: THREE.Vector3, normal: THREE.Vector3, distance: number,
+): THREE.Quaternion | null {
+  const mathPos = (i: number, j: number) => new THREE.Vector3()
+    .addScaledVector(Drow, rotated.points[i][j].u)
+    .addScaledVector(Dcol, rotated.points[i][j].v)
+    .addScaledVector(normal, -distance);
+  const worldPos = (i: number, j: number) => {
+    const tRow = ((anchorRow + i) % R + R) % R, tCol = ((anchorCol + j) % C + C) % C;
+    return new THREE.Vector3((tCol + 0.5 - C / 2) * GRID_STEP, 0, (tRow + 0.5 - R / 2) * GRID_STEP);
+  };
+  function findStep(i0: number, j0: number, di: number, dj: number): { i: number; j: number } | null {
+    const maxSteps = di !== 0 ? rotated.rows : rotated.cols;
+    for (let k = 1; k <= maxSteps; k++) {
+      const i = i0 + di * k, j = j0 + dj * k;
+      if (i < 0 || i >= rotated.rows || j < 0 || j >= rotated.cols) return null;
+      if (rotated.points[i][j].valid) return { i, j };
+    }
+    return null;
+  }
+
+  const zi = rotated.zeroI, zj = rotated.zeroJ;
+  const rowStep = findStep(zi, zj, 1, 0) ?? findStep(zi, zj, -1, 0);
+  const colStep = findStep(zi, zj, 0, 1) ?? findStep(zi, zj, 0, -1);
+  if (!rowStep || !colStep) return null;
+
+  const originMath = mathPos(zi, zj), originWorld = worldPos(zi, zj);
+  const rowMath = mathPos(rowStep.i, rowStep.j).sub(originMath).normalize();
+  const rowWorld = worldPos(rowStep.i, rowStep.j).sub(originWorld).normalize();
+  const colMath = mathPos(colStep.i, colStep.j).sub(originMath).normalize();
+  const colWorld = worldPos(colStep.i, colStep.j).sub(originWorld).normalize();
+
+  const thirdMath = new THREE.Vector3().crossVectors(rowMath, colMath).normalize();
+  const thirdWorld = new THREE.Vector3().crossVectors(rowWorld, colWorld).normalize();
+  if (thirdMath.lengthSq() < 1e-9 || thirdWorld.lengthSq() < 1e-9) return null; // degenerate: collinear steps
+
+  const mathBasis = new THREE.Matrix4().makeBasis(rowMath, colMath, thirdMath);
+  const worldBasis = new THREE.Matrix4().makeBasis(rowWorld, colWorld, thirdWorld);
+  const mathBasisInv = mathBasis.clone().invert();
+  return new THREE.Quaternion().setFromRotationMatrix(worldBasis.clone().multiply(mathBasisInv));
 }
 
 // Decodes the camera's absolute world position: samples every valid floor
@@ -3022,26 +3492,28 @@ function tallyPositionVotes(grid: DecodeSampleGrid): VoteResult | null {
 function runPositionDecode(gray: Float64Array, w: number, h: number, vFovRad: number) {
   const grid = buildDecodeSampleGrid(gray, w, h, vFovRad);
   lastDecodeGrid = grid;
+  lastDecodeRotated = null;
   if (!grid) { lastPositionDecode = null; lastDecodeCorrectness = null; return; }
   const winner = tallyPositionVotes(grid);
   if (!winner) { lastPositionDecode = null; lastDecodeCorrectness = null; return; }
 
   // Per-cell correctness across the FULL grid (not just the cells that
   // happened to be part of a voting window) -- same math scoreCorrelation
-  // uses internally: given the winning anchor + orientation, every cell's
-  // implied torus position is anchor + rotateShift(i,j,o).
-  const { mirrored, orientation: o, anchorRow, anchorCol } = winner;
-  const correctness: (DecodeCellDebug | null)[][] = Array.from({ length: grid.rows }, () => new Array(grid.cols).fill(null));
+  // uses internally: given the winning anchor, every cell's implied torus
+  // position is just anchor + (i,j), now that rotated.points is already a
+  // plain, un-rotated reading of the winning orientation (see rotateGrid) --
+  // no shift correction needed, unlike the old mirrored/orientation version.
+  const { anchorRow, anchorCol } = winner;
+  const rotated = rotateGrid(grid, winner.orientation);
+  lastDecodeRotated = rotated;
+  const correctness: (DecodeCellDebug | null)[][] = Array.from({ length: rotated.rows }, () => new Array(rotated.cols).fill(null));
   let correctCount = 0, wrongCount = 0;
-  for (let i = 0; i < grid.rows; i++) {
-    for (let j = 0; j < grid.cols; j++) {
-      // mirrorRowsGrid-equivalent: mirrored candidate's cell (i,j) is
-      // ORIGINAL cell (rows-1-i, j).
-      const pt = mirrored ? grid.points[grid.rows - 1 - i][j] : grid.points[i][j];
+  for (let i = 0; i < rotated.rows; i++) {
+    for (let j = 0; j < rotated.cols; j++) {
+      const pt = rotated.points[i][j];
       if (!pt.valid) continue;
-      const [dr, dc] = rotateShift(i, j, o);
-      const torusRow = ((anchorRow + dr) % R + R) % R;
-      const torusCol = ((anchorCol + dc) % C + C) % C;
+      const torusRow = ((anchorRow + i) % R + R) % R;
+      const torusCol = ((anchorCol + j) % C + C) % C;
       const correct = pt.bit === torus[torusRow][torusCol];
       correctness[i][j] = { bit: pt.bit, correct };
       correct ? correctCount++ : wrongCount++;
@@ -3058,45 +3530,51 @@ function runPositionDecode(gray: Float64Array, w: number, h: number, vFovRad: nu
   // CORNER, uv fraction (0,0); the +0.5 one lands exactly on the cell
   // CENTER, uv fraction (0.5,0.5)). Missing that +0.5 here previously left
   // every recovered camPos off by almost exactly half a GRID_STEP in both
-  // X and Z. Uses the cell nearest the camera itself
-  // (grid.zeroI/zeroJ) as the reference point, not an arbitrary corner --
-  // minimizes the drift error that grows with distance from the camera
-  // (confirmed empirically via lastDecodeCorrectness's own distance-vs-
-  // correctness breakdown).
+  // X and Z. Uses the cell nearest the camera itself (rotated.zeroI/zeroJ,
+  // recomputed for the WINNING rotation by rotateGrid -- not grid's own
+  // zeroI/zeroJ, which describe the pre-rotation frame) as the reference
+  // point, not an arbitrary corner -- minimizes the drift error that grows
+  // with distance from the camera (confirmed empirically via
+  // lastDecodeCorrectness's own distance-vs-correctness breakdown).
   const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes!; // buildDecodeSampleGrid returning non-null guarantees this
   const normal = Dnormal.clone();
-  if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
-  const refI = mirrored ? grid.rows - 1 - grid.zeroI : grid.zeroI;
-  const [drRef, dcRef] = rotateShift(refI, grid.zeroJ, o);
-  const refTorusRow = ((anchorRow + drRef) % R + R) % R;
-  const refTorusCol = ((anchorCol + dcRef) % C + C) % C;
-  const refPt = grid.points[grid.zeroI][grid.zeroJ];
-  const hitRel = new THREE.Vector3().addScaledVector(Drow, refPt.u).addScaledVector(Dcol, refPt.v).addScaledVector(normal, -distance);
+  if (cornerDir(0, 0, MATH_QUAT, vFovRad, RT_ASPECT).dot(normal) > 0) normal.negate();
+  const refTorusRow = ((anchorRow + rotated.zeroI) % R + R) % R;
+  const refTorusCol = ((anchorCol + rotated.zeroJ) % C + C) % C;
 
-  // tallyPositionVotes' D4 search (row-mirror x 4 orientations) already
-  // resolves any ambiguity in how OUR sampling grid's own (i,j) axes relate
-  // to the TORUS's native (row,col) -- refTorusRow/refTorusCol ARE genuinely
-  // "torus row" and "torus col" for the reference cell. What it does NOT
-  // resolve is whether the FLOOR MESH's own construction actually assigns
-  // world X to torus COLUMN and world Z to torus ROW, or the other way
-  // around -- that's a fixed fact about the mesh (see the comment above),
-  // not a per-frame ambiguity, and vote count can't tell us which: it's
-  // computed entirely within the decode's own row/col index space and never
-  // touches world X/Z, so it comes out IDENTICAL either way. The only way
-  // to tell, in this lab (NOT available to a real, non-cheating tracker),
-  // is ground truth -- pick whichever candidate lands closer to the real
-  // camPos.
-  const worldPosTrueUnswapped = new THREE.Vector3((refTorusCol + 0.5 - C / 2) * GRID_STEP, 0, (refTorusRow + 0.5 - R / 2) * GRID_STEP);
-  const worldPosTrueSwapped = new THREE.Vector3((refTorusRow + 0.5 - R / 2) * GRID_STEP, 0, (refTorusCol + 0.5 - C / 2) * GRID_STEP);
-  const camPosUnswapped = worldPosTrueUnswapped.sub(hitRel); // .sub() only mutates the receiver, hitRel is safe to reuse below
-  const camPosSwapped = worldPosTrueSwapped.sub(hitRel);
-  const errUnswapped = camPosUnswapped.distanceTo(camPos);
-  const errSwapped = camPosSwapped.distanceTo(camPos);
-  const swapped = errSwapped < errUnswapped;
+  // Recovers the camera's TRUE world orientation from the pattern alone (see
+  // solveRecoveredCamQuat's own comment). Drow/Dcol/normal above -- and every
+  // refPt.u/.v below -- live in MATH_QUAT's fixed math frame, not true world
+  // space, so they can't be combined with a true-world position
+  // (worldPosTrue below) by plain vector arithmetic until they're rotated
+  // into that frame first. Skipping this step (the old code did, implicitly)
+  // silently assumed MATH_QUAT already equaled the true camera orientation --
+  // only ever actually true in simulated mode by construction, never for a
+  // real photo, which is exactly what produced the "everything decodes
+  // correctly but the recovered floor is rotated/reflected" bug.
+  const recoveredCamQuat = solveRecoveredCamQuat(rotated, anchorRow, anchorCol, Drow, Dcol, normal, distance);
+  if (!recoveredCamQuat) { lastPositionDecode = null; return; }
+
+  const DrowWorld = Drow.clone().applyQuaternion(recoveredCamQuat);
+  const DcolWorld = Dcol.clone().applyQuaternion(recoveredCamQuat);
+  const normalWorld = normal.clone().applyQuaternion(recoveredCamQuat);
+  const refPt = rotated.points[rotated.zeroI][rotated.zeroJ];
+  const hitRelWorld = new THREE.Vector3()
+    .addScaledVector(DrowWorld, refPt.u).addScaledVector(DcolWorld, refPt.v).addScaledVector(normalWorld, -distance);
+
+  // The floor's fixed, known torus-cell -> world-XZ mapping -- no remaining
+  // ambiguity here: tallyPositionVotes' rotation search plus the just-solved
+  // recoveredCamQuat between them fully pin down torusRow/torusCol AND which
+  // true-world axis each corresponds to, so there's no swapped/unswapped
+  // candidate left to pick between anymore. The old worldAxisSwapped flag was
+  // patching exactly this gap with a ground-truth-only coin flip (hardcoded
+  // false for real capture, since there was nothing to compare against) --
+  // gone now, not needed by either mode.
+  const worldPosTrue = new THREE.Vector3((refTorusCol + 0.5 - C / 2) * GRID_STEP, 0, (refTorusRow + 0.5 - R / 2) * GRID_STEP);
   lastPositionDecode = {
     row: refTorusRow, col: refTorusCol, consistency, votes: winner.votes, totalWindows: winner.totalWindows,
-    camPos: swapped ? camPosSwapped : camPosUnswapped,
-    camPosErrUnswapped: errUnswapped, camPosErrSwapped: errSwapped, worldAxisSwapped: swapped,
+    camPos: worldPosTrue.sub(hitRelWorld),
+    recoveredCamQuat,
   };
 }
 
@@ -3117,10 +3595,21 @@ function runAxesReconstruction() {
   requestAnimationFrame(() => {
     try {
       const t0 = performance.now();
+      // Real-capture mode sources rawGray from the last photo relayed over
+      // the dev bridge (see ingestRealCapture) instead of rendering the
+      // simulated scene -- everything below is IDENTICAL either way, since
+      // ingestRealCapture already produces the same bottom-up,
+      // rtSize-resolution contract captureDistortedGrayscale does.
+      if (state.useRealCapture && !lastRealCaptureGray) {
+        axesReadout.textContent = 'waiting for a real capture -- take a photo on the phone page';
+        return;
+      }
       // captureDistortedGrayscale already applies noise+blur (in the
       // physically-correct order -- see its comment) but returns GL-native
       // (bottom-up) row order; computeWorldVotes's NDC math needs top-down.
-      const { gray: rawGray, w, h } = captureDistortedGrayscale();
+      const { gray: rawGray, w, h } = state.useRealCapture
+        ? { gray: lastRealCaptureGray!, w: lastRealCaptureW, h: lastRealCaptureH }
+        : captureDistortedGrayscale();
       // buildProjectedTexture (called below) now needs lastNoisedPreviewGray
       // for its own per-source-pixel gradient (see its own comment) -- but
       // updateDistortedPreview only ever SETS that when the current field
@@ -3139,8 +3628,8 @@ function runAxesReconstruction() {
       // just use it directly rather than depending on the preview path.
       lastNoisedPreviewGray = rawGray;
       const gray = flipRowsF64(rawGray, w, h);
-      const vFovRad = THREE.MathUtils.degToRad(gizmoCam.fov);
-      const votes = computeWorldVotes(gray, w, h, state.simGradRadius, state.coherenceRadius, camQuat, vFovRad, RT_ASPECT);
+      const vFovRad = getAnalysisVFovRad();
+      const votes = computeWorldVotes(gray, w, h, state.simGradRadius, state.coherenceRadius, MATH_QUAT, vFovRad, RT_ASPECT);
       lastVotes = votes;
       updateGradientCirclesDebug();
       const t1 = performance.now();
@@ -3169,61 +3658,52 @@ function runAxesReconstruction() {
       axesComputed = !!quadricPair;
 
       // fitPairOfPlanes can't tell from the math alone which of its two
-      // recovered orthogonal directions is "row" vs "col" (a genuine
-      // ambiguity, not a bug in the fit itself -- see its header comment).
-      // Resolved here, ONCE, against ground truth (fine for this testbed,
-      // which has it available) -- and reused everywhere downstream
-      // (pole markers, distance recovery, lastRecoveredAxes, the readout) so
-      // they all agree on the same labeling. Previously this correction only
-      // affected the readout's displayed text, while lastRecoveredAxes AND
-      // the red/blue pole markers below kept whatever raw (possibly swapped)
-      // labels the fit produced -- "Projected Cam" showed a fully swapped
-      // u/v projection despite the readout looking correct, and the pole
-      // markers could show up on the wrong axis even once that was fixed,
-      // since they were still being set from quadricPair.Drow/Dcol directly
-      // further up rather than from this corrected pair.
+      // recovered orthogonal directions is "row" vs "col", nor which way
+      // either one points (a genuine ambiguity, not a bug in the fit itself
+      // -- see its header comment). Unlike the old per-mode resolution this
+      // replaced (ground truth for simulated, manual flip toggles for real
+      // capture), this pins down only ONE bit of information here --
+      // handedness, i.e. does (Drow, Dcol, normal) form the same fixed-sign
+      // triple every time -- and deliberately leaves row-vs-col identity
+      // (the "swap") UNRESOLVED. That's not a gap: swap, composed with a
+      // handedness-preserving sign flip, IS a 90-degree rotation (swapping
+      // two orthogonal directions alone is a reflection -- swapping AND
+      // negating one of them isn't), so once handedness is pinned, the only
+      // remaining camera-vs-pattern ambiguity is exactly the 4-element
+      // rotation subgroup tallyPositionVotes' whole-grid-rotation search
+      // resolves downstream. No reflection can ever be the right answer
+      // anymore, by construction -- decode no longer needs to search for
+      // one (see tallyPositionVotes' own comment).
       //
-      // Picks whichever labeling minimizes TOTAL error against both ground-
-      // truth axes (Drow-vs-ROW_DIR + Dcol-vs-COL_DIR, or the swapped pairing)
-      // rather than just comparing both candidates to ROW_DIR alone. The two
-      // are mathematically equivalent here -- Drow/Dcol come out of a
-      // symmetric eigendecomposition so they're already exactly orthogonal,
-      // same as ROW_DIR/COL_DIR by construction, so agreement on one axis
-      // guarantees agreement on the other -- but this version states the
-      // actual intent directly instead of leaning on that orthogonality fact.
+      // This is also why simulated and real capture can now share the exact
+      // same resolution: ground truth was only ever needed to pick swap AND
+      // sign outright, which decode's own search now makes unnecessary to
+      // pick at all -- simulated mode's ROW_DIR/COL_DIR comparison below
+      // (rowErr/colErr in the readout) is kept purely as an accuracy
+      // DIAGNOSTIC (did decode's own rotation search converge on the
+      // physically correct answer), not as an input to which axis is used.
       //
-      // angleBetweenDegV takes Math.abs() of the dot product, so it (by
-      // design) can't tell a candidate from its own negation -- it only
-      // resolves row-vs-col, not which way each one points. Drow/Dcol's
-      // individual signs are otherwise arbitrary (whatever the eigensolver's
-      // b1/b2 happened to come out as), unlike Dnormal, whose sign IS fixed
-      // elsewhere in this file (against the non-cheating fact that the floor
-      // must face the camera). Left uncorrected, this flipped u and/or v's
-      // sign in buildProjectedTexture's u = hit.dot(Drow)/v = hit.dot(Dcol)
-      // (the "Projected Cam" view coming out mirrored relative to the true
-      // top-down pattern), and fed straight into runPositionDecode's hitRel,
-      // injecting a large systematic camPos error along whichever axis was
-      // flipped -- while per-cell bit correctness stayed unaffected, since
-      // tallyPositionVotes' own D4 (mirror x 4 rotations) search already
-      // absorbs any axis-sign ambiguity when matching bits to the known
-      // pattern. Ground truth again (testbed-only, same as the swap above):
-      // flip each axis independently if it landed antiparallel to its true
-      // world direction -- negating one axis alone can't break their
-      // orthogonality (dot(-a,b) = -dot(a,b), still 0 if it started at 0).
+      // Sign convention: cross(Drow, Dcol) . normal is pinned to a fixed,
+      // known value (normal already sign-fixed against "faces the camera",
+      // same non-cheating fact used everywhere else in this file) --
+      // whichever of Drow/Dcol came out of the eigendecomposition, negate
+      // Dcol specifically if the cross product landed on the wrong side.
+      // Negating one axis alone can't break their orthogonality (dot(-a,b)
+      // = -dot(a,b), still 0 if it started at 0).
       let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
       if (orientationFit) {
-        const errUnswapped = angleBetweenDegV(orientationFit.Drow, ROW_DIR) + angleBetweenDegV(orientationFit.Dcol, COL_DIR);
-        const errSwapped = angleBetweenDegV(orientationFit.Drow, COL_DIR) + angleBetweenDegV(orientationFit.Dcol, ROW_DIR);
-        const flipped = errSwapped < errUnswapped;
-        rowDirRecovered = flipped ? orientationFit.Dcol : orientationFit.Drow;
-        colDirRecovered = flipped ? orientationFit.Drow : orientationFit.Dcol;
-        if (rowDirRecovered.dot(ROW_DIR) < 0) rowDirRecovered.negate();
-        if (colDirRecovered.dot(COL_DIR) < 0) colDirRecovered.negate();
-
-        recoveredRowPoleA.position.copy(rowDirRecovered).multiplyScalar(SPHERE_RADIUS);
-        recoveredRowPoleB.position.copy(rowDirRecovered).multiplyScalar(-SPHERE_RADIUS);
-        recoveredColPoleA.position.copy(colDirRecovered).multiplyScalar(SPHERE_RADIUS);
-        recoveredColPoleB.position.copy(colDirRecovered).multiplyScalar(-SPHERE_RADIUS);
+        const normalForHandedness = orientationFit.Dnormal.clone();
+        if (cornerDir(0, 0, MATH_QUAT, vFovRad, RT_ASPECT).dot(normalForHandedness) > 0) normalForHandedness.negate();
+        rowDirRecovered = orientationFit.Drow.clone();
+        colDirRecovered = orientationFit.Dcol.clone();
+        const handedness = rowDirRecovered.clone().cross(colDirRecovered).dot(normalForHandedness);
+        if (handedness > 0) colDirRecovered.negate();
+        // Pole markers are placed further down, once runPositionDecode has
+        // solved recoveredCamQuat -- rowDirRecovered/colDirRecovered here are
+        // still in MATH_QUAT's fixed math frame, not true world space, so
+        // placing them directly (the old behavior) only ever looked right in
+        // simulated mode, where that frame happened to already equal world
+        // space by construction.
       }
 
       // Distance-to-floor recovery needs the axes above, so it only runs on
@@ -3285,7 +3765,9 @@ function runAxesReconstruction() {
         // Rebuilds projectedPreviewData/lastProjectedBins/lastMarginals now
         // that distance is correct -- position decode below (and "Projected
         // Cam" itself) need the properly-scaled versions, not the
-        // placeholder-distance ones from the first pass above.
+        // placeholder-distance ones from the first pass above. Decode itself
+        // gets its own separately-bucketed pass inside buildDecodeSampleGrid
+        // (see computeDecodeMarginals) -- this call is purely for display.
         buildProjectedTexture();
       } else {
         lastRecoveredAxes = null;
@@ -3309,25 +3791,45 @@ function runAxesReconstruction() {
       if (state.positionLM && lastRecoveredAxes && lastPositionDecode && lastNoisedPreviewGray) {
         const { Drow, Dcol, Dnormal, distance } = lastRecoveredAxes;
         const normalForInit = Dnormal.clone();
-        if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(normalForInit) > 0) normalForInit.negate();
+        if (cornerDir(0, 0, MATH_QUAT, vFovRad, RT_ASPECT).dot(normalForInit) > 0) normalForInit.negate();
         // worldPos(u=0,v=0) = camPos + normal*(-distance) EXACTLY, not just
         // approximately camPos.x/z -- Drow/Dcol/normal is a complete
         // orthonormal basis and every hit point satisfies hit.normal=
         // -distance by construction (see refineOrientationAndPositionLM's
         // own comment), so this is the correct non-cheating initializer.
-        const initialWorldX0 = lastPositionDecode.camPos.x + normalForInit.x * -distance;
-        const initialWorldZ0 = lastPositionDecode.camPos.z + normalForInit.z * -distance;
+        // normalForInit is still in MATH_QUAT's fixed math frame here --
+        // rotate into true world space (same as runPositionDecode's own
+        // hitRelWorld) before combining it with camPos, itself already a
+        // true-world position.
+        const normalForInitWorld = normalForInit.clone().applyQuaternion(lastPositionDecode.recoveredCamQuat);
+        const initialWorldX0 = lastPositionDecode.camPos.x + normalForInitWorld.x * -distance;
+        const initialWorldZ0 = lastPositionDecode.camPos.z + normalForInitWorld.z * -distance;
         const photoSamples = computePhotometricSamples(lastNoisedPreviewGray, w, h, 4);
         lastPositionLMResult = refineOrientationAndPositionLM(
-          photoSamples, w, h, { Drow, Dcol, Dnormal }, distance, initialWorldX0, initialWorldZ0, camQuat, vFovRad, RT_ASPECT,
+          photoSamples, w, h, { Drow, Dcol, Dnormal }, distance, initialWorldX0, initialWorldZ0, MATH_QUAT, vFovRad, RT_ASPECT,
         );
         lastRecoveredAxes.Drow = lastPositionLMResult.Drow;
         lastRecoveredAxes.Dcol = lastPositionLMResult.Dcol;
         lastRecoveredAxes.Dnormal = lastPositionLMResult.Dnormal;
         const refinedNormal = lastPositionLMResult.Dnormal.clone();
-        if (cornerDir(0, 0, camQuat, vFovRad, RT_ASPECT).dot(refinedNormal) > 0) refinedNormal.negate();
-        lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormal.x * distance;
-        lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormal.z * distance;
+        if (cornerDir(0, 0, MATH_QUAT, vFovRad, RT_ASPECT).dot(refinedNormal) > 0) refinedNormal.negate();
+        // Re-solves recoveredCamQuat against the now-refined Drow/Dcol/
+        // normal -- same mechanism runPositionDecode itself used, reusing
+        // the SAME rotated grid/anchor (this LM pass only perturbs the fit
+        // slightly, it doesn't change which torus cell any sample belongs
+        // to, so the correspondence solveRecoveredCamQuat needs is still
+        // valid).
+        if (lastDecodeRotated) {
+          const anchorRow = ((lastPositionDecode.row - lastDecodeRotated.zeroI) % R + R) % R;
+          const anchorCol = ((lastPositionDecode.col - lastDecodeRotated.zeroJ) % C + C) % C;
+          const refinedQuat = solveRecoveredCamQuat(
+            lastDecodeRotated, anchorRow, anchorCol, lastRecoveredAxes.Drow, lastRecoveredAxes.Dcol, refinedNormal, distance,
+          );
+          if (refinedQuat) lastPositionDecode.recoveredCamQuat = refinedQuat;
+        }
+        const refinedNormalWorld = refinedNormal.clone().applyQuaternion(lastPositionDecode.recoveredCamQuat);
+        lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormalWorld.x * distance;
+        lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormalWorld.z * distance;
         // Rebuilds with the now Option-B-refined orientation, so "Projected
         // Cam" and the marginal graphs reflect the final answer, not the
         // pre-refinement one.
@@ -3360,11 +3862,26 @@ function runAxesReconstruction() {
             // now uses (confirmed live: skipping this recompute dropped
             // consistency from a clean 1.0 to chance-level ~0.5 at poses
             // that had nothing wrong with them before this pass existed).
-            lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormal.x * lastRecoveredAxes.distance;
-            lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormal.z * lastRecoveredAxes.distance;
+            lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormalWorld.x * lastRecoveredAxes.distance;
+            lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormalWorld.z * lastRecoveredAxes.distance;
             buildProjectedTexture();
           }
         }
+      }
+      // Pole markers: rowDirRecovered/colDirRecovered (computed above during
+      // handedness pinning) are still in MATH_QUAT's fixed math frame -- only
+      // meaningful to place on the ground-truth sphere (which shows true
+      // world directions) once rotated by the orientation runPositionDecode
+      // just solved from the pattern. Guarded on lastPositionDecode since a
+      // failed/degenerate decode leaves recoveredCamQuat unavailable.
+      if (lastPositionDecode && rowDirRecovered && colDirRecovered) {
+        const { recoveredCamQuat } = lastPositionDecode;
+        const rowDirWorld = rowDirRecovered.clone().applyQuaternion(recoveredCamQuat);
+        const colDirWorld = colDirRecovered.clone().applyQuaternion(recoveredCamQuat);
+        recoveredRowPoleA.position.copy(rowDirWorld).multiplyScalar(SPHERE_RADIUS);
+        recoveredRowPoleB.position.copy(rowDirWorld).multiplyScalar(-SPHERE_RADIUS);
+        recoveredColPoleA.position.copy(colDirWorld).multiplyScalar(SPHERE_RADIUS);
+        recoveredColPoleB.position.copy(colDirWorld).multiplyScalar(-SPHERE_RADIUS);
       }
       updateRecoveredCamGizmo();
       applyRecoveredFloorOverlay();
@@ -3375,11 +3892,28 @@ function runAxesReconstruction() {
       if (state.mode === 'through') updateContaminationOverlays();
       const t4 = performance.now();
 
+      // Ground truth (ROW_DIR/COL_DIR, camPos.y, camPos itself) doesn't exist
+      // for a real capture, so every diagnostic line below that depends on
+      // it is skipped entirely rather than printing a meaningless number --
+      // ground-truth-FREE lines (vote count, LM cost, raw recovered
+      // distance/position) still show in both modes.
+      const haveGroundTruth = !state.useRealCapture;
       const lines = [`${votes.length} votes  (${fitVotes.length} fed to fit)`];
       if (rowDirRecovered && colDirRecovered) {
-        const rowErr = angleBetweenDegV(rowDirRecovered, ROW_DIR);
-        const colErr = angleBetweenDegV(colDirRecovered, COL_DIR);
-        lines.push(`row err ${rowErr.toFixed(2)}°  col err ${colErr.toFixed(2)}°  [Phase 1, vote-based]`);
+        if (haveGroundTruth) {
+          // Swap is deliberately NOT resolved upstream anymore (see the
+          // handedness comment above) -- rowDirRecovered may legitimately
+          // BE the true col direction, decode's own rotation search sorts
+          // that out downstream, not this fit. So this diagnostic checks
+          // both pairings and reports whichever the fit actually landed
+          // closer to, rather than assuming rowDirRecovered must line up
+          // with ROW_DIR specifically.
+          const errUnswapped = angleBetweenDegV(rowDirRecovered, ROW_DIR) + angleBetweenDegV(colDirRecovered, COL_DIR);
+          const errSwapped = angleBetweenDegV(rowDirRecovered, COL_DIR) + angleBetweenDegV(colDirRecovered, ROW_DIR);
+          const rowErr = errSwapped < errUnswapped ? angleBetweenDegV(rowDirRecovered, COL_DIR) : angleBetweenDegV(rowDirRecovered, ROW_DIR);
+          const colErr = errSwapped < errUnswapped ? angleBetweenDegV(colDirRecovered, ROW_DIR) : angleBetweenDegV(colDirRecovered, COL_DIR);
+          lines.push(`row err ${rowErr.toFixed(2)}°  col err ${colErr.toFixed(2)}°  [Phase 1, vote-based${errSwapped < errUnswapped ? ', swapped' : ''}]`);
+        }
       } else {
         lines.push(`degenerate fit`);
       }
@@ -3394,23 +3928,38 @@ function runAxesReconstruction() {
         // distance to it along the true normal is just its own height.
         const trueDist = camPos.y;
         const distU = spacing.distanceU, distV = spacing.distanceV;
-        const errU = (Math.abs(distU - trueDist) / trueDist) * 100;
-        const errV = (Math.abs(distV - trueDist) / trueDist) * 100;
-        lines.push(`dist U ${distU.toFixed(2)} (${errU.toFixed(1)}% err)  dist V ${distV.toFixed(2)} (${errV.toFixed(1)}% err)  true ${trueDist.toFixed(2)}  [rough, rtSize buckets]`);
+        if (haveGroundTruth) {
+          const errU = (Math.abs(distU - trueDist) / trueDist) * 100;
+          const errV = (Math.abs(distV - trueDist) / trueDist) * 100;
+          lines.push(`dist U ${distU.toFixed(2)} (${errU.toFixed(1)}% err)  dist V ${distV.toFixed(2)} (${errV.toFixed(1)}% err)  true ${trueDist.toFixed(2)}  [rough, rtSize buckets]`);
+        } else {
+          lines.push(`dist U ${distU.toFixed(2)}  dist V ${distV.toFixed(2)}  [rough, rtSize buckets]`);
+        }
         if (refinedSpacing) {
           const rDistU = refinedSpacing.distanceU, rDistV = refinedSpacing.distanceV;
-          const rErrU = (Math.abs(rDistU - trueDist) / trueDist) * 100;
-          const rErrV = (Math.abs(rDistV - trueDist) / trueDist) * 100;
-          lines.push(`dist U ${rDistU.toFixed(2)} (${rErrU.toFixed(1)}% err)  dist V ${rDistV.toFixed(2)} (${rErrV.toFixed(1)}% err)  [refined, adaptive buckets]`);
+          if (haveGroundTruth) {
+            const rErrU = (Math.abs(rDistU - trueDist) / trueDist) * 100;
+            const rErrV = (Math.abs(rDistV - trueDist) / trueDist) * 100;
+            lines.push(`dist U ${rDistU.toFixed(2)} (${rErrU.toFixed(1)}% err)  dist V ${rDistV.toFixed(2)} (${rErrV.toFixed(1)}% err)  [refined, adaptive buckets]`);
+          } else {
+            lines.push(`dist U ${rDistU.toFixed(2)}  dist V ${rDistV.toFixed(2)}  [refined, adaptive buckets]`);
+          }
         }
         if (finalSpacing) {
           const fDistU = finalSpacing.distanceU, fDistV = finalSpacing.distanceV;
-          const fErrU = (Math.abs(fDistU - trueDist) / trueDist) * 100;
-          const fErrV = (Math.abs(fDistV - trueDist) / trueDist) * 100;
-          lines.push(`dist U ${fDistU.toFixed(2)} (${fErrU.toFixed(1)}% err)  dist V ${fDistV.toFixed(2)} (${fErrV.toFixed(1)}% err)  [final, post-Phase-3 orientation]`);
+          if (haveGroundTruth) {
+            const fErrU = (Math.abs(fDistU - trueDist) / trueDist) * 100;
+            const fErrV = (Math.abs(fDistV - trueDist) / trueDist) * 100;
+            lines.push(`dist U ${fDistU.toFixed(2)} (${fErrU.toFixed(1)}% err)  dist V ${fDistV.toFixed(2)} (${fErrV.toFixed(1)}% err)  [final, post-Phase-3 orientation]`);
+          } else {
+            lines.push(`dist U ${fDistU.toFixed(2)}  dist V ${fDistV.toFixed(2)}  [final, post-Phase-3 orientation]`);
+          }
         }
       } else if (quadricPair) {
         lines.push(`spacing: no period found`);
+      }
+      if (lastPositionDecode) {
+        lines.push(`decoded torus (row,col): (${lastPositionDecode.row}, ${lastPositionDecode.col})  consistency ${(lastPositionDecode.consistency * 100).toFixed(1)}%  camPos (${lastPositionDecode.camPos.x.toFixed(2)}, ${lastPositionDecode.camPos.y.toFixed(2)}, ${lastPositionDecode.camPos.z.toFixed(2)})`);
       }
       if (lastPositionLMResult) {
         lines.push(`photoLM: ${lastPositionLMResult.iterations} iters, cost ${lastPositionLMResult.initialCost.toExponential(2)} -> ${lastPositionLMResult.finalCost.toExponential(2)}`);
@@ -3422,10 +3971,15 @@ function runAxesReconstruction() {
         // re-reported that, so every orientation-error number this debug
         // panel ever showed after Phase 3 landed was silently stale. This
         // is the actual final orientation decode uses.
-        if (lastRecoveredAxes) {
-          const finalRowErr = angleBetweenDegV(lastRecoveredAxes.Drow, ROW_DIR);
-          const finalColErr = angleBetweenDegV(lastRecoveredAxes.Dcol, COL_DIR);
-          lines.push(`row err ${finalRowErr.toFixed(2)}°  col err ${finalColErr.toFixed(2)}°  [Phase 3, final]`);
+        if (lastRecoveredAxes && haveGroundTruth) {
+          // Same swap-agnostic comparison as the Phase 1 diagnostic above --
+          // see its comment.
+          const { Drow: finalDrow, Dcol: finalDcol } = lastRecoveredAxes;
+          const errUnswapped = angleBetweenDegV(finalDrow, ROW_DIR) + angleBetweenDegV(finalDcol, COL_DIR);
+          const errSwapped = angleBetweenDegV(finalDrow, COL_DIR) + angleBetweenDegV(finalDcol, ROW_DIR);
+          const finalRowErr = errSwapped < errUnswapped ? angleBetweenDegV(finalDrow, COL_DIR) : angleBetweenDegV(finalDrow, ROW_DIR);
+          const finalColErr = errSwapped < errUnswapped ? angleBetweenDegV(finalDcol, ROW_DIR) : angleBetweenDegV(finalDcol, COL_DIR);
+          lines.push(`row err ${finalRowErr.toFixed(2)}°  col err ${finalColErr.toFixed(2)}°  [Phase 3, final${errSwapped < errUnswapped ? ', swapped' : ''}]`);
         }
       }
       lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  LM ${(t2b - t2).toFixed(0)}ms  spacing ${(t3 - t2b).toFixed(0)}ms  refine ${(t3b - t3).toFixed(0)}ms  decode ${(t4 - t3b).toFixed(0)}ms`);
@@ -3634,6 +4188,61 @@ function computeTangentWalkIncludedPixels(
   return included;
 }
 
+// Diagnostic mirror of guidedTangentDirectionAdaptive, same relationship to
+// it as computeTangentWalkIncludedPixels has to the fixed version above --
+// must stay in exact lockstep (incremental position, full-average steering,
+// independent directions) or the overlay would show a walk that isn't the
+// one state.tangentWalkAdaptive actually runs. updateHoverOverlays picks
+// between this and the fixed version above based on that same flag.
+function computeTangentWalkIncludedPixelsAdaptive(
+  fx: Float64Array, fy: Float64Array, w: number, h: number,
+  x: number, y: number, seedFx: number, seedFy: number,
+): { x: number; y: number }[] {
+  const included: { x: number; y: number }[] = [{ x, y }];
+  const seedTheta = Math.atan2(seedFy, seedFx);
+  const seedMag = Math.hypot(seedFx, seedFy);
+  const seedCos = Math.cos(2 * seedTheta) * seedMag, seedSin = Math.sin(2 * seedTheta) * seedMag;
+  const maxSteps = state.tangentWalkMaxSteps;
+  const devCos = Math.cos(2 * THREE.MathUtils.degToRad(state.tangentWalkDeviationDeg));
+  const magFraction = state.tangentWalkMagFraction;
+  const grace = state.tangentWalkGraceSamples;
+  for (const sign of [1, -1]) {
+    let sumCos = seedCos, sumSin = seedSin, runningMag = seedMag, sampleCount = 1;
+    let curX = x, curY = y;
+    let violations = 0;
+    for (let k = 1; k <= maxSteps; k++) {
+      const avgTheta = Math.atan2(sumSin, sumCos) / 2;
+      const tdx = -Math.sin(avgTheta), tdy = Math.cos(avgTheta);
+      curX += sign * tdx; curY += sign * tdy;
+      const sx = Math.round(curX), sy = Math.round(curY);
+      if (sx < 0 || sx >= w || sy < 0 || sy >= h) break;
+      const si = sy * w + sx;
+      const sfx = fx[si], sfy = fy[si];
+      const mag = Math.hypot(sfx, sfy);
+      if (mag === 0 || mag < runningMag * magFraction) {
+        violations++;
+        if (violations >= grace) break;
+        continue;
+      }
+      const theta = Math.atan2(sfy, sfx);
+      const c2 = Math.cos(2 * theta), s2 = Math.sin(2 * theta);
+      const avgLen = Math.hypot(sumCos, sumSin);
+      const cosDeviation = avgLen > 0 ? (c2 * sumCos + s2 * sumSin) / avgLen : 1;
+      if (cosDeviation < devCos) {
+        violations++;
+        if (violations >= grace) break;
+        continue;
+      }
+      violations = 0;
+      sumCos += c2 * mag; sumSin += s2 * mag;
+      runningMag = (runningMag * sampleCount + mag) / (sampleCount + 1);
+      sampleCount++;
+      included.push({ x: sx, y: sy });
+    }
+  }
+  return included;
+}
+
 // One tight stroked box per included pixel's on-screen footprint -- the seed
 // (always included[0]) stroked in white and slightly thicker so the walk's
 // starting point stays identifiable among however many other pixels it
@@ -3742,7 +4351,9 @@ function updateHoverOverlays(clientX: number, clientY: number) {
     const { fx, fy } = lastEffectiveField;
     const seedFx = fx[i], seedFy = fy[i];
     if (seedFx !== 0 || seedFy !== 0) {
-      const included = computeTangentWalkIncludedPixels(fx, fy, fieldW, fieldH, fieldCol, fieldRow, seedFx, seedFy);
+      const included = state.tangentWalkAdaptive
+        ? computeTangentWalkIncludedPixelsAdaptive(fx, fy, fieldW, fieldH, fieldCol, fieldRow, seedFx, seedFy)
+        : computeTangentWalkIncludedPixels(fx, fy, fieldW, fieldH, fieldCol, fieldRow, seedFx, seedFy);
       drawTangentWalkOutline(rect, fieldW, fieldH, fx, fy, included);
     }
   }
@@ -3793,6 +4404,55 @@ toggleTangentWalkPathBtn.addEventListener('click', () => {
 
 // ── Slider / checkbox wiring ─────────────────────────────────────────────
 
+// Both sections' sliders are meaningless once a real photo is driving the
+// pipeline instead of the simulated camera -- grayed out (CSS) AND actually
+// disabled (not just pointer-events:none, so keyboard/programmatic changes
+// can't sneak through either) rather than left looking interactive but inert.
+function setSectionDisabled(section: HTMLDivElement, disabled: boolean) {
+  section.classList.toggle('disabled', disabled);
+  for (const el of section.querySelectorAll('input')) (el as HTMLInputElement).disabled = disabled;
+}
+bindCheckbox('useRealCapture', (v) => {
+  state.useRealCapture = v;
+  setSectionDisabled(cameraDetailsSection, v);
+  setSectionDisabled(simDistortionSection, v);
+  if (v) {
+    // Switching back to real capture with an already-received photo on
+    // hand -- reflect it immediately rather than waiting for another one.
+    if (lastRealCaptureGray && (lastRealCaptureW !== rtSize.w || lastRealCaptureH !== rtSize.h)) {
+      resizeCaptureBuffers({ w: lastRealCaptureW, h: lastRealCaptureH });
+    }
+  } else {
+    // Revert to the viewportW/H sliders' own resolution.
+    resizeCaptureBuffers();
+  }
+  updateDistortedPreview();
+  if (state.mode === 'projected') buildProjectedTexture();
+  markCaptureDirty();
+  // Doesn't itself trigger a capture -- if a photo already arrived before
+  // this was switched on, this only refreshes the DISPLAY (above); the
+  // analysis pipeline waits for the next one (or "capture now") rather
+  // than silently reusing a possibly-stale decode.
+});
+// Re-runs analysis on the SAME already-received photo (no new capture
+// needed) so adjusting FOV while judging Projected Cam by eye gives an
+// immediate answer instead of requiring another round trip to the phone
+// for every tweak.
+function rerunOnRealCaptureSettingChange() {
+  if (state.useRealCapture && lastRealCaptureGray) runAxesReconstruction();
+}
+// Debounced: this is a continuous-drag control firing 'input' events on
+// every pixel of drag, and runAxesReconstruction is a multi-second op --
+// without this, dragging would queue up a burst of mostly-wasted calls
+// (axesCapturing's own re-entrancy guard drops the overlapping ones, but
+// still churns). Settles 200ms after the last move.
+let realCaptureFovRerunTimer: number | undefined;
+bindSlider('realCaptureFovDeg', (v) => {
+  state.realCaptureFovDeg = v;
+  markCaptureDirty();
+  clearTimeout(realCaptureFovRerunTimer);
+  realCaptureFovRerunTimer = window.setTimeout(rerunOnRealCaptureSettingChange, 200);
+}, (v) => `${v.toFixed(0)}°`);
 bindSlider('camX', (v) => { state.camX = v; markCaptureDirty(); });
 bindSlider('camY', (v) => { state.camY = v; markCaptureDirty(); });
 bindSlider('camZ', (v) => { state.camZ = v; markCaptureDirty(); });
@@ -3839,6 +4499,11 @@ bindCheckbox('showPoles', (v) => (state.showPoles = v));
 bindCheckbox('showFrustum', (v) => (state.showFrustum = v));
 bindCheckbox('showPatch', (v) => (state.showPatch = v));
 bindCheckbox('showFloor', (v) => (state.showFloor = v));
+bindSlider('floorCellOutlineSubdiv', (v) => {
+  state.floorCellOutlineSubdiv = v;
+  rebuildFloorTexture();
+  markCaptureDirty(); // this IS the real rendered floor, so the capture path needs to re-render too
+}, (v) => v.toFixed(0));
 bindCheckbox('showGizmoBody', (v) => (state.showGizmoBody = v));
 bindCheckbox('showRecoveredFloor', (v) => (state.showRecoveredFloor = v));
 bindCheckbox('showSampleLattice', (v) => (state.showSampleLattice = v));
@@ -3854,6 +4519,11 @@ bindSlider('tangentWalkMaxSteps', (v) => { state.tangentWalkMaxSteps = v; markCa
 bindSlider('tangentWalkDeviationDeg', (v) => { state.tangentWalkDeviationDeg = v; markCaptureDirty(); }, (v) => `${v.toFixed(0)}°`);
 bindSlider('tangentWalkMagFraction', (v) => { state.tangentWalkMagFraction = v; markCaptureDirty(); }, (v) => v.toFixed(2));
 bindSlider('tangentWalkGraceSamples', (v) => { state.tangentWalkGraceSamples = v; markCaptureDirty(); }, (v) => v.toFixed(0));
+bindCheckbox('tangentWalkAdaptive', (v) => {
+  state.tangentWalkAdaptive = v;
+  markCaptureDirty();
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+});
 // Contamination overlays only make sense against a DIRECTION field
 // (gradient/effective/walked) -- 'agreement' is scalar-only (no direction to
 // score badness against), and the pre-filter views (raw/antialiased/
@@ -3932,6 +4602,26 @@ const COL_DIR = new THREE.Vector3(0, 0, 1); // world +Z — direction shared by 
 const camPos = new THREE.Vector3();
 const camQuat = new THREE.Quaternion();
 const euler = new THREE.Euler(0, 0, 0, 'YXZ');
+
+// Fixed identity, NEVER mutated -- the reference frame every ray-casting call
+// inside the recovery pipeline (computeWorldVotes, buildDecodeSampleGrid,
+// castAndBucketProjectedSamples, the LM refinement passes, every "does this
+// normal face the camera" sign-check) is expressed in. It does NOT need to
+// equal the camera's true orientation for any of that math to work: rotate
+// every ray by the same fixed misrotation and the recovered Drow/Dcol/normal
+// just come out expressed in that same rotated frame, still fully
+// self-consistent (still correctly capturing the floor's orientation
+// RELATIVE TO the camera) -- see solveRecoveredCamQuat's own comment for how
+// the camera's actual world orientation gets recovered afterward, entirely
+// from the pattern, with zero dependency on this being "correct". camQuat
+// (the slider-driven one below) stays reserved for what it actually is: the
+// simulated camera's real orientation, needed to render gizmoCam and to draw
+// the ground-truth ROW_DIR/COL_DIR contamination overlay against the real
+// rendered image -- it must never leak into the recovery math itself, which
+// is exactly the bug this constant replaces (real-capture mode was silently
+// reusing whatever camQuat happened to be, i.e. leftover simulated-camera
+// slider state with zero relationship to how the phone was actually held).
+const MATH_QUAT = new THREE.Quaternion();
 
 function updateGizmo() {
   camPos.set(state.camX, state.camY, state.camZ);
@@ -4069,8 +4759,15 @@ resize();
 
 function animate() {
   requestAnimationFrame(animate);
-  const { vFovRad } = updateGizmo();
-  updateSphereOverlays(vFovRad);
+  updateGizmo();
+  // NOT updateGizmo()'s own returned vFovRad -- that's always derived from
+  // the simulated focalMM slider, regardless of capture mode (gizmoCam
+  // still needs a valid FOV/aspect for the 'world'-mode gizmo body/frustum
+  // helper even in real-capture mode, just not this one). The patch mesh
+  // and sphere frustum outline below are what "the image on the sphere"
+  // actually is, and need the SAME source everything else in the analysis
+  // pipeline uses -- see getAnalysisVFovRad.
+  updateSphereOverlays(getAnalysisVFovRad());
 
   // Toggling helper/body visibility per mode: don't render the camera's own
   // body/frustum-helper from inside its own optical center, and don't render
@@ -4098,7 +4795,10 @@ function animate() {
   if (captureDirty && now - lastPreviewUpdate >= PREVIEW_UPDATE_INTERVAL_MS) {
     lastPreviewUpdate = now;
     captureDirty = false;
-    renderCamRT();
+    // Nothing to render in real-capture mode -- there's no simulated scene
+    // driving the preview, only whatever photo ingestRealCapture already
+    // decoded (and already refreshed the preview from directly).
+    if (!state.useRealCapture) renderCamRT();
     updateDistortedPreview();
     if (state.mode === 'projected') buildProjectedTexture();
     if (state.mode === 'through') updateContaminationOverlays();
@@ -4217,6 +4917,11 @@ animate();
       } else if (msg.type === 'screenshot') {
         const dataUrl = renderer.domElement.toDataURL('image/png');
         ws!.send(JSON.stringify({ type: 'screenshotResult', id: msg.id, ok: true, dataUrl }));
+      } else if (msg.type === 'realCapture' && msg.dataUrl) {
+        // Broadcast from mobile-capture.html via the dev-bridge relay --
+        // see ingestRealCapture's own comment. No response expected here
+        // (unlike eval/screenshot, this isn't a request/reply pair).
+        ingestRealCapture(msg.dataUrl).catch((e) => console.error('[realCapture] ingest failed:', e));
       }
     });
   }

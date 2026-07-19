@@ -79,6 +79,7 @@
   }
   .modeRow button.active { background: #2a7; color: #fff; border-color: #2a7; }
   .section { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.15); }
+  .section.disabled { opacity: 0.35; pointer-events: none; }
   .section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #8ab; margin-bottom: 6px; }
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .row span.label { flex: 0 0 88px; color: #aaa; font-size: 11px; }
@@ -142,10 +143,17 @@
   </div>
 
   <div class="section">
+    <h2>real-world capture</h2>
+    <label class="chk"><input type="checkbox" id="useRealCapture"> use real capture (phone) instead of simulated</label>
+    <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="realCaptureFovDeg" min="20" max="150" step="1" value="65"><span class="val" id="realCaptureFovDegVal"></span></div>
+    <div class="hint" style="margin-bottom:0;">Axis orientation resolves automatically, no manual flip toggles needed.</div>
+  </div>
+
+  <div class="section" id="cameraDetailsSection">
     <h2>camera details</h2>
-    <div class="row"><span class="label">X</span><input type="range" id="camX" min="-50" max="50" step="0.1" value="0"><span class="val" id="camXVal"></span></div>
-    <div class="row"><span class="label">height</span><input type="range" id="camY" min="0.5" max="50" step="0.1" value="4"><span class="val" id="camYVal"></span></div>
-    <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-50" max="50" step="0.1" value="8"><span class="val" id="camZVal"></span></div>
+    <div class="row"><span class="label">X</span><input type="range" id="camX" min="-200" max="200" step="0.1" value="0"><span class="val" id="camXVal"></span></div>
+    <div class="row"><span class="label">height</span><input type="range" id="camY" min="0.5" max="200" step="0.1" value="4"><span class="val" id="camYVal"></span></div>
+    <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-200" max="200" step="0.1" value="8"><span class="val" id="camZVal"></span></div>
     <div class="row"><span class="label">yaw</span><input type="range" id="camYaw" min="-180" max="180" step="1" value="0"><span class="val" id="camYawVal"></span></div>
     <div class="row"><span class="label">pitch</span><input type="range" id="camPitch" min="-89" max="89" step="1" value="-20"><span class="val" id="camPitchVal"></span></div>
     <div class="row"><span class="label">focal (mm eq.)</span><input type="range" id="camFocal" min="10" max="85" step="1" value="26"><span class="val" id="camFocalVal"></span></div>
@@ -154,7 +162,7 @@
     <label class="chk"><input type="checkbox" id="aspectLocked"> aspect lock</label>
   </div>
 
-  <div class="section">
+  <div class="section" id="simDistortionSection">
     <h2>simulated capture distortion</h2>
     <div class="row"><span class="label">pixel noise &sigma;</span><input type="range" id="simNoise" min="0" max="40" step="1" value="8"><span class="val" id="simNoiseVal"></span></div>
     <div class="row"><span class="label">blur radius</span><input type="range" id="simBlur" min="0" max="4" step="1" value="1"><span class="val" id="simBlurVal"></span></div>
@@ -169,6 +177,7 @@
 
   <div class="section">
     <h2>guided tangent walk</h2>
+    <label class="chk"><input type="checkbox" id="tangentWalkAdaptive"> adaptive (re-steer while walking, vs. fixed straight line)</label>
     <div class="row"><span class="label">max steps</span><input type="range" id="tangentWalkMaxSteps" min="0" max="30" step="1" value="12"><span class="val" id="tangentWalkMaxStepsVal"></span></div>
     <div class="row"><span class="label">deviation (deg)</span><input type="range" id="tangentWalkDeviationDeg" min="1" max="90" step="1" value="45"><span class="val" id="tangentWalkDeviationDegVal"></span></div>
     <div class="row"><span class="label">mag fraction</span><input type="range" id="tangentWalkMagFraction" min="0" max="1" step="0.05" value="0.15"><span class="val" id="tangentWalkMagFractionVal"></span></div>
@@ -196,6 +205,7 @@
     <label class="chk"><input type="checkbox" id="showFrustum" checked> frustum outline</label>
     <label class="chk"><input type="checkbox" id="showPatch" checked> live viewport image patch</label>
     <label class="chk"><input type="checkbox" id="showFloor" checked> floor</label>
+    <div class="row"><span class="label">cell outline</span><input type="range" id="floorCellOutlineSubdiv" min="0" max="20" step="1" value="0"><span class="val" id="floorCellOutlineSubdivVal"></span></div>
     <label class="chk"><input type="checkbox" id="showGizmoBody" checked> camera box</label>
     <label class="chk"><input type="checkbox" id="showRecoveredFloor" checked> recovered floor overlay (decoded position)</label>
     <label class="chk"><input type="checkbox" id="showSampleLattice"> sample lattice (projected cam)</label>

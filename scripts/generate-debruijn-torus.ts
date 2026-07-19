@@ -23,7 +23,7 @@
 
 import { PNG } from 'pngjs';
 import { createWriteStream } from 'node:fs';
-import { generateTorus, WINDOW_CHECK_LIMIT } from '../src/debruijn.ts';
+import { generateTorus, buildTorusFromCandidate, ORDER5_CANDIDATE, WINDOW_CHECK_LIMIT } from '../src/debruijn.ts';
 
 function parseArgs(argv: string[]): Record<string, string> {
   const args: Record<string, string> = {};
@@ -72,12 +72,21 @@ async function main() {
   const N = order * order;
   console.log(`Order n=${order} -> window is ${order}x${order} cells, N=${N} bits, period L=2^${N}-1=${2 ** N - 1}`);
 
-  const { R, C, taps, torus } = generateTorus(order);
+  // Order 5 has no known efficient construction free of D4 rotation/
+  // reflection collisions across its full ~33.5M-cell torus, so Sphere Lab
+  // (see src/sphereLab.ts) instead uses ORDER5_CANDIDATE, a searched 256x256
+  // sub-region with a low (~1%) residual collision rate. Mirror that choice
+  // here so the printed sheet matches what the tracker actually decodes
+  // against, rather than an unconstrained order-5 torus nobody uses.
+  const useCandidate = order === 5;
+  const { R, C, taps, torus } = useCandidate ? buildTorusFromCandidate(5, ORDER5_CANDIDATE) : generateTorus(order);
   const aspect = Math.max(R, C) / Math.min(R, C);
   console.log(`Torus grid: ${R} x ${C} cells (aspect ratio ${aspect.toFixed(2)}:1)${aspect > 3 ? '  [warning: quite far from square — 2^N-1 didn\'t factor nicely for this order]' : ''}`);
   console.log(`Feedback taps ${JSON.stringify(taps)} — sequence verified full-period and (where tractable) torus-window-unique.`);
 
-  if (R * C <= WINDOW_CHECK_LIMIT) {
+  if (useCandidate) {
+    console.log('Cropped candidate sub-region (src/debruijn.ts ORDER5_CANDIDATE) — ~1.03% residual window collision rate, not fully unique. See scripts/best-order5-candidate.json.');
+  } else if (R * C <= WINDOW_CHECK_LIMIT) {
     console.log(`Verified: all ${R * C} windows of size ${order}x${order} are unique on the torus.`);
   } else {
     console.log('Torus too large to brute-force verify window uniqueness — skipping (relying on the CRT-fold construction; 1D maximal-length was verified, but the 2D fold was not).');

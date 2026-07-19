@@ -202,11 +202,11 @@ export function generateTorus(order: number): DebruijnTorus {
 export interface TorusCandidate { taps: number[]; r0: number; c0: number; cropSize: number }
 
 // Found by scripts/search-order5-torus.ts, checkpointed in
-// scripts/best-order5-candidate.json — reflCount=425 rotCount=277 bothCount=6
-// anyCount=696/63504 (1.096%), vs. order 4's measured 98.1% collision rate.
+// scripts/best-order5-candidate.json — reflCount=338 rotCount=314 bothCount=0
+// anyCount=652/63504 (1.027%), vs. order 4's measured 98.1% collision rate.
 export const ORDER5_CANDIDATE: TorusCandidate = {
-  taps: [25, 1, 3, 5, 7, 9, 10, 12, 14, 16, 18, 20, 22, 23],
-  r0: 7419, c0: 1166, cropSize: 256,
+  taps: [25, 1, 4, 6, 7, 10, 11, 15, 16, 19, 21, 22],
+  r0: 17719, c0: 1435, cropSize: 256,
 };
 
 export function buildTorusFromCandidate(order: number, { taps, r0, c0, cropSize }: TorusCandidate): DebruijnTorus {

@@ -52,21 +52,21 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
   return {
     showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, showSampleLattice: false,
     showTrueContamination: false, showReconstructedContamination: false, hideField: false,
-    showGradientArrow: false, showGradientArrowPerpendicular: false, gradientArrowScale: 2,
+    showGradientArrow: false, showGradientArrowPerpendicular: false, gradientArrowScale: 10,
     showTangentWalkPath: false,
     simGradRadius: 1, coherenceRadius: 1,
     // See the pre-Stage-A history for the full derivation of these tangent-walk
     // defaults (guided tangent walk, simNoise=8 stability etc.) -- unchanged.
-    tangentWalkMaxSteps: 12, tangentWalkDeviationDeg: 45, tangentWalkMagFraction: 0.15, tangentWalkGraceSamples: 3,
+    tangentWalkMaxSteps: 76, tangentWalkDeviationDeg: 45, tangentWalkMagFraction: 0, tangentWalkGraceSamples: 50,
     tangentWalkAdaptive: false,
     circleSamplePercentMin: 0, circleSamplePercentMax: 10,
     showRecoveredPoles: true,
     showAxisVectors: false,
     showTopCircles: true,
     weightSharpenPower: 4,
-    orientationLM: true,
-    positionLM: true,
-    fieldView: 'noised',
+    orientationLM: false,
+    positionLM: false,
+    fieldView: 'effective',
     axesAutoCapture: false, axesCaptureIntervalMs: 500,
     viewportW: 512, viewportH: 384, aspectLocked: false,
     horizFovDeg: 65,
@@ -75,9 +75,9 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
 export function createDefaultSimulatedSettings(): SimulatedCameraSettings {
   return {
     ...createDefaultCommonSettings(),
-    camX: 0, camY: 4, camZ: 8,
-    camYawDeg: 0, camPitchDeg: -20,
-    simNoise: 8, simBlur: 1, captureSupersample: 2,
+    camX: 0, camY: 20.7, camZ: 8,
+    camYawDeg: -43, camPitchDeg: -50,
+    simNoise: 1, simBlur: 0, captureSupersample: 2,
   };
 }
 export function createDefaultPhysicalSettings(): PhysicalCameraSettings {

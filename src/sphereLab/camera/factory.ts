@@ -146,7 +146,7 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
     lastDecodeCorrectness: null, lastProjectedBins: null, lastMarginals: null, lastVotes: [],
     axesComputed: false, axesCapturing: false, lastAxesCapture: 0,
     rtSize: { ...rtSize }, aspect, pipRect: { x: 0, y: 0, w: 0, h: 0 }, captureDirty: true, lastPreviewUpdate: 0,
-    lastNoisedPreviewGray: null, lastDisplayedVectorField: null, lastEffectiveField: null,
+    lastNoisedPreviewGray: null, lastDisplayedVectorField: null, lastEffectiveField: null, lastJacobianField: null,
     distortedPreviewData, distortedPreviewTex, projectedPreviewData, projectedPreviewTex,
     trueContamData, trueContamTex, reconContamData, reconContamTex,
     recoveredCamGizmo, recoveredCamAxes,

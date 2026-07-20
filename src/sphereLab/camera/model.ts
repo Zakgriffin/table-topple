@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { DecodeCellDebug, DecodeSampleGrid, GradientField, Marginals, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
+import { DecodeCellDebug, DecodeSampleGrid, GradientField, JacobianField, Marginals, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
 import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
 
 // ── Camera model ─────────────────────────────────────────────────────────
@@ -36,6 +36,7 @@ export interface CameraBase {
   lastNoisedPreviewGray: Float64Array | null;
   lastDisplayedVectorField: GradientField | null;
   lastEffectiveField: GradientField | null;
+  lastJacobianField: JacobianField | null;
 
   distortedPreviewData: Uint8Array; distortedPreviewTex: THREE.DataTexture;
   projectedPreviewData: Uint8Array; projectedPreviewTex: THREE.DataTexture;

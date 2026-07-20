@@ -17,6 +17,21 @@ export function computeGradientField(gray: Float64Array, w: number, h: number, g
   return { fx, fy, w, h, r };
 }
 
+// Quick throwaway comparison view -- forward difference over a bare 2x2
+// window (this pixel, one right, one down) instead of the radius-driven
+// centered difference above.
+export function computeGradient2x2Field(gray: Float64Array, w: number, h: number): GradientField {
+  const fx = new Float64Array(w * h), fy = new Float64Array(w * h);
+  for (let y = 0; y < h - 1; y++) {
+    for (let x = 0; x < w - 1; x++) {
+      const i = y * w + x;
+      fx[i] = gray[i + 1] - gray[i];
+      fy[i] = gray[i + w] - gray[i];
+    }
+  }
+  return { fx, fy, w, h, r: 1 };
+}
+
 // Magnitude of the local VECTOR SUM of gradients (double-angle folded so
 // alternating-polarity edges reinforce instead of cancelling) -- see
 // pre-Stage-A history for the full derivation. Normalized against this

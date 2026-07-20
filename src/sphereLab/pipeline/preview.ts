@@ -3,7 +3,8 @@ import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, separableBoxBlur } from './distortion.ts';
-import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField, fillGrayscalePreview, paintScalarFieldAsGray, paintVectorFieldAsColor } from './gradientField.ts';
+import { computeEffectiveGradientField, computeGradient2x2Field, computeGradientAgreementField, computeGradientField, fillGrayscalePreview, paintScalarFieldAsGray, paintVectorFieldAsColor } from './gradientField.ts';
+import { computeLocalJacobianField, paintJacobianFieldAsColor } from './localJacobian.ts';
 import { computeWalkedGradientField } from './tangentWalk.ts';
 
 // Shared tail for both capture sources: given a final analysis-resolution
@@ -16,6 +17,21 @@ export function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
     const field = computeGradientField(gray, w, h, Math.round(settings.simGradRadius));
     camera.lastDisplayedVectorField = field;
     paintVectorFieldAsColor(field, camera.distortedPreviewData);
+    camera.distortedPreviewTex.needsUpdate = true;
+  } else if (settings.fieldView === 'gradient2x2') {
+    const field = computeGradient2x2Field(gray, w, h);
+    camera.lastDisplayedVectorField = field;
+    paintVectorFieldAsColor(field, camera.distortedPreviewData);
+    camera.distortedPreviewTex.needsUpdate = true;
+  } else if (settings.fieldView === 'jacobian') {
+    const field = computeGradientField(gray, w, h, Math.round(settings.simGradRadius));
+    // Stashed for the hover overlay's spoked walk (see hoverDebugOverlays.ts)
+    // to sample the same underlying gradient field the Jacobian was built
+    // from -- lastJacobianField's eigenvectors seed the walk's two axes.
+    camera.lastDisplayedVectorField = field;
+    const jac = computeLocalJacobianField(field, Math.round(settings.simGradRadius));
+    camera.lastJacobianField = jac;
+    paintJacobianFieldAsColor(jac, camera.distortedPreviewData);
     camera.distortedPreviewTex.needsUpdate = true;
   } else if (settings.fieldView === 'walked') {
     const field = computeGradientField(gray, w, h, Math.round(settings.simGradRadius));
@@ -45,6 +61,7 @@ export function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
 export function updateDistortedPreview(camera: Camera) {
   camera.lastDisplayedVectorField = null;
   camera.lastEffectiveField = null;
+  camera.lastJacobianField = null;
   const settings = camera.settings;
   if (settings.hideField) {
     for (let i = 0; i < camera.distortedPreviewData.length; i += 4) {

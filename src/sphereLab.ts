@@ -172,15 +172,26 @@ interface CameraSettingsCommon {
   fieldView: FieldView;
   axesAutoCapture: boolean; axesCaptureIntervalMs: number;
   viewportW: number; viewportH: number; aspectLocked: boolean;
+  // HORIZONTAL field of view, in degrees -- shared by both camera types
+  // (see getAnalysisVFovRad, the one place that turns this into the
+  // vertical FOV every ray-casting call site actually needs, via whatever
+  // the camera's own current aspect ratio is). Used to be simulated-only
+  // focalMM, converted through a fixed 36mm "35mm-equivalent" sensor width
+  // -- that conversion quietly assumed a 3:2 sensor, so it drifted from
+  // what a real lens at that focal length would actually show once the
+  // camera's own aspect ratio (viewportW/H) wasn't 3:2, which by default it
+  // isn't (512x384 = 4:3). Specifying FOV directly, the same way a
+  // physical camera already had to (there's no focal-length spec sheet for
+  // a real phone lens to convert from), sidesteps the whole issue and
+  // means both camera types now go through the exact same formula.
+  horizFovDeg: number;
 }
 interface SimulatedCameraSettings extends CameraSettingsCommon {
   camX: number; camY: number; camZ: number;
   camYawDeg: number; camPitchDeg: number;
-  focalMM: number;
   simNoise: number; simBlur: number; captureSupersample: number;
 }
 interface PhysicalCameraSettings extends CameraSettingsCommon {
-  realCaptureFovDeg: number;
 }
 
 function createDefaultCommonSettings(): CameraSettingsCommon {
@@ -204,6 +215,7 @@ function createDefaultCommonSettings(): CameraSettingsCommon {
     fieldView: 'noised',
     axesAutoCapture: false, axesCaptureIntervalMs: 500,
     viewportW: 512, viewportH: 384, aspectLocked: false,
+    horizFovDeg: 65,
   };
 }
 function createDefaultSimulatedSettings(): SimulatedCameraSettings {
@@ -211,7 +223,6 @@ function createDefaultSimulatedSettings(): SimulatedCameraSettings {
     ...createDefaultCommonSettings(),
     camX: 0, camY: 4, camZ: 8,
     camYawDeg: 0, camPitchDeg: -20,
-    focalMM: 26,
     simNoise: 8, simBlur: 1, captureSupersample: 2,
   };
 }
@@ -225,11 +236,9 @@ function createDefaultPhysicalSettings(): PhysicalCameraSettings {
     // (labeled "capture" in that case) is the only one of the four that
     // still means something.
     fieldView: 'raw',
-    realCaptureFovDeg: 65,
   };
 }
 
-const SENSOR_WIDTH_MM = 36; // 35mm-equivalent convention, so "focal (mm eq.)" reads like a familiar lens spec
 const SPHERE_RADIUS = 2.5;
 const GRID_STEP = 1; // world units per pattern cell
 const VIS_HALF_EXTENT = 20; // cap on how many grid lines get a reference line / great circle drawn (perf + clutter, independent of the floor's true size)
@@ -1765,17 +1774,18 @@ const RECON_CONTAM_COLOR = [235, 150, 20] as const;
 
 // ── Per-camera capture/analysis pipeline ─────────────────────────────────
 
-// Central place for "what FOV should ray-casting assume" -- real-capture
-// mode uses the direct FOV input (settings.realCaptureFovDeg) instead of the
-// simulated camera's focalMM-derived one. realCaptureFovDeg is HORIZONTAL;
-// this function always returns VERTICAL (THREE.js's camera.fov convention),
-// via the camera's own current aspect ratio.
+// Central place for "what FOV should ray-casting assume" -- settings.
+// horizFovDeg is HORIZONTAL (shared by both camera types now, see
+// CameraSettingsCommon's own comment on why); this function always returns
+// VERTICAL (THREE.js's camera.fov convention), via the camera's own current
+// aspect ratio. updateGizmo sets a SimulatedCamera's actual gizmoCam.fov via
+// this exact same formula, so reading it back here (rather than
+// recomputing) would give the identical answer either way -- recomputing
+// directly from settings just means this function works uniformly for both
+// types without needing a per-type branch at all.
 function getAnalysisVFovRad(camera: Camera): number {
-  if (isPhysical(camera)) {
-    const hFovRad = THREE.MathUtils.degToRad(camera.settings.realCaptureFovDeg);
-    return 2 * Math.atan(Math.tan(hFovRad / 2) / camera.aspect);
-  }
-  return THREE.MathUtils.degToRad(camera.gizmoCam.fov);
+  const hFovRad = THREE.MathUtils.degToRad(camera.settings.horizFovDeg);
+  return 2 * Math.atan(Math.tan(hFovRad / 2) / camera.aspect);
 }
 
 function markCaptureDirty(camera: Camera) {
@@ -3292,6 +3302,14 @@ function refreshCameraPanel() {
   setSectionHidden(cameraSettingsSectionsEl, !cam);
   if (!cam) return;
 
+  // Every slider/checkbox inside cameraSettingsSectionsEl reads its
+  // accent-color from --cam-accent (see sphere-lab.html's CSS -- falls back
+  // to the fixed green everywhere else, e.g. the Global tab's own controls,
+  // which aren't tied to any one camera) -- setting it once here, on the
+  // shared container, is enough for every control inside to pick it up via
+  // ordinary CSS inheritance, no per-control wiring needed.
+  cameraSettingsSectionsEl.style.setProperty('--cam-accent', `#${cam.color.getHexString()}`);
+
   setSectionHidden(simCameraDetailFields, !isSimulated(cam));
   setSectionHidden(physCameraDetailFields, isSimulated(cam));
   setSectionHidden(simDistortionSection, !isSimulated(cam));
@@ -3313,12 +3331,12 @@ function refreshCameraPanel() {
 
   if (isSimulated(cam)) {
     setNum('camX', cam.settings.camX); setNum('camY', cam.settings.camY); setNum('camZ', cam.settings.camZ);
-    setNum('camYaw', cam.settings.camYawDeg); setNum('camPitch', cam.settings.camPitchDeg); setNum('camFocal', cam.settings.focalMM);
+    setNum('camYaw', cam.settings.camYawDeg); setNum('camPitch', cam.settings.camPitchDeg); setNum('camFov', cam.settings.horizFovDeg);
     setNum('simNoise', cam.settings.simNoise); setNum('simBlur', cam.settings.simBlur); setNum('captureSupersample', cam.settings.captureSupersample);
     setNum('viewportW', cam.settings.viewportW); setNum('viewportH', cam.settings.viewportH);
     setBool('aspectLocked', cam.settings.aspectLocked);
   } else {
-    setNum('realCaptureFovDeg', cam.settings.realCaptureFovDeg);
+    setNum('realCaptureFovDeg', cam.settings.horizFovDeg);
   }
 
   setBool('showSphere', cam.settings.showSphere); setBool('showCircles', cam.settings.showCircles);
@@ -3369,7 +3387,7 @@ let realCaptureFovRerunTimer: number | undefined;
 bindSlider('realCaptureFovDeg', (v) => {
   const cam = activeCamera();
   if (!cam || !isPhysical(cam)) return;
-  cam.settings.realCaptureFovDeg = v;
+  cam.settings.horizFovDeg = v;
   markCaptureDirty(cam);
   clearTimeout(realCaptureFovRerunTimer);
   realCaptureFovRerunTimer = window.setTimeout(rerunOnRealCaptureSettingChange, 200);
@@ -3379,7 +3397,7 @@ bindSlider('camY', (v) => { const cam = activeCamera(); if (cam && isSimulated(c
 bindSlider('camZ', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camZ = v; markCaptureDirty(cam); } });
 bindSlider('camYaw', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camYawDeg = v; markCaptureDirty(cam); } }, (v) => `${v.toFixed(0)}°`);
 bindSlider('camPitch', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camPitchDeg = v; markCaptureDirty(cam); } }, (v) => `${v.toFixed(0)}°`);
-bindSlider('camFocal', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.focalMM = v; markCaptureDirty(cam); } }, (v) => `${v.toFixed(0)}mm`);
+bindSlider('camFov', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.horizFovDeg = v; markCaptureDirty(cam); } }, (v) => `${v.toFixed(0)}°`);
 
 let syncingViewportAspect = false;
 function clampViewport(v: number, lo: number, hi: number): number {
@@ -3516,7 +3534,7 @@ function updateGizmo(camera: SimulatedCamera): { hFovRad: number; vFovRad: numbe
 
   camera.gizmoCam.position.copy(camera.camPos);
   camera.gizmoCam.quaternion.copy(camera.camQuat);
-  const hFovRad = 2 * Math.atan(SENSOR_WIDTH_MM / (2 * camera.settings.focalMM));
+  const hFovRad = THREE.MathUtils.degToRad(camera.settings.horizFovDeg);
   const vFovRad = 2 * Math.atan(Math.tan(hFovRad / 2) / camera.aspect);
   camera.gizmoCam.fov = THREE.MathUtils.radToDeg(vFovRad);
   camera.gizmoCam.aspect = camera.aspect;
@@ -3674,9 +3692,10 @@ function animate() {
     if (isSimulated(camera)) updateGizmo(camera);
     // NOT updateGizmo()'s own returned vFovRad -- getAnalysisVFovRad is the
     // single source of truth every other analysis call site uses too (see
-    // its own comment); for a simulated camera it reads back the same
-    // focalMM-derived gizmoCam.fov updateGizmo just set, so this matches
-    // exactly rather than duplicating the derivation.
+    // its own comment); it recomputes from the exact same settings.horizFovDeg
+    // + aspect updateGizmo just used, so this matches exactly rather than
+    // duplicating the derivation or trusting two separate code paths to
+    // agree.
     const vFovRad = getAnalysisVFovRad(camera);
     updateSphereOverlays(camera, vFovRad);
 

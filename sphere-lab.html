@@ -107,10 +107,10 @@
   .section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #8ab; margin-bottom: 6px; }
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .row span.label { flex: 0 0 88px; color: #aaa; font-size: 11px; }
-  .row input[type=range] { flex: 1; min-width: 0; accent-color: #2a7; }
+  .row input[type=range] { flex: 1; min-width: 0; accent-color: var(--cam-accent, #2a7); }
   .row span.val { flex: 0 0 44px; text-align: right; font-size: 11px; color: #eee; }
   label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 4px; cursor: pointer; }
-  label.chk input { accent-color: #2a7; }
+  label.chk input { accent-color: var(--cam-accent, #2a7); }
   .fieldViewDivider {
     font-size: 10px; color: #678; text-align: center; margin: 6px 0;
     border-top: 1px dashed rgba(255,255,255,0.2); padding-top: 6px;
@@ -184,7 +184,7 @@
       <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-200" max="200" step="0.1" value="8"><span class="val" id="camZVal"></span></div>
       <div class="row"><span class="label">yaw</span><input type="range" id="camYaw" min="-180" max="180" step="1" value="0"><span class="val" id="camYawVal"></span></div>
       <div class="row"><span class="label">pitch</span><input type="range" id="camPitch" min="-89" max="89" step="1" value="-20"><span class="val" id="camPitchVal"></span></div>
-      <div class="row"><span class="label">focal (mm eq.)</span><input type="range" id="camFocal" min="10" max="85" step="1" value="26"><span class="val" id="camFocalVal"></span></div>
+      <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="camFov" min="20" max="150" step="1" value="65"><span class="val" id="camFovVal"></span></div>
       <div class="row"><span class="label">viewport W</span><input type="range" id="viewportW" min="128" max="2000" step="32" value="512"><span class="val" id="viewportWVal"></span></div>
       <div class="row"><span class="label">viewport H</span><input type="range" id="viewportH" min="96" max="2000" step="24" value="384"><span class="val" id="viewportHVal"></span></div>
       <label class="chk"><input type="checkbox" id="aspectLocked"> aspect lock</label>

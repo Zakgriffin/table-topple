@@ -99,8 +99,11 @@
     background: transparent; color: #9c9; font-family: monospace; font-size: 13px; cursor: pointer;
   }
   .cameraTabAdd:hover { background: rgba(255,255,255,0.08); }
+  .cameraTab.globalTab { --tab-color: #789; }
+  .cameraTab.globalTab::before { border-radius: 2px; } /* square dot, not a circle -- distinct from a camera's own color swatch */
   .section { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.15); }
   .section.disabled { opacity: 0.35; pointer-events: none; }
+  .hidden { display: none !important; }
   .section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #8ab; margin-bottom: 6px; }
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
   .row span.label { flex: 0 0 88px; color: #aaa; font-size: 11px; }
@@ -165,24 +168,30 @@
     <button id="modeProjected">Projected Cam</button>
   </div>
 
-  <div class="section">
-    <h2>real-world capture</h2>
-    <label class="chk"><input type="checkbox" id="useRealCapture"> use real capture (phone) instead of simulated</label>
-    <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="realCaptureFovDeg" min="20" max="150" step="1" value="65"><span class="val" id="realCaptureFovDegVal"></span></div>
-    <div class="hint" style="margin-bottom:0;">Axis orientation resolves automatically, no manual flip toggles needed.</div>
+  <div class="section" id="globalSettingsSection">
+    <h2>global</h2>
+    <label class="chk"><input type="checkbox" id="showFloor" checked> floor</label>
+    <div class="row"><span class="label">cell outline</span><input type="range" id="floorCellOutlineSubdiv" min="0" max="20" step="1" value="0"><span class="val" id="floorCellOutlineSubdivVal"></span></div>
+    <div class="hint" style="margin-bottom:0;">Applies to the shared floor/pattern, regardless of which camera (or none) is selected.</div>
   </div>
 
+  <div id="cameraSettingsSections" class="hidden">
   <div class="section" id="cameraDetailsSection">
     <h2>camera details</h2>
-    <div class="row"><span class="label">X</span><input type="range" id="camX" min="-200" max="200" step="0.1" value="0"><span class="val" id="camXVal"></span></div>
-    <div class="row"><span class="label">height</span><input type="range" id="camY" min="0.5" max="200" step="0.1" value="4"><span class="val" id="camYVal"></span></div>
-    <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-200" max="200" step="0.1" value="8"><span class="val" id="camZVal"></span></div>
-    <div class="row"><span class="label">yaw</span><input type="range" id="camYaw" min="-180" max="180" step="1" value="0"><span class="val" id="camYawVal"></span></div>
-    <div class="row"><span class="label">pitch</span><input type="range" id="camPitch" min="-89" max="89" step="1" value="-20"><span class="val" id="camPitchVal"></span></div>
-    <div class="row"><span class="label">focal (mm eq.)</span><input type="range" id="camFocal" min="10" max="85" step="1" value="26"><span class="val" id="camFocalVal"></span></div>
-    <div class="row"><span class="label">viewport W</span><input type="range" id="viewportW" min="128" max="2000" step="32" value="512"><span class="val" id="viewportWVal"></span></div>
-    <div class="row"><span class="label">viewport H</span><input type="range" id="viewportH" min="96" max="2000" step="24" value="384"><span class="val" id="viewportHVal"></span></div>
-    <label class="chk"><input type="checkbox" id="aspectLocked"> aspect lock</label>
+    <div id="simCameraDetailFields">
+      <div class="row"><span class="label">X</span><input type="range" id="camX" min="-200" max="200" step="0.1" value="0"><span class="val" id="camXVal"></span></div>
+      <div class="row"><span class="label">height</span><input type="range" id="camY" min="0.5" max="200" step="0.1" value="4"><span class="val" id="camYVal"></span></div>
+      <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-200" max="200" step="0.1" value="8"><span class="val" id="camZVal"></span></div>
+      <div class="row"><span class="label">yaw</span><input type="range" id="camYaw" min="-180" max="180" step="1" value="0"><span class="val" id="camYawVal"></span></div>
+      <div class="row"><span class="label">pitch</span><input type="range" id="camPitch" min="-89" max="89" step="1" value="-20"><span class="val" id="camPitchVal"></span></div>
+      <div class="row"><span class="label">focal (mm eq.)</span><input type="range" id="camFocal" min="10" max="85" step="1" value="26"><span class="val" id="camFocalVal"></span></div>
+      <div class="row"><span class="label">viewport W</span><input type="range" id="viewportW" min="128" max="2000" step="32" value="512"><span class="val" id="viewportWVal"></span></div>
+      <div class="row"><span class="label">viewport H</span><input type="range" id="viewportH" min="96" max="2000" step="24" value="384"><span class="val" id="viewportHVal"></span></div>
+      <label class="chk"><input type="checkbox" id="aspectLocked"> aspect lock</label>
+    </div>
+    <div id="physCameraDetailFields">
+      <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="realCaptureFovDeg" min="20" max="150" step="1" value="65"><span class="val" id="realCaptureFovDegVal"></span></div>
+    </div>
   </div>
 
   <div class="section" id="simDistortionSection">
@@ -209,10 +218,12 @@
 
   <div class="section">
     <h2>field view</h2>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewRaw" value="raw"> raw (no blur, no noise)</label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewAntialiased" value="antialiased"> antialiased (sensor AA filter, no lens blur yet)</label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewDownsampled" value="downsampled"> downsampled (+lens blur, no noise yet)</label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised" checked> noised (final image the algorithm sees)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewRaw" value="raw"> <span id="fieldViewRawLabel">raw (no blur, no noise)</span></label>
+    <div id="simOnlyFieldViews">
+      <label class="chk"><input type="radio" name="fieldView" id="fieldViewAntialiased" value="antialiased"> antialiased (sensor AA filter, no lens blur yet)</label>
+      <label class="chk"><input type="radio" name="fieldView" id="fieldViewDownsampled" value="downsampled"> downsampled (+lens blur, no noise yet)</label>
+      <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised" checked> noised (final image the algorithm sees)</label>
+    </div>
     <div class="fieldViewDivider">&darr; 2D filter pipeline starts here &darr;</div>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewGradient" value="gradient"> gradient field (hue=direction, sat=magnitude)</label>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewAgreement" value="agreement"> gradient agreement (vector-sum coherence, drives the fit)</label>
@@ -227,8 +238,6 @@
     <label class="chk"><input type="checkbox" id="showPoles" checked> vanishing-point poles</label>
     <label class="chk"><input type="checkbox" id="showFrustum" checked> frustum outline</label>
     <label class="chk"><input type="checkbox" id="showPatch" checked> live viewport image patch</label>
-    <label class="chk"><input type="checkbox" id="showFloor" checked> floor</label>
-    <div class="row"><span class="label">cell outline</span><input type="range" id="floorCellOutlineSubdiv" min="0" max="20" step="1" value="0"><span class="val" id="floorCellOutlineSubdivVal"></span></div>
     <label class="chk"><input type="checkbox" id="showGizmoBody" checked> camera box</label>
     <label class="chk"><input type="checkbox" id="showRecoveredFloor" checked> recovered floor overlay (decoded position)</label>
     <label class="chk"><input type="checkbox" id="showSampleLattice"> sample lattice (projected cam)</label>
@@ -258,6 +267,7 @@
   <div class="section">
     <h2>readout</h2>
     <div id="readout"></div>
+  </div>
   </div>
 </div>
 

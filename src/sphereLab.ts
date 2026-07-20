@@ -12,20 +12,34 @@
 // apart on the sphere, always — that's the "orthogonal constraint" the real
 // pipeline (src/orthogonalVp.ts) searches for, seen from the inside.
 //
-// ── Stage A architecture note ────────────────────────────────────────────
-// This file models N cameras (exactly one lives at runtime today — see the
-// "Camera model" section below) instead of one hardcoded camera. Every
-// mutable THREE object / buffer that used to be a single module-level
-// binding now lives on a `Camera` object; truly shared things (the scene,
-// renderer, floor, De Bruijn pattern, the world-view orbit controls,
-// ROW_DIR/COL_DIR, MATH_QUAT) stay module-level. `activeCamera()` is the
-// camera whose detail panel (sliders/readouts/Through-Cam/Projected-Cam/
-// Inside-Sphere) is currently shown; the cheap per-frame gizmo/overlay
-// update loop in animate() runs for every camera in `cameras`, while the
-// expensive preview-render/auto-capture work only ever runs for the active
-// one — today that's a distinction without a difference (only one camera
-// exists), but it's what lets Stage B add more cameras without another
-// big-bang rewrite.
+// ── N-camera architecture note ────────────────────────────────────────────
+// This file models N cameras -- any number of simulated ones (created/
+// destroyed by hand, "+" in the tab bar) plus any number of physical ones
+// (each auto-appearing the moment a phone connects through the dev bridge,
+// see initDevBridge) -- instead of one hardcoded camera. Every mutable THREE
+// object/buffer that used to be a single module-level binding lives on a
+// `Camera` object; truly shared things (the scene, renderer, floor, De
+// Bruijn pattern, the world-view orbit controls, ROW_DIR/COL_DIR, MATH_QUAT)
+// stay module-level. There is deliberately NO default camera: `cameras`
+// starts empty and the tab bar starts on its always-present "Global" tab
+// (activeCameraId === '' means exactly that -- no camera selected, only
+// global settings shown, see refreshCameraPanel). `activeCamera()` is
+// whichever camera's detail panel (sliders/readouts/Through-Cam/Projected-
+// Cam/Inside-Sphere) is currently shown; the cheap per-frame gizmo/overlay
+// update loop in animate() runs for every camera in `cameras` regardless of
+// which is active (that's what makes the World view show all of them at
+// once), while the expensive preview-render/auto-capture work only ever
+// runs for the active one, since Through-Cam/Projected-Cam/Inside-Sphere/the
+// PIP preview only ever show one camera at a time.
+//
+// A physical camera's type is fixed for its entire life: it's created only
+// by a real phone connecting (see initDevBridge's realCapture handler) and
+// destroyed only by that connection closing (kicked from the tab bar, or a
+// natural disconnect -- both funnel through the same server-side close
+// handler, see scripts/dev-bridge/server.js). There is no UI path to
+// manually conjure a physical camera or flip an existing camera's type --
+// camera "type" answers a factual question (is this backed by a real phone
+// or not), not a togglable setting.
 
 import * as THREE from 'three';
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js';
@@ -64,7 +78,6 @@ const toggleGradientArrowBtn = document.getElementById('toggleGradientArrow') as
 const toggleGradientArrowModeBtn = document.getElementById('toggleGradientArrowMode') as HTMLButtonElement;
 const toggleTangentWalkPathBtn = document.getElementById('toggleTangentWalkPath') as HTMLButtonElement;
 const arrowToggles = document.getElementById('arrowToggles') as HTMLDivElement;
-const cameraDetailsSection = document.getElementById('cameraDetailsSection') as HTMLDivElement;
 const simDistortionSection = document.getElementById('simDistortionSection') as HTMLDivElement;
 
 const modeBtns: Record<Mode, HTMLButtonElement> = {
@@ -205,6 +218,13 @@ function createDefaultSimulatedSettings(): SimulatedCameraSettings {
 function createDefaultPhysicalSettings(): PhysicalCameraSettings {
   return {
     ...createDefaultCommonSettings(),
+    // Overrides the common default of 'noised' -- that (and antialiased/
+    // downsampled, the other simulated-distortion-pipeline stages) don't
+    // exist for a real photo, and are hidden from the field-view list
+    // entirely for a physical camera (see refreshCameraPanel) -- 'raw'
+    // (labeled "capture" in that case) is the only one of the four that
+    // still means something.
+    fieldView: 'raw',
     realCaptureFovDeg: 65,
   };
 }
@@ -417,11 +437,9 @@ interface PhotometricSample { px: number; py: number; observed: number }
 
 // ── Camera model ─────────────────────────────────────────────────────────
 //
-// Exactly one Camera exists at runtime in Stage A (the `useRealCapture`
-// checkbox destroys and recreates it as the other type -- see
-// switchActiveCameraType below), but every per-camera THREE object/buffer
-// already lives on this object rather than as a module-level singleton, so
-// Stage B can add more without touching this shape again.
+// Any number of these can exist at once (zero included -- see this file's
+// header note); every per-camera THREE object/buffer lives on this object
+// rather than as a module-level singleton.
 
 interface CameraBase {
   id: string;
@@ -496,12 +514,13 @@ interface PhysicalCamera extends CameraBase {
   lastRealCaptureGray: Float64Array | null;
   lastRealCaptureW: number; lastRealCaptureH: number;
   // The dev-bridge server's own id for the phone connection this camera was
-  // auto-created for (see initDevBridge's realCapture handler) -- null for
-  // one created manually via the useRealCapture checkbox, which has no real
-  // connection behind it. Only a non-null connectionId gets a "kick"
-  // affordance in the tab bar (see renderCameraTabs): kicking a camera with
-  // nothing real to disconnect wouldn't do anything.
-  connectionId: string | null;
+  // auto-created for (see initDevBridge's realCapture handler) -- every
+  // PhysicalCamera has one now, and always will: there's no manual/UI path
+  // to create one anymore (see this file's header), only a real phone
+  // connecting. That's what lets the tab bar's close button unconditionally
+  // KICK any physical camera (see renderCameraTabs) instead of needing to
+  // ask whether there's really a connection behind it to kick.
+  connectionId: string;
 }
 type Camera = SimulatedCamera | PhysicalCamera;
 
@@ -561,7 +580,8 @@ function renderReconContamOverlay(camera: Camera, x: number, y: number, w: numbe
 // Build every per-camera THREE object/buffer this file used to allocate
 // once at module scope, add them to the shared `scene`, and return a fully
 // populated Camera. Real allocate-N-of-them functions -- addSimulatedCamera
-// (Stage B's "+" button) and switchActiveCameraType both call these.
+// (the tab bar's "+" button) and initDevBridge's realCapture handler (a
+// phone connecting) both call these.
 
 function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Color) {
   const aspect = rtSize.w / rtSize.h;
@@ -765,7 +785,7 @@ function createSimulatedCamera(color: THREE.Color): SimulatedCamera {
   return camera;
 }
 
-function createPhysicalCamera(color: THREE.Color, connectionId: string | null): PhysicalCamera {
+function createPhysicalCamera(color: THREE.Color, connectionId: string): PhysicalCamera {
   const settings = createDefaultPhysicalSettings();
   const rtSize = { w: Math.round(settings.viewportW), h: Math.round(settings.viewportH) };
   const base = makeCameraBaseParts(rtSize, color);
@@ -782,10 +802,9 @@ function createPhysicalCamera(color: THREE.Color, connectionId: string | null): 
 
 // Disposes every THREE object/geometry/material/texture/render-target a
 // camera owns and removes them from `scene` -- the mirror image of the
-// factories above. Stage A only ever calls this from
-// switchActiveCameraType (toggling useRealCapture), but it's written as a
-// real, general "tear down one camera completely" function since Stage B's
-// destroyCamera(id) needs exactly this.
+// factories above. Called from removeCameraTab (a "x"/kick click) and, for a
+// physical camera specifically, from initDevBridge's captureDisconnected
+// handler.
 function destroyCamera(camera: Camera) {
   const disposeObj = (o: THREE.Object3D) => {
     scene.remove(o);
@@ -3101,10 +3120,16 @@ toggleTangentWalkPathBtn.addEventListener('click', () => {
 
 // ── Slider / checkbox wiring ─────────────────────────────────────────────
 
-function setSectionDisabled(section: HTMLDivElement, disabled: boolean) {
-  section.classList.toggle('disabled', disabled);
-  for (const el of section.querySelectorAll('input')) (el as HTMLInputElement).disabled = disabled;
+function setSectionHidden(el: HTMLElement, hidden: boolean) {
+  el.classList.toggle('hidden', hidden);
 }
+
+const globalSettingsSectionEl = document.getElementById('globalSettingsSection') as HTMLDivElement;
+const cameraSettingsSectionsEl = document.getElementById('cameraSettingsSections') as HTMLDivElement;
+const simCameraDetailFields = document.getElementById('simCameraDetailFields') as HTMLDivElement;
+const physCameraDetailFields = document.getElementById('physCameraDetailFields') as HTMLDivElement;
+const simOnlyFieldViews = document.getElementById('simOnlyFieldViews') as HTMLDivElement;
+const fieldViewRawLabel = document.getElementById('fieldViewRawLabel') as HTMLSpanElement;
 
 // ── Camera lifecycle: tabs, add/remove (Stage B), physical/kick (Stage C) ──
 
@@ -3132,6 +3157,18 @@ const cameraTabsEl = document.getElementById('cameraTabs') as HTMLDivElement;
 // wholesale rather than diff.
 function renderCameraTabs() {
   cameraTabsEl.innerHTML = '';
+
+  // Always present, never closable -- the panel's own home when no camera
+  // is selected (including on a fresh load: there's no default camera
+  // anymore, see this file's header). No --tab-color override, so it picks
+  // up .cameraTab's own neutral default instead of a camera's own color.
+  const globalTab = document.createElement('button');
+  globalTab.className = 'cameraTab globalTab' + (activeCameraId === '' ? ' active' : '');
+  globalTab.textContent = 'Global';
+  globalTab.title = 'global settings (shared by every camera)';
+  globalTab.addEventListener('click', () => selectGlobalTab());
+  cameraTabsEl.appendChild(globalTab);
+
   for (const camera of cameras.values()) {
     const tab = document.createElement('button');
     tab.className = 'cameraTab' + (camera.id === activeCameraId ? ' active' : '');
@@ -3140,23 +3177,24 @@ function renderCameraTabs() {
     const label = document.createElement('span');
     label.textContent = camera.name;
     tab.appendChild(label);
-    // A camera with a real phone connection behind it (auto-created, see
-    // initDevBridge's realCapture handler) gets KICKED -- closes that
-    // connection server-side, tab removal itself waits for the resulting
-    // captureDisconnected broadcast rather than removing optimistically, so
-    // it stays correct if the kick races with some other disconnect reason.
-    // Every other camera (simulated, or a manually-toggled physical one
-    // with no real connection to kick) just gets removed locally and
-    // immediately, same as Stage B.
-    if (cameras.size > 1) {
-      const isLiveConnection = camera.type === 'physical' && camera.connectionId !== null;
+    // A physical camera is ALWAYS a real phone connection now (see this
+    // file's header) -- its close button KICKS that connection server-side
+    // instead of removing the tab locally; tab removal itself waits for the
+    // resulting captureDisconnected broadcast rather than happening
+    // optimistically, so it stays correct if the kick races with some other
+    // disconnect reason. A simulated camera just gets removed locally and
+    // immediately, same as Stage B. Every camera can be closed now,
+    // including the last one -- zero cameras is a normal, supported state
+    // (see removeCameraTab).
+    {
+      const isPhysicalCam = camera.type === 'physical';
       const close = document.createElement('span');
       close.className = 'cameraTabClose';
-      close.textContent = isLiveConnection ? '⏻' : '×';
-      close.title = isLiveConnection ? 'kick (disconnect the phone)' : 'remove this camera';
+      close.textContent = isPhysicalCam ? '⏻' : '×';
+      close.title = isPhysicalCam ? 'kick (disconnect the phone)' : 'remove this camera';
       close.addEventListener('click', (e) => {
         e.stopPropagation();
-        if (isLiveConnection) sendToDevBridge({ type: 'kickCapture', captureId: (camera as PhysicalCamera).connectionId });
+        if (isPhysicalCam) sendToDevBridge({ type: 'kickCapture', captureId: (camera as PhysicalCamera).connectionId });
         else removeCameraTab(camera.id);
       });
       tab.appendChild(close);
@@ -3187,8 +3225,7 @@ function primeCameraForDisplay(camera: Camera) {
   layoutPip(camera);
 }
 
-// Adds a new simulated camera ALONGSIDE whatever already exists (unlike
-// switchActiveCameraType below, which REPLACES the active one) and makes it
+// Adds a new simulated camera ALONGSIDE whatever already exists and makes it
 // active. Offsets its default X position a few units per already-existing
 // camera so a fresh gizmo doesn't spawn exactly on top of another one.
 function addSimulatedCamera() {
@@ -3201,10 +3238,23 @@ function addSimulatedCamera() {
   refreshCameraPanel();
 }
 
+// Selects the Global tab -- no camera active, only globalSettingsSection
+// shown (see refreshCameraPanel). Every other mode (Through-Cam/Inside-
+// Sphere/Projected-Cam) needs an active camera to render anything, so this
+// forces back to World rather than leaving one of them showing a blank
+// screen with nothing selected to show.
+function selectGlobalTab() {
+  if (activeCameraId === '') return;
+  activeCameraId = '';
+  if (globalState.mode !== 'world') setMode('world');
+  renderCameraTabs();
+  refreshCameraPanel();
+}
+
 // Tears down one camera. If it was the active one, falls back to whichever
-// camera is next in the map, or -- if that was the last camera left --
-// creates a fresh default simulated camera, so the app is never left with
-// zero cameras and no way to add one back.
+// camera is next in the map, or -- if that was the last camera left -- to
+// the Global tab. Zero cameras is a normal, supported state (see this
+// file's header): there's no more auto-created replacement papering over it.
 function removeCameraTab(id: string) {
   const camera = cameras.get(id);
   if (!camera) return;
@@ -3212,35 +3262,41 @@ function removeCameraTab(id: string) {
   destroyCamera(camera);
   if (wasActive) {
     const next = cameras.values().next().value;
-    const replacement = next ?? createSimulatedCamera(nextCameraColor());
-    if (!next) cameras.set(replacement.id, replacement);
-    activeCameraId = replacement.id;
-    primeCameraForDisplay(replacement);
+    if (next) {
+      activeCameraId = next.id;
+      primeCameraForDisplay(next);
+    } else {
+      activeCameraId = '';
+      if (globalState.mode !== 'world') setMode('world');
+    }
   }
   renderCameraTabs();
   refreshCameraPanel();
 }
 
-// Re-syncs every per-camera control's DISPLAYED value/state to match
-// whichever camera just became active. Writes already redirect correctly on
-// every tick regardless (bindSlider/bindCheckbox's onChange callbacks all
-// look up activeCamera() fresh each time they fire) -- this is purely the
-// other direction, camera state -> DOM. Dispatches the SAME 'input'/'change'
-// events bindSlider/bindCheckbox already listen for, reusing their existing
-// fmt/persist/onChange logic wholesale instead of duplicating it; the
-// onChange round-trip this causes (writing the same value straight back to
-// the SAME camera it was just read from) is a harmless no-op. useRealCapture
-// is the one exception -- it must NOT dispatch (that would immediately
-// destroy the camera this function is trying to display), so its checked
-// state is set directly and silently instead.
+// Re-syncs the WHOLE side panel to match whatever's currently selected --
+// either a specific camera (per-camera controls, further split into
+// simulated-only/physical-only sub-fields) or the Global tab (just
+// globalSettingsSection). Per-camera writes already redirect correctly on
+// every tick regardless of what's currently displayed (bindSlider/
+// bindCheckbox's onChange callbacks all look up activeCamera() fresh each
+// time they fire) -- this function is purely the other direction, state ->
+// DOM. Dispatches the SAME 'input'/'change' events bindSlider/bindCheckbox
+// already listen for, reusing their existing fmt/persist/onChange logic
+// wholesale instead of duplicating it; the onChange round-trip this causes
+// (writing the same value straight back to the SAME camera it was just read
+// from) is a harmless no-op.
 function refreshCameraPanel() {
   const cam = activeCamera();
+  setSectionHidden(globalSettingsSectionEl, !!cam);
+  setSectionHidden(cameraSettingsSectionsEl, !cam);
   if (!cam) return;
 
-  const useRealCaptureInput = document.getElementById('useRealCapture') as HTMLInputElement;
-  useRealCaptureInput.checked = isPhysical(cam);
-  setSectionDisabled(cameraDetailsSection, isPhysical(cam));
-  setSectionDisabled(simDistortionSection, isPhysical(cam));
+  setSectionHidden(simCameraDetailFields, !isSimulated(cam));
+  setSectionHidden(physCameraDetailFields, isSimulated(cam));
+  setSectionHidden(simDistortionSection, !isSimulated(cam));
+  setSectionHidden(simOnlyFieldViews, !isSimulated(cam));
+  fieldViewRawLabel.textContent = isSimulated(cam) ? 'raw (no blur, no noise)' : 'capture';
 
   const setNum = (id: string, v: number) => {
     const el = document.getElementById(id) as HTMLInputElement | null;
@@ -3259,11 +3315,11 @@ function refreshCameraPanel() {
     setNum('camX', cam.settings.camX); setNum('camY', cam.settings.camY); setNum('camZ', cam.settings.camZ);
     setNum('camYaw', cam.settings.camYawDeg); setNum('camPitch', cam.settings.camPitchDeg); setNum('camFocal', cam.settings.focalMM);
     setNum('simNoise', cam.settings.simNoise); setNum('simBlur', cam.settings.simBlur); setNum('captureSupersample', cam.settings.captureSupersample);
+    setNum('viewportW', cam.settings.viewportW); setNum('viewportH', cam.settings.viewportH);
+    setBool('aspectLocked', cam.settings.aspectLocked);
   } else {
     setNum('realCaptureFovDeg', cam.settings.realCaptureFovDeg);
   }
-  setNum('viewportW', cam.settings.viewportW); setNum('viewportH', cam.settings.viewportH);
-  setBool('aspectLocked', cam.settings.aspectLocked);
 
   setBool('showSphere', cam.settings.showSphere); setBool('showCircles', cam.settings.showCircles);
   setBool('showPoles', cam.settings.showPoles); setBool('showFrustum', cam.settings.showFrustum);
@@ -3304,32 +3360,6 @@ function refreshCameraPanel() {
   layoutPip(cam);
 }
 
-// Destroys the current active camera and creates a fresh one of the other
-// type -- see this file's header / Stage A plan for why: a camera's THREE
-// objects and settings shape genuinely differ by type (SimulatedCamera vs
-// PhysicalCamera don't share a settings shape), so there's no meaningful
-// way to preserve state across the switch, matching how today's toggle
-// already behaves (it swaps data source, not settings). Keeps the SAME
-// color the outgoing camera had (or assigns a fresh one if there wasn't
-// one yet), rather than resetting it, so this camera's own tab/gizmo/
-// overlay color stays stable across a type flip.
-function switchActiveCameraType(kind: 'simulated' | 'physical') {
-  const current = activeCamera();
-  if (current && current.type === kind) return;
-  const color = current ? current.color : nextCameraColor();
-  if (current) destroyCamera(current);
-  // connectionId null: this is the manual/checkbox path, not a real phone
-  // connection auto-creating its own camera (see initDevBridge's realCapture
-  // handler for that path) -- nothing for a "kick" to disconnect here.
-  const cam = kind === 'simulated' ? createSimulatedCamera(color) : createPhysicalCamera(color, null);
-  cameras.set(cam.id, cam);
-  activeCameraId = cam.id;
-  setSectionDisabled(cameraDetailsSection, kind === 'physical');
-  setSectionDisabled(simDistortionSection, kind === 'physical');
-  primeCameraForDisplay(cam);
-  renderCameraTabs();
-}
-bindCheckbox('useRealCapture', (v) => switchActiveCameraType(v ? 'physical' : 'simulated'));
 
 function rerunOnRealCaptureSettingChange() {
   const cam = activeCamera();
@@ -3727,6 +3757,12 @@ function animate() {
 const VALID_MODES: Mode[] = ['world', 'through', 'inside', 'projected'];
 const savedMode = savedControls['mode'];
 setMode(VALID_MODES.includes(savedMode as Mode) ? (savedMode as Mode) : 'world');
+
+// No default camera (see this file's header) -- activeCameraId is already
+// '' at this point, so this just paints the tab bar (Global tab only, "+")
+// and the Global-only panel state for the very first frame.
+renderCameraTabs();
+refreshCameraPanel();
 animate();
 
 // ── Dev bridge ───────────────────────────────────────────────────────────
@@ -3779,9 +3815,10 @@ animate();
         // background doesn't yank focus away from whatever camera the user
         // is currently looking at (contrast addSimulatedCamera, where
         // becoming active IS wanted, since that's a direct user action).
-        // A missing connectionId (a stale caller, or a server predating
-        // this) falls back to whatever the active camera already is, if
-        // it's physical -- the old, pre-Stage-C behavior.
+        // A missing connectionId (a stale caller, or a dev-bridge server
+        // predating this protocol) falls back to whatever the active camera
+        // already is, if it happens to be physical -- purely defensive,
+        // shouldn't be reachable against a current server.js.
         const connectionId: string | undefined = msg.captureId;
         let cam = connectionId ? findPhysicalCameraByConnection(connectionId) : undefined;
         if (!cam && connectionId) {

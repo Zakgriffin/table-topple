@@ -505,10 +505,18 @@ function isSimulated(camera: Camera): camera is SimulatedCamera { return camera.
 function isPhysical(camera: Camera): camera is PhysicalCamera { return camera.type === 'physical'; }
 
 let nextCameraSerial = 1;
-// Fixed palette entry for Stage A's one-and-only camera -- Stage B assigns
-// these per-camera off a real palette; today there's nothing to disambiguate
-// by color yet, so this is just a placeholder matching the type shape.
-const DEFAULT_CAMERA_COLOR = 0xffcc44;
+// Assigned in creation order, keyed off nextCameraSerial (never reused, even
+// across deletions -- reusing a color the moment a camera's slot frees up
+// would risk two SIMULTANEOUSLY existing cameras sharing a color, which
+// defeats the entire point). Falls back to a random, well-saturated HSL hue
+// once the fixed palette runs out, rather than capping how many cameras can
+// exist.
+const CAMERA_COLOR_PALETTE = [0xffcc44, 0x33dd55, 0xff5588, 0x55ccff, 0xcc88ff, 0xff8833, 0x33ffcc, 0xdd4444];
+function nextCameraColor(): THREE.Color {
+  const idx = nextCameraSerial - 1;
+  if (idx < CAMERA_COLOR_PALETTE.length) return new THREE.Color(CAMERA_COLOR_PALETTE[idx]);
+  return new THREE.Color().setHSL(Math.random(), 0.65, 0.55);
+}
 
 // ── Reusable full-screen quad renderers (shared infra, NOT per-camera) ───
 //
@@ -545,16 +553,19 @@ function renderReconContamOverlay(camera: Camera, x: number, y: number, w: numbe
 //
 // Build every per-camera THREE object/buffer this file used to allocate
 // once at module scope, add them to the shared `scene`, and return a fully
-// populated Camera. Reusable now (Stage A only ever calls these once at a
-// time, via switchActiveCameraType), real allocate-N-of-them functions
-// later (Stage B's "+" button).
+// populated Camera. Real allocate-N-of-them functions -- addSimulatedCamera
+// (Stage B's "+" button) and switchActiveCameraType both call these.
 
-function makeCameraBaseParts(rtSize: { w: number; h: number }) {
+function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Color) {
   const aspect = rtSize.w / rtSize.h;
 
+  // Recovered/decoded pose gizmo: SOLID in the camera's own color -- solid
+  // consistently means "recovered" across every camera, ground-truth (only
+  // simulated cameras have one, see createSimulatedCamera) is the
+  // translucent one instead.
   const recoveredCamGizmo = new THREE.Mesh(
     new THREE.BoxGeometry(0.3, 0.25, 0.4),
-    new THREE.MeshStandardMaterial({ color: 0x33dd55 }),
+    new THREE.MeshStandardMaterial({ color }),
   );
   recoveredCamGizmo.visible = false;
   scene.add(recoveredCamGizmo);
@@ -690,18 +701,20 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }) {
   return base;
 }
 
-function createSimulatedCamera(): SimulatedCamera {
+function createSimulatedCamera(color: THREE.Color): SimulatedCamera {
   const settings = createDefaultSimulatedSettings();
   const rtSize = { w: Math.round(settings.viewportW), h: Math.round(settings.viewportH) };
-  const base = makeCameraBaseParts(rtSize);
+  const base = makeCameraBaseParts(rtSize, color);
   const aspect = rtSize.w / rtSize.h;
 
   const gizmoCam = new THREE.PerspectiveCamera(50, aspect, 0.05, 500);
   scene.add(gizmoCam);
 
+  // Ground-truth (assumed) pose gizmo: TRANSLUCENT in the same color the
+  // recovered gizmo above uses solid -- see makeCameraBaseParts' comment.
   const gizmoBody = new THREE.Mesh(
     new THREE.BoxGeometry(0.3, 0.25, 0.4),
-    new THREE.MeshStandardMaterial({ color: DEFAULT_CAMERA_COLOR }),
+    new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.4 }),
   );
   scene.add(gizmoBody);
   const gizmoAxes = new THREE.AxesHelper(0.6);
@@ -735,7 +748,7 @@ function createSimulatedCamera(): SimulatedCamera {
 
   const camera: SimulatedCamera = {
     ...base,
-    id: `sim-${nextCameraSerial}`, name: `Simulated ${nextCameraSerial}`, color: new THREE.Color(DEFAULT_CAMERA_COLOR),
+    id: `sim-${nextCameraSerial}`, name: `Simulated ${nextCameraSerial}`, color,
     type: 'simulated', settings,
     camPos: new THREE.Vector3(), camQuat: new THREE.Quaternion(),
     gizmoCam, gizmoBody, gizmoAxes, camHelper, camRT, captureRTSize,
@@ -745,13 +758,13 @@ function createSimulatedCamera(): SimulatedCamera {
   return camera;
 }
 
-function createPhysicalCamera(): PhysicalCamera {
+function createPhysicalCamera(color: THREE.Color): PhysicalCamera {
   const settings = createDefaultPhysicalSettings();
   const rtSize = { w: Math.round(settings.viewportW), h: Math.round(settings.viewportH) };
-  const base = makeCameraBaseParts(rtSize);
+  const base = makeCameraBaseParts(rtSize, color);
   const camera: PhysicalCamera = {
     ...base,
-    id: `phys-${nextCameraSerial}`, name: `Physical ${nextCameraSerial}`, color: new THREE.Color(DEFAULT_CAMERA_COLOR),
+    id: `phys-${nextCameraSerial}`, name: `Physical ${nextCameraSerial}`, color,
     type: 'physical', settings,
     lastRealCaptureGray: null, lastRealCaptureW: 0, lastRealCaptureH: 0,
   };
@@ -3085,26 +3098,201 @@ function setSectionDisabled(section: HTMLDivElement, disabled: boolean) {
   for (const el of section.querySelectorAll('input')) (el as HTMLInputElement).disabled = disabled;
 }
 
+// ── Camera lifecycle: tabs, add/remove (Stage B) ─────────────────────────
+
+const cameraTabsEl = document.getElementById('cameraTabs') as HTMLDivElement;
+
+// Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
+// called after anything that adds/removes/renames a camera or changes which
+// one is active. Cheap enough (a handful of plain DOM nodes) to just rebuild
+// wholesale rather than diff.
+function renderCameraTabs() {
+  cameraTabsEl.innerHTML = '';
+  for (const camera of cameras.values()) {
+    const tab = document.createElement('button');
+    tab.className = 'cameraTab' + (camera.id === activeCameraId ? ' active' : '');
+    tab.style.setProperty('--tab-color', `#${camera.color.getHexString()}`);
+    tab.title = camera.type === 'simulated' ? 'simulated camera' : 'physical camera';
+    const label = document.createElement('span');
+    label.textContent = camera.name;
+    tab.appendChild(label);
+    // Every camera can be removed in Stage B (a plain local teardown) --
+    // Stage C adds a distinct "kick" affordance specifically for physical
+    // cameras (closes the phone's own connection server-side); this stays
+    // the always-available "stop showing/tracking this camera" action
+    // regardless of type, so it isn't wasted work once Stage C lands.
+    if (cameras.size > 1) {
+      const close = document.createElement('span');
+      close.className = 'cameraTabClose';
+      close.textContent = '×';
+      close.title = 'remove this camera';
+      close.addEventListener('click', (e) => { e.stopPropagation(); removeCameraTab(camera.id); });
+      tab.appendChild(close);
+    }
+    tab.addEventListener('click', () => {
+      if (camera.id === activeCameraId) return;
+      activeCameraId = camera.id;
+      renderCameraTabs();
+      refreshCameraPanel();
+    });
+    cameraTabsEl.appendChild(tab);
+  }
+  const addBtn = document.createElement('button');
+  addBtn.className = 'cameraTabAdd';
+  addBtn.textContent = '+';
+  addBtn.title = 'add a simulated camera';
+  addBtn.addEventListener('click', () => addSimulatedCamera());
+  cameraTabsEl.appendChild(addBtn);
+}
+
+// Brings a freshly-created-or-reactivated camera's capture pipeline up to
+// date -- the same handful of calls every camera-creation path needs.
+function primeCameraForDisplay(camera: Camera) {
+  if (isSimulated(camera)) renderCamRT(camera); // populate camRT before reading it back below, so the preview isn't blank for the first frame or two
+  updateDistortedPreview(camera);
+  if (globalState.mode === 'projected') buildProjectedTexture(camera);
+  markCaptureDirty(camera);
+  layoutPip(camera);
+}
+
+// Adds a new simulated camera ALONGSIDE whatever already exists (unlike
+// switchActiveCameraType below, which REPLACES the active one) and makes it
+// active. Offsets its default X position a few units per already-existing
+// camera so a fresh gizmo doesn't spawn exactly on top of another one.
+function addSimulatedCamera() {
+  const camera = createSimulatedCamera(nextCameraColor());
+  camera.settings.camX += (cameras.size % 6) * 3;
+  cameras.set(camera.id, camera);
+  activeCameraId = camera.id;
+  primeCameraForDisplay(camera);
+  renderCameraTabs();
+  refreshCameraPanel();
+}
+
+// Tears down one camera. If it was the active one, falls back to whichever
+// camera is next in the map, or -- if that was the last camera left --
+// creates a fresh default simulated camera, so the app is never left with
+// zero cameras and no way to add one back.
+function removeCameraTab(id: string) {
+  const camera = cameras.get(id);
+  if (!camera) return;
+  const wasActive = id === activeCameraId;
+  destroyCamera(camera);
+  if (wasActive) {
+    const next = cameras.values().next().value;
+    const replacement = next ?? createSimulatedCamera(nextCameraColor());
+    if (!next) cameras.set(replacement.id, replacement);
+    activeCameraId = replacement.id;
+    primeCameraForDisplay(replacement);
+  }
+  renderCameraTabs();
+  refreshCameraPanel();
+}
+
+// Re-syncs every per-camera control's DISPLAYED value/state to match
+// whichever camera just became active. Writes already redirect correctly on
+// every tick regardless (bindSlider/bindCheckbox's onChange callbacks all
+// look up activeCamera() fresh each time they fire) -- this is purely the
+// other direction, camera state -> DOM. Dispatches the SAME 'input'/'change'
+// events bindSlider/bindCheckbox already listen for, reusing their existing
+// fmt/persist/onChange logic wholesale instead of duplicating it; the
+// onChange round-trip this causes (writing the same value straight back to
+// the SAME camera it was just read from) is a harmless no-op. useRealCapture
+// is the one exception -- it must NOT dispatch (that would immediately
+// destroy the camera this function is trying to display), so its checked
+// state is set directly and silently instead.
+function refreshCameraPanel() {
+  const cam = activeCamera();
+  if (!cam) return;
+
+  const useRealCaptureInput = document.getElementById('useRealCapture') as HTMLInputElement;
+  useRealCaptureInput.checked = isPhysical(cam);
+  setSectionDisabled(cameraDetailsSection, isPhysical(cam));
+  setSectionDisabled(simDistortionSection, isPhysical(cam));
+
+  const setNum = (id: string, v: number) => {
+    const el = document.getElementById(id) as HTMLInputElement | null;
+    if (!el) return;
+    el.value = String(v);
+    el.dispatchEvent(new Event('input'));
+  };
+  const setBool = (id: string, v: boolean) => {
+    const el = document.getElementById(id) as HTMLInputElement | null;
+    if (!el) return;
+    el.checked = v;
+    el.dispatchEvent(new Event('change'));
+  };
+
+  if (isSimulated(cam)) {
+    setNum('camX', cam.settings.camX); setNum('camY', cam.settings.camY); setNum('camZ', cam.settings.camZ);
+    setNum('camYaw', cam.settings.camYawDeg); setNum('camPitch', cam.settings.camPitchDeg); setNum('camFocal', cam.settings.focalMM);
+    setNum('simNoise', cam.settings.simNoise); setNum('simBlur', cam.settings.simBlur); setNum('captureSupersample', cam.settings.captureSupersample);
+  } else {
+    setNum('realCaptureFovDeg', cam.settings.realCaptureFovDeg);
+  }
+  setNum('viewportW', cam.settings.viewportW); setNum('viewportH', cam.settings.viewportH);
+  setBool('aspectLocked', cam.settings.aspectLocked);
+
+  setBool('showSphere', cam.settings.showSphere); setBool('showCircles', cam.settings.showCircles);
+  setBool('showPoles', cam.settings.showPoles); setBool('showFrustum', cam.settings.showFrustum);
+  setBool('showPatch', cam.settings.showPatch); setBool('showGizmoBody', cam.settings.showGizmoBody);
+  setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setBool('showSampleLattice', cam.settings.showSampleLattice);
+  setBool('orientationLM', cam.settings.orientationLM); setBool('positionLM', cam.settings.positionLM);
+
+  setNum('simGradRadius', cam.settings.simGradRadius); setNum('coherenceRadius', cam.settings.coherenceRadius);
+  setNum('tangentWalkMaxSteps', cam.settings.tangentWalkMaxSteps); setNum('tangentWalkDeviationDeg', cam.settings.tangentWalkDeviationDeg);
+  setNum('tangentWalkMagFraction', cam.settings.tangentWalkMagFraction); setNum('tangentWalkGraceSamples', cam.settings.tangentWalkGraceSamples);
+  setBool('tangentWalkAdaptive', cam.settings.tangentWalkAdaptive);
+
+  const fieldViewId = 'fieldView' + cam.settings.fieldView[0].toUpperCase() + cam.settings.fieldView.slice(1);
+  const fieldViewInput = document.getElementById(fieldViewId) as HTMLInputElement | null;
+  if (fieldViewInput) { fieldViewInput.checked = true; fieldViewInput.dispatchEvent(new Event('change')); }
+
+  setNum('gradientArrowScale', cam.settings.gradientArrowScale);
+  setNum('circleSamplePercentMin', cam.settings.circleSamplePercentMin); setNum('circleSamplePercentMax', cam.settings.circleSamplePercentMax);
+  setBool('showRecoveredPoles', cam.settings.showRecoveredPoles); setBool('showAxisVectors', cam.settings.showAxisVectors);
+  setBool('showTopCircles', cam.settings.showTopCircles);
+  setNum('weightSharpenPower', cam.settings.weightSharpenPower);
+  setBool('axesAutoCapture', cam.settings.axesAutoCapture);
+  setNum('axesCaptureInterval', cam.settings.axesCaptureIntervalMs);
+
+  toggleHideFieldBtn.classList.toggle('active', cam.settings.hideField);
+  toggleTrueContamBtn.classList.toggle('active', cam.settings.showTrueContamination);
+  toggleReconContamBtn.classList.toggle('active', cam.settings.showReconstructedContamination);
+  toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
+  toggleGradientArrowModeBtn.classList.toggle('active', cam.settings.showGradientArrowPerpendicular);
+  toggleTangentWalkPathBtn.classList.toggle('active', cam.settings.showTangentWalkPath);
+  updateContaminationAvailability();
+  updateGradientArrowAvailability();
+  updateTangentWalkPathAvailability();
+
+  updateDistortedPreview(cam);
+  if (globalState.mode === 'projected') buildProjectedTexture(cam);
+  markCaptureDirty(cam);
+  layoutPip(cam);
+}
+
 // Destroys the current active camera and creates a fresh one of the other
 // type -- see this file's header / Stage A plan for why: a camera's THREE
 // objects and settings shape genuinely differ by type (SimulatedCamera vs
 // PhysicalCamera don't share a settings shape), so there's no meaningful
 // way to preserve state across the switch, matching how today's toggle
-// already behaves (it swaps data source, not settings).
+// already behaves (it swaps data source, not settings). Keeps the SAME
+// color the outgoing camera had (or assigns a fresh one if there wasn't
+// one yet), rather than resetting it, so this camera's own tab/gizmo/
+// overlay color stays stable across a type flip.
 function switchActiveCameraType(kind: 'simulated' | 'physical') {
   const current = activeCamera();
   if (current && current.type === kind) return;
+  const color = current ? current.color : nextCameraColor();
   if (current) destroyCamera(current);
-  const cam = kind === 'simulated' ? createSimulatedCamera() : createPhysicalCamera();
+  const cam = kind === 'simulated' ? createSimulatedCamera(color) : createPhysicalCamera(color);
   cameras.set(cam.id, cam);
   activeCameraId = cam.id;
   setSectionDisabled(cameraDetailsSection, kind === 'physical');
   setSectionDisabled(simDistortionSection, kind === 'physical');
-  if (isSimulated(cam)) renderCamRT(cam); // populate camRT before reading it back below, so the preview isn't blank for the first frame or two
-  updateDistortedPreview(cam);
-  if (globalState.mode === 'projected') buildProjectedTexture(cam);
-  markCaptureDirty(cam);
-  layoutPip(cam);
+  primeCameraForDisplay(cam);
+  renderCameraTabs();
 }
 bindCheckbox('useRealCapture', (v) => switchActiveCameraType(v ? 'physical' : 'simulated'));
 

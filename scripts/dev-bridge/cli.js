@@ -1,10 +1,16 @@
 // Talks to server.js to either eval arbitrary JS inside the live
-// sphere-lab.html page (direct eval in its module scope — sees state,
-// scene, camPos, gizmoCam, everything declared top-level in sphereLab.ts)
-// or pull a fresh screenshot of the canvas.
+// sphere-lab.html page (direct eval in its module scope — sees cameras,
+// activeCamera(), scene, globalState, everything declared top-level in
+// sphereLab.ts) or pull a fresh screenshot of the canvas.
+//
+// Since the N-camera refactor (Stage A), most per-camera state (settings,
+// pose, capture buffers, decode results) lives on Camera objects rather
+// than flat module-level globals -- eval `activeCamera()` to get the
+// currently-selected camera, e.g. `activeCamera().settings.camYawDeg` or
+// `activeCamera().lastPositionDecode`.
 //
 // Usage:
-//   node scripts/dev-bridge/cli.js eval "state.camYawDeg"
+//   node scripts/dev-bridge/cli.js eval "activeCamera().settings.camYawDeg"
 //   node scripts/dev-bridge/cli.js screenshot
 //
 // For real-capture testing: save-capture.mjs / restore-capture.mjs let a
@@ -18,19 +24,20 @@
 // RACE CONDITION WARNING, learned the hard way: sphereLab.ts's eval handler
 // runs `eval(msg.code)` synchronously and replies immediately with whatever
 // that expression returns -- it does NOT await promises or wait for queued
-// work. runAxesReconstruction() in particular queues its real work via
-// requestAnimationFrame, then (if state.positionLM) runs a further async LM
-// refinement pass after that -- so calling it and reading results (even a
-// few hundred ms later via a fixed sleep) can silently read STALE state from
-// whatever the LAST completed run left behind, not the one you just
-// triggered. A whole investigation session was derailed by exactly this: a
-// sweep over 8 flip-toggle combinations looked byte-identical across all 8
-// (seemingly proving decode was fully invariant to axis labeling) purely
-// because none of the later triggers had actually finished recomputing
-// before their results were read back synchronously in the same script.
-// The fix is to poll `axesCapturing` (a module-level flag, true while the
-// rAF + LM pipeline is in flight, false once genuinely done) via SEPARATE
-// eval calls after triggering, and only read results once it's false again
+// work. runAxesReconstruction(camera) in particular queues its real work via
+// requestAnimationFrame, then (if camera.settings.positionLM) runs a further
+// async LM refinement pass after that -- so calling it and reading results
+// (even a few hundred ms later via a fixed sleep) can silently read STALE
+// state from whatever the LAST completed run left behind, not the one you
+// just triggered. A whole investigation session was derailed by exactly
+// this: a sweep over 8 flip-toggle combinations looked byte-identical across
+// all 8 (seemingly proving decode was fully invariant to axis labeling)
+// purely because none of the later triggers had actually finished
+// recomputing before their results were read back synchronously in the same
+// script. The fix is to poll `activeCamera().axesCapturing` (a per-camera
+// flag, true while the rAF + LM pipeline is in flight, false once genuinely
+// done) via SEPARATE eval calls after triggering, and only read results once
+// it's false again
 // -- see the sweep loops that use this pattern for a live example. A fixed
 // sleep is not reliable even for a single combo: the LM refinement stage's
 // own runtime varies, so a delay long enough for a fast fit can still catch

@@ -1,5 +1,5 @@
-// Saves the currently-loaded real capture (lastRealCaptureGray/W/H from
-// sphereLab.ts) to scripts/dev-bridge/saved-capture.json, so a page reload
+// Saves the currently-loaded real capture (activeCamera().lastRealCaptureGray/
+// W/H from sphereLab.ts) to scripts/dev-bridge/saved-capture.json, so a page reload
 // (needed to pick up hot-reload-missed changes, or just for a clean restart)
 // doesn't force re-taking a photo on the phone every time -- see
 // restore-capture.mjs for the other half. Sends the eval's code over the
@@ -16,10 +16,15 @@ import { dirname, join } from 'node:path';
 const PORT = 8787;
 const OUT_PATH = join(dirname(fileURLToPath(import.meta.url)), 'saved-capture.json');
 
+// Stage A (N-camera refactor): lastRealCaptureGray/W/H moved from
+// module-level globals onto the active camera object -- see
+// activeCamera()/PhysicalCamera in sphereLab.ts.
 const EVAL_CODE = `
 (function() {
-  if (!lastRealCaptureGray) return JSON.stringify({ error: 'no capture loaded' });
-  const arr = lastRealCaptureGray;
+  const cam = activeCamera();
+  if (!cam || cam.type !== 'physical') return JSON.stringify({ error: 'active camera is not a physical camera (toggle "use real capture" first)' });
+  if (!cam.lastRealCaptureGray) return JSON.stringify({ error: 'no capture loaded' });
+  const arr = cam.lastRealCaptureGray;
   const bytes = new Uint8Array(arr.length);
   for (let i = 0; i < arr.length; i++) bytes[i] = Math.max(0, Math.min(255, Math.round(arr[i])));
   let binary = '';
@@ -27,7 +32,7 @@ const EVAL_CODE = `
   for (let i = 0; i < bytes.length; i += chunkSize) {
     binary += String.fromCharCode.apply(null, bytes.subarray(i, i + chunkSize));
   }
-  return JSON.stringify({ w: lastRealCaptureW, h: lastRealCaptureH, b64: btoa(binary) });
+  return JSON.stringify({ w: cam.lastRealCaptureW, h: cam.lastRealCaptureH, b64: btoa(binary) });
 })()
 `;
 

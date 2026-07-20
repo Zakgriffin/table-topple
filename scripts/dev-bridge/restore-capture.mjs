@@ -19,6 +19,14 @@ const IN_PATH = join(dirname(fileURLToPath(import.meta.url)), 'saved-capture.jso
 
 const data = JSON.parse(readFileSync(IN_PATH, 'utf8'));
 
+// Stage A (N-camera refactor): rtSize/lastRealCaptureGray/W/H moved from
+// module-level globals onto the active camera object, and
+// resizeCaptureBuffers/updateDistortedPreview/buildProjectedTexture/
+// runAxesReconstruction now take that camera as an explicit parameter --
+// see activeCamera()/PhysicalCamera in sphereLab.ts. Requires the page to
+// already be toggled to "use real capture" (same precondition the old
+// `if (state.useRealCapture)` guard enforced less strictly, by silently
+// skipping the reconstruction step instead of failing outright).
 const EVAL_CODE = `
 (function() {
   const w = ${data.w}, h = ${data.h};
@@ -27,12 +35,14 @@ const EVAL_CODE = `
   for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
   const gray = new Float64Array(bytes.length);
   for (let i = 0; i < bytes.length; i++) gray[i] = bytes[i];
-  if (w !== rtSize.w || h !== rtSize.h) resizeCaptureBuffers({ w, h });
-  lastRealCaptureGray = gray;
-  lastRealCaptureW = w; lastRealCaptureH = h;
-  updateDistortedPreview();
-  if (state.mode === 'projected') buildProjectedTexture();
-  if (state.useRealCapture) runAxesReconstruction();
+  const cam = activeCamera();
+  if (!cam || cam.type !== 'physical') return JSON.stringify({ restored: false, error: 'active camera is not a physical camera -- toggle "use real capture" first' });
+  if (w !== cam.rtSize.w || h !== cam.rtSize.h) resizeCaptureBuffers(cam, { w, h });
+  cam.lastRealCaptureGray = gray;
+  cam.lastRealCaptureW = w; cam.lastRealCaptureH = h;
+  updateDistortedPreview(cam);
+  if (globalState.mode === 'projected') buildProjectedTexture(cam);
+  runAxesReconstruction(cam);
   return JSON.stringify({ restored: true, w, h });
 })()
 `;

@@ -495,6 +495,13 @@ interface PhysicalCamera extends CameraBase {
   settings: PhysicalCameraSettings;
   lastRealCaptureGray: Float64Array | null;
   lastRealCaptureW: number; lastRealCaptureH: number;
+  // The dev-bridge server's own id for the phone connection this camera was
+  // auto-created for (see initDevBridge's realCapture handler) -- null for
+  // one created manually via the useRealCapture checkbox, which has no real
+  // connection behind it. Only a non-null connectionId gets a "kick"
+  // affordance in the tab bar (see renderCameraTabs): kicking a camera with
+  // nothing real to disconnect wouldn't do anything.
+  connectionId: string | null;
 }
 type Camera = SimulatedCamera | PhysicalCamera;
 
@@ -758,7 +765,7 @@ function createSimulatedCamera(color: THREE.Color): SimulatedCamera {
   return camera;
 }
 
-function createPhysicalCamera(color: THREE.Color): PhysicalCamera {
+function createPhysicalCamera(color: THREE.Color, connectionId: string | null): PhysicalCamera {
   const settings = createDefaultPhysicalSettings();
   const rtSize = { w: Math.round(settings.viewportW), h: Math.round(settings.viewportH) };
   const base = makeCameraBaseParts(rtSize, color);
@@ -767,6 +774,7 @@ function createPhysicalCamera(color: THREE.Color): PhysicalCamera {
     id: `phys-${nextCameraSerial}`, name: `Physical ${nextCameraSerial}`, color,
     type: 'physical', settings,
     lastRealCaptureGray: null, lastRealCaptureW: 0, lastRealCaptureH: 0,
+    connectionId,
   };
   nextCameraSerial++;
   return camera;
@@ -3098,7 +3106,23 @@ function setSectionDisabled(section: HTMLDivElement, disabled: boolean) {
   for (const el of section.querySelectorAll('input')) (el as HTMLInputElement).disabled = disabled;
 }
 
-// ── Camera lifecycle: tabs, add/remove (Stage B) ─────────────────────────
+// ── Camera lifecycle: tabs, add/remove (Stage B), physical/kick (Stage C) ──
+
+// Set by initDevBridge once it has a live socket; module-level (rather than
+// staying a local var inside that IIFE, like before Stage C) specifically so
+// renderCameraTabs' kick button can reach it without threading the socket
+// through as a parameter everywhere.
+let devBridgeSocket: WebSocket | null = null;
+function sendToDevBridge(obj: unknown) {
+  if (devBridgeSocket && devBridgeSocket.readyState === WebSocket.OPEN) devBridgeSocket.send(JSON.stringify(obj));
+}
+
+function findPhysicalCameraByConnection(connectionId: string): PhysicalCamera | undefined {
+  for (const camera of cameras.values()) {
+    if (camera.type === 'physical' && camera.connectionId === connectionId) return camera;
+  }
+  return undefined;
+}
 
 const cameraTabsEl = document.getElementById('cameraTabs') as HTMLDivElement;
 
@@ -3116,17 +3140,25 @@ function renderCameraTabs() {
     const label = document.createElement('span');
     label.textContent = camera.name;
     tab.appendChild(label);
-    // Every camera can be removed in Stage B (a plain local teardown) --
-    // Stage C adds a distinct "kick" affordance specifically for physical
-    // cameras (closes the phone's own connection server-side); this stays
-    // the always-available "stop showing/tracking this camera" action
-    // regardless of type, so it isn't wasted work once Stage C lands.
+    // A camera with a real phone connection behind it (auto-created, see
+    // initDevBridge's realCapture handler) gets KICKED -- closes that
+    // connection server-side, tab removal itself waits for the resulting
+    // captureDisconnected broadcast rather than removing optimistically, so
+    // it stays correct if the kick races with some other disconnect reason.
+    // Every other camera (simulated, or a manually-toggled physical one
+    // with no real connection to kick) just gets removed locally and
+    // immediately, same as Stage B.
     if (cameras.size > 1) {
+      const isLiveConnection = camera.type === 'physical' && camera.connectionId !== null;
       const close = document.createElement('span');
       close.className = 'cameraTabClose';
-      close.textContent = '×';
-      close.title = 'remove this camera';
-      close.addEventListener('click', (e) => { e.stopPropagation(); removeCameraTab(camera.id); });
+      close.textContent = isLiveConnection ? '⏻' : '×';
+      close.title = isLiveConnection ? 'kick (disconnect the phone)' : 'remove this camera';
+      close.addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (isLiveConnection) sendToDevBridge({ type: 'kickCapture', captureId: (camera as PhysicalCamera).connectionId });
+        else removeCameraTab(camera.id);
+      });
       tab.appendChild(close);
     }
     tab.addEventListener('click', () => {
@@ -3286,7 +3318,10 @@ function switchActiveCameraType(kind: 'simulated' | 'physical') {
   if (current && current.type === kind) return;
   const color = current ? current.color : nextCameraColor();
   if (current) destroyCamera(current);
-  const cam = kind === 'simulated' ? createSimulatedCamera(color) : createPhysicalCamera(color);
+  // connectionId null: this is the manual/checkbox path, not a real phone
+  // connection auto-creating its own camera (see initDevBridge's realCapture
+  // handler for that path) -- nothing for a "kick" to disconnect here.
+  const cam = kind === 'simulated' ? createSimulatedCamera(color) : createPhysicalCamera(color, null);
   cameras.set(cam.id, cam);
   activeCameraId = cam.id;
   setSectionDisabled(cameraDetailsSection, kind === 'physical');
@@ -3704,20 +3739,21 @@ animate();
 // no-ops silently if scripts/dev-bridge/server.js isn't running.
 (function initDevBridge() {
   const BRIDGE_PORT = 8787;
-  let ws: WebSocket | null = null;
   let reconnectTimer: number | undefined;
 
   function scheduleReconnect() {
-    ws = null;
+    devBridgeSocket = null;
     clearTimeout(reconnectTimer);
     reconnectTimer = window.setTimeout(connect, 2000);
   }
 
   function connect() {
+    let ws: WebSocket;
     try { ws = new WebSocket(`ws://localhost:${BRIDGE_PORT}`); }
     catch { scheduleReconnect(); return; }
+    devBridgeSocket = ws;
 
-    ws.addEventListener('open', () => ws!.send(JSON.stringify({ role: 'browser' })));
+    ws.addEventListener('open', () => ws.send(JSON.stringify({ role: 'browser' })));
     ws.addEventListener('close', scheduleReconnect);
     ws.addEventListener('error', () => {});
     ws.addEventListener('message', (ev) => {
@@ -3730,21 +3766,43 @@ animate();
         catch (e: any) { ok = false; error = String(e?.stack ?? e); }
         try { value = value === undefined ? undefined : JSON.parse(JSON.stringify(value)); }
         catch { value = String(value); }
-        ws!.send(JSON.stringify({ type: 'evalResult', id: msg.id, ok, value, error }));
+        ws.send(JSON.stringify({ type: 'evalResult', id: msg.id, ok, value, error }));
       } else if (msg.type === 'screenshot') {
         const dataUrl = renderer.domElement.toDataURL('image/png');
-        ws!.send(JSON.stringify({ type: 'screenshotResult', id: msg.id, ok: true, dataUrl }));
+        ws.send(JSON.stringify({ type: 'screenshotResult', id: msg.id, ok: true, dataUrl }));
       } else if (msg.type === 'realCapture' && msg.dataUrl) {
-        // Broadcast from mobile-capture.html via the dev-bridge relay. Stage
-        // A: routed to the active camera if it's already a PhysicalCamera;
-        // otherwise there's nothing to ingest into (Stage C adds real
-        // per-connection camera auto-creation) -- silently dropped, same as
-        // today's app silently ignoring a realCapture message while
-        // useRealCapture is off (ingestRealCapture was never called for it
-        // either).
-        const cam = activeCamera();
-        if (cam && isPhysical(cam)) {
-          ingestRealCapture(cam, msg.dataUrl).catch((e) => console.error('[realCapture] ingest failed:', e));
+        // Broadcast from mobile-capture.html via the dev-bridge relay,
+        // tagged with the sending phone's own connectionId (server.js
+        // assigns one per 'capture' connection). An unrecognized
+        // connectionId auto-creates its own new physical camera/tab --
+        // deliberately NOT made active, so a phone connecting in the
+        // background doesn't yank focus away from whatever camera the user
+        // is currently looking at (contrast addSimulatedCamera, where
+        // becoming active IS wanted, since that's a direct user action).
+        // A missing connectionId (a stale caller, or a server predating
+        // this) falls back to whatever the active camera already is, if
+        // it's physical -- the old, pre-Stage-C behavior.
+        const connectionId: string | undefined = msg.captureId;
+        let cam = connectionId ? findPhysicalCameraByConnection(connectionId) : undefined;
+        if (!cam && connectionId) {
+          cam = createPhysicalCamera(nextCameraColor(), connectionId);
+          cameras.set(cam.id, cam);
+          renderCameraTabs();
+        }
+        if (!cam) {
+          const active = activeCamera();
+          if (active && isPhysical(active)) cam = active;
+        }
+        if (cam) ingestRealCapture(cam, msg.dataUrl).catch((e) => console.error('[realCapture] ingest failed:', e));
+      } else if (msg.type === 'captureDisconnected' && msg.captureId) {
+        // The phone behind some physical camera(s) disconnected -- naturally
+        // or via this tab's own kick button (see renderCameraTabs). Removes
+        // the tab itself here, not optimistically when the kick was sent,
+        // so it stays correct if the kick races with an unrelated
+        // disconnect. Snapshotted to an array first since removeCameraTab
+        // mutates the very `cameras` map being iterated.
+        for (const cam of Array.from(cameras.values())) {
+          if (cam.type === 'physical' && cam.connectionId === msg.captureId) removeCameraTab(cam.id);
         }
       }
     });
@@ -3754,8 +3812,8 @@ animate();
   // Low-rate unsolicited frame push so a reasonably fresh screenshot is
   // always on disk without an explicit request.
   setInterval(() => {
-    if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({ type: 'frame', dataUrl: renderer.domElement.toDataURL('image/jpeg', 0.7) }));
+    if (devBridgeSocket && devBridgeSocket.readyState === WebSocket.OPEN) {
+      devBridgeSocket.send(JSON.stringify({ type: 'frame', dataUrl: renderer.domElement.toDataURL('image/jpeg', 0.7) }));
     }
   }, 1000);
 })();

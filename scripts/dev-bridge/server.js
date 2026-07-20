@@ -10,11 +10,23 @@
 // more than one open Sphere Lab tab at once, per an explicit ask -- eval/
 // screenshot requests still only ever go to whichever browser last
 // connected, unchanged, since those were never meant to fan out.
+//
+// N-camera Stage C: each 'capture' connection (a phone) gets a stable
+// randomUUID the moment it connects, included as captureId on every
+// realCapture message forwarded to browser tabs -- that's what lets Sphere
+// Lab tell two simultaneously-connected phones apart and auto-create a tab
+// per phone rather than one shared "the real capture". A captureDisconnected
+// broadcast fires whenever that connection closes (network drop, tab
+// closed, or an explicit kick below), and kickCapture (sent BY a browser
+// tab) closes the matching phone connection outright -- its own 'close'
+// handler is what actually fires captureDisconnected, so kicking doesn't
+// need its own separate broadcast path.
 
 import { WebSocketServer } from 'ws';
 import { writeFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { randomUUID } from 'crypto';
 
 const PORT = 8787;
 const FRAME_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'latest-frame.png');
@@ -23,6 +35,7 @@ const wss = new WebSocketServer({ port: PORT });
 const browserSockets = new Set();
 let latestBrowserSocket = null; // eval/screenshot still target just the most-recently-connected tab
 const pending = new Map(); // request id -> controller ws
+const captureSockets = new Map(); // capture ws -> its assigned captureId
 
 function send(ws, obj) {
   try { ws.send(JSON.stringify(obj)); } catch { /* socket already closed */ }
@@ -45,8 +58,11 @@ wss.on('connection', (ws) => {
       console.log(`[bridge] browser connected (${browserSockets.size} total)`);
       return;
     }
-    if (msg.role === 'controller' || msg.role === 'capture') {
-      if (msg.role === 'capture') console.log('[bridge] capture source connected');
+    if (msg.role === 'controller') return;
+    if (msg.role === 'capture') {
+      const captureId = randomUUID();
+      captureSockets.set(ws, captureId);
+      console.log(`[bridge] capture source connected (id ${captureId})`);
       return;
     }
 
@@ -83,11 +99,25 @@ wss.on('connection', (ws) => {
 
     // Capture source (mobile-capture.html) -> broadcast to EVERY connected
     // Sphere Lab tab, not just the latest one -- this is the one message
-    // type meant to fan out.
+    // type meant to fan out. captureId (this connection's own assigned id)
+    // rides along so Sphere Lab can tell which phone a photo came from.
     if (msg.type === 'realCapture' && msg.dataUrl) {
-      console.log(`[bridge] real capture received, broadcasting to ${browserSockets.size} browser tab(s)`);
+      const captureId = captureSockets.get(ws);
+      console.log(`[bridge] real capture received from ${captureId}, broadcasting to ${browserSockets.size} browser tab(s)`);
       for (const bs of browserSockets) {
-        if (bs.readyState === bs.OPEN) send(bs, msg);
+        if (bs.readyState === bs.OPEN) send(bs, { ...msg, captureId });
+      }
+      return;
+    }
+
+    // Browser -> kick a specific phone connection outright (not just "stop
+    // showing its tab locally", see this file's header comment). Closing it
+    // here is the only work needed -- the 'close' handler below fires the
+    // captureDisconnected broadcast every capture-socket close already goes
+    // through, kick or not.
+    if (msg.type === 'kickCapture' && msg.captureId) {
+      for (const [capWs, id] of captureSockets) {
+        if (id === msg.captureId) { capWs.close(); break; }
       }
       return;
     }
@@ -97,6 +127,15 @@ wss.on('connection', (ws) => {
     if (browserSockets.delete(ws)) {
       if (latestBrowserSocket === ws) latestBrowserSocket = null;
       console.log(`[bridge] browser disconnected (${browserSockets.size} remaining)`);
+      return;
+    }
+    const captureId = captureSockets.get(ws);
+    if (captureId !== undefined) {
+      captureSockets.delete(ws);
+      console.log(`[bridge] capture source disconnected (id ${captureId})`);
+      for (const bs of browserSockets) {
+        if (bs.readyState === bs.OPEN) send(bs, { type: 'captureDisconnected', captureId });
+      }
     }
   });
 });

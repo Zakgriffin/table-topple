@@ -80,6 +80,22 @@ function buildUniforms(gr: number, gc: number, orient: number, tableSize: number
 // no float-atomics workaround needed since this is pure counting). Returns
 // null if WebGPU isn't available; caller falls back to the CPU version,
 // which stays the source of truth.
+//
+// KNOWN TRADEOFF, measured via scripts/dev-bridge/profile-comparison.mjs on
+// saved-capture.json (a decode grid of ~22x29 cells, i.e. a camera not
+// especially close to the floor): this path is currently SLOWER than the
+// CPU version -- ~40-70ms here vs ~0.4-1ms on CPU. The 4 kernel dispatches
+// themselves cost near-nothing (each ~0-0.1ms), but 4x
+// encoder/bindGroup/pass/submit plus the tally-buffer readback (fixed
+// mapAsync latency, not size-proportional -- the 4-byte totalWindows
+// readback alone has been observed anywhere from ~5ms to ~55ms run-to-run)
+// dwarfs a workload this small. This should flip in the GPU's favor once
+// the decode grid is large -- a camera close to the floor (or otherwise
+// covering more torus periods) produces a much bigger grid and
+// proportionally many more candidate windows across the 4 orientations,
+// while the per-dispatch fixed overhead stays constant. Left as a manual
+// toggle rather than an automatic grid-size fallback for now -- untested at
+// what grid size the crossover actually happens.
 export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<VoteResult | null> {
   const device = await getGPUDevice();
   if (!device) return null;

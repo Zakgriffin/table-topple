@@ -20,8 +20,15 @@
 // capture-buffer fields on that camera, which only exist on the physical
 // camera type.
 //
+// Phase 1 (orientationLM) and Phase 3 (positionLM) are both OFF by default --
+// pass --with-phase1/--with-phase3 to opt into either. Default-off isolates
+// the "simplest" pipeline (votes -> plane fit -> orientation) from the two
+// iterative LM refinement passes, which dominate total time (Phase 3 alone
+// was ~30-35% of the full run) and would otherwise swamp everything else in
+// the comparison.
+//
 // Usage:
-//   node scripts/dev-bridge/profile-comparison.mjs [--repeat N]
+//   node scripts/dev-bridge/profile-comparison.mjs [--repeat N] [--with-phase1] [--with-phase3]
 
 import { WebSocket } from 'ws';
 import { readFileSync } from 'node:fs';
@@ -35,10 +42,13 @@ const START_DELAY_MS = 2000;
 const args = process.argv.slice(2);
 const repeatIdx = args.indexOf('--repeat');
 const REPEAT = repeatIdx >= 0 ? parseInt(args[repeatIdx + 1], 10) : 1;
+const WITH_PHASE1 = args.includes('--with-phase1');
+const WITH_PHASE3 = args.includes('--with-phase3');
 
+const gpuLabel = 'GPU (votes+fit+decode' + (WITH_PHASE3 ? '+Phase3' : '') + ')';
 const CONFIGS = [
-  { name: 'CPU only', useGPUVotes: false, useGPUPositionLM: false },
-  { name: 'GPU (votes + Phase 3)', useGPUVotes: true, useGPUPositionLM: true },
+  { name: 'CPU only', useGPUVotes: false, useGPUFit: false, useGPUDecode: false, useGPUPositionLM: false },
+  { name: gpuLabel, useGPUVotes: true, useGPUFit: true, useGPUDecode: true, useGPUPositionLM: WITH_PHASE3 },
 ];
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -100,11 +110,11 @@ function restoreCaptureCode() {
     }
     setActiveCameraId(cam.id);
     // Both LM refinement toggles default to off on a freshly-created camera
-    // (see camera/settings.ts) -- without this, Phase 1 (orientationLM) and
-    // Phase 3 (positionLM, the one with a GPU port) never run at all, and
-    // this comparison would silently miss the two most expensive LM stages.
-    cam.settings.orientationLM = true;
-    cam.settings.positionLM = true;
+    // (see camera/settings.ts) already -- these two lines just make this
+    // script's own --with-phase1/--with-phase3 opt-ins explicit rather than
+    // relying on that default staying off.
+    cam.settings.orientationLM = ${WITH_PHASE1};
+    cam.settings.positionLM = ${WITH_PHASE3};
     refreshCameraPanel();
     const w = ${data.w}, h = ${data.h};
     const binary = atob(${JSON.stringify(data.b64)});
@@ -120,11 +130,13 @@ function restoreCaptureCode() {
   })()`;
 }
 
-function triggerCode(useGPUVotes, useGPUPositionLM) {
+function triggerCode(config) {
   return `(function() {
     const cam = activeCamera();
-    globalState.useGPUVotes = ${useGPUVotes};
-    globalState.useGPUPositionLM = ${useGPUPositionLM};
+    globalState.useGPUVotes = ${config.useGPUVotes};
+    globalState.useGPUFit = ${config.useGPUFit};
+    globalState.useGPUDecode = ${config.useGPUDecode};
+    globalState.useGPUPositionLM = ${config.useGPUPositionLM};
     profilerReset();
     profilerSetEnabled(true);
     runAxesReconstruction(cam);
@@ -168,6 +180,7 @@ function pct(part, whole) { return whole > 0 ? `${((100 * part) / whole).toFixed
 
 async function main() {
   await connect();
+  console.log(`[profile-comparison] Phase 1 (orientationLM): ${WITH_PHASE1 ? 'ON' : 'off'}   Phase 3 (positionLM): ${WITH_PHASE3 ? 'ON' : 'off'}`);
   console.log('[profile-comparison] restoring saved-capture.json...');
   const restore = await evalCode(restoreCaptureCode());
   if (!restore.ok) { console.error(`restore failed: ${restore.error}`); process.exit(1); }
@@ -179,7 +192,7 @@ async function main() {
       const label = REPEAT > 1 ? `${config.name} (run ${rep}/${REPEAT})` : config.name;
       console.log(`\n=== ${label} -- make sure the sphere-lab.html tab is focused, starting in ${START_DELAY_MS / 1000}s ===`);
       await sleep(START_DELAY_MS);
-      await evalCode(triggerCode(config.useGPUVotes, config.useGPUPositionLM));
+      await evalCode(triggerCode(config));
       await waitUntilIdle();
       const result = await evalCode(RESULTS_CODE);
       console.log(`--- ${label}: flamechart ---`);

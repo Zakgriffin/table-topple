@@ -19,6 +19,7 @@ import { computePhotometricSamples, refineOrientationAndPositionLM } from './pos
 import { computeWorldVotes, fitPairOfPlanes, votesInMagnitudeBand } from './votes.ts';
 import { computeWorldVotesGPU } from '../pipelineGPU/voteGeneration.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
+import { votesInMagnitudeBandGPU } from '../pipelineGPU/voteBandSelect.ts';
 import { refineOrientationAndPositionLMGPU } from '../pipelineGPU/positionLM.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
@@ -80,13 +81,22 @@ export function runAxesReconstruction(camera: Camera) {
       const t1 = performance.now();
 
       const fitSpan = spanStart('fit (band-select + fitPairOfPlanes)');
-      const fitVotes = votesInMagnitudeBand(votes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax);
+      const bandSpan = spanStart(globalState.useGPUFit ? 'votesInMagnitudeBand (GPU)' : 'votesInMagnitudeBand (CPU sort)');
+      // Same fallback pattern as the other GPU sub-pipelines: votesInMagnitudeBand
+      // stays the source of truth, the GPU version is verified against it.
+      const fitVotes = globalState.useGPUFit
+        ? (await votesInMagnitudeBandGPU(votes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax))
+          ?? votesInMagnitudeBand(votes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax)
+        : votesInMagnitudeBand(votes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax);
+      spanEnd(bandSpan);
       // Same fallback pattern as the other GPU sub-pipelines: fitPairOfPlanes
       // stays the source of truth, the GPU version is verified against it.
+      const fitOnlySpan = spanStart(globalState.useGPUFit ? 'fitPairOfPlanes (GPU)' : 'fitPairOfPlanes (CPU)');
       const quadricPair = globalState.useGPUFit
         ? (await fitPairOfPlanesGPU(fitVotes, camera.settings.weightSharpenPower))
           ?? fitPairOfPlanes(fitVotes, camera.settings.weightSharpenPower)
         : fitPairOfPlanes(fitVotes, camera.settings.weightSharpenPower);
+      spanEnd(fitOnlySpan);
       spanEnd(fitSpan);
       const t2 = performance.now();
 

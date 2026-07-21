@@ -2,6 +2,7 @@ import * as THREE from 'three';
 import { CameraSettingsCommon } from '../camera/settings.ts';
 import { jacobiEigenSymmetric, smallestEigenvector } from '../../linalg.ts';
 import { cornerDir } from '../math/geometry.ts';
+import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { Vote } from '../types.ts';
 import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from './gradientField.ts';
 import { guidedTangentDirectionForWalk } from './tangentWalk.ts';
@@ -15,10 +16,17 @@ export function computeWorldVotes(
 ): Vote[] {
   const votes: Vote[] = [];
   const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, 1 - (py / h) * 2];
+  const gradSpan = spanStart('gradientField');
   const field = computeGradientField(gray, w, h, gradientRadius);
+  spanEnd(gradSpan);
+  const agreeSpan = spanStart('agreementField');
   const agreement = computeGradientAgreementField(field, agreementRadius);
+  spanEnd(agreeSpan);
+  const effSpan = spanStart('effectiveField');
   const effective = computeEffectiveGradientField(field, agreement);
+  spanEnd(effSpan);
   const { fx, fy, r } = effective;
+  const walkSpan = spanStart('walk+vote loop');
   for (let y = r; y < h - r; y++) {
     for (let x = r; x < w - r; x++) {
       const i = y * w + x;
@@ -38,6 +46,7 @@ export function computeWorldVotes(
       votes.push({ n, weight: Math.hypot(walked.fx, walked.fy) });
     }
   }
+  spanEnd(walkSpan);
   return votes;
 }
 

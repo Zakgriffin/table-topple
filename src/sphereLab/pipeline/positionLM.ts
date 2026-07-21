@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { cornerDir } from '../math/geometry.ts';
+import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 import { C, R, torus } from '../scene/floor.ts';
 import { Marginals, OrientationFit, PhotometricSample, PositionFit } from '../types.ts';
 import { hsvToRgb } from './distortion.ts';
@@ -76,60 +77,71 @@ export function refineOrientationAndPositionLM(
 
   let iterations = 0;
   for (; iterations < maxIterations; iterations++) {
-    const r0 = residualsFor(q, worldX0, worldZ0);
-    const n = r0.length;
-    if (n === 0) break;
+    const iterSpan: ProfileSpan | null = spanStart(`LM iter ${iterations}`);
+    try {
+      const residSpan = spanStart('residuals+jacobian (6x residualsFor)');
+      const r0 = residualsFor(q, worldX0, worldZ0);
+      const n = r0.length;
+      if (n === 0) break;
 
-    const J: Float64Array[] = [];
-    for (let k = 0; k < 3; k++) {
-      const qPlus = new THREE.Quaternion().setFromAxisAngle(axes[k], EPS_ROT).multiply(q);
-      const rP = residualsFor(qPlus, worldX0, worldZ0);
-      const len = Math.min(n, rP.length);
-      const col = new Float64Array(n);
-      for (let i = 0; i < len; i++) col[i] = (rP[i] - r0[i]) / EPS_ROT;
-      J.push(col);
-    }
-    for (const [dx, dz] of [[EPS_POS, 0], [0, EPS_POS]]) {
-      const rP = residualsFor(q, worldX0 + dx, worldZ0 + dz);
-      const len = Math.min(n, rP.length);
-      const col = new Float64Array(n);
-      const eps = dx || dz;
-      for (let i = 0; i < len; i++) col[i] = (rP[i] - r0[i]) / eps;
-      J.push(col);
-    }
-
-    const JtJ: number[][] = Array.from({ length: P }, () => new Array(P).fill(0));
-    const Jtr: number[] = new Array(P).fill(0);
-    for (let a = 0; a < P; a++) {
-      for (let b = 0; b < P; b++) {
-        let s = 0; for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
-        JtJ[a][b] = s;
+      const J: Float64Array[] = [];
+      for (let k = 0; k < 3; k++) {
+        const qPlus = new THREE.Quaternion().setFromAxisAngle(axes[k], EPS_ROT).multiply(q);
+        const rP = residualsFor(qPlus, worldX0, worldZ0);
+        const len = Math.min(n, rP.length);
+        const col = new Float64Array(n);
+        for (let i = 0; i < len; i++) col[i] = (rP[i] - r0[i]) / EPS_ROT;
+        J.push(col);
       }
-      let s = 0; for (let i = 0; i < n; i++) s += J[a][i] * r0[i];
-      Jtr[a] = s;
-    }
-    const A = JtJ.map((row, a) => row.map((v, b) => v + (a === b ? lambda * (JtJ[a][a] || 1) : 0)));
-    const rhs = Jtr.map((v) => -v);
-    const delta = solveLinearSystem(A, rhs);
-    if (!delta) break;
+      for (const [dx, dz] of [[EPS_POS, 0], [0, EPS_POS]]) {
+        const rP = residualsFor(q, worldX0 + dx, worldZ0 + dz);
+        const len = Math.min(n, rP.length);
+        const col = new Float64Array(n);
+        const eps = dx || dz;
+        for (let i = 0; i < len; i++) col[i] = (rP[i] - r0[i]) / eps;
+        J.push(col);
+      }
+      spanEnd(residSpan);
 
-    const deltaRotVec = new THREE.Vector3(delta[0], delta[1], delta[2]);
-    const deltaRotAngle = deltaRotVec.length();
-    const deltaWX = delta[3], deltaWZ = delta[4];
-    if (deltaRotAngle < 1e-10 && Math.abs(deltaWX) < 1e-10 && Math.abs(deltaWZ) < 1e-10) break;
+      const solveSpan = spanStart('JtJ/solve');
+      const JtJ: number[][] = Array.from({ length: P }, () => new Array(P).fill(0));
+      const Jtr: number[] = new Array(P).fill(0);
+      for (let a = 0; a < P; a++) {
+        for (let b = 0; b < P; b++) {
+          let s = 0; for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
+          JtJ[a][b] = s;
+        }
+        let s = 0; for (let i = 0; i < n; i++) s += J[a][i] * r0[i];
+        Jtr[a] = s;
+      }
+      const A = JtJ.map((row, a) => row.map((v, b) => v + (a === b ? lambda * (JtJ[a][a] || 1) : 0)));
+      const rhs = Jtr.map((v) => -v);
+      const delta = solveLinearSystem(A, rhs);
+      spanEnd(solveSpan);
+      if (!delta) break;
 
-    const qTry = deltaRotAngle > 1e-12
-      ? new THREE.Quaternion().setFromAxisAngle(deltaRotVec.normalize(), deltaRotAngle).multiply(q).normalize()
-      : q.clone();
-    const wx0Try = worldX0 + deltaWX, wz0Try = worldZ0 + deltaWZ;
+      const deltaRotVec = new THREE.Vector3(delta[0], delta[1], delta[2]);
+      const deltaRotAngle = deltaRotVec.length();
+      const deltaWX = delta[3], deltaWZ = delta[4];
+      if (deltaRotAngle < 1e-10 && Math.abs(deltaWX) < 1e-10 && Math.abs(deltaWZ) < 1e-10) break;
 
-    const tryCost = cost(residualsFor(qTry, wx0Try, wz0Try));
-    if (tryCost < curCost) {
-      q.copy(qTry); worldX0 = wx0Try; worldZ0 = wz0Try;
-      curCost = tryCost;
-      lambda = Math.max(lambda * 0.5, 1e-8);
-    } else {
-      lambda = Math.min(lambda * 3, 1e8);
+      const qTry = deltaRotAngle > 1e-12
+        ? new THREE.Quaternion().setFromAxisAngle(deltaRotVec.normalize(), deltaRotAngle).multiply(q).normalize()
+        : q.clone();
+      const wx0Try = worldX0 + deltaWX, wz0Try = worldZ0 + deltaWZ;
+
+      const tryPointSpan = spanStart('tryPoint residualsFor');
+      const tryCost = cost(residualsFor(qTry, wx0Try, wz0Try));
+      spanEnd(tryPointSpan);
+      if (tryCost < curCost) {
+        q.copy(qTry); worldX0 = wx0Try; worldZ0 = wz0Try;
+        curCost = tryCost;
+        lambda = Math.max(lambda * 0.5, 1e-8);
+      } else {
+        lambda = Math.min(lambda * 3, 1e8);
+      }
+    } finally {
+      spanEnd(iterSpan);
     }
   }
 

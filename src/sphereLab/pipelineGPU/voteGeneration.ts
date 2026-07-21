@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { CameraSettingsCommon } from '../camera/settings.ts';
+import { attachGPUKernelBreakdown, profilerEnabled, spanEnd, spanStart } from '../profiling/profiler.ts';
 import { Vote } from '../types.ts';
-import { createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, uploadFloat32, uploadUniform, WORKGROUP_SIZE } from './device.ts';
+import { createStorageBuffer, createTimestampQuerySet, dispatchCount, getGPUDevice, readFloat32, resolveTimestamps, supportsTimestampQuery, uploadFloat32, uploadUniform, WORKGROUP_SIZE } from './device.ts';
 import { BOX_BLUR_H_WGSL, BOX_BLUR_V_WGSL, DOUBLE_ANGLE_WGSL, EFFECTIVE_WGSL, GRADIENT_WGSL, WALK_AND_VOTE_WGSL } from './voteGeneration.wgsl.ts';
 
 interface Pipelines {
@@ -42,12 +43,13 @@ function getPipelines(device: GPUDevice): Pipelines {
 function dispatch(
   encoder: GPUCommandEncoder, device: GPUDevice, pipeline: GPUComputePipeline,
   buffers: GPUBuffer[], w: number, h: number,
+  timestampWrites?: GPUComputePassTimestampWrites,
 ) {
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
     entries: buffers.map((buffer, i) => ({ binding: i, resource: { buffer } })),
   });
-  const pass = encoder.beginComputePass();
+  const pass = encoder.beginComputePass(timestampWrites ? { timestampWrites } : undefined);
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(dispatchCount(w), dispatchCount(h));
@@ -85,6 +87,7 @@ export async function computeWorldVotesGPU(
   const pipelines = getPipelines(device);
   const n = w * h;
 
+  const uploadSpan = spanStart('CPU→GPU upload phase (gray + uniforms)');
   const grayBuf = uploadFloat32(device, new Float32Array(gray));
   const fxBuf = createStorageBuffer(device, n * 4);
   const fyBuf = createStorageBuffer(device, n * 4);
@@ -108,17 +111,32 @@ export async function computeWorldVotesGPU(
     devCos, settings.tangentWalkMagFraction, Math.round(settings.tangentWalkGraceSamples),
     aspect, vFovRad, quat,
   ));
+  spanEnd(uploadSpan);
 
+  const STAGE_NAMES = ['gradient', 'doubleAngle', 'blurH', 'blurV', 'effective', 'walkAndVote'];
+  const wantTimestamps = profilerEnabled() && supportsTimestampQuery(device);
+  const querySet = wantTimestamps ? createTimestampQuerySet(device, STAGE_NAMES.length) : null;
+  const tw = (i: number): GPUComputePassTimestampWrites | undefined =>
+    querySet ? { querySet, beginningOfPassWriteIndex: i * 2, endOfPassWriteIndex: i * 2 + 1 } : undefined;
+
+  const dispatchSpan = spanStart('GPU dispatch (6 kernels)');
   const encoder = device.createCommandEncoder();
-  dispatch(encoder, device, pipelines.gradient, [dimsBuf, grayBuf, fxBuf, fyBuf], w, h);
-  dispatch(encoder, device, pipelines.doubleAngle, [dimsBuf, fxBuf, fyBuf, cxBuf, cyBuf], w, h);
-  dispatch(encoder, device, pipelines.blurH, [blurDimsBuf, cxBuf, cyBuf, tmpXBuf, tmpYBuf], w, h);
-  dispatch(encoder, device, pipelines.blurV, [blurDimsBuf, tmpXBuf, tmpYBuf, sxBuf, syBuf], w, h);
-  dispatch(encoder, device, pipelines.effective, [dimsBuf, fxBuf, fyBuf, sxBuf, syBuf, effFxBuf, effFyBuf], w, h);
-  dispatch(encoder, device, pipelines.walkAndVote, [walkUniformsBuf, effFxBuf, effFyBuf, voteBuf], w, h);
+  dispatch(encoder, device, pipelines.gradient, [dimsBuf, grayBuf, fxBuf, fyBuf], w, h, tw(0));
+  dispatch(encoder, device, pipelines.doubleAngle, [dimsBuf, fxBuf, fyBuf, cxBuf, cyBuf], w, h, tw(1));
+  dispatch(encoder, device, pipelines.blurH, [blurDimsBuf, cxBuf, cyBuf, tmpXBuf, tmpYBuf], w, h, tw(2));
+  dispatch(encoder, device, pipelines.blurV, [blurDimsBuf, tmpXBuf, tmpYBuf, sxBuf, syBuf], w, h, tw(3));
+  dispatch(encoder, device, pipelines.effective, [dimsBuf, fxBuf, fyBuf, sxBuf, syBuf, effFxBuf, effFyBuf], w, h, tw(4));
+  dispatch(encoder, device, pipelines.walkAndVote, [walkUniformsBuf, effFxBuf, effFyBuf, voteBuf], w, h, tw(5));
   device.queue.submit([encoder.finish()]);
 
-  const raw = await readFloat32(device, voteBuf, n * 16);
+  if (querySet) {
+    const durations = await resolveTimestamps(device, querySet, STAGE_NAMES.length);
+    attachGPUKernelBreakdown(STAGE_NAMES.map((name, i) => ({ name, durationMs: durations[i] })));
+    querySet.destroy();
+  }
+  spanEnd(dispatchSpan);
+
+  const raw = await readFloat32(device, voteBuf, n * 16); // readFloat32 self-spans (device.ts) -- see attachGPUKernelBreakdown's comment for why this is split from kernel time
   const votes: Vote[] = [];
   for (let i = 0; i < n; i++) {
     const o = i * 4;

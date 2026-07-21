@@ -19,6 +19,7 @@ import { computePhotometricSamples, refineOrientationAndPositionLM } from './pos
 import { computeWorldVotes, fitPairOfPlanes, votesInMagnitudeBand } from './votes.ts';
 import { computeWorldVotesGPU } from '../pipelineGPU/voteGeneration.ts';
 import { refineOrientationAndPositionLMGPU } from '../pipelineGPU/positionLM.ts';
+import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
 // ── Axes/position reconstruction (the big orchestrator) ──────────────────
 
@@ -33,48 +34,65 @@ export function runAxesReconstruction(camera: Camera) {
     axesReadout.textContent = 'computing...';
   }
   requestAnimationFrame(async () => {
+    let rootSpan: ProfileSpan | null = null;
     try {
       const t0 = performance.now();
+      rootSpan = spanStart('axesReconstruction');
       // Painting projectedPreviewTex is a real GPU texture upload -- worth
       // skipping at every one of the intermediate buildProjectedTexture
       // call sites below unless this camera's Projected-Cam view is what's
       // actually on screen right now. The numeric half (bins/marginals)
       // stays unconditional -- it feeds the spacing refinement that the
       // always-on World view's recovered-pose overlay depends on for every
-      // camera, not just the displayed one.
-      const showProjected = isActive && globalState.mode === 'projected';
+      // camera, not just the displayed one. The RGBA half also has to run
+      // whenever the World-view floor overlay is on, though -- that overlay
+      // (see overlays/recoveredOverlays.ts) reuses projectedPreviewTex as
+      // its decal map, so skipping the paint here left it sitting at its
+      // all-zero (alpha 0, invisible) initial contents for any camera that
+      // never happened to be viewed in Projected-Cam mode first.
+      const showProjected = (isActive && globalState.mode === 'projected')
+        || (globalState.mode === 'world' && camera.settings.showRecoveredFloor);
       if (isPhysical(camera) && !camera.lastRealCaptureGray) {
         if (isActive) axesReadout.textContent = 'waiting for a real capture -- take a photo on the phone page';
         return;
       }
+      const captureSpan = spanStart('capture+preprocess');
       const { gray: rawGray, w, h } = isPhysical(camera)
         ? { gray: camera.lastRealCaptureGray!, w: camera.lastRealCaptureW, h: camera.lastRealCaptureH }
         : captureDistortedGrayscale(camera);
       camera.lastNoisedPreviewGray = rawGray;
       const gray = flipRowsF64(rawGray, w, h);
       const vFovRad = getAnalysisVFovRad(camera);
+      spanEnd(captureSpan);
       // Falls back to the CPU path if the GPU one returns null (WebGPU
       // unavailable, or the device request failed) -- see computeWorldVotesGPU's
       // own comment. computeWorldVotes stays the source of truth either way;
       // the GPU version is verified against it, not the other way around.
+      const votesSpan = spanStart(globalState.useGPUVotes ? 'votes (GPU)' : 'votes (CPU)');
       const votes = globalState.useGPUVotes
         ? (await computeWorldVotesGPU(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect))
           ?? computeWorldVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect)
         : computeWorldVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect);
+      spanEnd(votesSpan);
       camera.lastVotes = votes;
       updateGradientCirclesDebug(camera);
       const t1 = performance.now();
 
+      const fitSpan = spanStart('fit (band-select + fitPairOfPlanes)');
       const fitVotes = votesInMagnitudeBand(votes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax);
       const quadricPair = fitPairOfPlanes(fitVotes, camera.settings.weightSharpenPower);
+      spanEnd(fitSpan);
       const t2 = performance.now();
 
+      const lmSpan = spanStart('orientationLM (Phase 1)');
       const refinedFit = quadricPair && camera.settings.orientationLM ? refineOrientationLM(fitVotes, quadricPair) : null;
       const orientationFit = refinedFit ?? quadricPair;
+      spanEnd(lmSpan);
       const t2b = performance.now();
 
       camera.axesComputed = !!quadricPair;
 
+      const poseAssemblySpan = spanStart('poseAssembly+roughSpacing');
       let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
       if (orientationFit) {
         const normalForHandedness = orientationFit.Dnormal.clone();
@@ -101,8 +119,10 @@ export function runAxesReconstruction(camera: Camera) {
           distanceV: PLACEHOLDER_DISTANCE * (GRID_STEP / (marginals.rowPeriod * bins.binWidthV)),
         }
         : null;
+      spanEnd(poseAssemblySpan);
       const t3 = performance.now();
 
+      const refineSpan = spanStart('spacing refine (measurePeriodDistance + re-project)');
       let refinedSpacing: { distanceU: number; distanceV: number } | null = null;
       let finalSpacing: { distanceU: number; distanceV: number } | null = null;
       if (camera.lastRecoveredAxes && spacing) {
@@ -126,18 +146,24 @@ export function runAxesReconstruction(camera: Camera) {
       } else {
         camera.lastRecoveredAxes = null;
       }
+      spanEnd(refineSpan);
       const t3b = performance.now();
+      const decodeSpan = spanStart('positionDecode');
       runPositionDecode(camera, gray, w, h, vFovRad);
+      spanEnd(decodeSpan);
 
       let lastPositionLMResult: (PositionFit & { iterations: number; initialCost: number; finalCost: number }) | null = null;
       if (camera.settings.positionLM && camera.lastRecoveredAxes && camera.lastPositionDecode && camera.lastNoisedPreviewGray) {
+        const p3Span = spanStart('positionLM (Phase 3)');
         const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
         const normalForInit = Dnormal.clone();
         if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normalForInit) > 0) normalForInit.negate();
         const normalForInitWorld = normalForInit.clone().applyQuaternion(camera.lastPositionDecode.recoveredCamQuat);
         const initialWorldX0 = camera.lastPositionDecode.camPos.x + normalForInitWorld.x * -distance;
         const initialWorldZ0 = camera.lastPositionDecode.camPos.z + normalForInitWorld.z * -distance;
+        const photoSampleSpan = spanStart('computePhotometricSamples');
         const photoSamples = computePhotometricSamples(camera.lastNoisedPreviewGray, w, h, 4);
+        spanEnd(photoSampleSpan);
         // Same fallback pattern as the GPU vote path above: computeWorldVotes/
         // refineOrientationAndPositionLM stay the source of truth, the GPU
         // version is verified against them, not the other way around.
@@ -181,7 +207,9 @@ export function runAxesReconstruction(camera: Camera) {
             if (showProjected) paintProjectedTexture(camera, projResult4);
           }
         }
+        spanEnd(p3Span);
       }
+      const overlaySpan = spanStart('poleMarkers+overlays');
       if (camera.lastPositionDecode && rowDirRecovered && colDirRecovered) {
         const { recoveredCamQuat } = camera.lastPositionDecode;
         const rowDirWorld = rowDirRecovered.clone().applyQuaternion(recoveredCamQuat);
@@ -194,6 +222,7 @@ export function runAxesReconstruction(camera: Camera) {
       updateRecoveredCamGizmo(camera);
       applyRecoveredFloorOverlay(camera);
       if (isActive && globalState.mode === 'through') updateContaminationOverlays(camera);
+      spanEnd(overlaySpan);
       const t4 = performance.now();
 
       if (isActive) {
@@ -265,6 +294,7 @@ export function runAxesReconstruction(camera: Camera) {
         updatePositionReadoutText(camera);
       }
     } finally {
+      spanEnd(rootSpan);
       if (isActive) {
         captureAxesBtn.disabled = false;
         captureAxesBtn.textContent = prevLabel;

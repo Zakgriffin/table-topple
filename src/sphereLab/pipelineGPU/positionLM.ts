@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { solveLinearSystem } from '../pipeline/orientationLM.ts';
+import { attachGPUKernelBreakdown, profilerEnabled, ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 import { OrientationFit, PhotometricSample, PositionFit } from '../types.ts';
-import { createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, uploadFloat32, uploadUniform } from './device.ts';
+import { createStorageBuffer, createTimestampQuerySet, dispatchCount, getGPUDevice, readFloat32, resolveTimestamps, supportsTimestampQuery, uploadFloat32, uploadUniform } from './device.ts';
 import { PHOTOMETRIC_RESIDUALS_WGSL } from './positionLM.wgsl.ts';
 
 const pipelineCache = new WeakMap<GPUDevice, GPUComputePipeline>();
@@ -82,8 +83,9 @@ export async function refineOrientationAndPositionLMGPU(
 
   // Runs one dispatch: residual + 5 Jacobian-column evaluations for every
   // sample, at the given candidate pose. Returns the raw vec2(residual,valid)
-  // sextuple per sample, flattened.
-  async function evalResiduals(q: THREE.Quaternion, wx0: number, wz0: number): Promise<Float32Array> {
+  // sextuple per sample, flattened. `label` is only used for profiler output.
+  async function evalResiduals(q: THREE.Quaternion, wx0: number, wz0: number, label: string): Promise<Float32Array> {
+    const dispatchSpan = spanStart(`${label} (GPU round-trip)`);
     const uniformsBuf = uploadUniform(device!, buildP3Uniforms(
       w, h, n, torusR, torusC, distance, vFovRad, aspect, MIN_GRAZING_COS, EPS_ROT, EPS_POS,
       wx0, wz0, q, camQuat, Drow0, Dcol0, Dnormal0,
@@ -93,15 +95,23 @@ export async function refineOrientationAndPositionLMGPU(
       entries: [pxBuf, pyBuf, obsBuf, torusBuf, outBuf].map((buffer, i) => ({ binding: i + 1, resource: { buffer } }))
         .concat([{ binding: 0, resource: { buffer: uniformsBuf } }]),
     });
+    const wantTimestamps = profilerEnabled() && supportsTimestampQuery(device!);
+    const querySet = wantTimestamps ? createTimestampQuerySet(device!, 1) : null;
     const encoder = device!.createCommandEncoder();
-    const pass = encoder.beginComputePass();
+    const pass = encoder.beginComputePass(querySet ? { timestampWrites: { querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : undefined);
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(dispatchCount(n));
     pass.end();
     device!.queue.submit([encoder.finish()]);
+    if (querySet) {
+      const [durationMs] = await resolveTimestamps(device!, querySet, 1);
+      attachGPUKernelBreakdown([{ name: `${label} kernel`, durationMs }]);
+      querySet.destroy();
+    }
     const raw = await readFloat32(device!, outBuf, n * 6 * 8);
     uniformsBuf.destroy();
+    spanEnd(dispatchSpan);
     return raw;
   }
 
@@ -127,7 +137,7 @@ export async function refineOrientationAndPositionLMGPU(
     return nrm;
   };
 
-  const initialRaw = await evalResiduals(q, worldX0, worldZ0);
+  const initialRaw = await evalResiduals(q, worldX0, worldZ0, 'initial');
   const initialCost = cost(initialRaw, 0);
   let curCost = initialCost;
   let lambda = 1e-3;
@@ -136,63 +146,70 @@ export async function refineOrientationAndPositionLMGPU(
 
   let iterations = 0;
   for (; iterations < maxIterations; iterations++) {
-    const raw = await evalResiduals(q, worldX0, worldZ0);
-    // Count of valid baseline samples -- CPU's early "n===0 -> break".
-    let validCount = 0;
-    for (let i = 0; i < n; i++) if (raw[(i * 6) * 2 + 1] !== 0) validCount++;
-    if (validCount === 0) break;
+    const iterSpan: ProfileSpan | null = spanStart(`LM iter ${iterations}`);
+    try {
+      const raw = await evalResiduals(q, worldX0, worldZ0, `iter ${iterations} baseline`);
+      // Count of valid baseline samples -- CPU's early "n===0 -> break".
+      let validCount = 0;
+      for (let i = 0; i < n; i++) if (raw[(i * 6) * 2 + 1] !== 0) validCount++;
+      if (validCount === 0) break;
 
-    // Build the 5 Jacobian columns, index-aligned (see positionLM.wgsl.ts's
-    // header comment for why this differs slightly from the CPU's
-    // post-compaction positional alignment, and why it shouldn't matter here).
-    const J: Float64Array[] = [];
-    const epsList = [EPS_ROT, EPS_ROT, EPS_ROT, EPS_POS, EPS_POS];
-    for (let colIdx = 1; colIdx <= 5; colIdx++) {
-      const col = new Float64Array(n);
-      const eps = epsList[colIdx - 1];
-      for (let i = 0; i < n; i++) {
-        const o0 = (i * 6 + 0) * 2, ok = (i * 6 + colIdx) * 2;
-        if (raw[o0 + 1] === 0 || raw[ok + 1] === 0) continue;
-        col[i] = (raw[ok] - raw[o0]) / eps;
+      // Build the 5 Jacobian columns, index-aligned (see positionLM.wgsl.ts's
+      // header comment for why this differs slightly from the CPU's
+      // post-compaction positional alignment, and why it shouldn't matter here).
+      const solveSpan = spanStart('CPU (JtJ/solve)');
+      const J: Float64Array[] = [];
+      const epsList = [EPS_ROT, EPS_ROT, EPS_ROT, EPS_POS, EPS_POS];
+      for (let colIdx = 1; colIdx <= 5; colIdx++) {
+        const col = new Float64Array(n);
+        const eps = epsList[colIdx - 1];
+        for (let i = 0; i < n; i++) {
+          const o0 = (i * 6 + 0) * 2, ok = (i * 6 + colIdx) * 2;
+          if (raw[o0 + 1] === 0 || raw[ok + 1] === 0) continue;
+          col[i] = (raw[ok] - raw[o0]) / eps;
+        }
+        J.push(col);
       }
-      J.push(col);
-    }
-    const r0 = new Float64Array(n);
-    for (let i = 0; i < n; i++) { const o0 = (i * 6) * 2; r0[i] = raw[o0 + 1] === 0 ? 0 : raw[o0]; }
+      const r0 = new Float64Array(n);
+      for (let i = 0; i < n; i++) { const o0 = (i * 6) * 2; r0[i] = raw[o0 + 1] === 0 ? 0 : raw[o0]; }
 
-    const JtJ: number[][] = Array.from({ length: P }, () => new Array(P).fill(0));
-    const Jtr: number[] = new Array(P).fill(0);
-    for (let a = 0; a < P; a++) {
-      for (let b = 0; b < P; b++) {
-        let s = 0; for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
-        JtJ[a][b] = s;
+      const JtJ: number[][] = Array.from({ length: P }, () => new Array(P).fill(0));
+      const Jtr: number[] = new Array(P).fill(0);
+      for (let a = 0; a < P; a++) {
+        for (let b = 0; b < P; b++) {
+          let s = 0; for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
+          JtJ[a][b] = s;
+        }
+        let s = 0; for (let i = 0; i < n; i++) s += J[a][i] * r0[i];
+        Jtr[a] = s;
       }
-      let s = 0; for (let i = 0; i < n; i++) s += J[a][i] * r0[i];
-      Jtr[a] = s;
-    }
-    const A = JtJ.map((row, a) => row.map((v, b) => v + (a === b ? lambda * (JtJ[a][a] || 1) : 0)));
-    const rhs = Jtr.map((v) => -v);
-    const delta = solveLinearSystem(A, rhs);
-    if (!delta) break;
+      const A = JtJ.map((row, a) => row.map((v, b) => v + (a === b ? lambda * (JtJ[a][a] || 1) : 0)));
+      const rhs = Jtr.map((v) => -v);
+      const delta = solveLinearSystem(A, rhs);
+      spanEnd(solveSpan);
+      if (!delta) break;
 
-    const deltaRotVec = new THREE.Vector3(delta[0], delta[1], delta[2]);
-    const deltaRotAngle = deltaRotVec.length();
-    const deltaWX = delta[3], deltaWZ = delta[4];
-    if (deltaRotAngle < 1e-10 && Math.abs(deltaWX) < 1e-10 && Math.abs(deltaWZ) < 1e-10) break;
+      const deltaRotVec = new THREE.Vector3(delta[0], delta[1], delta[2]);
+      const deltaRotAngle = deltaRotVec.length();
+      const deltaWX = delta[3], deltaWZ = delta[4];
+      if (deltaRotAngle < 1e-10 && Math.abs(deltaWX) < 1e-10 && Math.abs(deltaWZ) < 1e-10) break;
 
-    const qTry = deltaRotAngle > 1e-12
-      ? new THREE.Quaternion().setFromAxisAngle(deltaRotVec.normalize(), deltaRotAngle).multiply(q).normalize()
-      : q.clone();
-    const wx0Try = worldX0 + deltaWX, wz0Try = worldZ0 + deltaWZ;
+      const qTry = deltaRotAngle > 1e-12
+        ? new THREE.Quaternion().setFromAxisAngle(deltaRotVec.normalize(), deltaRotAngle).multiply(q).normalize()
+        : q.clone();
+      const wx0Try = worldX0 + deltaWX, wz0Try = worldZ0 + deltaWZ;
 
-    const tryRaw = await evalResiduals(qTry, wx0Try, wz0Try);
-    const tryCost = cost(tryRaw, 0);
-    if (tryCost < curCost) {
-      q.copy(qTry); worldX0 = wx0Try; worldZ0 = wz0Try;
-      curCost = tryCost;
-      lambda = Math.max(lambda * 0.5, 1e-8);
-    } else {
-      lambda = Math.min(lambda * 3, 1e8);
+      const tryRaw = await evalResiduals(qTry, wx0Try, wz0Try, `iter ${iterations} tryPoint`);
+      const tryCost = cost(tryRaw, 0);
+      if (tryCost < curCost) {
+        q.copy(qTry); worldX0 = wx0Try; worldZ0 = wz0Try;
+        curCost = tryCost;
+        lambda = Math.max(lambda * 0.5, 1e-8);
+      } else {
+        lambda = Math.min(lambda * 3, 1e8);
+      }
+    } finally {
+      spanEnd(iterSpan);
     }
   }
 

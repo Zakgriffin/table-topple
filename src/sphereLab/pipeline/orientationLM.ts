@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 import { OrientationFit, Vote } from '../types.ts';
 
 // ── Orientation refinement (Levenberg-Marquardt) ─────────────────────────
@@ -53,52 +54,61 @@ export function refineOrientationLM(votes: Vote[], initial: OrientationFit, maxI
 
   let iterations = 0;
   for (; iterations < maxIterations; iterations++) {
-    const Drow = candidateDrow(q), Dcol = candidateDcol(q);
-    const n = votes.length;
-    const residuals = new Float64Array(n);
-    for (let i = 0; i < n; i++) residuals[i] = votes[i].weight * fourFoldResidual(votes[i].n, Drow, Dcol);
+    const iterSpan: ProfileSpan | null = spanStart(`LM iter ${iterations}`);
+    try {
+      const Drow = candidateDrow(q), Dcol = candidateDcol(q);
+      const n = votes.length;
+      const residuals = new Float64Array(n);
+      const residSpan = spanStart('residuals+jacobian');
+      for (let i = 0; i < n; i++) residuals[i] = votes[i].weight * fourFoldResidual(votes[i].n, Drow, Dcol);
 
-    const J: Float64Array[] = [new Float64Array(n), new Float64Array(n), new Float64Array(n)];
-    for (let k = 0; k < 3; k++) {
-      const qPlus = new THREE.Quaternion().setFromAxisAngle(axes[k], EPS).multiply(q);
-      const DrowP = candidateDrow(qPlus), DcolP = candidateDcol(qPlus);
-      for (let i = 0; i < n; i++) {
-        const rP = votes[i].weight * fourFoldResidual(votes[i].n, DrowP, DcolP);
-        J[k][i] = (rP - residuals[i]) / EPS;
+      const J: Float64Array[] = [new Float64Array(n), new Float64Array(n), new Float64Array(n)];
+      for (let k = 0; k < 3; k++) {
+        const qPlus = new THREE.Quaternion().setFromAxisAngle(axes[k], EPS).multiply(q);
+        const DrowP = candidateDrow(qPlus), DcolP = candidateDcol(qPlus);
+        for (let i = 0; i < n; i++) {
+          const rP = votes[i].weight * fourFoldResidual(votes[i].n, DrowP, DcolP);
+          J[k][i] = (rP - residuals[i]) / EPS;
+        }
       }
-    }
+      spanEnd(residSpan);
 
-    const JtJ = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
-    const Jtr = [0, 0, 0];
-    for (let a = 0; a < 3; a++) {
-      for (let b = 0; b < 3; b++) {
+      const solveSpan = spanStart('JtJ/solve');
+      const JtJ = [[0, 0, 0], [0, 0, 0], [0, 0, 0]];
+      const Jtr = [0, 0, 0];
+      for (let a = 0; a < 3; a++) {
+        for (let b = 0; b < 3; b++) {
+          let s = 0;
+          for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
+          JtJ[a][b] = s;
+        }
         let s = 0;
-        for (let i = 0; i < n; i++) s += J[a][i] * J[b][i];
-        JtJ[a][b] = s;
+        for (let i = 0; i < n; i++) s += J[a][i] * residuals[i];
+        Jtr[a] = s;
       }
-      let s = 0;
-      for (let i = 0; i < n; i++) s += J[a][i] * residuals[i];
-      Jtr[a] = s;
-    }
-    const A = JtJ.map((row, a) => row.map((v, b) => v + (a === b ? lambda * (JtJ[a][a] || 1) : 0)));
-    const rhs = Jtr.map((v) => -v);
-    const delta = solveLinearSystem(A, rhs);
-    if (!delta) break;
+      const A = JtJ.map((row, a) => row.map((v, b) => v + (a === b ? lambda * (JtJ[a][a] || 1) : 0)));
+      const rhs = Jtr.map((v) => -v);
+      const delta = solveLinearSystem(A, rhs);
+      spanEnd(solveSpan);
+      if (!delta) break;
 
-    const deltaVec = new THREE.Vector3(delta[0], delta[1], delta[2]);
-    const deltaAngle = deltaVec.length();
-    if (deltaAngle < 1e-10) break;
-    const deltaAxis = deltaVec.normalize();
-    const qTry = new THREE.Quaternion().setFromAxisAngle(deltaAxis, deltaAngle).multiply(q).normalize();
+      const deltaVec = new THREE.Vector3(delta[0], delta[1], delta[2]);
+      const deltaAngle = deltaVec.length();
+      if (deltaAngle < 1e-10) break;
+      const deltaAxis = deltaVec.normalize();
+      const qTry = new THREE.Quaternion().setFromAxisAngle(deltaAxis, deltaAngle).multiply(q).normalize();
 
-    const DrowTry = candidateDrow(qTry), DcolTry = candidateDcol(qTry);
-    const tryCost = orientationCost(votes, DrowTry, DcolTry);
-    if (tryCost < cost) {
-      q.copy(qTry);
-      cost = tryCost;
-      lambda = Math.max(lambda * 0.5, 1e-8);
-    } else {
-      lambda = Math.min(lambda * 3, 1e8);
+      const DrowTry = candidateDrow(qTry), DcolTry = candidateDcol(qTry);
+      const tryCost = orientationCost(votes, DrowTry, DcolTry);
+      if (tryCost < cost) {
+        q.copy(qTry);
+        cost = tryCost;
+        lambda = Math.max(lambda * 0.5, 1e-8);
+      } else {
+        lambda = Math.min(lambda * 3, 1e8);
+      }
+    } finally {
+      spanEnd(iterSpan);
     }
   }
 

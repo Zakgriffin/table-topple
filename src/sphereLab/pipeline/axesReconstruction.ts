@@ -12,7 +12,7 @@ import { globalState } from '../state.ts';
 import { PositionFit } from '../types.ts';
 import { axesReadout, captureAxesBtn } from '../ui/dom.ts';
 import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
-import { computeProjectedBinsAndMarginals, measurePeriodDistance, paintProjectedTexture, runPositionDecode, solveRecoveredCamQuat } from './decodeGrid.ts';
+import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, measurePeriodDistance, measurePeriodDistanceGPU, paintProjectedTexture, runPositionDecode, solveRecoveredCamQuat } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refineOrientationLM } from './orientationLM.ts';
 import { computePhotometricSamples, refineOrientationAndPositionLM } from './positionLM.ts';
@@ -22,6 +22,28 @@ import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { votesInMagnitudeBandGPU } from '../pipelineGPU/voteBandSelect.ts';
 import { refineOrientationAndPositionLMGPU } from '../pipelineGPU/positionLM.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
+
+// Falls back to CPU per-call if the GPU one returns null (WebGPU
+// unavailable) -- same pattern as every other GPU sub-pipeline in this
+// file, just factored into one helper since computeProjectedBinsAndMarginals
+// and measurePeriodDistance each have their own GPU/CPU pair called from
+// multiple sites below.
+async function projectBins(camera: Camera) {
+  const s = spanStart(globalState.useGPUProject ? 'projectBins (GPU stage 1 + CPU bucket)' : 'projectBins (CPU)');
+  const result = globalState.useGPUProject
+    ? (await computeProjectedBinsAndMarginalsGPU(camera)) ?? computeProjectedBinsAndMarginals(camera)
+    : computeProjectedBinsAndMarginals(camera);
+  spanEnd(s);
+  return result;
+}
+async function measureSpacing(camera: Camera, currentDistance: number, extentU: number, extentV: number) {
+  const s = spanStart(globalState.useGPUProject ? 'measureSpacing (GPU stage 1 + CPU bucket)' : 'measureSpacing (CPU)');
+  const result = globalState.useGPUProject
+    ? (await measurePeriodDistanceGPU(camera, currentDistance, extentU, extentV)) ?? measurePeriodDistance(camera, currentDistance, extentU, extentV)
+    : measurePeriodDistance(camera, currentDistance, extentU, extentV);
+  spanEnd(s);
+  return result;
+}
 
 // ── Axes/position reconstruction (the big orchestrator) ──────────────────
 
@@ -124,7 +146,7 @@ export function runAxesReconstruction(camera: Camera) {
         ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: orientationFit.Dnormal, distance: PLACEHOLDER_DISTANCE }
         : null;
       if (camera.lastRecoveredAxes) {
-        const projResult = computeProjectedBinsAndMarginals(camera);
+        const projResult = await projectBins(camera);
         if (showProjected) paintProjectedTexture(camera, projResult);
       }
 
@@ -150,14 +172,14 @@ export function runAxesReconstruction(camera: Camera) {
           const trueExtentU = (roughBins.maxU - roughBins.minU) * rescale;
           const trueExtentV = (roughBins.maxV - roughBins.minV) * rescale;
           const roughDistance = camera.lastRecoveredAxes.distance;
-          const measured = measurePeriodDistance(camera, roughDistance, trueExtentU, trueExtentV);
+          const measured = await measureSpacing(camera, roughDistance, trueExtentU, trueExtentV);
           if (measured) {
             refinedSpacing = measured;
             camera.lastRecoveredAxes.distance = (measured.distanceU + measured.distanceV) / 2;
           }
         }
 
-        const projResult2 = computeProjectedBinsAndMarginals(camera);
+        const projResult2 = await projectBins(camera);
         if (showProjected) paintProjectedTexture(camera, projResult2);
       } else {
         camera.lastRecoveredAxes = null;
@@ -205,7 +227,7 @@ export function runAxesReconstruction(camera: Camera) {
         const refinedNormalWorld = refinedNormal.clone().applyQuaternion(camera.lastPositionDecode.recoveredCamQuat);
         camera.lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormalWorld.x * distance;
         camera.lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormalWorld.z * distance;
-        const projResult3 = computeProjectedBinsAndMarginals(camera);
+        const projResult3 = await projectBins(camera);
         if (showProjected) paintProjectedTexture(camera, projResult3);
 
         const postPhase3Bins = camera.lastProjectedBins;
@@ -213,13 +235,13 @@ export function runAxesReconstruction(camera: Camera) {
           const extentU = postPhase3Bins.maxU - postPhase3Bins.minU;
           const extentV = postPhase3Bins.maxV - postPhase3Bins.minV;
           const currentDistance = camera.lastRecoveredAxes.distance;
-          const measured = measurePeriodDistance(camera, currentDistance, extentU, extentV);
+          const measured = await measureSpacing(camera, currentDistance, extentU, extentV);
           if (measured) {
             finalSpacing = measured;
             camera.lastRecoveredAxes.distance = (measured.distanceU + measured.distanceV) / 2;
             camera.lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormalWorld.x * camera.lastRecoveredAxes.distance;
             camera.lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormalWorld.z * camera.lastRecoveredAxes.distance;
-            const projResult4 = computeProjectedBinsAndMarginals(camera);
+            const projResult4 = await projectBins(camera);
             if (showProjected) paintProjectedTexture(camera, projResult4);
           }
         }

@@ -4,13 +4,32 @@ import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { binarize } from '../../decode.ts';
 import { cornerDir } from '../math/geometry.ts';
 import { tallyPositionVotesGPU } from '../pipelineGPU/decodeTally.ts';
+import { projectSamplesGPU } from '../pipelineGPU/projectSamples.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { C, ORDER, R, debruijnLookup, torus } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
-import { DecodeCellDebug, DecodeSampleGrid, DecodeSamplePoint, Marginals, ProjectedBins, VoteResult } from '../types.ts';
+import { DecodeCellDebug, DecodeSampleGrid, DecodeSamplePoint, GradientField, Marginals, ProjectedBins, ProjectedSamplesDense, VoteResult } from '../types.ts';
 import { getAnalysisVFovRad } from './capture.ts';
 import { computeGradientField } from './gradientField.ts';
 import { computeProjectedMarginals } from './positionLM.ts';
+
+// castAndBucketProjectedSamples reruns this same full-frame gradient field
+// EVERY call (computeGradientField(gray, w, h, 1)), but camera.lastNoisedPreviewGray
+// never changes within one runAxesReconstruction invocation -- yet this
+// function gets called 3-6 times per reconstruction (once per
+// computeProjectedBinsAndMarginals/measurePeriodDistance call, see
+// axesReconstruction.ts). A plain oversight, not intentional recomputation
+// -- cached per-camera (WeakMap, so multiple simultaneously-existing
+// cameras never collide), invalidated automatically whenever the gray
+// array reference or dimensions change (a new capture/reconstruction).
+const srcGradCache = new WeakMap<Camera, { src: Float64Array; w: number; h: number; grad: GradientField }>();
+function getCachedSrcGradientField(camera: Camera, gray: Float64Array, w: number, h: number): GradientField {
+  const cached = srcGradCache.get(camera);
+  if (cached && cached.src === gray && cached.w === w && cached.h === h) return cached.grad;
+  const grad = computeGradientField(gray, w, h, 1);
+  srcGradCache.set(camera, { src: gray, w, h, grad });
+  return grad;
+}
 
 // ── Grid rotation helpers (pure) ─────────────────────────────────────────
 
@@ -132,13 +151,15 @@ export function solveRecoveredCamQuat(
 }
 
 
-// Casts one ray per SCREEN pixel and bins the hits into a bucketW x bucketH
-// grid -- see pre-Stage-A history for the full derivation (grazing-angle
-// cutoff, gradient-covector re-expression in the (u,v) frame, the U-mirror
-// that cancels a handedness mismatch).
-export function castAndBucketProjectedSamples(camera: Camera, bucketW: number, bucketH: number): {
-  bins: ProjectedBins; sums: Float64Array; counts: Float64Array; gradCxSum: Float64Array; gradCySum: Float64Array;
-} | null {
+// Stage 1 (CPU) -- casts one ray per SCREEN pixel, and if it clears the
+// grazing-angle cutoff, projects it onto the recovered floor plane's (u,v)
+// frame plus its gradient covector. Dense output (one slot per pixel,
+// valid=0 for misses) specifically so this and projectSamplesGPU (see
+// pipelineGPU/projectSamples.ts) can feed the exact same stage-2 bucketing
+// code below -- see pre-Stage-A history for the full derivation
+// (grazing-angle cutoff, gradient-covector re-expression in the (u,v)
+// frame, the U-mirror that cancels a handedness mismatch).
+function projectSamplesCPU(camera: Camera): ProjectedSamplesDense | null {
   if (!camera.lastRecoveredAxes) return null;
   const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
   const w = camera.rtSize.w, h = camera.rtSize.h;
@@ -150,12 +171,14 @@ export function castAndBucketProjectedSamples(camera: Camera, bucketW: number, b
   const MIN_GRAZING_COS = 0.15;
   const hit = new THREE.Vector3();
   const hit2 = new THREE.Vector3();
-  const us: number[] = [], vs: number[] = [], srcIdx: number[] = [];
-  const gradCxAtSample: number[] = [], gradCyAtSample: number[] = [];
-  const srcGrad = camera.lastNoisedPreviewGray ? computeGradientField(camera.lastNoisedPreviewGray, w, h, 1) : null;
+  const n = w * h;
+  const uArr = new Float32Array(n), vArr = new Float32Array(n), cxArr = new Float32Array(n), cyArr = new Float32Array(n);
+  const validArr = new Uint8Array(n);
+  const srcGrad = camera.lastNoisedPreviewGray ? getCachedSrcGradientField(camera, camera.lastNoisedPreviewGray, w, h) : null;
   let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;
   for (let y = 0; y < h; y++) {
     for (let x = 0; x < w; x++) {
+      const i = y * w + x;
       const [ndcU, ndcV] = toNDC(x, y);
       const rayDir = cornerDir(ndcU, ndcV, MATH_QUAT, vFovRad, camera.aspect);
       const denom = rayDir.dot(normal);
@@ -163,14 +186,12 @@ export function castAndBucketProjectedSamples(camera: Camera, bucketW: number, b
       const t = -distance / denom;
       hit.copy(rayDir).multiplyScalar(t);
       const u = hit.dot(Drow), v = hit.dot(Dcol);
-      us.push(u); vs.push(v); srcIdx.push(y * w + x);
+      uArr[i] = u; vArr[i] = v; validArr[i] = 1;
       if (u < minU) minU = u; if (u > maxU) maxU = u;
       if (v < minV) minV = v; if (v > maxV) maxV = v;
 
-      let cxAtSample = 0, cyAtSample = 0;
       if (srcGrad) {
-        const si = y * w + x;
-        const fx = srcGrad.fx[si], fy = srcGrad.fy[si];
+        const fx = srcGrad.fx[i], fy = srcGrad.fy[i];
         const mag = Math.hypot(fx, fy);
         if (mag > 0) {
           const theta = Math.atan2(fy, fx);
@@ -185,17 +206,27 @@ export function castAndBucketProjectedSamples(camera: Camera, bucketW: number, b
             const du = u2 - u, dv = v2 - v;
             if (Math.hypot(du, dv) > 1e-9) {
               const phiUV = Math.atan2(dv, du);
-              cxAtSample = -mag * Math.cos(2 * phiUV);
-              cyAtSample = -mag * Math.sin(2 * phiUV);
+              cxArr[i] = -mag * Math.cos(2 * phiUV);
+              cyArr[i] = -mag * Math.sin(2 * phiUV);
             }
           }
         }
       }
-      gradCxAtSample.push(cxAtSample); gradCyAtSample.push(cyAtSample);
     }
   }
   if (!isFinite(minU) || !isFinite(minV)) return null;
+  return { u: uArr, v: vArr, cx: cxArr, cy: cyArr, valid: validArr, minU, maxU, minV, maxV };
+}
 
+// Stage 2 (CPU only, for now -- see this session's chat for why: bucketed
+// float accumulation needs either fixed-point atomic<i32> encoding or
+// something else GPU-side, deliberately not tackled yet). Bins stage 1's
+// dense per-pixel samples into a bucketW x bucketH grid -- shared,
+// unchanged, by both the CPU and GPU stage-1 paths below.
+function bucketSamples(camera: Camera, bucketW: number, bucketH: number, proj: ProjectedSamplesDense): {
+  bins: ProjectedBins; sums: Float64Array; counts: Float64Array; gradCxSum: Float64Array; gradCySum: Float64Array;
+} {
+  const { u, v, cx, cy, valid, minU, maxU, minV, maxV } = proj;
   const binWidthU = (maxU - minU) / bucketW || 1;
   const binWidthV = (maxV - minV) / bucketH || 1;
   const bins: ProjectedBins = { minU, maxU, minV, maxV, binWidthU, binWidthV, w: bucketW, h: bucketH };
@@ -203,20 +234,42 @@ export function castAndBucketProjectedSamples(camera: Camera, bucketW: number, b
   const counts = new Float64Array(bucketW * bucketH);
   const gradCxSum = new Float64Array(bucketW * bucketH);
   const gradCySum = new Float64Array(bucketW * bucketH);
-  for (let k = 0; k < us.length; k++) {
-    const bu = Math.min(bucketW - 1, Math.max(0, Math.floor((maxU - us[k]) / binWidthU)));
-    const bv = Math.min(bucketH - 1, Math.max(0, Math.floor((vs[k] - minV) / binWidthV)));
+  const n = valid.length;
+  for (let i = 0; i < n; i++) {
+    if (!valid[i]) continue;
+    const bu = Math.min(bucketW - 1, Math.max(0, Math.floor((maxU - u[i]) / binWidthU)));
+    const bv = Math.min(bucketH - 1, Math.max(0, Math.floor((v[i] - minV) / binWidthV)));
     const bi = bv * bucketW + bu;
-    const si = srcIdx[k];
-    const srcO = si * 4;
+    const srcO = i * 4;
     sums[bi * 3] += camera.distortedPreviewData[srcO];
     sums[bi * 3 + 1] += camera.distortedPreviewData[srcO + 1];
     sums[bi * 3 + 2] += camera.distortedPreviewData[srcO + 2];
     counts[bi]++;
-    gradCxSum[bi] += gradCxAtSample[k];
-    gradCySum[bi] += gradCyAtSample[k];
+    gradCxSum[bi] += cx[i];
+    gradCySum[bi] += cy[i];
   }
   return { bins, sums, counts, gradCxSum, gradCySum };
+}
+
+export function castAndBucketProjectedSamples(camera: Camera, bucketW: number, bucketH: number): {
+  bins: ProjectedBins; sums: Float64Array; counts: Float64Array; gradCxSum: Float64Array; gradCySum: Float64Array;
+} | null {
+  const proj = projectSamplesCPU(camera);
+  if (!proj) return null;
+  return bucketSamples(camera, bucketW, bucketH, proj);
+}
+
+// GPU-resident counterpart -- only stage 1 (the ray-cast+project, see
+// pipelineGPU/projectSamples.ts) runs on GPU; stage 2 (bucketing) stays the
+// exact same CPU code as the fully-CPU path above, fed by the GPU's dense
+// output. Returns null if WebGPU isn't available; caller falls back to the
+// CPU version, which stays the source of truth.
+export async function castAndBucketProjectedSamplesGPU(camera: Camera, bucketW: number, bucketH: number): Promise<{
+  bins: ProjectedBins; sums: Float64Array; counts: Float64Array; gradCxSum: Float64Array; gradCySum: Float64Array;
+} | null> {
+  const proj = await projectSamplesGPU(camera);
+  if (!proj) return null;
+  return bucketSamples(camera, bucketW, bucketH, proj);
 }
 
 type ProjectedSampleResult = ReturnType<typeof castAndBucketProjectedSamples>;
@@ -229,6 +282,21 @@ type ProjectedSampleResult = ReturnType<typeof castAndBucketProjectedSamples>;
 // wants to paint doesn't have to re-cast every ray a second time.
 export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampleResult {
   const result = camera.lastRecoveredAxes ? castAndBucketProjectedSamples(camera, camera.rtSize.w, camera.rtSize.h) : null;
+  if (!result) { camera.lastProjectedBins = null; camera.lastMarginals = null; return null; }
+  const { bins, counts, gradCxSum, gradCySum } = result;
+  camera.lastProjectedBins = bins;
+  camera.lastMarginals = computeProjectedMarginals(bins.w, bins.h, counts, gradCxSum, gradCySum);
+  return result;
+}
+
+// GPU-aware twin, deliberately kept separate rather than folded into
+// computeProjectedBinsAndMarginals above -- that function has several
+// call sites outside the reconstruction pipeline (throttled preview
+// updates, mode switches, camera creation) that are perfectly fine staying
+// synchronous, and making it async would force all of those to become
+// async too. Only runAxesReconstruction (already async) calls this one.
+export async function computeProjectedBinsAndMarginalsGPU(camera: Camera): Promise<ProjectedSampleResult> {
+  const result = camera.lastRecoveredAxes ? await castAndBucketProjectedSamplesGPU(camera, camera.rtSize.w, camera.rtSize.h) : null;
   if (!result) { camera.lastProjectedBins = null; camera.lastMarginals = null; return null; }
   const { bins, counts, gradCxSum, gradCySum } = result;
   camera.lastProjectedBins = bins;
@@ -274,6 +342,23 @@ export function measurePeriodDistance(camera: Camera, currentDistance: number, e
   const refineW = Math.min(MAX_REFINE_BUCKETS, Math.max(camera.rtSize.w, Math.ceil(extentU / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
   const refineH = Math.min(MAX_REFINE_BUCKETS, Math.max(camera.rtSize.h, Math.ceil(extentV / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
   const refined = castAndBucketProjectedSamples(camera, refineW, refineH);
+  const refinedMarginals = refined ? computeProjectedMarginals(refineW, refineH, refined.counts, refined.gradCxSum, refined.gradCySum) : null;
+  if (!refined || !refinedMarginals || refinedMarginals.colPeriod === null || refinedMarginals.rowPeriod === null) return null;
+  return {
+    distanceU: currentDistance * (GRID_STEP / (refinedMarginals.colPeriod * refined.bins.binWidthU)),
+    distanceV: currentDistance * (GRID_STEP / (refinedMarginals.rowPeriod * refined.bins.binWidthV)),
+  };
+}
+
+// GPU-aware twin, same reasoning as computeProjectedBinsAndMarginalsGPU
+// above -- kept separate so measurePeriodDistance's other (synchronous)
+// callers are untouched.
+export async function measurePeriodDistanceGPU(camera: Camera, currentDistance: number, extentU: number, extentV: number): Promise<{ distanceU: number; distanceV: number } | null> {
+  const TARGET_BUCKETS_PER_CELL = 20;
+  const MAX_REFINE_BUCKETS = 2048;
+  const refineW = Math.min(MAX_REFINE_BUCKETS, Math.max(camera.rtSize.w, Math.ceil(extentU / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
+  const refineH = Math.min(MAX_REFINE_BUCKETS, Math.max(camera.rtSize.h, Math.ceil(extentV / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
+  const refined = await castAndBucketProjectedSamplesGPU(camera, refineW, refineH);
   const refinedMarginals = refined ? computeProjectedMarginals(refineW, refineH, refined.counts, refined.gradCxSum, refined.gradCySum) : null;
   if (!refined || !refinedMarginals || refinedMarginals.colPeriod === null || refinedMarginals.rowPeriod === null) return null;
   return {
@@ -353,20 +438,12 @@ export function buildDecodeSampleGrid(camera: Camera, gray: Float64Array, w: num
 
 // Decodes the camera's absolute world position -- see pre-Stage-A history
 // for the full derivation.
-export async function runPositionDecode(camera: Camera, gray: Float64Array, w: number, h: number, vFovRad: number) {
-  const gridSpan = spanStart('buildDecodeSampleGrid');
+export function runPositionDecode(camera: Camera, gray: Float64Array, w: number, h: number, vFovRad: number) {
   const grid = buildDecodeSampleGrid(camera, gray, w, h, vFovRad);
-  spanEnd(gridSpan);
   camera.lastDecodeGrid = grid;
   camera.lastDecodeRotated = null;
   if (!grid) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return; }
-  const tallySpan = spanStart(globalState.useGPUDecode ? 'tallyPositionVotes (GPU)' : 'tallyPositionVotes (CPU)');
-  // Same fallback pattern as the other GPU sub-pipelines: tallyPositionVotes
-  // stays the source of truth, the GPU version is verified against it.
-  const winner = globalState.useGPUDecode
-    ? (await tallyPositionVotesGPU(grid)) ?? tallyPositionVotes(grid)
-    : tallyPositionVotes(grid);
-  spanEnd(tallySpan);
+  const winner = tallyPositionVotes(grid);
   if (!winner) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return; }
 
   const { anchorRow, anchorCol } = winner;

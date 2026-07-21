@@ -28,4 +28,9 @@ export const globalState = {
   // Same idea, independent toggle, for the decode window-tally histogram
   // (see pipelineGPU/decodeTally.ts).
   useGPUDecode: false,
+  // Same idea, independent toggle, for the projected-sample ray-cast (see
+  // pipelineGPU/projectSamples.ts) -- only stage 1 of
+  // castAndBucketProjectedSamples; the bucket-accumulation stage 2 stays on
+  // CPU regardless of this toggle.
+  useGPUProject: false,
 };

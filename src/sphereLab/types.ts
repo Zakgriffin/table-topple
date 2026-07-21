@@ -8,6 +8,15 @@ export type FieldView = 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'grad
 export interface Vote { n: THREE.Vector3; weight: number }
 export interface GradientField { fx: Float64Array; fy: Float64Array; w: number; h: number; r: number }
 export interface ProjectedBins { minU: number; maxU: number; minV: number; maxV: number; binWidthU: number; binWidthV: number; w: number; h: number }
+// Stage-1 output of castAndBucketProjectedSamples (decodeGrid.ts) -- one
+// ray-cast+project result per SCREEN pixel, dense (w*h, valid=0 for pixels
+// that failed the grazing-angle cutoff) so the CPU and GPU implementations
+// of that stage (pipelineGPU/projectSamples.ts) can feed the exact same
+// stage-2 bucketing code.
+export interface ProjectedSamplesDense {
+  u: Float32Array; v: Float32Array; cx: Float32Array; cy: Float32Array; valid: Uint8Array;
+  minU: number; maxU: number; minV: number; maxV: number;
+}
 export interface Marginals {
   colSum: Float64Array; rowSum: Float64Array; colSumCy: Float64Array; rowHueCx: Float64Array; rowSumCy: Float64Array;
   colMag: Float64Array; rowMag: Float64Array;

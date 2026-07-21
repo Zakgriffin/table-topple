@@ -45,10 +45,10 @@ const REPEAT = repeatIdx >= 0 ? parseInt(args[repeatIdx + 1], 10) : 1;
 const WITH_PHASE1 = args.includes('--with-phase1');
 const WITH_PHASE3 = args.includes('--with-phase3');
 
-const gpuLabel = 'GPU (votes+fit+decode' + (WITH_PHASE3 ? '+Phase3' : '') + ')';
+const gpuLabel = 'GPU (votes+fit+decode+project' + (WITH_PHASE3 ? '+Phase3' : '') + ')';
 const CONFIGS = [
-  { name: 'CPU only', useGPUVotes: false, useGPUFit: false, useGPUDecode: false, useGPUPositionLM: false },
-  { name: gpuLabel, useGPUVotes: true, useGPUFit: true, useGPUDecode: true, useGPUPositionLM: WITH_PHASE3 },
+  { name: 'CPU only', useGPUVotes: false, useGPUFit: false, useGPUDecode: false, useGPUProject: false, useGPUPositionLM: false },
+  { name: gpuLabel, useGPUVotes: true, useGPUFit: true, useGPUDecode: true, useGPUProject: true, useGPUPositionLM: WITH_PHASE3 },
 ];
 
 function sleep(ms) { return new Promise((r) => setTimeout(r, ms)); }
@@ -136,6 +136,7 @@ function triggerCode(config) {
     globalState.useGPUVotes = ${config.useGPUVotes};
     globalState.useGPUFit = ${config.useGPUFit};
     globalState.useGPUDecode = ${config.useGPUDecode};
+    globalState.useGPUProject = ${config.useGPUProject};
     globalState.useGPUPositionLM = ${config.useGPUPositionLM};
     profilerReset();
     profilerSetEnabled(true);

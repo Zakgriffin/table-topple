@@ -7,7 +7,7 @@ import { updateContaminationOverlays } from '../overlays/contaminationOverlays.t
 import { updatePositionReadoutText } from '../overlays/projectedCamOverlays.ts';
 import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo } from '../overlays/recoveredOverlays.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
-import { C, R } from '../scene/floor.ts';
+import { C, R, torus } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { PositionFit } from '../types.ts';
 import { axesReadout, captureAxesBtn } from '../ui/dom.ts';
@@ -18,6 +18,7 @@ import { refineOrientationLM } from './orientationLM.ts';
 import { computePhotometricSamples, refineOrientationAndPositionLM } from './positionLM.ts';
 import { computeWorldVotes, fitPairOfPlanes, votesInMagnitudeBand } from './votes.ts';
 import { computeWorldVotesGPU } from '../pipelineGPU/voteGeneration.ts';
+import { refineOrientationAndPositionLMGPU } from '../pipelineGPU/positionLM.ts';
 
 // ── Axes/position reconstruction (the big orchestrator) ──────────────────
 
@@ -137,9 +138,15 @@ export function runAxesReconstruction(camera: Camera) {
         const initialWorldX0 = camera.lastPositionDecode.camPos.x + normalForInitWorld.x * -distance;
         const initialWorldZ0 = camera.lastPositionDecode.camPos.z + normalForInitWorld.z * -distance;
         const photoSamples = computePhotometricSamples(camera.lastNoisedPreviewGray, w, h, 4);
-        lastPositionLMResult = refineOrientationAndPositionLM(
-          photoSamples, w, h, { Drow, Dcol, Dnormal }, distance, initialWorldX0, initialWorldZ0, MATH_QUAT, vFovRad, camera.aspect,
-        );
+        // Same fallback pattern as the GPU vote path above: computeWorldVotes/
+        // refineOrientationAndPositionLM stay the source of truth, the GPU
+        // version is verified against them, not the other way around.
+        lastPositionLMResult = globalState.useGPUPositionLM
+          ? (await refineOrientationAndPositionLMGPU(
+              photoSamples, w, h, { Drow, Dcol, Dnormal }, distance, initialWorldX0, initialWorldZ0, MATH_QUAT, vFovRad, camera.aspect, torus, R, C,
+            ))
+            ?? refineOrientationAndPositionLM(photoSamples, w, h, { Drow, Dcol, Dnormal }, distance, initialWorldX0, initialWorldZ0, MATH_QUAT, vFovRad, camera.aspect)
+          : refineOrientationAndPositionLM(photoSamples, w, h, { Drow, Dcol, Dnormal }, distance, initialWorldX0, initialWorldZ0, MATH_QUAT, vFovRad, camera.aspect);
         camera.lastRecoveredAxes.Drow = lastPositionLMResult.Drow;
         camera.lastRecoveredAxes.Dcol = lastPositionLMResult.Dcol;
         camera.lastRecoveredAxes.Dnormal = lastPositionLMResult.Dnormal;

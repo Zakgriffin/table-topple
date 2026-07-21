@@ -240,6 +240,7 @@ bindSlider('floorCellOutlineSubdiv', (v) => {
   for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render too
 }, (v) => v.toFixed(0));
 bindCheckbox('useGPUVotes', (v) => { globalState.useGPUVotes = v; });
+bindCheckbox('useGPUPositionLM', (v) => { globalState.useGPUPositionLM = v; });
 gpuVotesStatus.textContent = isWebGPUSupported()
   ? 'WebGPU is available in this browser.'
   : 'WebGPU is not available in this browser -- the checkbox above will silently fall back to the CPU pipeline.';

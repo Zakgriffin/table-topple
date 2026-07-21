@@ -17,4 +17,9 @@ export const globalState = {
   // still being trusted. Silently no-ops back to the CPU path if WebGPU
   // isn't available even when this is true (see axesReconstruction.ts).
   useGPUVotes: false,
+  // Same idea, independent toggle, for Phase 3's photometric position LM
+  // (see pipelineGPU/positionLM.ts) -- kept separate from useGPUVotes so
+  // either GPU sub-pipeline can be compared against its CPU counterpart on
+  // its own.
+  useGPUPositionLM: false,
 };

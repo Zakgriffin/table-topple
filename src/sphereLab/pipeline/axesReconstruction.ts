@@ -18,6 +18,7 @@ import { refineOrientationLM } from './orientationLM.ts';
 import { computePhotometricSamples, refineOrientationAndPositionLM } from './positionLM.ts';
 import { computeWorldVotes, fitPairOfPlanes, votesInMagnitudeBand } from './votes.ts';
 import { computeWorldVotesGPU } from '../pipelineGPU/voteGeneration.ts';
+import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { refineOrientationAndPositionLMGPU } from '../pipelineGPU/positionLM.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
@@ -80,7 +81,12 @@ export function runAxesReconstruction(camera: Camera) {
 
       const fitSpan = spanStart('fit (band-select + fitPairOfPlanes)');
       const fitVotes = votesInMagnitudeBand(votes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax);
-      const quadricPair = fitPairOfPlanes(fitVotes, camera.settings.weightSharpenPower);
+      // Same fallback pattern as the other GPU sub-pipelines: fitPairOfPlanes
+      // stays the source of truth, the GPU version is verified against it.
+      const quadricPair = globalState.useGPUFit
+        ? (await fitPairOfPlanesGPU(fitVotes, camera.settings.weightSharpenPower))
+          ?? fitPairOfPlanes(fitVotes, camera.settings.weightSharpenPower)
+        : fitPairOfPlanes(fitVotes, camera.settings.weightSharpenPower);
       spanEnd(fitSpan);
       const t2 = performance.now();
 

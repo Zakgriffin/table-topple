@@ -22,4 +22,7 @@ export const globalState = {
   // either GPU sub-pipeline can be compared against its CPU counterpart on
   // its own.
   useGPUPositionLM: false,
+  // Same idea, independent toggle, for the plane-fit reduction (see
+  // pipelineGPU/fitPlanes.ts).
+  useGPUFit: false,
 };

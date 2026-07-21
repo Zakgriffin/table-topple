@@ -25,4 +25,7 @@ export const globalState = {
   // Same idea, independent toggle, for the plane-fit reduction (see
   // pipelineGPU/fitPlanes.ts).
   useGPUFit: false,
+  // Same idea, independent toggle, for the decode window-tally histogram
+  // (see pipelineGPU/decodeTally.ts).
+  useGPUDecode: false,
 };

@@ -61,6 +61,19 @@ export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage 
   return buffer;
 }
 
+export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 0): GPUBuffer {
+  const s = spanStart(`CPU→GPU upload (${data.byteLength}B)`);
+  const buffer = device.createBuffer({
+    size: data.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | extraUsage,
+    mappedAtCreation: true,
+  });
+  new Uint32Array(buffer.getMappedRange()).set(data);
+  buffer.unmap();
+  spanEnd(s);
+  return buffer;
+}
+
 export function createStorageBuffer(device: GPUDevice, byteLength: number, extraUsage = 0): GPUBuffer {
   return device.createBuffer({
     size: byteLength,
@@ -98,6 +111,20 @@ export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLeng
   device.queue.submit([encoder.finish()]);
   await staging.mapAsync(GPUMapMode.READ);
   const result = new Float32Array(staging.getMappedRange().slice(0));
+  staging.unmap();
+  staging.destroy();
+  spanEnd(s);
+  return result;
+}
+
+export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLength: number): Promise<Uint32Array> {
+  const s = spanStart(`GPU→CPU readback (${byteLength}B)`);
+  const staging = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(buffer, 0, staging, 0, byteLength);
+  device.queue.submit([encoder.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  const result = new Uint32Array(staging.getMappedRange().slice(0));
   staging.unmap();
   staging.destroy();
   spanEnd(s);

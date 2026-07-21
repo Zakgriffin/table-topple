@@ -3,7 +3,10 @@ import { Camera } from '../camera/model.ts';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { binarize } from '../../decode.ts';
 import { cornerDir } from '../math/geometry.ts';
+import { tallyPositionVotesGPU } from '../pipelineGPU/decodeTally.ts';
+import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { C, ORDER, R, debruijnLookup, torus } from '../scene/floor.ts';
+import { globalState } from '../state.ts';
 import { DecodeCellDebug, DecodeSampleGrid, DecodeSamplePoint, Marginals, ProjectedBins, VoteResult } from '../types.ts';
 import { getAnalysisVFovRad } from './capture.ts';
 import { computeGradientField } from './gradientField.ts';
@@ -350,12 +353,20 @@ export function buildDecodeSampleGrid(camera: Camera, gray: Float64Array, w: num
 
 // Decodes the camera's absolute world position -- see pre-Stage-A history
 // for the full derivation.
-export function runPositionDecode(camera: Camera, gray: Float64Array, w: number, h: number, vFovRad: number) {
+export async function runPositionDecode(camera: Camera, gray: Float64Array, w: number, h: number, vFovRad: number) {
+  const gridSpan = spanStart('buildDecodeSampleGrid');
   const grid = buildDecodeSampleGrid(camera, gray, w, h, vFovRad);
+  spanEnd(gridSpan);
   camera.lastDecodeGrid = grid;
   camera.lastDecodeRotated = null;
   if (!grid) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return; }
-  const winner = tallyPositionVotes(grid);
+  const tallySpan = spanStart(globalState.useGPUDecode ? 'tallyPositionVotes (GPU)' : 'tallyPositionVotes (CPU)');
+  // Same fallback pattern as the other GPU sub-pipelines: tallyPositionVotes
+  // stays the source of truth, the GPU version is verified against it.
+  const winner = globalState.useGPUDecode
+    ? (await tallyPositionVotesGPU(grid)) ?? tallyPositionVotes(grid)
+    : tallyPositionVotes(grid);
+  spanEnd(tallySpan);
   if (!winner) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return; }
 
   const { anchorRow, anchorCol } = winner;

@@ -134,10 +134,11 @@ import * as NS35 from './pipelineGPU/voteGeneration.ts';
 import * as NS36 from './pipelineGPU/positionLM.ts';
 import * as NS37 from './profiling/profiler.ts';
 import * as NS38 from './pipelineGPU/fitPlanes.ts';
+import * as NS39 from './pipelineGPU/decodeTally.ts';
 Object.assign(
   globalThis,
   NS0, NS1, NS2, NS3, NS4, NS5, NS6, NS7, NS8, NS9, NS10, NS11, NS12, NS13, NS14, NS15, NS16, NS17,
-  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38,
+  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38, NS39,
   { THREE, activeCamera, cameras, isSimulated, isPhysical, globalState, euler, canvas, readout, savedControls,
     setMode, setPanelCollapsed, renderCameraTabs, refreshCameraPanel, renderViewport, layoutPip, resize,
     renderer, floorMesh, viewerCam, worldOrbit, insideCam, renderPreviewViewport, renderProjectedViewport,

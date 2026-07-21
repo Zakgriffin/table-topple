@@ -155,7 +155,7 @@ export function runAxesReconstruction(camera: Camera) {
       spanEnd(refineSpan);
       const t3b = performance.now();
       const decodeSpan = spanStart('positionDecode');
-      runPositionDecode(camera, gray, w, h, vFovRad);
+      await runPositionDecode(camera, gray, w, h, vFovRad);
       spanEnd(decodeSpan);
 
       let lastPositionLMResult: (PositionFit & { iterations: number; initialCost: number; finalCost: number }) | null = null;

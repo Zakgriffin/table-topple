@@ -241,6 +241,7 @@ bindSlider('floorCellOutlineSubdiv', (v) => {
 }, (v) => v.toFixed(0));
 bindCheckbox('useGPUVotes', (v) => { globalState.useGPUVotes = v; });
 bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; });
+bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; });
 bindCheckbox('useGPUPositionLM', (v) => { globalState.useGPUPositionLM = v; });
 gpuVotesStatus.textContent = isWebGPUSupported()
   ? 'WebGPU is available in this browser.'

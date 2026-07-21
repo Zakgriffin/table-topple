@@ -10,6 +10,13 @@ export const DEBUG_CIRCLE_SEGMENTS = 48;
 export const AXIS_VECTOR_LENGTH = 0.7;
 
 export function updateGradientCirclesDebug(camera: Camera) {
+  // Filters a percentile band of up to the full vote set (hundreds of
+  // thousands on a real capture) and builds circle-segment geometry for
+  // each -- skip entirely when neither toggle that would actually show it
+  // is on. Callers that flip one of those toggles ON call this directly to
+  // refresh (see ui/cameraPanel.ts), same as changing the percentile/
+  // sharpen sliders already does.
+  if (!camera.settings.showTopCircles && !camera.settings.showAxisVectors) return;
   const chosen = votesInMagnitudeBand(camera.lastVotes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax);
   // vote.n lives in MATH_QUAT's fixed math frame (see PositionDecodeResult's
   // comment) -- rotate into true world space by the same anchorQuat

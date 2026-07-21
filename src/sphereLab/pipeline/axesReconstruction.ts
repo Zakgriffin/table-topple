@@ -12,7 +12,7 @@ import { globalState } from '../state.ts';
 import { PositionFit } from '../types.ts';
 import { axesReadout, captureAxesBtn } from '../ui/dom.ts';
 import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
-import { buildProjectedTexture, measurePeriodDistance, runPositionDecode, solveRecoveredCamQuat } from './decodeGrid.ts';
+import { computeProjectedBinsAndMarginals, measurePeriodDistance, paintProjectedTexture, runPositionDecode, solveRecoveredCamQuat } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refineOrientationLM } from './orientationLM.ts';
 import { computePhotometricSamples, refineOrientationAndPositionLM } from './positionLM.ts';
@@ -33,6 +33,14 @@ export function runAxesReconstruction(camera: Camera) {
   requestAnimationFrame(() => {
     try {
       const t0 = performance.now();
+      // Painting projectedPreviewTex is a real GPU texture upload -- worth
+      // skipping at every one of the intermediate buildProjectedTexture
+      // call sites below unless this camera's Projected-Cam view is what's
+      // actually on screen right now. The numeric half (bins/marginals)
+      // stays unconditional -- it feeds the spacing refinement that the
+      // always-on World view's recovered-pose overlay depends on for every
+      // camera, not just the displayed one.
+      const showProjected = isActive && globalState.mode === 'projected';
       if (isPhysical(camera) && !camera.lastRealCaptureGray) {
         if (isActive) axesReadout.textContent = 'waiting for a real capture -- take a photo on the phone page';
         return;
@@ -72,7 +80,10 @@ export function runAxesReconstruction(camera: Camera) {
       camera.lastRecoveredAxes = rowDirRecovered && colDirRecovered && orientationFit
         ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: orientationFit.Dnormal, distance: PLACEHOLDER_DISTANCE }
         : null;
-      if (camera.lastRecoveredAxes) buildProjectedTexture(camera);
+      if (camera.lastRecoveredAxes) {
+        const projResult = computeProjectedBinsAndMarginals(camera);
+        if (showProjected) paintProjectedTexture(camera, projResult);
+      }
 
       const marginals = camera.lastMarginals, bins = camera.lastProjectedBins;
       const spacing = camera.lastRecoveredAxes && marginals && bins && marginals.colPeriod !== null && marginals.rowPeriod !== null
@@ -101,7 +112,8 @@ export function runAxesReconstruction(camera: Camera) {
           }
         }
 
-        buildProjectedTexture(camera);
+        const projResult2 = computeProjectedBinsAndMarginals(camera);
+        if (showProjected) paintProjectedTexture(camera, projResult2);
       } else {
         camera.lastRecoveredAxes = null;
       }
@@ -136,7 +148,8 @@ export function runAxesReconstruction(camera: Camera) {
         const refinedNormalWorld = refinedNormal.clone().applyQuaternion(camera.lastPositionDecode.recoveredCamQuat);
         camera.lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormalWorld.x * distance;
         camera.lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormalWorld.z * distance;
-        buildProjectedTexture(camera);
+        const projResult3 = computeProjectedBinsAndMarginals(camera);
+        if (showProjected) paintProjectedTexture(camera, projResult3);
 
         const postPhase3Bins = camera.lastProjectedBins;
         if (postPhase3Bins) {
@@ -149,7 +162,8 @@ export function runAxesReconstruction(camera: Camera) {
             camera.lastRecoveredAxes.distance = (measured.distanceU + measured.distanceV) / 2;
             camera.lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormalWorld.x * camera.lastRecoveredAxes.distance;
             camera.lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormalWorld.z * camera.lastRecoveredAxes.distance;
-            buildProjectedTexture(camera);
+            const projResult4 = computeProjectedBinsAndMarginals(camera);
+            if (showProjected) paintProjectedTexture(camera, projResult4);
           }
         }
       }

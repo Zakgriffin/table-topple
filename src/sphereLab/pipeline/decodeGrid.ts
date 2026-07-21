@@ -216,13 +216,30 @@ export function castAndBucketProjectedSamples(camera: Camera, bucketW: number, b
   return { bins, sums, counts, gradCxSum, gradCySum };
 }
 
-// Rebuilds projectedPreviewData: a bird's-eye, floor-plane-rectified view of
-// whichever field view is currently in distortedPreviewData.
-export function buildProjectedTexture(camera: Camera) {
+type ProjectedSampleResult = ReturnType<typeof castAndBucketProjectedSamples>;
+
+// The numeric half of what used to be buildProjectedTexture -- bins +
+// marginals feed the spacing refinement in runAxesReconstruction regardless
+// of which mode is on screen (World view's recovered-pose overlay depends on
+// an accurate distance for every camera, not just the one being displayed),
+// so this always runs. Returns the raw result too, so a caller that also
+// wants to paint doesn't have to re-cast every ray a second time.
+export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampleResult {
   const result = camera.lastRecoveredAxes ? castAndBucketProjectedSamples(camera, camera.rtSize.w, camera.rtSize.h) : null;
-  if (!result) { camera.projectedPreviewData.fill(0); camera.projectedPreviewTex.needsUpdate = true; camera.lastProjectedBins = null; camera.lastMarginals = null; return; }
-  const { bins, sums, counts, gradCxSum, gradCySum } = result;
+  if (!result) { camera.lastProjectedBins = null; camera.lastMarginals = null; return null; }
+  const { bins, counts, gradCxSum, gradCySum } = result;
   camera.lastProjectedBins = bins;
+  camera.lastMarginals = computeProjectedMarginals(bins.w, bins.h, counts, gradCxSum, gradCySum);
+  return result;
+}
+
+// The display half -- an actual GPU texture upload (needsUpdate = true),
+// worth skipping whenever nobody's looking at this camera's Projected-Cam
+// view. Takes the already-computed result so callers that only need the
+// numeric half (see above) never pay for this at all.
+export function paintProjectedTexture(camera: Camera, result: ProjectedSampleResult) {
+  if (!result) { camera.projectedPreviewData.fill(0); camera.projectedPreviewTex.needsUpdate = true; return; }
+  const { bins, sums, counts } = result;
   for (let bi = 0; bi < bins.w * bins.h; bi++) {
     const c = counts[bi];
     const o = bi * 4;
@@ -236,7 +253,14 @@ export function buildProjectedTexture(camera: Camera) {
     }
   }
   camera.projectedPreviewTex.needsUpdate = true;
-  camera.lastMarginals = computeProjectedMarginals(bins.w, bins.h, counts, gradCxSum, gradCySum);
+}
+
+// Convenience for call sites that always want both (buildProjectedTexture's
+// old all-in-one behavior) -- currently just the throttled preview-update
+// path in main.ts's animate loop, which already only runs for the active
+// camera while Projected-Cam mode is on screen.
+export function buildProjectedTexture(camera: Camera) {
+  paintProjectedTexture(camera, computeProjectedBinsAndMarginals(camera));
 }
 
 // Re-buckets castAndBucketProjectedSamples' rays at a resolution sized to

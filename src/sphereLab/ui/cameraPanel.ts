@@ -274,8 +274,12 @@ bindSlider('gradientArrowScale', (v) => { const cam = activeCamera(); if (cam) c
 bindSlider('circleSamplePercentMin', (v) => { const cam = activeCamera(); if (cam) { cam.settings.circleSamplePercentMin = v; updateGradientCirclesDebug(cam); } }, (v) => `${v.toFixed(0)}%`);
 bindSlider('circleSamplePercentMax', (v) => { const cam = activeCamera(); if (cam) { cam.settings.circleSamplePercentMax = v; updateGradientCirclesDebug(cam); } }, (v) => `${v.toFixed(0)}%`);
 bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
-bindCheckbox('showAxisVectors', (v) => { const cam = activeCamera(); if (cam) cam.settings.showAxisVectors = v; });
-bindCheckbox('showTopCircles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showTopCircles = v; });
+// Turning either on refreshes immediately -- updateGradientCirclesDebug now
+// skips its work while both are off (see its own comment), so the geometry
+// sitting there when you flip one on could otherwise be stale until the
+// next capture.
+bindCheckbox('showAxisVectors', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showAxisVectors = v; if (v) updateGradientCirclesDebug(cam); } });
+bindCheckbox('showTopCircles', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showTopCircles = v; if (v) updateGradientCirclesDebug(cam); } });
 bindSlider('weightSharpenPower', (v) => { const cam = activeCamera(); if (cam) { cam.settings.weightSharpenPower = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
 bindCheckbox('axesAutoCapture', (v) => { const cam = activeCamera(); if (cam) cam.settings.axesAutoCapture = v; });
 bindSlider('axesCaptureInterval', (v) => { const cam = activeCamera(); if (cam) cam.settings.axesCaptureIntervalMs = v; }, (v) => `${v.toFixed(0)}`);

@@ -89,5 +89,14 @@ export interface PhysicalCamera extends CameraBase {
   // KICK any physical camera (see renderCameraTabs) instead of needing to
   // ask whether there's really a connection behind it to kick.
   connectionId: string;
+  // Purely a reflection of whatever mode.html's mode toggle last reported
+  // (see devBridge/client.ts's captureMode handler) -- Sphere Lab never
+  // sets this itself, only displays it (see ui/cameraPanel.ts).
+  captureMode: 'single' | 'video';
+  // Mirrors axesCapturing, but tracks what was last actually SENT to the
+  // phone as a captureReady signal (see main.ts's animate loop), so that
+  // signal only goes out on a genuine true/false transition instead of
+  // every frame.
+  lastReportedReady: boolean;
 }
 export type Camera = SimulatedCamera | PhysicalCamera;

@@ -30,7 +30,24 @@
     backdrop-filter: blur(4px); transition: background 0.15s ease;
   }
   #shutter:active { background: rgba(255,255,255,0.45); }
+  /* Sphere Lab is still crunching the last frame -- shown regardless of
+     photo/video mode. #shutter.sent (the brief post-send flash) is declared
+     after this on purpose so it wins for its 300ms even if a capture
+     happens to land right as we optimistically go not-ready. */
+  #shutter.notReady { background: rgba(230,200,20,0.75); border-color: #fd0; }
   #shutter.sent { background: rgba(60,220,110,0.75); border-color: #6f6; }
+  #modeToggle {
+    position: fixed; bottom: max(196px, calc(env(safe-area-inset-bottom) + 184px)); left: 50%;
+    transform: translateX(-50%); z-index: 10;
+    display: flex; gap: 4px;
+    background: rgba(255,255,255,0.15); backdrop-filter: blur(4px);
+    border-radius: 999px; padding: 4px;
+  }
+  #modeToggle button {
+    border: none; background: transparent; color: #ccc;
+    font-family: monospace; font-size: 12px; padding: 6px 16px; border-radius: 999px;
+  }
+  #modeToggle button.active { background: rgba(255,255,255,0.25); color: #fff; }
   #switchCam {
     position: fixed; bottom: max(52px, calc(env(safe-area-inset-bottom) + 40px)); right: 24px; z-index: 10;
     width: 52px; height: 52px; border-radius: 50%; border: none;
@@ -59,6 +76,10 @@
 <canvas id="captureCanvas" style="display:none;"></canvas>
 <div id="status"><span id="camStatus">starting camera…</span><span id="relayStatus">relay: connecting…</span></div>
 <div id="zoomBox"><span>zoom</span><input type="range" id="zoom" min="0" max="1" step="0.01" value="0" disabled></div>
+<div id="modeToggle">
+  <button id="modeSingleBtn" class="active" data-mode="single">photo</button>
+  <button id="modeVideoBtn" data-mode="video">video</button>
+</div>
 <button id="switchCam" title="switch camera">&#8635;</button>
 <button id="shutter" title="capture and send to Sphere Lab"></button>
 <script type="module" src="/src/mobileCapture.ts"></script>

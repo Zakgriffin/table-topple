@@ -225,7 +225,7 @@ export function createPhysicalCamera(color: THREE.Color, connectionId: string): 
     id: `phys-${nextCameraSerial}`, name: `Physical ${nextCameraSerial}`, color,
     type: 'physical', settings,
     lastRealCaptureGray: null, lastRealCaptureW: 0, lastRealCaptureH: 0,
-    connectionId,
+    connectionId, captureMode: 'single', lastReportedReady: true,
   };
   bumpCameraSerial();
   return camera;

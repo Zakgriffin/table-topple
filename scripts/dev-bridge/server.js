@@ -121,6 +121,28 @@ wss.on('connection', (ws) => {
       }
       return;
     }
+
+    // Capture source -> broadcast, same fan-out as realCapture -- announces
+    // a video/single toggle flip on the phone so every open Sphere Lab tab
+    // can reflect it (and auto-creates a tab the same way realCapture does,
+    // so toggling to video before ever taking a photo still shows up).
+    if (msg.type === 'captureMode' && msg.mode) {
+      const captureId = captureSockets.get(ws);
+      for (const bs of browserSockets) {
+        if (bs.readyState === bs.OPEN) send(bs, { ...msg, captureId });
+      }
+      return;
+    }
+
+    // Browser -> a specific phone: is Sphere Lab ready to receive/process
+    // another frame from it. Routed the same way kickCapture is (find the
+    // one capture socket matching captureId), just sent instead of closed.
+    if (msg.type === 'captureReady' && msg.captureId) {
+      for (const [capWs, id] of captureSockets) {
+        if (id === msg.captureId) { send(capWs, { type: 'captureReady', ready: msg.ready }); break; }
+      }
+      return;
+    }
   });
 
   ws.on('close', () => {

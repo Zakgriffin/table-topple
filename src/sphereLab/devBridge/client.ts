@@ -1,9 +1,31 @@
+import { PhysicalCamera } from '../camera/model.ts';
 import { createPhysicalCamera } from '../camera/factory.ts';
 import { findPhysicalCameraByConnection, removeCameraTab } from '../camera/lifecycle.ts';
 import { activeCamera, cameras, isPhysical, nextCameraColor } from '../camera/store.ts';
 import { ingestRealCapture } from '../pipeline/capture.ts';
 import { renderer } from '../scene/renderer.ts';
-import { renderCameraTabs } from '../ui/cameraPanel.ts';
+import { renderCameraTabs, refreshCameraPanel } from '../ui/cameraPanel.ts';
+
+// Shared by both the realCapture and captureMode handlers below -- either
+// one can be the first message ever received from a given phone (toggling
+// to video before ever taking a photo is a real path now), so both need to
+// be able to auto-create the tab. Deliberately NOT made active either way,
+// same reasoning as before: a phone doing something in the background
+// shouldn't yank focus from whatever camera the user is currently looking
+// at.
+function findOrCreatePhysicalCamera(connectionId: string | undefined): PhysicalCamera | undefined {
+  let cam = connectionId ? findPhysicalCameraByConnection(connectionId) : undefined;
+  if (!cam && connectionId) {
+    cam = createPhysicalCamera(nextCameraColor(), connectionId);
+    cameras.set(cam.id, cam);
+    renderCameraTabs();
+  }
+  if (!cam) {
+    const active = activeCamera();
+    if (active && isPhysical(active)) cam = active;
+  }
+  return cam;
+}
 
 // Set by initDevBridge once it has a live socket; module-level (rather than
 // staying a local var inside that IIFE, like before Stage C) specifically so
@@ -58,28 +80,19 @@ export function sendToDevBridge(obj: unknown) {
       } else if (msg.type === 'realCapture' && msg.dataUrl) {
         // Broadcast from mobile-capture.html via the dev-bridge relay,
         // tagged with the sending phone's own connectionId (server.js
-        // assigns one per 'capture' connection). An unrecognized
-        // connectionId auto-creates its own new physical camera/tab --
-        // deliberately NOT made active, so a phone connecting in the
-        // background doesn't yank focus away from whatever camera the user
-        // is currently looking at (contrast addSimulatedCamera, where
-        // becoming active IS wanted, since that's a direct user action).
-        // A missing connectionId (a stale caller, or a dev-bridge server
-        // predating this protocol) falls back to whatever the active camera
-        // already is, if it happens to be physical -- purely defensive,
-        // shouldn't be reachable against a current server.js.
-        const connectionId: string | undefined = msg.captureId;
-        let cam = connectionId ? findPhysicalCameraByConnection(connectionId) : undefined;
-        if (!cam && connectionId) {
-          cam = createPhysicalCamera(nextCameraColor(), connectionId);
-          cameras.set(cam.id, cam);
-          renderCameraTabs();
-        }
-        if (!cam) {
-          const active = activeCamera();
-          if (active && isPhysical(active)) cam = active;
-        }
+        // assigns one per 'capture' connection). See findOrCreatePhysicalCamera
+        // above for the auto-create-but-don't-activate reasoning.
+        const cam = findOrCreatePhysicalCamera(msg.captureId);
         if (cam) ingestRealCapture(cam, msg.dataUrl).catch((e) => console.error('[realCapture] ingest failed:', e));
+      } else if (msg.type === 'captureMode' && msg.mode) {
+        // The phone's video/single toggle flipped -- purely a UI reflection
+        // (see PhysicalCamera.captureMode's own comment), no pipeline effect
+        // by itself.
+        const cam = findOrCreatePhysicalCamera(msg.captureId);
+        if (cam) {
+          cam.captureMode = msg.mode === 'video' ? 'video' : 'single';
+          if (cam === activeCamera()) refreshCameraPanel();
+        }
       } else if (msg.type === 'captureDisconnected' && msg.captureId) {
         // The phone behind some physical camera(s) disconnected -- naturally
         // or via this tab's own kick button (see renderCameraTabs). Removes

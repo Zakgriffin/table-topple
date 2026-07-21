@@ -5,6 +5,13 @@
 // and sphereLab.ts's ingestRealCapture. Doesn't run any of the actual
 // analysis pipeline itself; this page's only job is getting a real photo
 // off the phone and onto the laptop.
+//
+// Two capture modes: single (tap the shutter each time, as before) and
+// video (streams frames automatically). Either way, Sphere Lab's own
+// reconstruction pass is slow enough that it needs to gate how fast frames
+// arrive -- see the "Capture mode + readiness" section below for the
+// signaling that makes that safe instead of flooding the relay with frames
+// Sphere Lab hasn't finished the last one yet.
 
 const video = document.getElementById('v') as HTMLVideoElement;
 const captureCanvas = document.getElementById('captureCanvas') as HTMLCanvasElement;
@@ -14,6 +21,8 @@ const relayStatus = document.getElementById('relayStatus')!;
 const zoomSlider = document.getElementById('zoom') as HTMLInputElement;
 const switchCamBtn = document.getElementById('switchCam') as HTMLButtonElement;
 const shutterBtn = document.getElementById('shutter') as HTMLButtonElement;
+const modeSingleBtn = document.getElementById('modeSingleBtn') as HTMLButtonElement;
+const modeVideoBtn = document.getElementById('modeVideoBtn') as HTMLButtonElement;
 
 // ── Camera + zoom (ported from src/main.ts:33-99, same reasoning) ─────────
 
@@ -102,6 +111,39 @@ function scheduleReconnect() {
   reconnectTimer = window.setTimeout(connectRelay, 2000);
 }
 
+// ── Capture mode + readiness ────────────────────────────────────────────
+//
+// Sphere Lab's reconstruction pass is slow enough that it needs to tell us
+// when it's actually done with the last frame (see main.ts's animate loop,
+// which watches axesCapturing and pushes captureReady over this same
+// socket) -- both photo and video mode respect it, not just video, per an
+// explicit ask: the shutter turns yellow and single-mode taps become a
+// no-op whenever Sphere Lab isn't ready, exactly like video mode already
+// has to gate its automatic sends.
+let captureMode: 'single' | 'video' = 'single';
+let sphereLabReady = true;
+let readyTimeoutTimer: number | undefined;
+
+function setCaptureMode(mode: 'single' | 'video') {
+  captureMode = mode;
+  modeSingleBtn.classList.toggle('active', mode === 'single');
+  modeVideoBtn.classList.toggle('active', mode === 'video');
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'captureMode', mode }));
+}
+modeSingleBtn.addEventListener('click', () => setCaptureMode('single'));
+modeVideoBtn.addEventListener('click', () => setCaptureMode('video'));
+
+// If nothing ever answers (no Sphere Lab tab open, or one that closed mid-
+// crunch) don't stay stuck yellow/stalled forever -- fall back to assuming
+// ready after a while. A real captureReady message always overrides this.
+const READY_TIMEOUT_MS = 8000;
+function setReady(ready: boolean) {
+  sphereLabReady = ready;
+  shutterBtn.classList.toggle('notReady', !ready);
+  clearTimeout(readyTimeoutTimer);
+  if (!ready) readyTimeoutTimer = window.setTimeout(() => setReady(true), READY_TIMEOUT_MS);
+}
+
 function connectRelay() {
   const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
   try { ws = new WebSocket(`${proto}//${location.host}/dev-bridge`); }
@@ -109,14 +151,25 @@ function connectRelay() {
 
   ws.addEventListener('open', () => {
     ws!.send(JSON.stringify({ role: 'capture' }));
+    // A reconnect gets a brand-new captureId server-side (see server.js),
+    // which Sphere Lab will treat as a fresh phone -- re-announce whatever
+    // mode was already selected, and drop any stale not-ready state from
+    // before the drop, since it belonged to the OLD captureId.
+    ws!.send(JSON.stringify({ type: 'captureMode', mode: captureMode }));
+    setReady(true);
     setRelayStatus('connected', false);
   });
   ws.addEventListener('close', scheduleReconnect);
   ws.addEventListener('error', () => {});
+  ws.addEventListener('message', (ev) => {
+    let msg: any;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+    if (msg.type === 'captureReady') setReady(!!msg.ready);
+  });
 }
 connectRelay();
 
-// ── Shutter ─────────────────────────────────────────────────────────────
+// ── Shutter / video streaming ────────────────────────────────────────────
 //
 // Capped to MAX_DIM on the long edge before encoding -- Sphere Lab
 // resamples whatever arrives down to its own analysis resolution anyway
@@ -124,7 +177,11 @@ connectRelay();
 // (often 3000-4000px) would just be a slower base64 transfer for no benefit.
 const MAX_DIM = 1600;
 
-shutterBtn.addEventListener('click', () => {
+// Grabs the current video frame and sends it, if there's anywhere to send
+// it to. Shared by the single-tap shutter and the video-mode loop below --
+// callers are responsible for checking sphereLabReady first (video mode
+// checks every tick; the shutter click handler checks once per tap).
+function captureAndSendFrame() {
   if (!currentStream || video.videoWidth === 0) return;
   const vw = video.videoWidth, vh = video.videoHeight;
   const scale = Math.min(1, MAX_DIM / Math.max(vw, vh));
@@ -148,7 +205,28 @@ shutterBtn.addEventListener('click', () => {
     ws.send(JSON.stringify({ type: 'realCapture', dataUrl }));
     shutterBtn.classList.add('sent');
     setTimeout(() => shutterBtn.classList.remove('sent'), 300);
+    // Optimistic -- Sphere Lab will confirm the real state via captureReady
+    // once it's actually looked at this frame; this just stops us (or the
+    // video loop) from firing off a second one in the meantime.
+    setReady(false);
   } else {
     setRelayStatus('not connected -- capture NOT sent', true);
   }
+}
+
+shutterBtn.addEventListener('click', () => {
+  // In video mode the button is a status indicator, not a trigger -- frames
+  // already send themselves via the loop below.
+  if (captureMode !== 'single' || !sphereLabReady) return;
+  captureAndSendFrame();
 });
+
+// Ticks every frame; only actually sends in video mode, and only once
+// Sphere Lab has said it's ready for another one -- that's what turns a
+// slow reconstruction pass into a natural frame-rate cap instead of
+// flooding the relay with frames nothing's looked at yet.
+function videoLoop() {
+  requestAnimationFrame(videoLoop);
+  if (captureMode === 'video' && sphereLabReady) captureAndSendFrame();
+}
+videoLoop();

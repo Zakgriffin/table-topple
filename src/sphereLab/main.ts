@@ -86,7 +86,7 @@ import { updateGizmo, updateSphereOverlays } from './overlays/sphereOverlays.ts'
 import { updateRecoveredCamGizmo } from './overlays/recoveredOverlays.ts';
 import { drawMarginalLines, drawSampleLattice, MARGINAL_THICKNESS } from './overlays/projectedCamOverlays.ts';
 import { computeThroughRect } from './overlays/hoverDebugOverlays.ts';
-import './devBridge/client.ts'; // side effect: opens the dev-bridge websocket
+import { sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
 
 // Every module's exports, purely so devBridge/client.ts's `eval(msg.code)`
 // can still see the whole app as one flat scope -- back when this was a
@@ -169,6 +169,18 @@ function animate() {
     }
     updateRecoveredCamGizmo(camera);
     camera.recoveredFloorOverlay.visible = globalState.mode === 'world' && camera.settings.showRecoveredFloor && !!camera.lastPositionDecode;
+
+    // Tell the phone behind a physical camera whether it's safe to send
+    // another frame -- axesCapturing is exactly "still crunching the last
+    // one" (see runAxesReconstruction). Only fires on an actual true/false
+    // transition, not every frame, via the lastReportedReady comparison.
+    if (isPhysical(camera)) {
+      const ready = !camera.axesCapturing;
+      if (ready !== camera.lastReportedReady) {
+        camera.lastReportedReady = ready;
+        sendToDevBridge({ type: 'captureReady', captureId: camera.connectionId, ready });
+      }
+    }
   }
   floorMesh.visible = globalState.showFloor;
 

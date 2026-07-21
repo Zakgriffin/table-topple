@@ -12,7 +12,7 @@ import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, physCameraDetailFields, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTrueContamBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTrueContamBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -132,6 +132,7 @@ export function refreshCameraPanel() {
     setBool('aspectLocked', cam.settings.aspectLocked);
   } else {
     setNum('realCaptureFovDeg', cam.settings.horizFovDeg);
+    physCaptureModeReadout.textContent = cam.captureMode;
   }
 
   setBool('showSphere', cam.settings.showSphere); setBool('showCircles', cam.settings.showCircles);

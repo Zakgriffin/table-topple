@@ -91,6 +91,7 @@ export const simCameraDetailFields = document.getElementById('simCameraDetailFie
 export const physCameraDetailFields = document.getElementById('physCameraDetailFields') as HTMLDivElement;
 export const simOnlyFieldViews = document.getElementById('simOnlyFieldViews') as HTMLDivElement;
 export const fieldViewRawLabel = document.getElementById('fieldViewRawLabel') as HTMLSpanElement;
+export const physCaptureModeReadout = document.getElementById('physCaptureModeReadout') as HTMLSpanElement;
 
 
 export const cameraTabsEl = document.getElementById('cameraTabs') as HTMLDivElement;

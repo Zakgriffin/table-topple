@@ -1,4 +1,6 @@
 import * as THREE from 'three';
+import { CompositeLineDisplay, SegmentMerge } from '../pipeline/bucketFillJoin.ts';
+import { BucketFillSegment } from '../pipeline/bucketFillSegments.ts';
 import { DecodeCellDebug, DecodeSampleGrid, GradientField, JacobianField, Marginals, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
 import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
 
@@ -37,11 +39,19 @@ export interface CameraBase {
   lastDisplayedVectorField: GradientField | null;
   lastEffectiveField: GradientField | null;
   lastJacobianField: JacobianField | null;
+  lastBucketFillSegments: BucketFillSegment[] | null;
+  lastBucketFillColors: [number, number, number][] | null;
+  lastBucketFillMerges: SegmentMerge[] | null;
+  lastBucketFillComposite: CompositeLineDisplay[] | null;
 
   distortedPreviewData: Uint8Array; distortedPreviewTex: THREE.DataTexture;
   projectedPreviewData: Uint8Array; projectedPreviewTex: THREE.DataTexture;
   trueContamData: Uint8Array; trueContamTex: THREE.DataTexture;
   reconContamData: Uint8Array; reconContamTex: THREE.DataTexture;
+  topGradientData: Uint8Array; topGradientTex: THREE.DataTexture;
+  tangentWalkPathData: Uint8Array; tangentWalkPathTex: THREE.DataTexture;
+  bucketFillData: Uint8Array; bucketFillTex: THREE.DataTexture;
+  bucketFillJoinData: Uint8Array; bucketFillJoinTex: THREE.DataTexture;
 
   // -- THREE objects: recovered side (both camera types have these) --
   recoveredCamGizmo: THREE.Mesh; recoveredCamAxes: THREE.AxesHelper;

@@ -21,6 +21,10 @@ export const previewQuad = makeQuadRenderer({});
 export const projectedQuad = makeQuadRenderer({});
 export const trueContamQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
 export const reconContamQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
+export const topGradientQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
+export const tangentWalkPathQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
+export const bucketFillQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
+export const bucketFillJoinQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
 export function renderQuad(q: { mat: THREE.MeshBasicMaterial; scene: THREE.Scene }, tex: THREE.Texture, x: number, y: number, w: number, h: number) {
   q.mat.map = tex;
   renderer.setViewport(x, y, w, h);
@@ -32,3 +36,7 @@ export function renderPreviewViewport(camera: Camera, x: number, y: number, w: n
 export function renderProjectedViewport(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(projectedQuad, camera.projectedPreviewTex, x, y, w, h); }
 export function renderTrueContamOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(trueContamQuad, camera.trueContamTex, x, y, w, h); }
 export function renderReconContamOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(reconContamQuad, camera.reconContamTex, x, y, w, h); }
+export function renderTopGradientOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(topGradientQuad, camera.topGradientTex, x, y, w, h); }
+export function renderTangentWalkPathOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(tangentWalkPathQuad, camera.tangentWalkPathTex, x, y, w, h); }
+export function renderBucketFillOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(bucketFillQuad, camera.bucketFillTex, x, y, w, h); }
+export function renderBucketFillJoinOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(bucketFillJoinQuad, camera.bucketFillJoinTex, x, y, w, h); }

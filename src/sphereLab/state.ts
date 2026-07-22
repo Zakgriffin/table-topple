@@ -11,6 +11,12 @@ export const globalState = {
   mode: 'world' as Mode,
   showFloor: true,
   floorCellOutlineSubdiv: 0,
+  // The De Bruijn floor pattern's board size (cells per side) -- mirrors
+  // debruijn.ts's ORDER5_CANDIDATE.cropSize, which this now overrides at
+  // runtime via scene/floor.ts's rebuildFloorPattern (see the "De Bruijn
+  // board size" slider in ui/cameraPanel.ts). 256 matches that candidate's
+  // original fixed cropSize, i.e. today's actual default board.
+  boardSize: 256,
   // Manual dev-time switch for the vote-generation pipeline (see
   // pipelineGPU/voteGeneration.ts) -- not auto-detected/fallback yet, per an
   // explicit choice to keep that decision simple while the GPU path is

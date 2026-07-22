@@ -33,7 +33,17 @@ function nextPowerOfTwo(n: number): number {
 // torus-brightness buffer cache. Load factor 0.5 (table sized to 2x entry
 // count, rounded up to a power of two) keeps linear-probe chains short.
 interface HashTable { keysBuf: GPUBuffer; valuesBuf: GPUBuffer; size: number }
-const hashTableCache = new WeakMap<GPUDevice, HashTable>();
+let hashTableCache = new WeakMap<GPUDevice, HashTable>();
+// Call whenever debruijnLookup actually changes (currently: the "De Bruijn
+// board size" global slider, see ui/cameraPanel.ts) -- the assumption this
+// cache was built on (comment above) no longer holds once that's possible
+// at runtime. Existing GPUBuffers held by any cached table are intentionally
+// left to GC, not explicitly destroy()'d -- they're tiny and destroying a
+// buffer that a still-in-flight GPU command might reference is worse than
+// leaking it briefly.
+export function invalidateHashTableCache() {
+  hashTableCache = new WeakMap<GPUDevice, HashTable>();
+}
 function getHashTable(device: GPUDevice): HashTable {
   let table = hashTableCache.get(device);
   if (table) return table;

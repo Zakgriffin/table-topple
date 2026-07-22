@@ -48,8 +48,23 @@ export function writeCirclePoints(line: THREE.Line, normal: THREE.Vector3, radiu
 
 // Row/col great-circle family "k" values, shared by every camera's own
 // circle-pool meshes -- purely derived from the (global, shared) pattern
-// extent, not camera state.
+// extent, not camera state. Mutated in place (never reassigned) so every
+// import of the array binding keeps seeing the same live array; per-camera
+// circle pools (camera/factory.ts) are sized off rowLineKs.length/
+// colLineKs.length at CAMERA-creation time only, so a board-size change
+// that shrinks these below what an already-existing camera's pool was
+// built for just leaves that camera's extra pool entries showing whatever
+// they last displayed (cosmetic only, see overlays/sphereOverlays.ts's
+// updateFamily -- it only ever writes pool[0..ks.length-1]) -- not expected
+// to matter in practice, since VIS_HALF_EXTENT caps both arrays' length the
+// same way for any board size roughly >= 2*VIS_HALF_EXTENT/GRID_STEP cells,
+// comfortably below the board-size slider's whole useful range.
 export const rowLineKs: number[] = [];
-for (let k = -Math.min(VIS_HALF_EXTENT, HALF_R); k <= Math.min(VIS_HALF_EXTENT, HALF_R); k += GRID_STEP) rowLineKs.push(k);
 export const colLineKs: number[] = [];
-for (let k = -Math.min(VIS_HALF_EXTENT, HALF_C); k <= Math.min(VIS_HALF_EXTENT, HALF_C); k += GRID_STEP) colLineKs.push(k);
+export function rebuildGridLineKs() {
+  rowLineKs.length = 0;
+  for (let k = -Math.min(VIS_HALF_EXTENT, HALF_R); k <= Math.min(VIS_HALF_EXTENT, HALF_R); k += GRID_STEP) rowLineKs.push(k);
+  colLineKs.length = 0;
+  for (let k = -Math.min(VIS_HALF_EXTENT, HALF_C); k <= Math.min(VIS_HALF_EXTENT, HALF_C); k += GRID_STEP) colLineKs.push(k);
+}
+rebuildGridLineKs();

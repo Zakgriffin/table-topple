@@ -1,4 +1,25 @@
+import { savedControls } from '../ui/dom.ts';
 import { FieldView } from '../types.ts';
+
+// bindSlider/bindCheckbox (ui/dom.ts) already WRITE every control's value to
+// localStorage on change, keyed by the DOM element's own id -- but per-
+// camera settings are otherwise pure hardcoded defaults below, so nothing
+// ever reads that back in and a fresh camera (including after a reload,
+// since cameras themselves aren't persisted -- see main.ts's header) always
+// started from scratch regardless of what was saved. These two helpers read
+// a saved value back in, by the SAME id bindSlider/bindCheckbox persist
+// under, falling back to the literal default when nothing's been saved yet
+// (first-ever load) or the value doesn't parse.
+function savedBool(id: string, fallback: boolean): boolean {
+  const v = savedControls[id];
+  return v === undefined ? fallback : v === '1';
+}
+function savedNum(id: string, fallback: number): number {
+  const v = savedControls[id];
+  if (v === undefined) return fallback;
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : fallback;
+}
 
 // ── Per-camera settings ──────────────────────────────────────────────────
 //
@@ -11,6 +32,11 @@ export interface CameraSettingsCommon {
   showSphere: boolean; showCircles: boolean; showPoles: boolean; showFrustum: boolean; showPatch: boolean;
   showGizmoBody: boolean; showRecoveredFloor: boolean; showSampleLattice: boolean;
   showTrueContamination: boolean; showReconstructedContamination: boolean; hideField: boolean;
+  showTopGradient: boolean;
+  showBucketFillSegments: boolean; bucketFillToleranceDeg: number; bucketFillMagnitudeThreshold: number; bucketFillMinLengthPx: number;
+  showBucketFillMarkers: boolean;
+  showBucketFillJoin: boolean; bucketFillJoinSteps: number; bucketFillMergeMinSimilarity: number;
+  showBucketFillComposite: boolean;
   showGradientArrow: boolean; showGradientArrowPerpendicular: boolean; gradientArrowScale: number;
   showTangentWalkPath: boolean;
   simGradRadius: number; coherenceRadius: number;
@@ -21,6 +47,7 @@ export interface CameraSettingsCommon {
   showAxisVectors: boolean;
   showTopCircles: boolean;
   weightSharpenPower: number;
+  useSegmentVotes: boolean;
   orientationLM: boolean;
   positionLM: boolean;
   fieldView: FieldView;
@@ -52,6 +79,16 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
   return {
     showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, showSampleLattice: false,
     showTrueContamination: false, showReconstructedContamination: false, hideField: false,
+    showTopGradient: false,
+    showBucketFillSegments: savedBool('toggleBucketFill', false),
+    bucketFillToleranceDeg: savedNum('bucketFillToleranceDeg', 22.5),
+    bucketFillMagnitudeThreshold: savedNum('bucketFillMagnitudeThreshold', 0),
+    bucketFillMinLengthPx: savedNum('bucketFillMinLengthPx', 3),
+    showBucketFillMarkers: savedBool('toggleBucketFillMarkers', true),
+    showBucketFillJoin: savedBool('toggleBucketFillJoin', false),
+    bucketFillJoinSteps: savedNum('bucketFillJoinSteps', 0),
+    bucketFillMergeMinSimilarity: savedNum('bucketFillMergeMinSimilarity', 0.9),
+    showBucketFillComposite: savedBool('toggleBucketFillComposite', false),
     showGradientArrow: false, showGradientArrowPerpendicular: false, gradientArrowScale: 10,
     showTangentWalkPath: false,
     simGradRadius: 1, coherenceRadius: 1,
@@ -64,6 +101,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showAxisVectors: false,
     showTopCircles: true,
     weightSharpenPower: 4,
+    useSegmentVotes: savedBool('useSegmentVotes', false),
     orientationLM: false,
     positionLM: false,
     fieldView: 'effective',

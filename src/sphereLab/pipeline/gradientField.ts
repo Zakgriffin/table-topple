@@ -65,6 +65,24 @@ export function computeEffectiveGradientField(field: GradientField, agreement: F
   return { fx: efx, fy: efy, w, h, r };
 }
 
+// Triangular fold of a grayscale buffer (0..maxVal, see toGrayscale/
+// fillGrayscalePreview): pixels in the lower half keep their exact
+// brightness, pixels in the upper half mirror back down toward 0 at maxVal
+// (slope -1 past the midpoint) -- 0 and maxVal both fold to 0, maxVal/2
+// stays at maxVal/2. Applied to whichever grayscale is about to feed the
+// gradient pipeline (see paintFieldViewFromGray's callers), so it's the same
+// source both camera types already use for that pipeline, not a distortion
+// stage of its own.
+export function computeTriangleFold(gray: Float64Array, maxVal = 255): Float64Array {
+  const half = maxVal / 2;
+  const out = new Float64Array(gray.length);
+  for (let i = 0; i < gray.length; i++) {
+    const v = gray[i];
+    out[i] = v <= half ? v : maxVal - v;
+  }
+  return out;
+}
+
 // ── Display: colorizes a value field, only for whichever one is on screen ─
 
 export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array) {

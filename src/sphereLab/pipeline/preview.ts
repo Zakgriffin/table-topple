@@ -3,7 +3,7 @@ import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, separableBoxBlur } from './distortion.ts';
-import { computeEffectiveGradientField, computeGradient2x2Field, computeGradientAgreementField, computeGradientField, fillGrayscalePreview, paintScalarFieldAsGray, paintVectorFieldAsColor } from './gradientField.ts';
+import { computeEffectiveGradientField, computeGradient2x2Field, computeGradientAgreementField, computeGradientField, computeTriangleFold, fillGrayscalePreview, paintScalarFieldAsGray, paintVectorFieldAsColor } from './gradientField.ts';
 import { computeLocalJacobianField, paintJacobianFieldAsColor } from './localJacobian.ts';
 import { computeWalkedGradientField } from './tangentWalk.ts';
 
@@ -13,7 +13,11 @@ import { computeWalkedGradientField } from './tangentWalk.ts';
 export function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const settings = camera.settings;
-  if (settings.fieldView === 'gradient') {
+  if (settings.fieldView === 'triangleFold') {
+    const folded = computeTriangleFold(gray);
+    fillGrayscalePreview(folded, camera.distortedPreviewData);
+    camera.distortedPreviewTex.needsUpdate = true;
+  } else if (settings.fieldView === 'gradient') {
     const field = computeGradientField(gray, w, h, Math.round(settings.simGradRadius));
     camera.lastDisplayedVectorField = field;
     paintVectorFieldAsColor(field, camera.distortedPreviewData);

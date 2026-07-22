@@ -209,12 +209,28 @@ export const ORDER5_CANDIDATE: TorusCandidate = {
   r0: 17719, c0: 1435, cropSize: 256,
 };
 
+// The full (un-cropped) sequence/torus depends only on (order, taps) -- NOT
+// on r0/c0/cropSize -- but deriving it is the expensive part: tryTaps walks
+// the full 2^N - 1 states (33.5M for order 5) and buildTorus fills a
+// same-sized array. Cache it by (order, taps) so a caller that re-crops the
+// same candidate repeatedly (e.g. sphere-lab.html's board-size slider, which
+// calls this on every 'input' tick while dragging) only pays for that O(1)
+// lookup plus the actual crop, which is O(cropSize^2) -- not the full O(2^N)
+// rebuild every time.
+let fullTorusCache: { key: string; fullR: number; fullC: number; fullTorus: Uint8Array[] } | null = null;
 export function buildTorusFromCandidate(order: number, { taps, r0, c0, cropSize }: TorusCandidate): DebruijnTorus {
   const N = order * order;
-  const seq = tryTaps(taps, N);
-  if (!seq) throw new Error(`Candidate taps ${JSON.stringify(taps)} are not a valid maximal-length degree-${N} LFSR.`);
-  const { R: fullR, C: fullC } = bestCoprimeSplit(2 ** N - 1);
-  const fullTorus = buildTorus(seq, fullR, fullC);
+  const key = `${order}:${taps.join(',')}`;
+  let fullR: number, fullC: number, fullTorus: Uint8Array[];
+  if (fullTorusCache && fullTorusCache.key === key) {
+    ({ fullR, fullC, fullTorus } = fullTorusCache);
+  } else {
+    const seq = tryTaps(taps, N);
+    if (!seq) throw new Error(`Candidate taps ${JSON.stringify(taps)} are not a valid maximal-length degree-${N} LFSR.`);
+    ({ R: fullR, C: fullC } = bestCoprimeSplit(2 ** N - 1));
+    fullTorus = buildTorus(seq, fullR, fullC);
+    fullTorusCache = { key, fullR, fullC, fullTorus };
+  }
   const torus = Array.from({ length: cropSize }, (_, i) =>
     Uint8Array.from({ length: cropSize }, (_, j) => fullTorus[(r0 + i) % fullR][(c0 + j) % fullC]));
   return { order, N, R: cropSize, C: cropSize, taps, torus };

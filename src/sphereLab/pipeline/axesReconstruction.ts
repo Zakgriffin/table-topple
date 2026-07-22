@@ -16,7 +16,7 @@ import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, 
 import { flipRowsF64 } from './distortion.ts';
 import { refineOrientationLM } from './orientationLM.ts';
 import { computePhotometricSamples, refineOrientationAndPositionLM } from './positionLM.ts';
-import { computeWorldVotes, fitPairOfPlanes, votesInMagnitudeBand } from './votes.ts';
+import { computeSegmentVotes, computeWorldVotes, fitPairOfPlanes, votesInMagnitudeBand } from './votes.ts';
 import { computeWorldVotesGPU } from '../pipelineGPU/voteGeneration.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { votesInMagnitudeBandGPU } from '../pipelineGPU/voteBandSelect.ts';
@@ -92,11 +92,21 @@ export function runAxesReconstruction(camera: Camera) {
       // unavailable, or the device request failed) -- see computeWorldVotesGPU's
       // own comment. computeWorldVotes stays the source of truth either way;
       // the GPU version is verified against it, not the other way around.
-      const votesSpan = spanStart(globalState.useGPUVotes ? 'votes (GPU)' : 'votes (CPU)');
-      const votes = globalState.useGPUVotes
-        ? (await computeWorldVotesGPU(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect))
-          ?? computeWorldVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect)
-        : computeWorldVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect);
+      //
+      // useSegmentVotes is a separate, CPU-only, experimental swap of the
+      // vote SOURCE itself (see computeSegmentVotes's own comment) -- one
+      // vote per bucket-fill line segment instead of one per pixel. It
+      // bypasses the GPU vote path entirely (this is a comparison/accuracy
+      // experiment, not a perf-sensitive path) but still hands the same
+      // Vote[] shape to everything below, so band-select/fit/LM/decode/
+      // projected-cam all keep working completely unmodified.
+      const votesSpan = spanStart(camera.settings.useSegmentVotes ? 'votes (segments)' : globalState.useGPUVotes ? 'votes (GPU)' : 'votes (CPU)');
+      const votes = camera.settings.useSegmentVotes
+        ? computeSegmentVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect)
+        : globalState.useGPUVotes
+          ? (await computeWorldVotesGPU(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect))
+            ?? computeWorldVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect)
+          : computeWorldVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect);
       spanEnd(votesSpan);
       camera.lastVotes = votes;
       updateGradientCirclesDebug(camera);

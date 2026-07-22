@@ -19,7 +19,13 @@ function getPipeline(device: GPUDevice): GPUComputePipeline {
 // The torus brightness pattern never changes during the app's lifetime --
 // upload once per device and reuse across every call, same reasoning as the
 // pipeline cache above.
-const torusBufCache = new WeakMap<GPUDevice, GPUBuffer>();
+let torusBufCache = new WeakMap<GPUDevice, GPUBuffer>();
+// Call whenever the torus pattern actually changes (currently: the "De
+// Bruijn board size" global slider, see ui/cameraPanel.ts) -- same reasoning
+// as decodeTally.ts's invalidateHashTableCache.
+export function invalidateTorusBufferCache() {
+  torusBufCache = new WeakMap<GPUDevice, GPUBuffer>();
+}
 function getTorusBuffer(device: GPUDevice, torus: Uint8Array[], R: number, C: number): GPUBuffer {
   let buf = torusBufCache.get(device);
   if (!buf) {

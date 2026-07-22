@@ -2,7 +2,11 @@ import { addSimulatedCamera, removeCameraTab, selectGlobalTab } from '../camera/
 import { PhysicalCamera } from '../camera/model.ts';
 import { activeCamera, activeCameraId, cameras, isPhysical, isSimulated, setActiveCameraId } from '../camera/store.ts';
 import { sendToDevBridge } from '../devBridge/client.ts';
+import { rebuildGridLineKs } from '../math/geometry.ts';
+import { updateBucketFillAvailability, updateBucketFillOverlay } from '../overlays/bucketFillOverlay.ts';
+import { updateBucketFillCompositeAvailability, updateBucketFillJoinAvailability, updateBucketFillJoinOverlay } from '../overlays/bucketFillJoinOverlay.ts';
 import { updateContaminationAvailability } from '../overlays/contaminationOverlays.ts';
+import { updateTopGradientAvailability, updateTopGradientOverlay } from '../overlays/gradientHighlightOverlays.ts';
 import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, updateHoverOverlays, updateTangentWalkPathAvailability } from '../overlays/hoverDebugOverlays.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { runAxesReconstruction } from '../pipeline/axesReconstruction.ts';
@@ -10,10 +14,12 @@ import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { isWebGPUSupported } from '../pipelineGPU/device.ts';
-import { rebuildFloorTexture } from '../scene/floor.ts';
+import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
+import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
+import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTrueContamBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTopGradientBtn, toggleTrueContamBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -140,6 +146,7 @@ export function refreshCameraPanel() {
   setBool('showPoles', cam.settings.showPoles); setBool('showFrustum', cam.settings.showFrustum);
   setBool('showPatch', cam.settings.showPatch); setBool('showGizmoBody', cam.settings.showGizmoBody);
   setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setBool('showSampleLattice', cam.settings.showSampleLattice);
+  setBool('useSegmentVotes', cam.settings.useSegmentVotes);
   setBool('orientationLM', cam.settings.orientationLM); setBool('positionLM', cam.settings.positionLM);
 
   setNum('simGradRadius', cam.settings.simGradRadius); setNum('coherenceRadius', cam.settings.coherenceRadius);
@@ -153,6 +160,11 @@ export function refreshCameraPanel() {
 
   setNum('gradientArrowScale', cam.settings.gradientArrowScale);
   setNum('circleSamplePercentMin', cam.settings.circleSamplePercentMin); setNum('circleSamplePercentMax', cam.settings.circleSamplePercentMax);
+  setNum('bucketFillToleranceDeg', cam.settings.bucketFillToleranceDeg);
+  setNum('bucketFillMagnitudeThreshold', cam.settings.bucketFillMagnitudeThreshold);
+  setNum('bucketFillMinLengthPx', cam.settings.bucketFillMinLengthPx);
+  setNum('bucketFillJoinSteps', cam.settings.bucketFillJoinSteps);
+  setNum('bucketFillMergeMinSimilarity', cam.settings.bucketFillMergeMinSimilarity);
   setBool('showRecoveredPoles', cam.settings.showRecoveredPoles); setBool('showAxisVectors', cam.settings.showAxisVectors);
   setBool('showTopCircles', cam.settings.showTopCircles);
   setNum('weightSharpenPower', cam.settings.weightSharpenPower);
@@ -165,9 +177,18 @@ export function refreshCameraPanel() {
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
   toggleGradientArrowModeBtn.classList.toggle('active', cam.settings.showGradientArrowPerpendicular);
   toggleTangentWalkPathBtn.classList.toggle('active', cam.settings.showTangentWalkPath);
+  toggleTopGradientBtn.classList.toggle('active', cam.settings.showTopGradient);
+  toggleBucketFillBtn.classList.toggle('active', cam.settings.showBucketFillSegments);
+  toggleBucketFillMarkersBtn.classList.toggle('active', cam.settings.showBucketFillMarkers);
+  toggleBucketFillJoinBtn.classList.toggle('active', cam.settings.showBucketFillJoin);
+  toggleBucketFillCompositeBtn.classList.toggle('active', cam.settings.showBucketFillComposite);
   updateContaminationAvailability();
   updateGradientArrowAvailability();
   updateTangentWalkPathAvailability();
+  updateTopGradientAvailability();
+  updateBucketFillAvailability();
+  updateBucketFillJoinAvailability();
+updateBucketFillCompositeAvailability();
 
   updateDistortedPreview(cam);
   if (globalState.mode === 'projected') buildProjectedTexture(cam);
@@ -239,6 +260,14 @@ bindSlider('floorCellOutlineSubdiv', (v) => {
   rebuildFloorTexture();
   for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render too
 }, (v) => v.toFixed(0));
+bindSlider('boardSize', (v) => {
+  globalState.boardSize = v;
+  rebuildFloorPattern(v); // re-crops the torus, rebuilds the decode lookup table, resizes the floor mesh/texture/reference lines
+  rebuildGridLineKs(); // reads HALF_R/HALF_C, which rebuildFloorPattern just updated -- must run after it
+  invalidateHashTableCache(); // GPU decode-tally's hash table was built from the OLD debruijnLookup
+  invalidateTorusBufferCache(); // GPU Phase 3's torus-brightness buffer was built from the OLD torus
+  for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render/re-decode against the new board
+}, (v) => v.toFixed(0));
 bindCheckbox('useGPUVotes', (v) => { globalState.useGPUVotes = v; });
 bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; });
 bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; });
@@ -250,6 +279,7 @@ gpuVotesStatus.textContent = isWebGPUSupported()
 bindCheckbox('showGizmoBody', (v) => { const cam = activeCamera(); if (cam) cam.settings.showGizmoBody = v; });
 bindCheckbox('showRecoveredFloor', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredFloor = v; });
 bindCheckbox('showSampleLattice', (v) => { const cam = activeCamera(); if (cam) cam.settings.showSampleLattice = v; });
+bindCheckbox('useSegmentVotes', (v) => { const cam = activeCamera(); if (cam) cam.settings.useSegmentVotes = v; });
 bindCheckbox('orientationLM', (v) => { const cam = activeCamera(); if (cam) cam.settings.orientationLM = v; });
 bindCheckbox('positionLM', (v) => { const cam = activeCamera(); if (cam) cam.settings.positionLM = v; });
 
@@ -275,13 +305,32 @@ bindRadioGroup('fieldView', (v) => {
   updateContaminationAvailability();
   updateGradientArrowAvailability();
   updateTangentWalkPathAvailability();
+  updateTopGradientAvailability();
+  updateBucketFillAvailability();
+  updateBucketFillJoinAvailability();
+updateBucketFillCompositeAvailability();
 });
 updateContaminationAvailability();
 updateGradientArrowAvailability();
 updateTangentWalkPathAvailability();
+updateTopGradientAvailability();
+updateBucketFillAvailability();
+updateBucketFillJoinAvailability();
+updateBucketFillCompositeAvailability();
 bindSlider('gradientArrowScale', (v) => { const cam = activeCamera(); if (cam) cam.settings.gradientArrowScale = v; updateHoverOverlays(lastHoverClientX, lastHoverClientY); }, (v) => v.toFixed(1));
-bindSlider('circleSamplePercentMin', (v) => { const cam = activeCamera(); if (cam) { cam.settings.circleSamplePercentMin = v; updateGradientCirclesDebug(cam); } }, (v) => `${v.toFixed(0)}%`);
-bindSlider('circleSamplePercentMax', (v) => { const cam = activeCamera(); if (cam) { cam.settings.circleSamplePercentMax = v; updateGradientCirclesDebug(cam); } }, (v) => `${v.toFixed(0)}%`);
+bindSlider('circleSamplePercentMin', (v) => { const cam = activeCamera(); if (cam) { cam.settings.circleSamplePercentMin = v; updateGradientCirclesDebug(cam); updateTopGradientOverlay(cam); updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => `${v.toFixed(0)}%`);
+bindSlider('circleSamplePercentMax', (v) => { const cam = activeCamera(); if (cam) { cam.settings.circleSamplePercentMax = v; updateGradientCirclesDebug(cam); updateTopGradientOverlay(cam); updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => `${v.toFixed(0)}%`);
+bindSlider('bucketFillToleranceDeg', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillToleranceDeg = v; updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => `${v.toFixed(1)}°`);
+bindSlider('bucketFillMagnitudeThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillMagnitudeThreshold = v; updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(1));
+bindSlider('bucketFillMinLengthPx', (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.bucketFillMinLengthPx = v;
+  updateBucketFillOverlay(cam); // base raster: filtered segments disappear from it too
+  updateBucketFillJoinOverlay(cam); // join walk: filtered segments never get fronts
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY); // endpoint markers
+}, (v) => v.toFixed(0));
+bindSlider('bucketFillJoinSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillJoinSteps = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(0));
+bindSlider('bucketFillMergeMinSimilarity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillMergeMinSimilarity = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(2));
 bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
 // Turning either on refreshes immediately -- updateGradientCirclesDebug now
 // skips its work while both are off (see its own comment), so the geometry

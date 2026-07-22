@@ -103,3 +103,19 @@ export function hsvToRgb(h: number, s: number, v: number): [number, number, numb
   else if (h < 300) { r = x; b = c; } else { r = c; b = x; }
   return [Math.round((r + m) * 255), Math.round((g + m) * 255), Math.round((b + m) * 255)];
 }
+
+// Hue only (0-360, degrees) -- the inverse of hsvToRgb's hue axis. Doesn't
+// need to know the original s/v to recover hue exactly (standard formula,
+// achromatic/gray input has no defined hue, returns 0 for that case).
+export function rgbToHueDeg(r: number, g: number, b: number): number {
+  const max = Math.max(r, g, b), min = Math.min(r, g, b);
+  const delta = max - min;
+  if (delta === 0) return 0;
+  let hue: number;
+  if (max === r) hue = ((g - b) / delta) % 6;
+  else if (max === g) hue = (b - r) / delta + 2;
+  else hue = (r - g) / delta + 4;
+  hue *= 60;
+  if (hue < 0) hue += 360;
+  return hue;
+}

@@ -43,6 +43,7 @@ export function updateBucketFillOverlay(camera: Camera) {
   camera.bucketFillTex.needsUpdate = true;
   camera.lastBucketFillSegments = segments;
   camera.lastBucketFillColors = colors;
+  camera.lastBucketFillRegionId = regionId;
 }
 
 export function updateBucketFillAvailability() {
@@ -56,5 +57,6 @@ export function updateBucketFillAvailability() {
     cam.bucketFillTex.needsUpdate = true;
     cam.lastBucketFillSegments = null;
     cam.lastBucketFillColors = null;
+    cam.lastBucketFillRegionId = null;
   }
 }

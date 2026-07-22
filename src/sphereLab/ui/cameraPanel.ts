@@ -4,7 +4,7 @@ import { activeCamera, activeCameraId, cameras, isPhysical, isSimulated, setActi
 import { sendToDevBridge } from '../devBridge/client.ts';
 import { rebuildGridLineKs } from '../math/geometry.ts';
 import { updateBucketFillAvailability, updateBucketFillOverlay } from '../overlays/bucketFillOverlay.ts';
-import { updateBucketFillCompositeAvailability, updateBucketFillJoinAvailability, updateBucketFillJoinOverlay } from '../overlays/bucketFillJoinOverlay.ts';
+import { updateBucketFillCompositeAvailability, updateBucketFillJoinAvailability, updateBucketFillJoinOverlay, updateBucketFillMergeMarkersAvailability } from '../overlays/bucketFillJoinOverlay.ts';
 import { updateContaminationAvailability } from '../overlays/contaminationOverlays.ts';
 import { updateTopGradientAvailability, updateTopGradientOverlay } from '../overlays/gradientHighlightOverlays.ts';
 import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, updateHoverOverlays, updateTangentWalkPathAvailability } from '../overlays/hoverDebugOverlays.ts';
@@ -19,7 +19,7 @@ import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTopGradientBtn, toggleTrueContamBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTopGradientBtn, toggleTrueContamBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -182,13 +182,15 @@ export function refreshCameraPanel() {
   toggleBucketFillMarkersBtn.classList.toggle('active', cam.settings.showBucketFillMarkers);
   toggleBucketFillJoinBtn.classList.toggle('active', cam.settings.showBucketFillJoin);
   toggleBucketFillCompositeBtn.classList.toggle('active', cam.settings.showBucketFillComposite);
+  toggleBucketFillMergeMarkersBtn.classList.toggle('active', cam.settings.showBucketFillMergeMarkers);
   updateContaminationAvailability();
   updateGradientArrowAvailability();
   updateTangentWalkPathAvailability();
   updateTopGradientAvailability();
   updateBucketFillAvailability();
   updateBucketFillJoinAvailability();
-updateBucketFillCompositeAvailability();
+  updateBucketFillCompositeAvailability();
+  updateBucketFillMergeMarkersAvailability();
 
   updateDistortedPreview(cam);
   if (globalState.mode === 'projected') buildProjectedTexture(cam);
@@ -308,7 +310,8 @@ bindRadioGroup('fieldView', (v) => {
   updateTopGradientAvailability();
   updateBucketFillAvailability();
   updateBucketFillJoinAvailability();
-updateBucketFillCompositeAvailability();
+  updateBucketFillCompositeAvailability();
+  updateBucketFillMergeMarkersAvailability();
 });
 updateContaminationAvailability();
 updateGradientArrowAvailability();
@@ -317,6 +320,7 @@ updateTopGradientAvailability();
 updateBucketFillAvailability();
 updateBucketFillJoinAvailability();
 updateBucketFillCompositeAvailability();
+updateBucketFillMergeMarkersAvailability();
 bindSlider('gradientArrowScale', (v) => { const cam = activeCamera(); if (cam) cam.settings.gradientArrowScale = v; updateHoverOverlays(lastHoverClientX, lastHoverClientY); }, (v) => v.toFixed(1));
 bindSlider('circleSamplePercentMin', (v) => { const cam = activeCamera(); if (cam) { cam.settings.circleSamplePercentMin = v; updateGradientCirclesDebug(cam); updateTopGradientOverlay(cam); updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => `${v.toFixed(0)}%`);
 bindSlider('circleSamplePercentMax', (v) => { const cam = activeCamera(); if (cam) { cam.settings.circleSamplePercentMax = v; updateGradientCirclesDebug(cam); updateTopGradientOverlay(cam); updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => `${v.toFixed(0)}%`);

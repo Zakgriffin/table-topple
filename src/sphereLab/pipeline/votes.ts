@@ -4,7 +4,8 @@ import { jacobiEigenSymmetric, smallestEigenvector } from '../../linalg.ts';
 import { cornerDir } from '../math/geometry.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { Vote } from '../types.ts';
-import { computeBucketFillRegions, segmentLength } from './bucketFillSegments.ts';
+import { compositeLineLength, computeCompositeLines, computeJoinWalk, computeMergeGroups } from './bucketFillJoin.ts';
+import { computeBucketFillRegions } from './bucketFillSegments.ts';
 import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from './gradientField.ts';
 import { computeTopGradientAlpha } from './gradientHighlight.ts';
 import { guidedTangentDirectionForWalk } from './tangentWalk.ts';
@@ -52,20 +53,19 @@ export function computeWorldVotes(
   return votes;
 }
 
-// Experimental alternative to computeWorldVotes: one vote per bucket-fill
-// LINE SEGMENT (pipeline/bucketFillSegments.ts) instead of one per pixel.
-// Builds the exact same "effective" field (raw gradient x local agreement)
-// computeWorldVotes builds internally, then flood-fills it into segments and
-// casts a ray to each segment's two tracked endpoints -- rather than one
-// pixel plus a single-pixel tangent step, this uses the segment's actual
-// observed extent, which should be far less sensitive to per-pixel noise the
-// farther that extent is (a 1px tangent step's direction estimate is at the
-// mercy of a single noisy gradient measurement; a 40px-long segment's
-// endpoint-to-endpoint direction averages out that noise over its whole
-// length). Reuses the SAME percentile-band (circleSamplePercentMin/Max) and
-// bucket-fill tolerance/magnitude settings the bucket-fill overlay's own
-// controls already expose, so this is tunable from the existing sliders
-// without new UI just for this path.
+// Experimental alternative to computeWorldVotes: one vote per bucket-fill-
+// and-JOIN-WALK composite LINE (pipeline/bucketFillJoin.ts) instead of one
+// per pixel. Builds the exact same "effective" field (raw gradient x local
+// agreement) computeWorldVotes builds internally, flood-fills it into
+// segments, then runs the full join walk (merge groups + composite lines,
+// same as the join-walk overlay) and casts a ray to each GROUP's composite
+// endpoints -- not each raw segment's own endpoints -- so a chain of
+// several short segments joined into one long line votes as ONE long,
+// well-conditioned ray instead of several separate short, noisier ones.
+// Reuses the SAME percentile-band, tolerance/magnitude/length, and join-
+// walk settings (steps, merge similarity) the bucket-fill/join overlays
+// already expose, so this is tunable from the existing sliders without new
+// UI just for this path.
 export function computeSegmentVotes(
   settings: CameraSettingsCommon,
   gray: Float64Array, w: number, h: number,
@@ -76,27 +76,33 @@ export function computeSegmentVotes(
   const agreement = computeGradientAgreementField(field, agreementRadius);
   const effective = computeEffectiveGradientField(field, agreement);
   const seedEligible = computeTopGradientAlpha(effective, settings.circleSamplePercentMin, settings.circleSamplePercentMax);
-  const { segments } = computeBucketFillRegions(effective, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold);
+  const { regionId, segments } = computeBucketFillRegions(effective, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold);
+
+  const { merges } = computeJoinWalk(
+    segments, regionId, w, h, settings.bucketFillMergeMinSimilarity, settings.bucketFillJoinSteps, settings.bucketFillMinLengthPx,
+  );
+  const groupOf = computeMergeGroups(segments.length, merges);
+  const composites = computeCompositeLines(segments, groupOf);
 
   const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, 1 - (py / h) * 2];
   const votes: Vote[] = [];
-  for (const seg of segments) {
-    if (segmentLength(seg) < settings.bucketFillMinLengthPx) continue; // too short to trust its endpoint-to-endpoint direction -- see pipeline/bucketFillSegments.ts's segmentLength
-    const [u1, v1] = toNDC(seg.endAlongX, seg.endAlongY);
-    const [u2, v2] = toNDC(seg.endAgainstX, seg.endAgainstY);
+  for (const line of composites.values()) {
+    if (compositeLineLength(line) < settings.bucketFillMinLengthPx) continue; // an unmerged singleton whose own segment was already too short
+    const [u1, v1] = toNDC(line.x1, line.y1);
+    const [u2, v2] = toNDC(line.x2, line.y2);
     const ray1 = cornerDir(u1, v1, quat, vFovRad, aspect);
     const ray2 = cornerDir(u2, v2, quat, vFovRad, aspect);
     const n = ray1.clone().cross(ray2);
-    const arcLen = n.length(); // sin(angle between the two endpoint rays) -- the segment's own PROJECTED ARC LENGTH on the unit sphere
+    const arcLen = n.length(); // sin(angle between the two endpoint rays) -- the composite line's own PROJECTED ARC LENGTH on the unit sphere
     if (arcLen < 1e-12) continue;
     n.divideScalar(arcLen); // normalize using the length already computed, instead of a second hypot
     // Weighted by that same projected arc length, not pixel count or average
-    // magnitude -- a short/close-together segment gives a small, easily-
+    // magnitude -- a short/close-together line gives a small, easily-
     // corrupted cross product; a long one gives a large, well-conditioned
     // one, which is exactly the property we want a fit-confidence weight to
     // track (same reasoning computeWorldVotes's own per-pixel cross product
-    // relies on implicitly, just now visible as an explicit per-segment
-    // quantity instead of buried in a 1-pixel step).
+    // relies on implicitly, just now visible as an explicit per-composite-
+    // line quantity instead of buried in a 1-pixel step).
     votes.push({ n, weight: arcLen });
   }
   return votes;

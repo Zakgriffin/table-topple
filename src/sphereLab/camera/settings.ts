@@ -37,6 +37,7 @@ export interface CameraSettingsCommon {
   showBucketFillMarkers: boolean;
   showBucketFillJoin: boolean; bucketFillJoinSteps: number; bucketFillMergeMinSimilarity: number;
   showBucketFillComposite: boolean;
+  showBucketFillMergeMarkers: boolean;
   showGradientArrow: boolean; showGradientArrowPerpendicular: boolean; gradientArrowScale: number;
   showTangentWalkPath: boolean;
   simGradRadius: number; coherenceRadius: number;
@@ -89,6 +90,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     bucketFillJoinSteps: savedNum('bucketFillJoinSteps', 0),
     bucketFillMergeMinSimilarity: savedNum('bucketFillMergeMinSimilarity', 0.9),
     showBucketFillComposite: savedBool('toggleBucketFillComposite', false),
+    showBucketFillMergeMarkers: savedBool('toggleBucketFillMergeMarkers', false),
     showGradientArrow: false, showGradientArrowPerpendicular: false, gradientArrowScale: 10,
     showTangentWalkPath: false,
     simGradRadius: 1, coherenceRadius: 1,

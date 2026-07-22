@@ -7,9 +7,9 @@ import { hsvToRgb } from '../pipeline/distortion.ts';
 import { computeSpokedWalkIncludedPixels } from '../pipeline/localJacobian.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
-import { canvas, gradientArrowCanvas, gradientArrowCtx, persistControl, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTopGradientBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowCanvas, gradientArrowCtx, persistControl, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTopGradientBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { updateBucketFillOverlay } from './bucketFillOverlay.ts';
-import { updateBucketFillCompositeAvailability, updateBucketFillJoinAvailability, updateBucketFillJoinOverlay } from './bucketFillJoinOverlay.ts';
+import { updateBucketFillCompositeAvailability, updateBucketFillJoinAvailability, updateBucketFillJoinOverlay, updateBucketFillMergeMarkersAvailability } from './bucketFillJoinOverlay.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
 import { updateTopGradientOverlay } from './gradientHighlightOverlays.ts';
 
@@ -35,6 +35,24 @@ export function drawMarkerDot(px: number, py: number, color: string) {
   ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
   ctx.fillStyle = color;
   ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2); ctx.fill();
+}
+// Same black-outline-then-colored-stroke language as drawMarkerDot, an X
+// instead of a dot (used for the same/opposite-direction join merge points,
+// so they read as a distinct marker kind from segment-endpoint dots).
+export function drawMarkerX(px: number, py: number, color: string) {
+  const ctx = gradientArrowCtx;
+  const r = 4.5;
+  ctx.lineCap = 'round';
+  ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 4;
+  ctx.beginPath();
+  ctx.moveTo(px - r, py - r); ctx.lineTo(px + r, py + r);
+  ctx.moveTo(px - r, py + r); ctx.lineTo(px + r, py - r);
+  ctx.stroke();
+  ctx.strokeStyle = color; ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(px - r, py - r); ctx.lineTo(px + r, py + r);
+  ctx.moveTo(px - r, py + r); ctx.lineTo(px + r, py - r);
+  ctx.stroke();
 }
 export function drawOneArrow(px: number, py: number, dirVecX: number, dirVecY: number, color: string, scale: number) {
   const tipX = px + dirVecX * scale, tipY = py + dirVecY * scale;
@@ -272,6 +290,35 @@ function drawBucketFillCompositeLines(camera: Camera) {
   }
 }
 
+// Red X at merge points where the two colliding fronts were walking the SAME
+// direction rather than head-on, blue X where they were walking opposite/
+// head-on -- see pipeline/bucketFillJoin.ts's computeJoinWalk, the frontDot
+// check right where a merge is recorded. Tracks the join toggle, not the
+// composite toggle -- these points exist as soon as the join walk itself
+// runs.
+function drawBucketFillDirectionMerges(camera: Camera) {
+  const settings = camera.settings;
+  if (!settings.showBucketFillJoin || !settings.showBucketFillMergeMarkers) return;
+  const rect = computeThroughRect(camera);
+  const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
+  const toScreen = (fx: number, fy: number) => ({
+    px: rect.x + (fx + 0.5) * (rect.w / fieldW),
+    py: rect.y + rect.h - (fy + 0.5) * (rect.h / fieldH),
+  });
+  if (camera.lastBucketFillSameDirMerges) {
+    for (const p of camera.lastBucketFillSameDirMerges) {
+      const { px, py } = toScreen(p.x, p.y);
+      drawMarkerX(px, py, 'rgb(255,0,0)');
+    }
+  }
+  if (camera.lastBucketFillOppositeDirMerges) {
+    for (const p of camera.lastBucketFillOppositeDirMerges) {
+      const { px, py } = toScreen(p.x, p.y);
+      drawMarkerX(px, py, 'rgb(60,140,255)');
+    }
+  }
+}
+
 // Single per-hover entry point -- operates on the ACTIVE camera, since only
 // its Through-Cam view is ever on screen. Also doubles as the redraw
 // entry point for the PERSISTENT bucket-fill segment markers above (see
@@ -295,6 +342,7 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
 
   if (markersOn) drawBucketFillSegmentMarkers(camera);
   if (settings.showBucketFillComposite) drawBucketFillCompositeLines(camera);
+  drawBucketFillDirectionMerges(camera);
 
   if (!arrowsOn && !walkOn) return;
   const rect = computeThroughRect(camera);
@@ -432,6 +480,7 @@ toggleBucketFillJoinBtn.addEventListener('click', () => {
   persistControl('toggleBucketFillJoin', cam.settings.showBucketFillJoin ? '1' : '0');
   updateBucketFillJoinOverlay(cam);
   updateBucketFillCompositeAvailability(); // composite's enabled state depends on this toggle -- refresh it now, not just on some other trigger
+  updateBucketFillMergeMarkersAvailability(); // same for the merge-direction X markers
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 });
 toggleBucketFillCompositeBtn.addEventListener('click', () => {
@@ -440,6 +489,13 @@ toggleBucketFillCompositeBtn.addEventListener('click', () => {
   toggleBucketFillCompositeBtn.classList.toggle('active', cam.settings.showBucketFillComposite);
   persistControl('toggleBucketFillComposite', cam.settings.showBucketFillComposite ? '1' : '0');
   updateBucketFillJoinOverlay(cam); // composites are computed inside this, gated on the toggle just flipped
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+});
+toggleBucketFillMergeMarkersBtn.addEventListener('click', () => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.showBucketFillMergeMarkers = !cam.settings.showBucketFillMergeMarkers;
+  toggleBucketFillMergeMarkersBtn.classList.toggle('active', cam.settings.showBucketFillMergeMarkers);
+  persistControl('toggleBucketFillMergeMarkers', cam.settings.showBucketFillMergeMarkers ? '1' : '0');
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 });
 toggleGradientArrowBtn.addEventListener('click', () => {

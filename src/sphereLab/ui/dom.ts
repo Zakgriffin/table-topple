@@ -25,6 +25,7 @@ export const toggleBucketFillBtn = document.getElementById('toggleBucketFill') a
 export const toggleBucketFillMarkersBtn = document.getElementById('toggleBucketFillMarkers') as HTMLButtonElement;
 export const toggleBucketFillJoinBtn = document.getElementById('toggleBucketFillJoin') as HTMLButtonElement;
 export const toggleBucketFillCompositeBtn = document.getElementById('toggleBucketFillComposite') as HTMLButtonElement;
+export const toggleBucketFillMergeMarkersBtn = document.getElementById('toggleBucketFillMergeMarkers') as HTMLButtonElement;
 export const gradientArrowCanvas = document.getElementById('gradientArrowOverlay') as HTMLCanvasElement;
 export const gradientArrowCtx = gradientArrowCanvas.getContext('2d')!;
 export const toggleGradientArrowBtn = document.getElementById('toggleGradientArrow') as HTMLButtonElement;

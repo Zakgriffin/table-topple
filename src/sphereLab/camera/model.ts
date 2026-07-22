@@ -41,8 +41,17 @@ export interface CameraBase {
   lastJacobianField: JacobianField | null;
   lastBucketFillSegments: BucketFillSegment[] | null;
   lastBucketFillColors: [number, number, number][] | null;
+  // Per-pixel segment ownership from the flood fill itself (computeBucketFillRegions),
+  // -1 = no segment -- kept around so the join walk can seed its own buffer
+  // from it (see pipeline/bucketFillJoin.ts's computeJoinWalk).
+  lastBucketFillRegionId: Int32Array | null;
   lastBucketFillMerges: SegmentMerge[] | null;
   lastBucketFillComposite: CompositeLineDisplay[] | null;
+  // Merge points split by whether the two colliding fronts were walking the
+  // SAME direction or head-on/opposite at the moment they merged -- see
+  // pipeline/bucketFillJoin.ts's computeJoinWalk for how this is detected.
+  lastBucketFillSameDirMerges: { x: number; y: number }[] | null;
+  lastBucketFillOppositeDirMerges: { x: number; y: number }[] | null;
 
   distortedPreviewData: Uint8Array; distortedPreviewTex: THREE.DataTexture;
   projectedPreviewData: Uint8Array; projectedPreviewTex: THREE.DataTexture;

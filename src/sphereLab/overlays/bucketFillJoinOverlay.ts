@@ -1,7 +1,7 @@
 import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
-import { CompositeLineDisplay, computeCompositeLines, computeJoinWalk, computeMergeGroups, groupDisplayColors, paintJoinOverlay } from '../pipeline/bucketFillJoin.ts';
-import { toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn } from '../ui/dom.ts';
+import { compositeLineLength, CompositeLineDisplay, computeCompositeLines, computeJoinWalk, computeMergeGroups, groupDisplayColors, paintJoinOverlay } from '../pipeline/bucketFillJoin.ts';
+import { toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMergeMarkersBtn } from '../ui/dom.ts';
 
 // Depends on camera.lastBucketFillSegments already being populated by
 // overlays/bucketFillOverlay.ts's updateBucketFillOverlay -- call this AFTER
@@ -9,11 +9,13 @@ import { toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn } from '../ui/dom
 export function updateBucketFillJoinOverlay(camera: Camera) {
   const settings = camera.settings;
   if (!settings.showBucketFillJoin) return;
-  if (!camera.lastBucketFillSegments || !camera.lastBucketFillColors) return;
-  const { joinBuffer, merges } = computeJoinWalk(
-    camera.lastBucketFillSegments, camera.rtSize.w, camera.rtSize.h,
+  if (!camera.lastBucketFillSegments || !camera.lastBucketFillColors || !camera.lastBucketFillRegionId) return;
+  const { joinBuffer, merges, sameDirMergePoints, oppositeDirMergePoints } = computeJoinWalk(
+    camera.lastBucketFillSegments, camera.lastBucketFillRegionId, camera.rtSize.w, camera.rtSize.h,
     settings.bucketFillMergeMinSimilarity, settings.bucketFillJoinSteps, settings.bucketFillMinLengthPx,
   );
+  camera.lastBucketFillSameDirMerges = sameDirMergePoints;
+  camera.lastBucketFillOppositeDirMerges = oppositeDirMergePoints;
   // Colored by MERGE GROUP, not raw per-segment color -- unlike the base
   // fill (which stays per-segment so individual blobs stay distinguishable),
   // the whole point of this layer is showing which segments have been
@@ -28,7 +30,17 @@ export function updateBucketFillJoinOverlay(camera: Camera) {
   if (settings.showBucketFillComposite) {
     const compositeByRoot = computeCompositeLines(camera.lastBucketFillSegments, groupOf);
     const composites: CompositeLineDisplay[] = [];
-    for (const [root, line] of compositeByRoot) composites.push({ ...line, color: displayColors[root] });
+    for (const [root, line] of compositeByRoot) {
+      // A segment too short to ever get join-walk fronts (see the
+      // computeJoinWalk length filter above) can never appear in `merges`,
+      // so it stays its own singleton group forever -- computeCompositeLines
+      // still emits a "composite" for it (just its own raw endpoints), the
+      // same tiny stray line the min-length filter is supposed to make
+      // disappear everywhere else (base raster, markers, join-walk fronts,
+      // votes.ts's own vote generation). Filtered out here the same way.
+      if (compositeLineLength(line) < settings.bucketFillMinLengthPx) continue;
+      composites.push({ ...line, color: displayColors[root] });
+    }
     camera.lastBucketFillComposite = composites;
   } else {
     camera.lastBucketFillComposite = null;
@@ -48,6 +60,8 @@ export function updateBucketFillJoinAvailability() {
     cam.bucketFillJoinTex.needsUpdate = true;
     cam.lastBucketFillMerges = null;
     cam.lastBucketFillComposite = null;
+    cam.lastBucketFillSameDirMerges = null;
+    cam.lastBucketFillOppositeDirMerges = null;
   }
 }
 
@@ -62,5 +76,19 @@ export function updateBucketFillCompositeAvailability() {
     cam.settings.showBucketFillComposite = false;
     toggleBucketFillCompositeBtn.classList.remove('active');
     cam.lastBucketFillComposite = null;
+  }
+}
+
+// Availability tracks the join toggle (its own parent), same level as
+// composite -- the merge-direction X markers are computed unconditionally as
+// part of the join walk itself (they're cheap, unlike composite lines), so
+// there's nothing to additionally gate on except "did a join walk run".
+export function updateBucketFillMergeMarkersAvailability() {
+  const cam = activeCamera(); if (!cam) return;
+  const relevant = cam.settings.showBucketFillJoin;
+  toggleBucketFillMergeMarkersBtn.disabled = !relevant;
+  if (!relevant) {
+    cam.settings.showBucketFillMergeMarkers = false;
+    toggleBucketFillMergeMarkersBtn.classList.remove('active');
   }
 }

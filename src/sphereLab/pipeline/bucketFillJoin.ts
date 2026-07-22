@@ -73,6 +73,7 @@ interface JoinFront {
 
 export function computeJoinWalk(
   segments: BucketFillSegment[], regionId: Int32Array, w: number, h: number, minSimilarity: number, numSteps: number, minLengthPx: number,
+  maxTravelFactor: number,
 ): {
   joinBuffer: Int32Array; merges: SegmentMerge[];
   blueMergePoints: { x: number; y: number }[]; orangeMergePoints: { x: number; y: number }[]; redMergePoints: { x: number; y: number }[];
@@ -165,16 +166,19 @@ export function computeJoinWalk(
   // mergeAt). This is the ONLY place compositeX1/Y1/X2/Y2 and
   // frontAtSlot1/2 ever get written, so a group's tracked composite always
   // exactly matches wherever its two live fronts actually started from.
-  // Each front's maxK is capped to this SAME pair's own length -- a front
-  // never walks farther out than the length of the evidence (single segment,
-  // or already-merged composite) that just produced it, so a short segment
-  // only ever reaches a proportionally short distance looking for its
-  // partner, not an arbitrary fixed number of steps.
+  // Each front's maxK is capped to maxTravelFactor times this SAME pair's
+  // own length -- a front never walks farther out than a fixed multiple of
+  // the evidence (single segment, or already-merged composite) that just
+  // produced it, so a short segment only ever reaches a proportionally short
+  // distance looking for its partner, not an arbitrary fixed number of
+  // steps. maxTravelFactor === 1 means "exactly its own length" (the
+  // original behavior); values above 1 let a front search past that if the
+  // real partner sits slightly farther than the segment's own length away.
   function spawnPair(root: number, p1x: number, p1y: number, p2x: number, p2y: number) {
     const ddx = p1x - p2x, ddy = p1y - p2y;
     const len = Math.hypot(ddx, ddy);
     const ux = len > 1e-9 ? ddx / len : 1, uy = len > 1e-9 ? ddy / len : 0;
-    const maxK = Math.round(len);
+    const maxK = Math.round(len * maxTravelFactor);
     const fi1 = fronts.length;
     fronts.push({ seg: root, startX: p1x, startY: p1y, dx: ux, dy: uy, k: 0, maxK, active: true, handle: allocateHandle(root) });
     const fi2 = fronts.length;
@@ -454,7 +458,11 @@ export function computeCompositeLines(segments: BucketFillSegment[], groupOf: In
   return result;
 }
 
-export interface CompositeLineDisplay extends CompositeLine { color: [number, number, number] }
+// root: the merge-group root this composite line was built from -- lets a
+// caller (e.g. overlays/hoverDebugOverlays.ts's family recoloring) match a
+// displayed line back to pipeline/gridPeriodPhase.ts's own per-line results,
+// which are keyed the same way.
+export interface CompositeLineDisplay extends CompositeLine { color: [number, number, number]; root: number }
 
 const JOIN_ALPHA = 130; // "faded" relative to the base fill's fully-opaque 255
 

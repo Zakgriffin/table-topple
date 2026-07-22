@@ -280,12 +280,38 @@ function drawBucketFillCompositeLines(camera: Camera) {
     py: rect.y + rect.h - (fy + 0.5) * (rect.h / fieldH),
   });
   const ctx = gradientArrowCtx;
+
+  // Family coloring (pipeline/gridPeriodPhase.ts): blue = row family, red =
+  // column family, black -> full-color by each line's own RANK within its
+  // family (sorted by its rectified `value` -- the same order the
+  // period/phase fit itself assigns integer indices in), so this literally
+  // shows the sequence the fit will register each line as. Falls back to
+  // the usual group-blend color for any line the debug pipeline doesn't
+  // recognize (hasn't run yet, or settings changed between the two
+  // independent recomputes).
+  let rowRank: Map<number, number> | null = null, colRank: Map<number, number> | null = null;
+  const gpp = camera.lastGridPeriodPhase;
+  if (settings.showCompositeLineFamilies && gpp) {
+    const sortedRow = [...gpp.rowLines].sort((a, b) => a.value - b.value);
+    rowRank = new Map(sortedRow.map((s, i) => [s.root, sortedRow.length > 1 ? i / (sortedRow.length - 1) : 1]));
+    const sortedCol = [...gpp.colLines].sort((a, b) => a.value - b.value);
+    colRank = new Map(sortedCol.map((s, i) => [s.root, sortedCol.length > 1 ? i / (sortedCol.length - 1) : 1]));
+  }
+
   for (const c of camera.lastBucketFillComposite) {
     const a = toScreen(c.x1, c.y1), b = toScreen(c.x2, c.y2);
     ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 5;
     ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
-    const [rr, gg, bb] = c.color;
-    ctx.strokeStyle = `rgb(${rr},${gg},${bb})`; ctx.lineWidth = 2.5;
+    let strokeColor: string;
+    if (rowRank && rowRank.has(c.root)) {
+      strokeColor = `rgb(0,0,${Math.round(rowRank.get(c.root)! * 255)})`;
+    } else if (colRank && colRank.has(c.root)) {
+      strokeColor = `rgb(${Math.round(colRank.get(c.root)! * 255)},0,0)`;
+    } else {
+      const [rr, gg, bb] = c.color;
+      strokeColor = `rgb(${rr},${gg},${bb})`;
+    }
+    ctx.strokeStyle = strokeColor; ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
   }
 }

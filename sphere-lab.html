@@ -23,9 +23,13 @@
   #sampleLattice {
     position: fixed; z-index: 6; pointer-events: none; display: none;
   }
+  #gridPeriodPhaseProjected {
+    position: fixed; z-index: 7; pointer-events: none; display: none;
+  }
   #overlayToggleStack {
     position: fixed; top: 16px; right: 16px; z-index: 10;
     display: flex; flex-direction: column; gap: 8px;
+    max-height: calc(100vh - 32px); overflow-y: auto;
   }
   #contamToggles {
     display: none; flex-direction: column; gap: 8px;
@@ -150,6 +154,7 @@
 <canvas id="marginalRight"></canvas>
 <canvas id="marginalBottom"></canvas>
 <canvas id="sampleLattice"></canvas>
+<canvas id="gridPeriodPhaseProjected"></canvas>
 <canvas id="gradientArrowOverlay"></canvas>
 <div id="overlayToggleStack">
   <div id="contamToggles">
@@ -165,7 +170,12 @@
     <button id="toggleBucketFillJoin">join walk (faded trail)</button>
     <div class="row"><span class="label">join steps</span><input type="range" id="bucketFillJoinSteps" min="0" max="600" step="1" value="0"><span class="val" id="bucketFillJoinStepsVal"></span></div>
     <div class="row"><span class="label">merge similarity</span><input type="range" id="bucketFillMergeMinSimilarity" min="0" max="1" step="0.01" value="0.9"><span class="val" id="bucketFillMergeMinSimilarityVal"></span></div>
+    <div class="row"><span class="label">max travel (x seg length)</span><input type="range" id="bucketFillMaxTravelFactor" min="1" max="5" step="0.1" value="1"><span class="val" id="bucketFillMaxTravelFactorVal"></span></div>
     <button id="toggleBucketFillComposite">composite lines</button>
+    <label class="chk"><input type="checkbox" id="showGridPeriodPhaseDebug"> compute grid period/phase (experimental)</label>
+    <label class="chk"><input type="checkbox" id="showCompositeLineFamilies"> color composite lines by row/col family (black&rarr;blue / black&rarr;red)</label>
+    <svg id="gridPeriodPhasePlot" viewBox="0 0 340 160" height="160" style="display:block; width:100%; margin: 4px 0; background: rgba(0,0,0,0.4); border: 1px solid #444; cursor: grab;"></svg>
+    <div class="row"><span class="label">bucket count</span><input type="range" id="gridPeriodPhaseBinCount" min="5" max="150" step="1" value="30"><span class="val" id="gridPeriodPhaseBinCountVal"></span></div>
     <button id="toggleBucketFillMergeMarkers">merge direction markers (X)</button>
   </div>
   <div id="arrowToggles">
@@ -275,6 +285,7 @@
     <label class="chk"><input type="checkbox" id="showGizmoBody" checked> camera box</label>
     <label class="chk"><input type="checkbox" id="showRecoveredFloor" checked> recovered floor overlay (decoded position)</label>
     <label class="chk"><input type="checkbox" id="showSampleLattice"> sample lattice (projected cam)</label>
+    <label class="chk"><input type="checkbox" id="showNewSampleLattice"> new sample lattice (from grid period/phase, projected cam)</label>
   </div>
 
   <div class="section">
@@ -282,6 +293,7 @@
     <div class="row"><span class="label">circles min</span><input type="range" id="circleSamplePercentMin" min="0" max="100" step="1" value="0"><span class="val" id="circleSamplePercentMinVal"></span></div>
     <div class="row"><span class="label">circles max</span><input type="range" id="circleSamplePercentMax" min="0" max="100" step="1" value="10"><span class="val" id="circleSamplePercentMaxVal"></span></div>
     <label class="chk"><input type="checkbox" id="showTopCircles" checked> show top circles (rings)</label>
+    <div class="row"><span class="label">ring stroke weight</span><input type="range" id="topCirclesLineWidth" min="0.5" max="8" step="0.5" value="1"><span class="val" id="topCirclesLineWidthVal"></span></div>
     <label class="chk"><input type="checkbox" id="showRecoveredPoles" checked> show reconstructed poles</label>
     <label class="chk"><input type="checkbox" id="showAxisVectors"> show vote axis vectors</label>
     <div class="row"><span class="label">weight sharpen</span><input type="range" id="weightSharpenPower" min="1" max="10" step="0.5" value="4"><span class="val" id="weightSharpenPowerVal"></span></div>

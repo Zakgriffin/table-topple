@@ -4,6 +4,7 @@ import { activeCamera, isPhysical, isSimulated } from '../camera/store.ts';
 import { COL_DIR, GRID_STEP, MATH_QUAT, ROW_DIR, SPHERE_RADIUS } from '../constants.ts';
 import { angleBetweenDegV, cornerDir } from '../math/geometry.ts';
 import { updateContaminationOverlays } from '../overlays/contaminationOverlays.ts';
+import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { updatePositionReadoutText } from '../overlays/projectedCamOverlays.ts';
 import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo } from '../overlays/recoveredOverlays.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
@@ -16,6 +17,7 @@ import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, 
 import { flipRowsF64 } from './distortion.ts';
 import { refineOrientationLM } from './orientationLM.ts';
 import { computePhotometricSamples, refineOrientationAndPositionLM } from './positionLM.ts';
+import { computeGridPeriodPhase } from './gridPeriodPhase.ts';
 import { computeSegmentVotes, computeWorldVotes, fitPairOfPlanes, votesInMagnitudeBand } from './votes.ts';
 import { computeWorldVotesGPU } from '../pipelineGPU/voteGeneration.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
@@ -257,6 +259,22 @@ export function runAxesReconstruction(camera: Camera) {
         }
         spanEnd(p3Span);
       }
+
+      // Grid period/phase debug pipeline (pipeline/gridPeriodPhase.ts) --
+      // opt-in (its own toggle, gated separately from the main vote/fit
+      // path) since it recomputes the bucket-fill/join-walk/composite-line
+      // steps a second time internally rather than threading identity
+      // through the existing anonymous Vote[] used above. Runs after every
+      // orientation refinement (LM Phase 1 and Phase 3) so it uses the BEST
+      // available Drow/Dcol/Dnormal, not the rough initial fit.
+      camera.lastGridPeriodPhase = camera.settings.showGridPeriodPhaseDebug && camera.lastRecoveredAxes
+        ? computeGridPeriodPhase(
+            camera.settings, gray, w, h, MATH_QUAT, vFovRad, camera.aspect,
+            camera.lastRecoveredAxes.Drow, camera.lastRecoveredAxes.Dcol, camera.lastRecoveredAxes.Dnormal,
+            GRID_STEP,
+          )
+        : null;
+
       const overlaySpan = spanStart('poleMarkers+overlays');
       if (camera.lastPositionDecode && rowDirRecovered && colDirRecovered) {
         const { recoveredCamQuat } = camera.lastPositionDecode;
@@ -340,6 +358,7 @@ export function runAxesReconstruction(camera: Camera) {
         lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  LM ${(t2b - t2).toFixed(0)}ms  spacing ${(t3 - t2b).toFixed(0)}ms  refine ${(t3b - t3).toFixed(0)}ms  decode ${(t4 - t3b).toFixed(0)}ms`);
         axesReadout.textContent = lines.join('\n');
         updatePositionReadoutText(camera);
+        drawGridPeriodPhasePlot(camera);
       }
     } finally {
       spanEnd(rootSpan);

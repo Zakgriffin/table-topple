@@ -1,6 +1,7 @@
 import { activeCamera } from '../camera/store.ts';
 import { updateContaminationOverlays } from '../overlays/contaminationOverlays.ts';
 import { clearGradientArrowOverlay } from '../overlays/hoverDebugOverlays.ts';
+import { hideGridPeriodPhaseProjected } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { hideMarginalLines, hideSampleLattice } from '../overlays/projectedCamOverlays.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
@@ -21,7 +22,7 @@ export function setMode(m: Mode) {
   pipLabel.style.display = m === 'through' || m === 'projected' ? 'none' : 'block';
   const cam = activeCamera();
   if (m === 'projected') { if (cam) buildProjectedTexture(cam); }
-  else { hideMarginalLines(); hideSampleLattice(); }
+  else { hideMarginalLines(); hideSampleLattice(); hideGridPeriodPhaseProjected(); }
   contamToggles.style.display = m === 'through' ? 'flex' : 'none';
   arrowToggles.style.display = m === 'through' ? 'flex' : 'none';
   if (m !== 'through') clearGradientArrowOverlay();

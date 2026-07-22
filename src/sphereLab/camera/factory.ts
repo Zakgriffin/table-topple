@@ -157,9 +157,13 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
   const recoveredColPoleA = makeRecoveredPoleMarker(0x0000ff);
   const recoveredColPoleB = makeRecoveredPoleMarker(0x0000ff);
 
+  // Rendered as a flat triangle ribbon, not a native GL line -- see
+  // model.ts's own comment on gradientCirclesGeo for why. DoubleSide since
+  // this is a debug overlay meant to stay visible from any orbit angle,
+  // including nearly edge-on to a given circle's own plane.
   const gradientCirclesGeo = new THREE.BufferGeometry();
-  const gradientCirclesMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.35 });
-  const gradientCirclesLines = new THREE.LineSegments(gradientCirclesGeo, gradientCirclesMat);
+  const gradientCirclesMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.35, side: THREE.DoubleSide });
+  const gradientCirclesLines = new THREE.Mesh(gradientCirclesGeo, gradientCirclesMat);
   gradientCirclesLines.layers.set(DEBUG_LAYER);
   sphereAnchor.add(gradientCirclesLines);
 
@@ -178,6 +182,8 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
     lastNoisedPreviewGray: null, lastDisplayedVectorField: null, lastEffectiveField: null, lastJacobianField: null,
     lastBucketFillSegments: null, lastBucketFillColors: null, lastBucketFillRegionId: null, lastBucketFillMerges: null, lastBucketFillComposite: null,
     lastBucketFillBlueMerges: null, lastBucketFillOrangeMerges: null, lastBucketFillRedMerges: null,
+    lastGridPeriodPhase: null,
+    gridPeriodPhaseViewMin: null, gridPeriodPhaseViewMax: null,
     distortedPreviewData, distortedPreviewTex, projectedPreviewData, projectedPreviewTex,
     trueContamData, trueContamTex, reconContamData, reconContamTex, topGradientData, topGradientTex,
     tangentWalkPathData, tangentWalkPathTex, bucketFillData, bucketFillTex, bucketFillJoinData, bucketFillJoinTex,

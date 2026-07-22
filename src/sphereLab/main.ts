@@ -88,6 +88,7 @@ import { updateBucketFillJoinOverlay } from './overlays/bucketFillJoinOverlay.ts
 import { updateGizmo, updateSphereOverlays } from './overlays/sphereOverlays.ts';
 import { updateRecoveredCamGizmo } from './overlays/recoveredOverlays.ts';
 import { drawMarginalLines, drawSampleLattice, MARGINAL_THICKNESS } from './overlays/projectedCamOverlays.ts';
+import { drawGridPeriodPhaseProjected } from './overlays/gridPeriodPhaseOverlays.ts';
 import { computeThroughRect, lastHoverClientX, lastHoverClientY, updateHoverOverlays } from './overlays/hoverDebugOverlays.ts';
 import { sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
 
@@ -146,17 +147,19 @@ import * as NS44 from './overlays/bucketFillOverlay.ts';
 import * as NS45 from './pipeline/bucketFillSegments.ts';
 import * as NS46 from './overlays/bucketFillJoinOverlay.ts';
 import * as NS47 from './pipeline/bucketFillJoin.ts';
+import * as NS48 from './overlays/gridPeriodPhaseOverlays.ts';
+import * as NS49 from './pipeline/gridPeriodPhase.ts';
 Object.assign(
   globalThis,
   NS0, NS1, NS2, NS3, NS4, NS5, NS6, NS7, NS8, NS9, NS10, NS11, NS12, NS13, NS14, NS15, NS16, NS17,
-  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS44, NS45, NS46, NS47,
+  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS44, NS45, NS46, NS47, NS48, NS49,
   { THREE, activeCamera, cameras, isSimulated, isPhysical, globalState, euler, canvas, readout, savedControls,
     setMode, setPanelCollapsed, renderCameraTabs, refreshCameraPanel, renderViewport, layoutPip, resize,
     renderer, floorMesh, viewerCam, worldOrbit, insideCam, renderPreviewViewport, renderProjectedViewport,
     renderTrueContamOverlay, renderReconContamOverlay, getAnalysisVFovRad, markCaptureDirty, resizeCaptureBuffers,
     renderCamRT, updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS, buildProjectedTexture, runAxesReconstruction,
     updateContaminationOverlays, updateGizmo, updateSphereOverlays, updateRecoveredCamGizmo, drawMarginalLines,
-    drawSampleLattice, MARGINAL_THICKNESS, computeThroughRect },
+    drawSampleLattice, MARGINAL_THICKNESS, computeThroughRect, drawGridPeriodPhaseProjected },
 );
 
 type Mode = 'world' | 'through' | 'inside' | 'projected';
@@ -256,6 +259,7 @@ function animate() {
       renderProjectedViewport(active, x, innerHeight - y - h, w, h);
       drawMarginalLines(active, x, y, w, h);
       drawSampleLattice(active, x, y, w, h);
+      drawGridPeriodPhaseProjected(active, x, y, w, h);
     }
   } else {
     // Inside-Sphere: only meaningful for a simulated camera's own ground-

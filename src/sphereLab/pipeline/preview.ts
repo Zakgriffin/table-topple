@@ -62,6 +62,22 @@ export function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
   }
 }
 
+// The tangent-walk-path hover overlay (overlays/hoverDebugOverlays.ts) always
+// wants the EFFECTIVE field specifically, regardless of which fieldView the
+// user currently has selected for the main preview -- but paintFieldViewFromGray
+// above only ever computes it as a side effect of the 'walked'/'effective'
+// branches, and is itself skipped entirely whenever hideField is on. Called
+// at the end of both capture paths below so showTangentWalkPath gets a fresh
+// effective field either way; a no-op if paintFieldViewFromGray already set
+// one this pass (fieldView was 'walked'/'effective' and hideField was off).
+function ensureEffectiveField(camera: Camera, gray: Float64Array) {
+  if (camera.lastEffectiveField || !camera.settings.showTangentWalkPath) return;
+  const w = camera.rtSize.w, h = camera.rtSize.h;
+  const field = computeGradientField(gray, w, h, Math.round(camera.settings.simGradRadius));
+  const agreement = computeGradientAgreementField(field, Math.round(camera.settings.coherenceRadius));
+  camera.lastEffectiveField = computeEffectiveGradientField(field, agreement);
+}
+
 export function updateDistortedPreview(camera: Camera) {
   camera.lastDisplayedVectorField = null;
   camera.lastEffectiveField = null;
@@ -73,7 +89,21 @@ export function updateDistortedPreview(camera: Camera) {
     }
     camera.distortedPreviewTex.needsUpdate = true;
   }
-  const needGrayForOverlay = settings.showTrueContamination || settings.showReconstructedContamination;
+  // Anything that reads camera.lastNoisedPreviewGray directly (not just the
+  // painted field-view colors this function's own hideField branches gate)
+  // needs to be listed here, or hideField skips recomputing it entirely --
+  // the STALE gray buffer (e.g. from before a viewport resize, when it was
+  // a different width/height) then gets reused at the CURRENT rtSize.w/h by
+  // whichever overlay reads it, reading/writing at systematically wrong
+  // offsets -- the diagonal "streaking" artifact. Bucket-fill and top-
+  // gradient (overlays/bucketFillOverlay.ts, overlays/
+  // gradientHighlightOverlays.ts) were both missing here; showBucketFillJoin/
+  // Composite/MergeMarkers don't need their own entry since their
+  // availability gating already forces them off whenever
+  // showBucketFillSegments is off. showTangentWalkPath needs lastEffectiveField
+  // specifically, not lastNoisedPreviewGray -- see ensureEffectiveField above.
+  const needGrayForOverlay = settings.showTrueContamination || settings.showReconstructedContamination
+    || settings.showBucketFillSegments || settings.showTopGradient || settings.showTangentWalkPath;
   if (settings.hideField && !needGrayForOverlay) return;
 
   if (isPhysical(camera)) {
@@ -87,6 +117,7 @@ export function updateDistortedPreview(camera: Camera) {
       }
     }
     camera.lastNoisedPreviewGray = camera.lastRealCaptureGray;
+    ensureEffectiveField(camera, camera.lastRealCaptureGray);
     return;
   }
 
@@ -136,6 +167,7 @@ export function updateDistortedPreview(camera: Camera) {
     }
   }
   camera.lastNoisedPreviewGray = noised;
+  ensureEffectiveField(camera, noised);
 }
 
 export const PREVIEW_UPDATE_INTERVAL_MS = 100; // ~10fps

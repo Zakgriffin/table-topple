@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { CompositeLineDisplay, SegmentMerge } from '../pipeline/bucketFillJoin.ts';
 import { BucketFillSegment } from '../pipeline/bucketFillSegments.ts';
+import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
 import { DecodeCellDebug, DecodeSampleGrid, GradientField, JacobianField, Marginals, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
 import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
 
@@ -53,6 +54,15 @@ export interface CameraBase {
   lastBucketFillBlueMerges: { x: number; y: number }[] | null;
   lastBucketFillOrangeMerges: { x: number; y: number }[] | null;
   lastBucketFillRedMerges: { x: number; y: number }[] | null;
+  lastGridPeriodPhase: GridPeriodPhaseResult | null;
+  // Interactive pan/zoom state for the period/phase debug plot (overlays/
+  // gridPeriodPhaseOverlays.ts) -- null means "no interaction yet, use the
+  // default bracket-relative view". Deliberately NOT in settings (not
+  // persisted) -- this is scroll position, not a configuration choice, and
+  // a saved zoom level from a totally different capture wouldn't mean
+  // anything as a default for the next session.
+  gridPeriodPhaseViewMin: number | null;
+  gridPeriodPhaseViewMax: number | null;
 
   distortedPreviewData: Uint8Array; distortedPreviewTex: THREE.DataTexture;
   projectedPreviewData: Uint8Array; projectedPreviewTex: THREE.DataTexture;
@@ -78,7 +88,16 @@ export interface CameraBase {
   rowCirclePool: THREE.Line[]; colCirclePool: THREE.Line[];
   frustumLine: THREE.LineLoop;
   patchGeo: THREE.BufferGeometry; patchMat: THREE.MeshBasicMaterial; patchMesh: THREE.Mesh;
-  gradientCirclesGeo: THREE.BufferGeometry; gradientCirclesMat: THREE.LineBasicMaterial; gradientCirclesLines: THREE.LineSegments;
+  // Rendered as a thin flat TRIANGLE RIBBON (2 triangles per circle segment,
+  // extruded in-plane to +-halfWidth around the true SPHERE_RADIUS), not a
+  // native GL line -- a real "fat line" addon (three/addons/lines,
+  // LineSegments2/LineMaterial) was tried first for an adjustable stroke
+  // weight, but rendered nothing at all in this environment (confirmed via
+  // live dev-bridge inspection: draw calls happened, geometry data was
+  // correct, no GL errors, yet zero pixels) for reasons not worth chasing
+  // further -- ordinary triangles + MeshBasicMaterial has no such failure
+  // mode. See updateGradientCirclesDebug for the ribbon construction.
+  gradientCirclesGeo: THREE.BufferGeometry; gradientCirclesMat: THREE.MeshBasicMaterial; gradientCirclesLines: THREE.Mesh;
   axisVectorsGeo: THREE.BufferGeometry; axisVectorsMat: THREE.LineBasicMaterial; axisVectorsLines: THREE.LineSegments;
 }
 export interface SimulatedCamera extends CameraBase {

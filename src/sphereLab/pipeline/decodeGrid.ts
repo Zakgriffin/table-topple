@@ -218,6 +218,23 @@ function projectSamplesCPU(camera: Camera): ProjectedSamplesDense | null {
   return { u: uArr, v: vArr, cx: cxArr, cy: cyArr, valid: validArr, minU, maxU, minV, maxV };
 }
 
+// Exported so other debug overlays (currently gridPeriodPhaseOverlays.ts)
+// can convert their OWN gnomonic-unit {xRow,xCol} points (see
+// pipeline/gridPeriodPhase.ts's gnomonic()) into this same u/v space --
+// u = k*xRow, v = k*xCol for a single shared scalar k -- instead of
+// re-deriving their own bounding box and mirror convention, which is what
+// caused the Projected-Cam misalignment this was added to fix. k folds in
+// both the camera height (distance) and the same grazing-angle normal-flip
+// projectSamplesCPU applies above, since that flip changes u/v's sign but
+// not gnomonic()'s (gnomonic always uses the raw, unflipped Dnormal).
+export function projectedUVScale(camera: Camera): number | null {
+  if (!camera.lastRecoveredAxes) return null;
+  const { Dnormal, distance } = camera.lastRecoveredAxes;
+  const vFovRad = getAnalysisVFovRad(camera);
+  const flipped = cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(Dnormal) > 0;
+  return flipped ? -distance : distance;
+}
+
 // Stage 2 (CPU only, for now -- see this session's chat for why: bucketed
 // float accumulation needs either fixed-point atomic<i32> encoding or
 // something else GPU-side, deliberately not tackled yet). Bins stage 1's

@@ -80,6 +80,7 @@ export function computeSegmentVotes(
 
   const { merges } = computeJoinWalk(
     segments, regionId, w, h, settings.bucketFillMergeMinSimilarity, settings.bucketFillJoinSteps, settings.bucketFillMinLengthPx,
+    settings.bucketFillMaxTravelFactor,
   );
   const groupOf = computeMergeGroups(segments.length, merges);
   const composites = computeCompositeLines(segments, groupOf);

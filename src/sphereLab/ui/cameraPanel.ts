@@ -9,6 +9,7 @@ import { updateContaminationAvailability } from '../overlays/contaminationOverla
 import { updateTopGradientAvailability, updateTopGradientOverlay } from '../overlays/gradientHighlightOverlays.ts';
 import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, updateHoverOverlays, updateTangentWalkPathAvailability } from '../overlays/hoverDebugOverlays.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
+import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { runAxesReconstruction } from '../pipeline/axesReconstruction.ts';
 import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
@@ -146,7 +147,11 @@ export function refreshCameraPanel() {
   setBool('showPoles', cam.settings.showPoles); setBool('showFrustum', cam.settings.showFrustum);
   setBool('showPatch', cam.settings.showPatch); setBool('showGizmoBody', cam.settings.showGizmoBody);
   setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setBool('showSampleLattice', cam.settings.showSampleLattice);
+  setBool('showNewSampleLattice', cam.settings.showNewSampleLattice);
   setBool('useSegmentVotes', cam.settings.useSegmentVotes);
+  setBool('showGridPeriodPhaseDebug', cam.settings.showGridPeriodPhaseDebug);
+  setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
+  setBool('showCompositeLineFamilies', cam.settings.showCompositeLineFamilies);
   setBool('orientationLM', cam.settings.orientationLM); setBool('positionLM', cam.settings.positionLM);
 
   setNum('simGradRadius', cam.settings.simGradRadius); setNum('coherenceRadius', cam.settings.coherenceRadius);
@@ -165,8 +170,10 @@ export function refreshCameraPanel() {
   setNum('bucketFillMinLengthPx', cam.settings.bucketFillMinLengthPx);
   setNum('bucketFillJoinSteps', cam.settings.bucketFillJoinSteps);
   setNum('bucketFillMergeMinSimilarity', cam.settings.bucketFillMergeMinSimilarity);
+  setNum('bucketFillMaxTravelFactor', cam.settings.bucketFillMaxTravelFactor);
   setBool('showRecoveredPoles', cam.settings.showRecoveredPoles); setBool('showAxisVectors', cam.settings.showAxisVectors);
   setBool('showTopCircles', cam.settings.showTopCircles);
+  setNum('topCirclesLineWidth', cam.settings.topCirclesLineWidth);
   setNum('weightSharpenPower', cam.settings.weightSharpenPower);
   setBool('axesAutoCapture', cam.settings.axesAutoCapture);
   setNum('axesCaptureInterval', cam.settings.axesCaptureIntervalMs);
@@ -196,6 +203,7 @@ export function refreshCameraPanel() {
   if (globalState.mode === 'projected') buildProjectedTexture(cam);
   markCaptureDirty(cam);
   layoutPip(cam);
+  drawGridPeriodPhasePlot(cam);
 }
 
 
@@ -281,6 +289,22 @@ gpuVotesStatus.textContent = isWebGPUSupported()
 bindCheckbox('showGizmoBody', (v) => { const cam = activeCamera(); if (cam) cam.settings.showGizmoBody = v; });
 bindCheckbox('showRecoveredFloor', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredFloor = v; });
 bindCheckbox('showSampleLattice', (v) => { const cam = activeCamera(); if (cam) cam.settings.showSampleLattice = v; });
+bindCheckbox('showNewSampleLattice', (v) => { const cam = activeCamera(); if (cam) cam.settings.showNewSampleLattice = v; });
+bindCheckbox('showGridPeriodPhaseDebug', (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.showGridPeriodPhaseDebug = v;
+  drawGridPeriodPhasePlot(cam);
+});
+bindSlider('gridPeriodPhaseBinCount', (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.gridPeriodPhaseBinCount = v;
+  drawGridPeriodPhasePlot(cam);
+}, (v) => v.toFixed(0));
+bindCheckbox('showCompositeLineFamilies', (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.showCompositeLineFamilies = v;
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+});
 bindCheckbox('useSegmentVotes', (v) => { const cam = activeCamera(); if (cam) cam.settings.useSegmentVotes = v; });
 bindCheckbox('orientationLM', (v) => { const cam = activeCamera(); if (cam) cam.settings.orientationLM = v; });
 bindCheckbox('positionLM', (v) => { const cam = activeCamera(); if (cam) cam.settings.positionLM = v; });
@@ -335,6 +359,7 @@ bindSlider('bucketFillMinLengthPx', (v) => {
 }, (v) => v.toFixed(0));
 bindSlider('bucketFillJoinSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillJoinSteps = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(0));
 bindSlider('bucketFillMergeMinSimilarity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillMergeMinSimilarity = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(2));
+bindSlider('bucketFillMaxTravelFactor', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillMaxTravelFactor = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(1));
 bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
 // Turning either on refreshes immediately -- updateGradientCirclesDebug now
 // skips its work while both are off (see its own comment), so the geometry
@@ -342,6 +367,7 @@ bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam)
 // next capture.
 bindCheckbox('showAxisVectors', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showAxisVectors = v; if (v) updateGradientCirclesDebug(cam); } });
 bindCheckbox('showTopCircles', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showTopCircles = v; if (v) updateGradientCirclesDebug(cam); } });
+bindSlider('topCirclesLineWidth', (v) => { const cam = activeCamera(); if (cam) { cam.settings.topCirclesLineWidth = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
 bindSlider('weightSharpenPower', (v) => { const cam = activeCamera(); if (cam) { cam.settings.weightSharpenPower = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
 bindCheckbox('axesAutoCapture', (v) => { const cam = activeCamera(); if (cam) cam.settings.axesAutoCapture = v; });
 bindSlider('axesCaptureInterval', (v) => { const cam = activeCamera(); if (cam) cam.settings.axesCaptureIntervalMs = v; }, (v) => `${v.toFixed(0)}`);

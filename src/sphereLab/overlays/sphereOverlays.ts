@@ -38,12 +38,31 @@ export function updateGradientCirclesDebug(camera: Camera) {
   }
   const wRange = maxW - minW;
 
-  const positions = new Float32Array(chosen.length * DEBUG_CIRCLE_SEGMENTS * 2 * 3);
-  const colors = new Float32Array(chosen.length * DEBUG_CIRCLE_SEGMENTS * 2 * 3);
+  // Each circle segment becomes a flat quad (2 triangles, 6 verts) instead
+  // of a single line -- extruded to +-halfWidth along `normal`, PERPENDICULAR
+  // to the vote's own great-circle plane, not radially within it. Radial
+  // in-plane extrusion (the first version of this) put both edges of the
+  // ribbon on the exact same ray from the origin at every point around the
+  // circle -- invisible (zero apparent width) from the Inside-Sphere view,
+  // which sits AT the origin, no matter how large halfWidth was. Since
+  // `normal` is perpendicular to every point's own radial direction (it's
+  // perpendicular to both u and v, which span the circle's plane), extruding
+  // along it produces genuine angular separation from ANY viewpoint,
+  // including the origin. Cheap and reliable (see camera/model.ts's own
+  // comment on gradientCirclesGeo for why this replaced a fat-line shader
+  // approach) at the cost of the ring's apparent thickness scaling slightly
+  // with zoom/distance, which is fine for a debug overlay.
+  const halfWidth = camera.settings.topCirclesLineWidth * 0.006;
+  const positions = new Float32Array(chosen.length * DEBUG_CIRCLE_SEGMENTS * 6 * 3);
+  const colors = new Float32Array(chosen.length * DEBUG_CIRCLE_SEGMENTS * 6 * 3);
   const axisPositions = new Float32Array(chosen.length * 2 * 3);
   const axisColors = new Float32Array(chosen.length * 2 * 3);
   let p = 0, pc = 0, ap = 0, apc = 0;
   const u = new THREE.Vector3(), v = new THREE.Vector3(), helper = new THREE.Vector3();
+  const pushVert = (x: number, y: number, z: number, r: number, b: number) => {
+    positions[p++] = x; positions[p++] = y; positions[p++] = z;
+    colors[pc++] = r; colors[pc++] = 0; colors[pc++] = b;
+  };
   for (const vote of chosen) {
     const normal = vote.n.clone().applyQuaternion(anchorQuat);
     const t = wRange > 0 ? (vote.weight - minW) / wRange : 0;
@@ -52,15 +71,20 @@ export function updateGradientCirclesDebug(camera: Camera) {
     if (Math.abs(normal.y) >= 0.9) helper.set(1, 0, 0);
     u.crossVectors(helper, normal).normalize();
     v.crossVectors(normal, u);
+    const nx = normal.x * halfWidth, ny = normal.y * halfWidth, nz = normal.z * halfWidth;
     for (let s = 0; s < DEBUG_CIRCLE_SEGMENTS; s++) {
       const a0 = (s / DEBUG_CIRCLE_SEGMENTS) * Math.PI * 2;
       const a1 = ((s + 1) / DEBUG_CIRCLE_SEGMENTS) * Math.PI * 2;
-      const c0 = Math.cos(a0) * SPHERE_RADIUS, sn0 = Math.sin(a0) * SPHERE_RADIUS;
-      const c1 = Math.cos(a1) * SPHERE_RADIUS, sn1 = Math.sin(a1) * SPHERE_RADIUS;
-      positions[p++] = u.x * c0 + v.x * sn0; positions[p++] = u.y * c0 + v.y * sn0; positions[p++] = u.z * c0 + v.z * sn0;
-      positions[p++] = u.x * c1 + v.x * sn1; positions[p++] = u.y * c1 + v.y * sn1; positions[p++] = u.z * c1 + v.z * sn1;
-      colors[pc++] = r; colors[pc++] = 0; colors[pc++] = b;
-      colors[pc++] = r; colors[pc++] = 0; colors[pc++] = b;
+      const dx0 = Math.cos(a0) * SPHERE_RADIUS, dy0 = Math.sin(a0) * SPHERE_RADIUS;
+      const dx1 = Math.cos(a1) * SPHERE_RADIUS, dy1 = Math.sin(a1) * SPHERE_RADIUS;
+      const b0x = u.x * dx0 + v.x * dy0, b0y = u.y * dx0 + v.y * dy0, b0z = u.z * dx0 + v.z * dy0;
+      const b1x = u.x * dx1 + v.x * dy1, b1y = u.y * dx1 + v.y * dy1, b1z = u.z * dx1 + v.z * dy1;
+      const i0x = b0x - nx, i0y = b0y - ny, i0z = b0z - nz;
+      const o0x = b0x + nx, o0y = b0y + ny, o0z = b0z + nz;
+      const i1x = b1x - nx, i1y = b1y - ny, i1z = b1z - nz;
+      const o1x = b1x + nx, o1y = b1y + ny, o1z = b1z + nz;
+      pushVert(i0x, i0y, i0z, r, b); pushVert(o0x, o0y, o0z, r, b); pushVert(o1x, o1y, o1z, r, b);
+      pushVert(i0x, i0y, i0z, r, b); pushVert(o1x, o1y, o1z, r, b); pushVert(i1x, i1y, i1z, r, b);
     }
     const len = maxW > 0 ? AXIS_VECTOR_LENGTH * Math.pow(vote.weight / maxW, camera.settings.weightSharpenPower) : 0;
     axisPositions[ap++] = 0; axisPositions[ap++] = 0; axisPositions[ap++] = 0;

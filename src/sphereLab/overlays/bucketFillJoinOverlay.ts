@@ -13,6 +13,7 @@ export function updateBucketFillJoinOverlay(camera: Camera) {
   const { joinBuffer, merges, blueMergePoints, orangeMergePoints, redMergePoints } = computeJoinWalk(
     camera.lastBucketFillSegments, camera.lastBucketFillRegionId, camera.rtSize.w, camera.rtSize.h,
     settings.bucketFillMergeMinSimilarity, settings.bucketFillJoinSteps, settings.bucketFillMinLengthPx,
+    settings.bucketFillMaxTravelFactor,
   );
   camera.lastBucketFillBlueMerges = blueMergePoints;
   camera.lastBucketFillOrangeMerges = orangeMergePoints;
@@ -40,7 +41,7 @@ export function updateBucketFillJoinOverlay(camera: Camera) {
       // disappear everywhere else (base raster, markers, join-walk fronts,
       // votes.ts's own vote generation). Filtered out here the same way.
       if (compositeLineLength(line) < settings.bucketFillMinLengthPx) continue;
-      composites.push({ ...line, color: displayColors[root] });
+      composites.push({ ...line, color: displayColors[root], root });
     }
     camera.lastBucketFillComposite = composites;
   } else {

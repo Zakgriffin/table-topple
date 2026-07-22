@@ -36,6 +36,7 @@ export interface CameraSettingsCommon {
   showBucketFillSegments: boolean; bucketFillToleranceDeg: number; bucketFillMagnitudeThreshold: number; bucketFillMinLengthPx: number;
   showBucketFillMarkers: boolean;
   showBucketFillJoin: boolean; bucketFillJoinSteps: number; bucketFillMergeMinSimilarity: number;
+  bucketFillMaxTravelFactor: number;
   showBucketFillComposite: boolean;
   showBucketFillMergeMarkers: boolean;
   showGradientArrow: boolean; showGradientArrowPerpendicular: boolean; gradientArrowScale: number;
@@ -47,8 +48,13 @@ export interface CameraSettingsCommon {
   showRecoveredPoles: boolean;
   showAxisVectors: boolean;
   showTopCircles: boolean;
+  topCirclesLineWidth: number;
   weightSharpenPower: number;
   useSegmentVotes: boolean;
+  showGridPeriodPhaseDebug: boolean;
+  gridPeriodPhaseBinCount: number;
+  showCompositeLineFamilies: boolean;
+  showNewSampleLattice: boolean;
   orientationLM: boolean;
   positionLM: boolean;
   fieldView: FieldView;
@@ -89,6 +95,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showBucketFillJoin: savedBool('toggleBucketFillJoin', false),
     bucketFillJoinSteps: savedNum('bucketFillJoinSteps', 0),
     bucketFillMergeMinSimilarity: savedNum('bucketFillMergeMinSimilarity', 0.9),
+    bucketFillMaxTravelFactor: savedNum('bucketFillMaxTravelFactor', 1),
     showBucketFillComposite: savedBool('toggleBucketFillComposite', false),
     showBucketFillMergeMarkers: savedBool('toggleBucketFillMergeMarkers', false),
     showGradientArrow: false, showGradientArrowPerpendicular: false, gradientArrowScale: 10,
@@ -102,8 +109,13 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showRecoveredPoles: true,
     showAxisVectors: false,
     showTopCircles: true,
+    topCirclesLineWidth: savedNum('topCirclesLineWidth', 1),
     weightSharpenPower: 4,
     useSegmentVotes: savedBool('useSegmentVotes', false),
+    showGridPeriodPhaseDebug: savedBool('showGridPeriodPhaseDebug', false),
+    gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
+    showCompositeLineFamilies: savedBool('showCompositeLineFamilies', false),
+    showNewSampleLattice: savedBool('showNewSampleLattice', false),
     orientationLM: false,
     positionLM: false,
     fieldView: 'effective',

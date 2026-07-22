@@ -290,12 +290,14 @@ function drawBucketFillCompositeLines(camera: Camera) {
   }
 }
 
-// Red X at merge points where the two colliding fronts were walking the SAME
-// direction rather than head-on, blue X where they were walking opposite/
-// head-on -- see pipeline/bucketFillJoin.ts's computeJoinWalk, the frontDot
-// check right where a merge is recorded. Tracks the join toggle, not the
-// composite toggle -- these points exist as soon as the join walk itself
-// runs.
+// Merge-point X markers, classified by how the merge's winning pair of
+// points was chosen (see pipeline/bucketFillJoin.ts's computeJoinWalk,
+// mergeAt): blue = one point from each group, those points' fronts were
+// walking roughly opposite ("closing a gap"); orange = one point from each
+// group, but walking roughly the same way; red = both winning points came
+// from the SAME group, so the other group's own contribution was discarded
+// entirely. Tracks the join toggle, not the composite toggle -- these
+// points exist as soon as the join walk itself runs.
 function drawBucketFillDirectionMerges(camera: Camera) {
   const settings = camera.settings;
   if (!settings.showBucketFillJoin || !settings.showBucketFillMergeMarkers) return;
@@ -305,18 +307,16 @@ function drawBucketFillDirectionMerges(camera: Camera) {
     px: rect.x + (fx + 0.5) * (rect.w / fieldW),
     py: rect.y + rect.h - (fy + 0.5) * (rect.h / fieldH),
   });
-  if (camera.lastBucketFillSameDirMerges) {
-    for (const p of camera.lastBucketFillSameDirMerges) {
+  const drawAll = (points: { x: number; y: number }[] | null, color: string) => {
+    if (!points) return;
+    for (const p of points) {
       const { px, py } = toScreen(p.x, p.y);
-      drawMarkerX(px, py, 'rgb(255,0,0)');
+      drawMarkerX(px, py, color);
     }
-  }
-  if (camera.lastBucketFillOppositeDirMerges) {
-    for (const p of camera.lastBucketFillOppositeDirMerges) {
-      const { px, py } = toScreen(p.x, p.y);
-      drawMarkerX(px, py, 'rgb(60,140,255)');
-    }
-  }
+  };
+  drawAll(camera.lastBucketFillBlueMerges, 'rgb(60,140,255)');
+  drawAll(camera.lastBucketFillOrangeMerges, 'rgb(255,140,0)');
+  drawAll(camera.lastBucketFillRedMerges, 'rgb(255,0,0)');
 }
 
 // Single per-hover entry point -- operates on the ACTIVE camera, since only

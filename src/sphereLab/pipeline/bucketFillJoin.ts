@@ -4,54 +4,55 @@ import { hsvToRgb, rgbToHueDeg } from './distortion.ts';
 // ── Line-segment joining (pure) ───────────────────────────────────────────
 //
 // A second, separate stepped process on top of the bucket-fill segments
-// (pipeline/bucketFillSegments.ts): from each segment's two endpoints, walk
-// straight out along that segment's own tangent direction (fixed for the
-// whole walk -- there's no more field data to re-steer by once we're past
-// the segment's actual pixels, unlike the original flood fill). The
-// UNDERLYING data structure is conceptually a texture of SEGMENT INDICES,
-// not colors -- each cell holds which segment currently claims it (-1 =
-// unclaimed) -- so a front walking into a cell already claimed by a
+// (pipeline/bucketFillSegments.ts): every merge GROUP (initially just one
+// raw segment; later, a chain of several) has exactly two live "fronts",
+// walking straight outward from its two known extremity points -- there's
+// no more field data to re-steer by once we're past the segment's actual
+// pixels, unlike the original flood fill, so a front's direction is fixed
+// until it's REGENERATED (see below), not continuously re-evaluated.
+//
+// The UNDERLYING data structure is conceptually a texture of SEGMENT
+// INDICES, not colors -- each cell holds which segment currently claims it
+// (-1 = unclaimed) -- so a front walking into a cell already claimed by a
 // DIFFERENT segment can look that segment up directly and test whether the
-// two are plausibly the same line (their gradient directions are close to
+// two are plausibly the same line (their current GROUP axes are close to
 // collinear) before deciding to merge. Internally this is one level of
 // indirection: a cell actually stores a HANDLE, resolved to a segment index
-// through a small per-episode table (see computeJoinWalk's own comment) --
-// this is what lets a front's pre-redirect trail be erased in O(1) (just
-// invalidate its old handle) instead of walking back over every pixel it
-// claimed. This buffer is SEEDED with the flood fill's own pixel
-// footprint (regionId, from bucketFillSegments.ts's computeBucketFillRegions)
-// before any front takes a step -- so a front reacts the moment it enters
-// ANOTHER segment's real blob shape, not just when it happens to cross that
-// segment's own thin front-trace line. Only segments that pass minLengthPx
-// (the same set that gets fronts at all) get seeded, so a too-short segment
-// stays exactly as invisible to the join walk as it already is everywhere
-// else. A collision that FAILS the similarity test (almost
-// always a crossing perpendicular segment on this grid) gets passed through
-// without claiming the cell, not treated as a dead end, so a front can keep
+// through a small per-episode table (episodeOwner, see below) -- this is
+// what lets a front's pre-merge trail be erased in O(1) (just invalidate its
+// old handle) instead of walking back over every pixel it claimed. This
+// buffer is SEEDED with the flood fill's own pixel footprint (regionId, from
+// bucketFillSegments.ts's computeBucketFillRegions) before any front takes a
+// step -- so a front reacts the moment it enters ANOTHER segment's real blob
+// shape, not just when it happens to cross that segment's own thin
+// front-trace line. Only segments that pass minLengthPx (the same set that
+// gets fronts at all) get seeded, so a too-short segment stays exactly as
+// invisible to the join walk as it already is everywhere else.
+//
+// A collision that FAILS the orientation-similarity test (almost always a
+// crossing perpendicular segment on this grid) gets passed through without
+// claiming the cell, not treated as a dead end, so a front can keep
 // searching past unrelated crossings for its true collinear partner further
-// along. A collision that PASSES only actually MERGES if the two specific
-// fronts involved were walking HEAD-ON (roughly opposite directions) -- the
-// expected case for two ends of one line meeting in the middle: both stop,
-// they found their neighbor, this point is now internal to the composite,
-// not an extremity -- but each one's SIBLING (the other front on that same
-// segment, still headed outward toward the group's other, still-unexplored
-// end) gets redirected instead: it SNAPS to the group's own composite
-// endpoint on that side (not wherever it currently is) and keeps walking
-// outward from there, now along the merged group's own composite direction
-// (see the live union-find below) rather than its own original segment's
-// estimate -- safe to jump straight there since its entire pre-redirect
-// trail gets erased anyway (see the handle-indirection comment below), so
-// nothing stale is left behind between the old and new positions. If instead the
-// two fronts were walking the SAME direction (the DISCOVERING front caught
-// up to/overtook the DISCOVERED front's own trail, not closing a gap), this
-// is NOT treated as a merge at all: only the discovering front stops, the
-// discovered one is left completely untouched, no group/composite update
-// happens. So after a real (head-on) merge, exactly the two fronts still
-// facing outward survive, sharing one jointly-informed direction -- this
-// lets a chain of 3+ segments keep discovering further collinear neighbors,
-// correcting course toward the group's actual line as more evidence comes
-// in, rather than a fixed pair only ever finding one match each. Colors are
-// purely a rendering concern, see paintJoinOverlay.
+// along -- this part is unchanged from before. What happens when it PASSES
+// is deliberately indifferent to HOW the collision happened (another
+// front's own trace line, or a bare flood-fill blob pixel -- both resolve to
+// "this segment" via the exact same episodeOwner lookup, so the merge logic
+// never needs to know or care which) and indifferent to any front's current
+// travel DIRECTION: the two segments' current GROUPS each have exactly two
+// known extremity points (their live composite pair) -- 4 candidate points
+// total -- and the two of those 4 that end up FARTHEST APART become the
+// merged group's new composite. Two fresh fronts spawn there, walking
+// straight away from each other along the line between them; whichever of
+// the other two candidate points didn't win just has its (if any) existing
+// front stopped, no replacement -- if both winners happen to come from the
+// SAME original group, the other group's whole contribution is discarded
+// (its shorter reach didn't extend the group's known extent at all). This
+// keeps "exactly two active fronts per group" true by construction, with no
+// separate case analysis for front-vs-front vs front-vs-blob collisions, and
+// no need to reason about any front's travel direction to decide who
+// survives -- see mergeAt below for the actual mechanics, and
+// spawnPair/the handle-indirection comments for how "erase the old trail,
+// start fresh at the winning point" is implemented.
 //
 // Deterministic and fully recomputed from scratch for whatever step count is
 // requested (see numSteps) -- "step N" always means the same walk state, so
@@ -61,11 +62,11 @@ import { hsvToRgb, rgbToHueDeg } from './distortion.ts';
 export interface SegmentMerge { a: number; b: number }
 
 interface JoinFront {
-  seg: number;
-  fi: number; // this front's own index into the `fronts` array -- lets a redirect re-derive its own identity (for allocateHandle) without a linear search
+  seg: number; // a raw segment index whose find() resolves to this front's CURRENT group root -- not necessarily the segment this front's own point originally came from once it's part of a merged group, see mergeAt
   startX: number; startY: number;
-  dx: number; dy: number; // fixed unit tangent direction for this front's whole walk
+  dx: number; dy: number; // fixed unit direction for this front's whole walk, set once at spawn time from the two points it was spawned between (see spawnPair) -- never re-steered except by a fresh spawn
   k: number; // steps taken so far -- position is always startX + k*dx, startY + k*dy (recomputed fresh each step, not accumulated, to avoid drift)
+  maxK: number; // this front stops once k reaches this -- the length of the pair it was spawned from (see spawnPair), so a front never walks farther than the evidence that produced it
   active: boolean;
   handle: number; // this front's CURRENT episode handle -- every cell it claims while walking this episode is tagged with this number, see computeJoinWalk's own comment
 }
@@ -74,18 +75,22 @@ export function computeJoinWalk(
   segments: BucketFillSegment[], regionId: Int32Array, w: number, h: number, minSimilarity: number, numSteps: number, minLengthPx: number,
 ): {
   joinBuffer: Int32Array; merges: SegmentMerge[];
-  sameDirMergePoints: { x: number; y: number }[]; oppositeDirMergePoints: { x: number; y: number }[];
+  blueMergePoints: { x: number; y: number }[]; orangeMergePoints: { x: number; y: number }[]; redMergePoints: { x: number; y: number }[];
 } {
   const n = w * h;
   const merges: SegmentMerge[] = [];
-  // Merge points split by the two colliding fronts' own TRAVEL directions
-  // (JoinFront.dx/dy, not the segments' orientation-only gradient axis) --
-  // walking the SAME way vs head-on/opposite -- see this function's own
-  // dot-product check below for what that distinguishes and why.
-  const sameDirMergePoints: { x: number; y: number }[] = [];
-  const oppositeDirMergePoints: { x: number; y: number }[] = [];
+  // Cosmetic classification of each real merge (see mergeAt) -- doesn't feed
+  // back into the walk itself. Blue/orange: the winning pair took one point
+  // from EACH of the two groups, and those two points' own fronts happened
+  // to be walking roughly opposite (blue, "closing a gap") or roughly the
+  // same (orange) direction. Red: the winning pair took BOTH points from the
+  // SAME group -- the other group's own best point lost outright and its
+  // whole contribution was discarded.
+  const blueMergePoints: { x: number; y: number }[] = [];
+  const orangeMergePoints: { x: number; y: number }[] = [];
+  const redMergePoints: { x: number; y: number }[] = [];
   if (segments.length === 0) {
-    return { joinBuffer: new Int32Array(n).fill(-1), merges, sameDirMergePoints, oppositeDirMergePoints };
+    return { joinBuffer: new Int32Array(n).fill(-1), merges, blueMergePoints, orangeMergePoints, redMergePoints };
   }
 
   // -- Handle indirection ---------------------------------------------------
@@ -97,45 +102,24 @@ export function computeJoinWalk(
   // PERMANENT, one per segment (episodeOwner[i] = i, never invalidated) --
   // reserved for the flood-fill blob seed below, since a segment's own real
   // footprint never goes away. Every FRONT additionally gets its own fresh
-  // handle for each "episode" of its walk (from creation, or from its most
-  // recent redirect, until its next redirect) -- erasing a front's
-  // pre-redirect trail is then just `episodeOwner[oldHandle] = -1`, an O(1)
-  // invalidation instead of walking back over every pixel it claimed: every
-  // cell still holding that handle silently resolves to -1 (unclaimed) the
-  // next time anything reads it. This also lets "which front owns this cell"
-  // (episodeFront, replacing what used to be a full-image-resolution
-  // claimedByFront: Int32Array) live as a tiny per-EPISODE table instead of a
-  // per-PIXEL one -- bounded by how many episodes ever exist (roughly 2 per
-  // segment plus one per redirect), not by image size.
+  // handle for each "episode" of its walk (from its most recent spawn until
+  // it's replaced by a future merge) -- erasing a front's pre-merge trail is
+  // then just `episodeOwner[oldHandle] = -1`, an O(1) invalidation instead of
+  // walking back over every pixel it claimed: every cell still holding that
+  // handle silently resolves to -1 (unclaimed) the next time anything reads
+  // it. There's no need for a per-pixel "which front claimed this" table
+  // (unlike an earlier version of this function) -- merge decisions are made
+  // entirely at the GROUP level (see frontAtSlot1/2 below), never by asking
+  // "which specific front is sitting on this exact pixel".
   const cellHandle = new Int32Array(n).fill(-1);
   const episodeOwner: number[] = [];
-  const episodeFront: number[] = [];
-  for (let i = 0; i < segments.length; i++) { episodeOwner.push(i); episodeFront.push(-1); }
-  function allocateHandle(seg: number, fi: number): number {
+  for (let i = 0; i < segments.length; i++) episodeOwner.push(i);
+  function allocateHandle(seg: number): number {
     const h = episodeOwner.length;
     episodeOwner.push(seg);
-    episodeFront.push(fi);
     return h;
   }
 
-  // minSimilarity is compared DIRECTLY against |dot(unitA, unitB)| -- both
-  // sides are already-normalized unit vectors before the dot product, so
-  // this is already a clean cosine similarity in [0,1], no angle conversion
-  // needed. |dot| (not the raw signed dot) ranges 0 (perpendicular) to 1
-  // (parallel OR antiparallel -- the abs() is what makes this correctly
-  // axial, same reasoning as bucketFillSegments.ts's own sign-resolution,
-  // just applied to a single pairwise comparison instead of an online
-  // running average). gradUX/gradUY below are each segment's own individual
-  // gradient direction, used as: (a) the walk's fixed per-front tangent
-  // direction (unaffected by any of this -- a front's own step direction
-  // never changes except via an explicit redirect), and (b) the FALLBACK
-  // similarity-test direction for a segment that hasn't merged with anything
-  // yet. Once a segment IS part of a merged group, the similarity test
-  // instead uses groupGradientAxis() below, which reads that group's live
-  // composite line direction -- not this raw per-segment value -- so the
-  // test always reflects the group's current, jointly-informed direction
-  // rather than whichever single original member happens to still own the
-  // pixel a new front collided with.
   // Same eligibility test every other consumer of minLengthPx uses (base
   // raster, markers, votes) -- computed once up front since it's needed both
   // for the blob-seeding pass below and for which segments get fronts at all.
@@ -152,48 +136,13 @@ export function computeJoinWalk(
     if (rid >= 0 && eligible[rid]) cellHandle[i] = rid;
   }
 
-  const gradUX = new Float64Array(segments.length), gradUY = new Float64Array(segments.length);
-  const fronts: JoinFront[] = [];
-  // Each segment's two front INDICES (not the fronts themselves) -- needed
-  // at merge time to find a colliding front's SIBLING (the other front on
-  // the same segment, still headed toward the group's other, unexplored
-  // end) without a linear search.
-  const frontsBySegment = new Map<number, [number, number]>();
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    if (!eligible[i]) continue; // too short to trust its endpoint-to-endpoint direction -- no fronts at all, can't grow OR be merged into
-    const gLen = Math.hypot(seg.avgFx, seg.avgFy);
-    const gux = gLen > 0 ? seg.avgFx / gLen : 1, guy = gLen > 0 ? seg.avgFy / gLen : 0;
-    gradUX[i] = gux; gradUY[i] = guy;
-    const tx = -guy, ty = gux; // tangent = gradient rotated 90 degrees, same convention as the marker drawing
-    // A front's very first claimed pixel would just be its own segment's own
-    // endpoint -- already covered by the permanent blob seed above (same
-    // segment, same value), so there's no separate "claim my starting pixel"
-    // step here anymore; each front's own handle only ever gets used once it
-    // actually steps somewhere new.
-    const alongFi = fronts.length;
-    fronts.push({
-      seg: i, fi: alongFi, startX: seg.endAlongX, startY: seg.endAlongY, dx: tx, dy: ty, k: 0, active: true,
-      handle: allocateHandle(i, alongFi),
-    });
-    const againstFi = fronts.length;
-    fronts.push({
-      seg: i, fi: againstFi, startX: seg.endAgainstX, startY: seg.endAgainstY, dx: -tx, dy: -ty, k: 0, active: true,
-      handle: allocateHandle(i, againstFi),
-    });
-    frontsBySegment.set(i, [alongFi, againstFi]);
-  }
-
-  // Live union-find with satellite data: same idea as computeMergeGroups
-  // below, but maintained WHILE the walk runs (not after) so a redirect can
-  // ask "what's this segment's group's composite line RIGHT NOW". Each
-  // root's own compositeX1/Y1/X2/Y2 entry holds that group's current
-  // farthest-apart endpoint pair (see computeCompositeLines for the same
-  // "farthest pair among candidates" idea, done here incrementally: a union
-  // only ever has 4 candidate points to consider -- the two groups' existing
-  // composite pairs -- not a rescan of every member). Always read/write
-  // through find(root), never a cached index, since path compression can
-  // change which index IS the root as more unions happen.
+  // Live union-find with satellite data. Each root's own
+  // compositeX1/Y1/X2/Y2 entry holds that group's current two known
+  // extremity points, and frontAtSlot1/2 holds which FRONT (index into
+  // `fronts`, or -1) currently represents each of those two points --
+  // together these fully describe "this group's current live state".
+  // Always read/write through find(root), never a cached index, since path
+  // compression can change which index IS the root as more unions happen.
   const parent = new Int32Array(segments.length);
   for (let i = 0; i < segments.length; i++) parent[i] = i;
   function find(x: number): number {
@@ -202,110 +151,156 @@ export function computeJoinWalk(
   }
   const compositeX1 = new Float64Array(segments.length), compositeY1 = new Float64Array(segments.length);
   const compositeX2 = new Float64Array(segments.length), compositeY2 = new Float64Array(segments.length);
-  for (const f of fronts) {
-    // Both of a segment's fronts initialize the SAME composite pair (its own
-    // two endpoints) -- harmless double-write, avoids needing a separate
-    // per-segment init pass.
-    compositeX1[f.seg] = segments[f.seg].endAlongX; compositeY1[f.seg] = segments[f.seg].endAlongY;
-    compositeX2[f.seg] = segments[f.seg].endAgainstX; compositeY2[f.seg] = segments[f.seg].endAgainstY;
-  }
-  function union(a: number, b: number): number {
-    const ra = find(a), rb = find(b);
-    if (ra === rb) return ra;
-    let bestX1 = compositeX1[ra], bestY1 = compositeY1[ra], bestX2 = compositeX2[ra], bestY2 = compositeY2[ra];
-    let bestDistSq = (bestX1 - bestX2) ** 2 + (bestY1 - bestY2) ** 2;
-    const candidates: [number, number][] = [
-      [compositeX1[ra], compositeY1[ra]], [compositeX2[ra], compositeY2[ra]],
-      [compositeX1[rb], compositeY1[rb]], [compositeX2[rb], compositeY2[rb]],
-    ];
-    for (let p = 0; p < candidates.length; p++) {
-      for (let q = p + 1; q < candidates.length; q++) {
-        const dx = candidates[p][0] - candidates[q][0], dy = candidates[p][1] - candidates[q][1];
-        const distSq = dx * dx + dy * dy;
-        if (distSq > bestDistSq) {
-          bestDistSq = distSq;
-          bestX1 = candidates[p][0]; bestY1 = candidates[p][1]; bestX2 = candidates[q][0]; bestY2 = candidates[q][1];
-        }
-      }
-    }
-    parent[ra] = rb;
-    compositeX1[rb] = bestX1; compositeY1[rb] = bestY1; compositeX2[rb] = bestX2; compositeY2[rb] = bestY2;
-    return rb;
-  }
-  // Redirects a SIBLING front -- not one of the two that just collided (those
-  // stop, see below), but the OTHER front on each of those two segments,
-  // still headed toward the group's other, still-unexplored extremity. SNAPS
-  // to the composite's own known endpoint on that side (not wherever the
-  // front currently happens to be mid-walk) -- the group's actual, currently-
-  // known reach -- then continues outward from there along the group's just-
-  // updated composite axis instead of its own original segment's estimate,
-  // so from here on both segments' outward-facing rays share one jointly-
-  // informed direction. Sign chosen to keep it moving roughly the way it
-  // already was (dot product against its OLD direction), not double back on
-  // itself; the snapped start point is whichever composite endpoint that
-  // final direction points AWAY from (continuing past the group's own known
-  // extremity, not back into the line it just came from). Safe to jump
-  // straight there -- rather than continuing from the front's current
-  // position and leaving the skipped stretch behind as a stale trail -- since
-  // the whole pre-redirect episode gets erased below anyway (see the handle-
-  // indirection comment above), regardless of where the front resumes from.
-  function redirectSibling(front: JoinFront, root: number) {
-    if (!front.active) return; // already stopped (out of bounds, or already consumed by an earlier merge) -- nothing to redirect
-    let ndx = compositeX2[root] - compositeX1[root], ndy = compositeY2[root] - compositeY1[root];
-    const ndLen = Math.hypot(ndx, ndy);
-    if (ndLen < 1e-9) return; // degenerate (shouldn't happen for any group with 2+ distinct points) -- leave direction as-is
-    ndx /= ndLen; ndy /= ndLen;
-    const sign = (ndx * front.dx + ndy * front.dy) >= 0 ? 1 : -1;
-    if (sign > 0) { front.startX = compositeX2[root]; front.startY = compositeY2[root]; }
-    else { front.startX = compositeX1[root]; front.startY = compositeY1[root]; }
-    front.dx = ndx * sign; front.dy = ndy * sign;
-    front.k = 0;
-    // Erase this front's pre-redirect trail (its whole prior episode, not
-    // just the stretch between its old position and the new snapped one) --
-    // O(1), no pixel-walking needed: every cell it claimed under its OLD
-    // handle now silently resolves to -1 (unclaimed) the next time anything
-    // reads it. It then gets a fresh handle for its continuing walk from the
-    // new snapped position/direction just set above.
-    episodeOwner[front.handle] = -1;
-    front.handle = allocateHandle(front.seg, front.fi);
+  const frontAtSlot1 = new Int32Array(segments.length).fill(-1);
+  const frontAtSlot2 = new Int32Array(segments.length).fill(-1);
+
+  const fronts: JoinFront[] = [];
+
+  // Spawns a fresh pair of fronts representing `root`'s two current
+  // extremity points -- one at each point, walking directly away from the
+  // other along the line between them. Direction comes purely from this
+  // pair's own geometry (not a gradient average) -- exactly as valid for a
+  // lone segment's own two endpoints (used by the initial per-segment setup
+  // below) as it is for a freshly merged group's winning pair (used by
+  // mergeAt). This is the ONLY place compositeX1/Y1/X2/Y2 and
+  // frontAtSlot1/2 ever get written, so a group's tracked composite always
+  // exactly matches wherever its two live fronts actually started from.
+  // Each front's maxK is capped to this SAME pair's own length -- a front
+  // never walks farther out than the length of the evidence (single segment,
+  // or already-merged composite) that just produced it, so a short segment
+  // only ever reaches a proportionally short distance looking for its
+  // partner, not an arbitrary fixed number of steps.
+  function spawnPair(root: number, p1x: number, p1y: number, p2x: number, p2y: number) {
+    const ddx = p1x - p2x, ddy = p1y - p2y;
+    const len = Math.hypot(ddx, ddy);
+    const ux = len > 1e-9 ? ddx / len : 1, uy = len > 1e-9 ? ddy / len : 0;
+    const maxK = Math.round(len);
+    const fi1 = fronts.length;
+    fronts.push({ seg: root, startX: p1x, startY: p1y, dx: ux, dy: uy, k: 0, maxK, active: true, handle: allocateHandle(root) });
+    const fi2 = fronts.length;
+    fronts.push({ seg: root, startX: p2x, startY: p2y, dx: -ux, dy: -uy, k: 0, maxK, active: true, handle: allocateHandle(root) });
+    compositeX1[root] = p1x; compositeY1[root] = p1y; frontAtSlot1[root] = fi1;
+    compositeX2[root] = p2x; compositeY2[root] = p2y; frontAtSlot2[root] = fi2;
   }
 
-  // The direction used for the merge-similarity test -- a segment's current
-  // GROUP's live composite line direction (via find(seg)'s root), not just
-  // that one segment's own raw gradient. This makes the test see the same
-  // answer regardless of which specific member pixel a front happens to
-  // collide with (a 3-segment chain's trail is a mix of all 3 members'
-  // pixels, but should always be tested as "one C", not "whichever of A/B/C
-  // this particular pixel happens to still say"). compositeX1/Y1/X2/Y2 are
-  // valid even for a still-unmerged singleton (initialized to its own
-  // endAlong/endAgainst), so this same lookup works uniformly whether or not
-  // a merge has happened yet -- no separate merged/unmerged branch needed.
-  // The composite pair is a TANGENT-axis direction (along the line, see
-  // computeCompositeLines); rotated back to the gradient axis here (inverse
-  // of the tx=-guy,ty=gux convention above) purely so it's directly
-  // comparable to gradUX/gradUY's convention -- since the test only ever
-  // uses |dot|, rotating both sides by the same 90 degrees wouldn't actually
-  // change the result, but keeping one consistent axis convention throughout
-  // the file avoids confusion.
-  function groupGradientAxis(seg: number): [number, number] {
+  for (let i = 0; i < segments.length; i++) {
+    if (!eligible[i]) continue; // too short to trust its endpoint-to-endpoint direction -- no fronts at all, can't grow OR be merged into
+    spawnPair(i, segments[i].endAlongX, segments[i].endAlongY, segments[i].endAgainstX, segments[i].endAgainstY);
+  }
+
+  // The GROUP's current axis direction (via find(seg)'s root) -- used ONLY
+  // to gate whether two groups are plausibly the same line at all before a
+  // merge is even considered; the actual choice of which points survive a
+  // real merge (mergeAt) is purely geometric and doesn't use this. |dot|
+  // against minSimilarity, same axial (sign-insensitive) reasoning as
+  // bucketFillSegments.ts's own gradient averaging -- a line's direction is
+  // undirected.
+  function groupAxis(seg: number): [number, number] {
     const root = find(seg);
-    const tx0 = compositeX2[root] - compositeX1[root], ty0 = compositeY2[root] - compositeY1[root];
-    const len = Math.hypot(tx0, ty0);
-    if (len < 1e-9) return [gradUX[seg], gradUY[seg]]; // degenerate composite (shouldn't happen once past the length filter) -- fall back to the raw per-segment gradient
-    return [ty0 / len, -tx0 / len];
+    const dx0 = compositeX2[root] - compositeX1[root], dy0 = compositeY2[root] - compositeY1[root];
+    const len = Math.hypot(dx0, dy0);
+    if (len < 1e-9) return [0, 0]; // degenerate (shouldn't happen once past the length filter) -- dot comes out 0, correctly never matches
+    return [dx0 / len, dy0 / len];
+  }
+
+  // The core merge operation, called once the orientation-similarity gate
+  // above has already passed for segA (the segment whose front just
+  // stepped) and segB (whatever it ran into -- via another front's trace OR
+  // a bare blob pixel, doesn't matter, both resolve to a segment index the
+  // same way, see the collision loop below). Gathers the two groups'
+  // current 4 candidate points (2 each) and finds both the FARTHEST cross
+  // pair (one point from each group -- the two same-group pairs are never
+  // considered, so the "red" classification below can never fire, left in
+  // place as dead code rather than deleted) and the NEAREST cross pair.
+  //
+  // Orientation similarity alone can't tell "these are the same line,
+  // extended" apart from "these are two different but merely PARALLEL
+  // lines" (e.g. two adjacent rows of the De Bruijn grid have identical
+  // direction vectors despite being unrelated) -- so before committing to
+  // anything, this also checks that the NEAREST pair's own connecting
+  // vector (the two points actually facing each other across whatever gap
+  // just got bridged) aligns with BOTH groups' own axis directions. A real
+  // collinear merge has that connecting vector running right along the
+  // shared line; a lateral offset between two merely-parallel lines bends it
+  // away from one or both axes even though the axes themselves still agree.
+  // Reuses minSimilarity rather than a separate tunable -- same shape of
+  // quantity (a cosine-similarity threshold on a unit-vector dot product),
+  // just applied to a second vector pair.
+  //
+  // Returns false (no merge, no state mutated) if this check fails --
+  // treated exactly like a failed orientation test by the caller.
+  function mergeAt(segA: number, segB: number, cx: number, cy: number): boolean {
+    const ra = find(segA), rb = find(segB);
+    const candidates = [
+      { x: compositeX1[ra], y: compositeY1[ra], root: ra, fi: frontAtSlot1[ra] },
+      { x: compositeX2[ra], y: compositeY2[ra], root: ra, fi: frontAtSlot2[ra] },
+      { x: compositeX1[rb], y: compositeY1[rb], root: rb, fi: frontAtSlot1[rb] },
+      { x: compositeX2[rb], y: compositeY2[rb], root: rb, fi: frontAtSlot2[rb] },
+    ];
+    const crossPairs: [number, number][] = [[0, 2], [0, 3], [1, 2], [1, 3]];
+    let bestP = 0, bestQ = 2, bestDistSq = -1;
+    let nearP = 0, nearQ = 2, nearDistSq = Infinity;
+    for (const [p, q] of crossPairs) {
+      const dx = candidates[p].x - candidates[q].x, dy = candidates[p].y - candidates[q].y;
+      const distSq = dx * dx + dy * dy;
+      if (distSq > bestDistSq) { bestDistSq = distSq; bestP = p; bestQ = q; }
+      if (distSq < nearDistSq) { nearDistSq = distSq; nearP = p; nearQ = q; }
+    }
+    const winA = candidates[bestP], winB = candidates[bestQ];
+    const nearA = candidates[nearP], nearB = candidates[nearQ];
+
+    if (nearDistSq > 1e-9) {
+      const cvx = (nearB.x - nearA.x) / Math.sqrt(nearDistSq), cvy = (nearB.y - nearA.y) / Math.sqrt(nearDistSq);
+      const [gaX, gaY] = groupAxis(segA), [gbX, gbY] = groupAxis(segB);
+      const cvDotA = Math.abs(cvx * gaX + cvy * gaY), cvDotB = Math.abs(cvx * gbX + cvy * gbY);
+      if (cvDotA < minSimilarity || cvDotB < minSimilarity) return false; // parallel but laterally offset -- not actually the same line
+    }
+    // nearDistSq ~ 0: the near points already coincide, nothing to check --
+    // trivially collinear (can't be laterally offset from itself).
+
+    if (winA.root === winB.root) {
+      redMergePoints.push({ x: cx, y: cy });
+    } else if (winA.fi >= 0 && winB.fi >= 0) {
+      const fa = fronts[winA.fi], fb = fronts[winB.fi];
+      const fdot = fa.dx * fb.dx + fa.dy * fb.dy;
+      (fdot < 0 ? blueMergePoints : orangeMergePoints).push({ x: cx, y: cy });
+    }
+
+    // Every one of the (up to 4) fronts currently at these candidate points
+    // is being replaced -- the 2 winners get a fresh spawn at the exact same
+    // point (new direction, new handle -- see spawnPair), the 2 losers just
+    // stop with no replacement. Only the WINNERS' pre-merge trails get
+    // erased (they're the ones starting a fresh episode); a loser's trail is
+    // genuine, already-walked territory and stays as-is.
+    for (const cand of candidates) {
+      if (cand.fi < 0) continue;
+      const isWinner = cand === winA || cand === winB;
+      if (isWinner) episodeOwner[fronts[cand.fi].handle] = -1;
+      fronts[cand.fi].active = false;
+    }
+
+    parent[ra] = rb; // standard union-by-arbitrary-root, matches computeMergeGroups' own convention
+    spawnPair(rb, winA.x, winA.y, winB.x, winB.y);
+    return true;
   }
 
   for (let step = 1; step <= numSteps; step++) {
-    for (let fi = 0; fi < fronts.length; fi++) {
+    // Snapshot the front count at the START of this step -- a merge can
+    // spawn brand-new fronts mid-step (see mergeAt/spawnPair), but they
+    // shouldn't get a bonus step within the same step count they were born
+    // in; they wait for the next step, same as every other front.
+    const frontCount = fronts.length;
+    for (let fi = 0; fi < frontCount; fi++) {
       const f = fronts[fi];
       if (!f.active) continue;
       f.k++;
+      if (f.k > f.maxK) { f.active = false; continue; } // reached the length of the evidence that spawned it -- see spawnPair
       const nx = Math.round(f.startX + f.k * f.dx), ny = Math.round(f.startY + f.k * f.dy);
       if (nx < 0 || nx >= w || ny < 0 || ny >= h) { f.active = false; continue; }
       const idx = ny * w + nx;
       const rawOccupant = cellHandle[idx];
       // -1 here covers BOTH a cell that's never been touched AND one whose
-      // handle was invalidated by an earlier redirect (see the handle-
+      // handle was invalidated by an earlier merge (see the handle-
       // indirection comment above) -- both read as plain "unclaimed".
       const occupant = rawOccupant === -1 ? -1 : episodeOwner[rawOccupant];
       if (occupant === -1) {
@@ -316,84 +311,25 @@ export function computeJoinWalk(
         // toward each other) -- nothing new to learn, pass through exactly
         // like the own-segment case below.
       } else if (occupant !== f.seg) {
-        const [gux, guy] = groupGradientAxis(f.seg);
-        const [oux, ouy] = groupGradientAxis(occupant);
+        const [gux, guy] = groupAxis(f.seg);
+        const [oux, ouy] = groupAxis(occupant);
         const dot = gux * oux + guy * ouy;
-        if (Math.abs(dot) >= minSimilarity) {
-          // -1 for a permanent blob-seed handle (no owning front); a real
-          // front index otherwise.
-          const otherFi = episodeFront[rawOccupant];
-          // Distinguishes head-on ("closing the gap", the expected case for
-          // two ends of one line meeting in the middle) from same-direction
-          // collisions (the DISCOVERING front f caught up to/overtook the
-          // DISCOVERED front's own trail, walking the same way -- not two
-          // ends closing a gap at all). This checks the two SPECIFIC FRONTS'
-          // own travel directions, not the segments' sign-insensitive
-          // orientation similarity above -- that's already what let this
-          // collision reach here, so this is strictly additional
-          // information. Only meaningful when a specific front (not a bare
-          // flood-fill blob seed, see this file's header) owns the cell --
-          // otherFi < 0 always falls to the head-on branch below, since
-          // there's no "discovered front" to distinguish from in that case.
-          const isSameDirection = otherFi >= 0 && f.dx * fronts[otherFi].dx + f.dy * fronts[otherFi].dy >= 0;
-          if (isSameDirection) {
-            // Same-direction ("red X") -- NOT treated as a real merge: no
-            // group union, no composite update, no redirect. Only the
-            // DISCOVERING front (f, the one that just stepped into this
-            // cell) stops; the DISCOVERED front (occupant's own front,
-            // otherFi) is left completely untouched, still walking its own
-            // way as if this never happened.
-            sameDirMergePoints.push({ x: nx, y: ny });
-            f.active = false;
-          } else {
-            if (otherFi >= 0) oppositeDirMergePoints.push({ x: nx, y: ny });
-            merges.push({ a: f.seg, b: occupant });
-            // The two fronts that just met are done -- they found their
-            // neighbor, this point is now internal to the composite, not an
-            // extremity. f's SIBLING (the other front on f's own segment,
-            // still headed outward toward the group's real, still-unexplored
-            // end on that side) is the one that keeps walking, see
-            // redirectSibling's own comment.
-            f.active = false;
-            const root = union(f.seg, occupant);
-            const [aAlong, aAgainst] = frontsBySegment.get(f.seg)!;
-            redirectSibling(fronts[fi === aAlong ? aAgainst : aAlong], root);
-            if (otherFi >= 0) {
-              // Front-to-front: otherFi pins down EXACTLY which of
-              // occupant's two fronts we hit, so its sibling (the other one)
-              // is unambiguously "still headed outward on that side" -- same
-              // redirect treatment as f's own sibling above.
-              fronts[otherFi].active = false;
-              const [bAlong, bAgainst] = frontsBySegment.get(occupant)!;
-              redirectSibling(fronts[otherFi === bAlong ? bAgainst : bAlong], root);
-            } else {
-              // Blob hit: there's no specific front that owns the collided
-              // cell, so unlike the front-to-front case there's no way to
-              // tell which of occupant's own two fronts is "the sibling" of
-              // whichever one we notionally ran into -- redirecting either
-              // would be a guess. Stopping BOTH instead of guessing keeps
-              // the "at most 2 active fronts per group" invariant intact.
-              // The group's composite line stays fully correct either way
-              // (union() reads it from occupant's own real endpoints, not
-              // from whether either front is still alive) -- the only cost
-              // is not continuing to actively explore past occupant's
-              // original extent on this side.
-              const [bAlong, bAgainst] = frontsBySegment.get(occupant)!;
-              fronts[bAlong].active = false;
-              fronts[bAgainst].active = false;
-            }
-          }
+        if (Math.abs(dot) >= minSimilarity && mergeAt(f.seg, occupant, nx, ny)) {
+          merges.push({ a: f.seg, b: occupant });
         }
-        // else: NOT a match (e.g. a crossing perpendicular segment) -- pass
-        // through without claiming the cell (leave the occupant's own claim
-        // alone) and keep walking. Stopping unconditionally here was the
-        // actual bug: on this grid, a front headed toward its true collinear
-        // partner runs into unrelated crossing segments constantly, and
-        // stopping at the FIRST one (regardless of match) meant most fronts
-        // never got anywhere near far enough to find a real match.
+        // else: NOT a match (e.g. a crossing perpendicular segment, or a
+        // merely-parallel-but-offset line rejected by mergeAt's own
+        // connecting-vector check) -- pass through without claiming the
+        // cell (leave the occupant's own claim alone) and keep walking.
+        // Stopping unconditionally here was the original bug this whole
+        // design fixed: on this grid, a front headed
+        // toward its true collinear partner runs into unrelated crossing
+        // segments constantly, and stopping at the FIRST one (regardless of
+        // match) meant most fronts never got anywhere near far enough to
+        // find a real match.
       }
-      // occupant === f.seg: this front (or its sibling front on the same
-      // segment) already owns this cell -- pass through as a no-op.
+      // occupant === f.seg: this front's own group's territory -- pass
+      // through as a no-op.
     }
   }
 
@@ -407,7 +343,7 @@ export function computeJoinWalk(
     joinBuffer[i] = h === -1 ? -1 : episodeOwner[h];
   }
 
-  return { joinBuffer, merges, sameDirMergePoints, oppositeDirMergePoints };
+  return { joinBuffer, merges, blueMergePoints, orangeMergePoints, redMergePoints };
 }
 
 // Union-find over the merge pairs -- two segments joined only indirectly

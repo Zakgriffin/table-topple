@@ -177,7 +177,7 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
     rtSize: { ...rtSize }, aspect, pipRect: { x: 0, y: 0, w: 0, h: 0 }, captureDirty: true, lastPreviewUpdate: 0,
     lastNoisedPreviewGray: null, lastDisplayedVectorField: null, lastEffectiveField: null, lastJacobianField: null,
     lastBucketFillSegments: null, lastBucketFillColors: null, lastBucketFillRegionId: null, lastBucketFillMerges: null, lastBucketFillComposite: null,
-    lastBucketFillSameDirMerges: null, lastBucketFillOppositeDirMerges: null,
+    lastBucketFillBlueMerges: null, lastBucketFillOrangeMerges: null, lastBucketFillRedMerges: null,
     distortedPreviewData, distortedPreviewTex, projectedPreviewData, projectedPreviewTex,
     trueContamData, trueContamTex, reconContamData, reconContamTex, topGradientData, topGradientTex,
     tangentWalkPathData, tangentWalkPathTex, bucketFillData, bucketFillTex, bucketFillJoinData, bucketFillJoinTex,

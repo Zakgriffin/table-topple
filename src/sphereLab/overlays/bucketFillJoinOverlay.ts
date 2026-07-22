@@ -10,12 +10,13 @@ export function updateBucketFillJoinOverlay(camera: Camera) {
   const settings = camera.settings;
   if (!settings.showBucketFillJoin) return;
   if (!camera.lastBucketFillSegments || !camera.lastBucketFillColors || !camera.lastBucketFillRegionId) return;
-  const { joinBuffer, merges, sameDirMergePoints, oppositeDirMergePoints } = computeJoinWalk(
+  const { joinBuffer, merges, blueMergePoints, orangeMergePoints, redMergePoints } = computeJoinWalk(
     camera.lastBucketFillSegments, camera.lastBucketFillRegionId, camera.rtSize.w, camera.rtSize.h,
     settings.bucketFillMergeMinSimilarity, settings.bucketFillJoinSteps, settings.bucketFillMinLengthPx,
   );
-  camera.lastBucketFillSameDirMerges = sameDirMergePoints;
-  camera.lastBucketFillOppositeDirMerges = oppositeDirMergePoints;
+  camera.lastBucketFillBlueMerges = blueMergePoints;
+  camera.lastBucketFillOrangeMerges = orangeMergePoints;
+  camera.lastBucketFillRedMerges = redMergePoints;
   // Colored by MERGE GROUP, not raw per-segment color -- unlike the base
   // fill (which stays per-segment so individual blobs stay distinguishable),
   // the whole point of this layer is showing which segments have been
@@ -60,8 +61,9 @@ export function updateBucketFillJoinAvailability() {
     cam.bucketFillJoinTex.needsUpdate = true;
     cam.lastBucketFillMerges = null;
     cam.lastBucketFillComposite = null;
-    cam.lastBucketFillSameDirMerges = null;
-    cam.lastBucketFillOppositeDirMerges = null;
+    cam.lastBucketFillBlueMerges = null;
+    cam.lastBucketFillOrangeMerges = null;
+    cam.lastBucketFillRedMerges = null;
   }
 }
 

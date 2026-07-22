@@ -47,11 +47,12 @@ export interface CameraBase {
   lastBucketFillRegionId: Int32Array | null;
   lastBucketFillMerges: SegmentMerge[] | null;
   lastBucketFillComposite: CompositeLineDisplay[] | null;
-  // Merge points split by whether the two colliding fronts were walking the
-  // SAME direction or head-on/opposite at the moment they merged -- see
-  // pipeline/bucketFillJoin.ts's computeJoinWalk for how this is detected.
-  lastBucketFillSameDirMerges: { x: number; y: number }[] | null;
-  lastBucketFillOppositeDirMerges: { x: number; y: number }[] | null;
+  // Merge-point markers, classified by how each merge's winning pair of
+  // points was chosen -- see pipeline/bucketFillJoin.ts's computeJoinWalk
+  // (mergeAt) for how blue/red/purple are decided.
+  lastBucketFillBlueMerges: { x: number; y: number }[] | null;
+  lastBucketFillOrangeMerges: { x: number; y: number }[] | null;
+  lastBucketFillRedMerges: { x: number; y: number }[] | null;
 
   distortedPreviewData: Uint8Array; distortedPreviewTex: THREE.DataTexture;
   projectedPreviewData: Uint8Array; projectedPreviewTex: THREE.DataTexture;

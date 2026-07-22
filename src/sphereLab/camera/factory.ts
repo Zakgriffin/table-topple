@@ -17,13 +17,14 @@ import { bumpCameraSerial, cameras, isSimulated, nextCameraSerial } from './stor
 export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Color) {
   const aspect = rtSize.w / rtSize.h;
 
-  // Recovered/decoded pose gizmo: SOLID in the camera's own color -- solid
-  // consistently means "recovered" across every camera, ground-truth (only
-  // simulated cameras have one, see createSimulatedCamera) is the
-  // translucent one instead.
+  // Recovered/decoded pose gizmo: TRANSLUCENT in the camera's own color --
+  // translucent consistently means "recovered" (a decode, not a certainty)
+  // across every camera, including physical ones (which have no
+  // ground-truth gizmo at all). Ground-truth (only simulated cameras have
+  // one, see createSimulatedCamera) is the solid/opaque one instead.
   const recoveredCamGizmo = new THREE.Mesh(
     new THREE.BoxGeometry(0.3, 0.25, 0.4),
-    new THREE.MeshStandardMaterial({ color }),
+    new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.4 }),
   );
   recoveredCamGizmo.visible = false;
   scene.add(recoveredCamGizmo);
@@ -206,11 +207,11 @@ export function createSimulatedCamera(color: THREE.Color): SimulatedCamera {
   const gizmoCam = new THREE.PerspectiveCamera(50, aspect, 0.05, 500);
   scene.add(gizmoCam);
 
-  // Ground-truth (assumed) pose gizmo: TRANSLUCENT in the same color the
-  // recovered gizmo above uses solid -- see makeCameraBaseParts' comment.
+  // Ground-truth (assumed) pose gizmo: SOLID/opaque in the same color the
+  // recovered gizmo above uses translucent -- see makeCameraBaseParts' comment.
   const gizmoBody = new THREE.Mesh(
     new THREE.BoxGeometry(0.3, 0.25, 0.4),
-    new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.4 }),
+    new THREE.MeshStandardMaterial({ color }),
   );
   scene.add(gizmoBody);
   const gizmoAxes = new THREE.AxesHelper(0.6);

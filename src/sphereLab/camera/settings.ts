@@ -84,7 +84,7 @@ export interface PhysicalCameraSettings extends CameraSettingsCommon {
 
 export function createDefaultCommonSettings(): CameraSettingsCommon {
   return {
-    showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, showSampleLattice: false,
+    showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, showSampleLattice: false,
     showTrueContamination: false, showReconstructedContamination: false, hideField: false,
     showTopGradient: false,
     showBucketFillSegments: savedBool('toggleBucketFill', false),

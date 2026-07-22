@@ -4,7 +4,6 @@ import { CameraSettingsCommon } from '../camera/settings.ts';
 import { activeCamera } from '../camera/store.ts';
 import { segmentLength } from '../pipeline/bucketFillSegments.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
-import { computeSpokedWalkIncludedPixels } from '../pipeline/localJacobian.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
 import { canvas, gradientArrowCanvas, gradientArrowCtx, persistControl, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTopGradientBtn, toggleTrueContamBtn } from '../ui/dom.ts';
@@ -380,66 +379,38 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
   const fieldRow = Math.min(fieldH - 1, Math.max(0, Math.floor((1 - ny) * fieldH)));
   const i = fieldRow * fieldW + fieldCol;
 
-  if (settings.fieldView === 'jacobian' && camera.lastJacobianField) {
-    const jac = camera.lastJacobianField;
-    const { e1x: E1x, e1y: E1y, lambda1, e2x: E2x, e2y: E2y, lambda2 } = jac;
-    const e1x = E1x[i], e1y = E1y[i], e2x = E2x[i], e2y = E2y[i];
-    const hasStructure = lambda1[i] !== 0 || lambda2[i] !== 0;
-
-    if (arrowsOn && hasStructure) {
+  if (arrowsOn && camera.lastDisplayedVectorField) {
+    const { fx, fy } = camera.lastDisplayedVectorField;
+    const gx = fx[i], gy = fy[i];
+    const mag = Math.hypot(gx, gy);
+    if (mag > 0) {
       const px = rect.x + (fieldCol + 0.5) * (rect.w / fieldW);
       const py = rect.y + rect.h - (fieldRow + 0.5) * (rect.h / fieldH);
-      // e1 (dominant, "across the edge") in orange, e2 (subordinate, "along
-      // the edge") in cyan -- matches drawSpokedWalkOutline's colors below.
+      let hueTheta = Math.atan2(gy, gx);
+      if (hueTheta < 0) hueTheta += Math.PI;
+      if (hueTheta >= Math.PI) hueTheta -= Math.PI;
+      const [rr, gg, bb] = hsvToRgb((hueTheta / Math.PI) * 360, 1, 1);
+      const color = `rgb(${rr},${gg},${bb})`;
+
       if (settings.showGradientArrow) {
-        const m = Math.abs(lambda1[i]);
-        drawOneArrow(px, py, e1x * m, -e1y * m, 'rgb(255,120,0)', settings.gradientArrowScale);
+        const theta = Math.atan2(gy, gx);
+        drawOneArrow(px, py, Math.cos(theta) * mag, -Math.sin(theta) * mag, color, settings.gradientArrowScale);
       }
       if (settings.showGradientArrowPerpendicular) {
-        const m = Math.abs(lambda2[i]);
-        drawOneArrow(px, py, e2x * m, -e2y * m, 'rgb(0,200,255)', settings.gradientArrowScale);
+        const theta = Math.atan2(gx, -gy);
+        drawOneArrow(px, py, Math.cos(theta) * mag, -Math.sin(theta) * mag, color, settings.gradientArrowScale);
       }
     }
+  }
 
-    if (walkOn && hasStructure && camera.lastDisplayedVectorField) {
-      const { fx, fy } = camera.lastDisplayedVectorField; // the raw field the Jacobian was built from
-      const included = computeSpokedWalkIncludedPixels(settings, fx, fy, fieldW, fieldH, fieldCol, fieldRow, e1x, e1y, e2x, e2y);
-      paintSpokedWalkOverlay(camera, fieldW, included);
-    }
-  } else {
-    if (arrowsOn && camera.lastDisplayedVectorField) {
-      const { fx, fy } = camera.lastDisplayedVectorField;
-      const gx = fx[i], gy = fy[i];
-      const mag = Math.hypot(gx, gy);
-      if (mag > 0) {
-        const px = rect.x + (fieldCol + 0.5) * (rect.w / fieldW);
-        const py = rect.y + rect.h - (fieldRow + 0.5) * (rect.h / fieldH);
-        let hueTheta = Math.atan2(gy, gx);
-        if (hueTheta < 0) hueTheta += Math.PI;
-        if (hueTheta >= Math.PI) hueTheta -= Math.PI;
-        const [rr, gg, bb] = hsvToRgb((hueTheta / Math.PI) * 360, 1, 1);
-        const color = `rgb(${rr},${gg},${bb})`;
-
-        if (settings.showGradientArrow) {
-          const theta = Math.atan2(gy, gx);
-          drawOneArrow(px, py, Math.cos(theta) * mag, -Math.sin(theta) * mag, color, settings.gradientArrowScale);
-        }
-        if (settings.showGradientArrowPerpendicular) {
-          const theta = Math.atan2(gx, -gy);
-          drawOneArrow(px, py, Math.cos(theta) * mag, -Math.sin(theta) * mag, color, settings.gradientArrowScale);
-        }
-      }
-    }
-
-    if (walkOn && camera.lastEffectiveField) {
-      const { fx, fy } = camera.lastEffectiveField;
-      const seedFx = fx[i], seedFy = fy[i];
-      if (seedFx !== 0 || seedFy !== 0) {
-        const included = settings.tangentWalkAdaptive
-          ? computeTangentWalkIncludedPixelsAdaptive(settings, fx, fy, fieldW, fieldH, fieldCol, fieldRow, seedFx, seedFy)
-          : computeTangentWalkIncludedPixels(settings, fx, fy, fieldW, fieldH, fieldCol, fieldRow, seedFx, seedFy);
-        paintTangentWalkPathOverlay(camera, fieldW, fx, fy, included);
-      }
+  if (walkOn && camera.lastEffectiveField) {
+    const { fx, fy } = camera.lastEffectiveField;
+    const seedFx = fx[i], seedFy = fy[i];
+    if (seedFx !== 0 || seedFy !== 0) {
+      const included = settings.tangentWalkAdaptive
+        ? computeTangentWalkIncludedPixelsAdaptive(settings, fx, fy, fieldW, fieldH, fieldCol, fieldRow, seedFx, seedFy)
+        : computeTangentWalkIncludedPixels(settings, fx, fy, fieldW, fieldH, fieldCol, fieldRow, seedFx, seedFy);
+      paintTangentWalkPathOverlay(camera, fieldW, fx, fy, included);
     }
   }
 }
@@ -546,7 +517,7 @@ toggleTangentWalkPathBtn.addEventListener('click', () => {
 
 export function updateGradientArrowAvailability() {
   const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'gradient' || cam.settings.fieldView === 'gradient2x2' || cam.settings.fieldView === 'effective' || cam.settings.fieldView === 'walked' || cam.settings.fieldView === 'jacobian';
+  const relevant = cam.settings.fieldView === 'gradient' || cam.settings.fieldView === 'gradient2x2' || cam.settings.fieldView === 'effective' || cam.settings.fieldView === 'walked';
   toggleGradientArrowBtn.disabled = !relevant;
   toggleGradientArrowModeBtn.disabled = !relevant;
   if (!relevant) {
@@ -559,7 +530,7 @@ export function updateGradientArrowAvailability() {
 }
 export function updateTangentWalkPathAvailability() {
   const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'effective' || cam.settings.fieldView === 'walked' || cam.settings.fieldView === 'jacobian';
+  const relevant = cam.settings.fieldView === 'effective' || cam.settings.fieldView === 'walked';
   toggleTangentWalkPathBtn.disabled = !relevant;
   if (!relevant) {
     cam.settings.showTangentWalkPath = false;

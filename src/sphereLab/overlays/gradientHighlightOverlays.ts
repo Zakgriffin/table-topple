@@ -7,9 +7,8 @@ import { FieldView } from '../types.ts';
 import { toggleTopGradientBtn } from '../ui/dom.ts';
 
 // Every FieldView that's an actual GradientField (has a direction, not just
-// a scalar) -- 'agreement' is scalar-only and 'jacobian' is a different
-// field type entirely, so both are excluded here the same way
-// updateContaminationAvailability excludes them.
+// a scalar) -- 'agreement' is scalar-only, so it's excluded here the same
+// way updateContaminationAvailability excludes it.
 const VECTOR_FIELD_VIEWS: readonly FieldView[] = ['gradient', 'gradient2x2', 'effective', 'walked'];
 
 // Recomputes the top-gradient overlay if it's actually toggled on.

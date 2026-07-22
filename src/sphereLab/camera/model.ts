@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { CompositeLineDisplay, SegmentMerge } from '../pipeline/bucketFillJoin.ts';
 import { BucketFillSegment } from '../pipeline/bucketFillSegments.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
-import { DecodeCellDebug, DecodeSampleGrid, GradientField, JacobianField, Marginals, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
+import { DecodeCellDebug, DecodeSampleGrid, GradientField, Marginals, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
 import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
 
 // ── Camera model ─────────────────────────────────────────────────────────
@@ -39,7 +39,6 @@ export interface CameraBase {
   lastNoisedPreviewGray: Float64Array | null;
   lastDisplayedVectorField: GradientField | null;
   lastEffectiveField: GradientField | null;
-  lastJacobianField: JacobianField | null;
   lastBucketFillSegments: BucketFillSegment[] | null;
   lastBucketFillColors: [number, number, number][] | null;
   // Per-pixel segment ownership from the flood fill itself (computeBucketFillRegions),

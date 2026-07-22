@@ -8,8 +8,8 @@ import { FieldView } from '../types.ts';
 import { toggleBucketFillBtn } from '../ui/dom.ts';
 
 // Every FieldView that's an actual GradientField -- same set
-// overlays/gradientHighlightOverlays.ts uses, for the same reason ("agreement"
-// is scalar-only, "jacobian" is a different field type).
+// overlays/gradientHighlightOverlays.ts uses, for the same reason
+// ("agreement" is scalar-only).
 const VECTOR_FIELD_VIEWS: readonly FieldView[] = ['gradient', 'gradient2x2', 'effective', 'walked'];
 
 export function updateBucketFillOverlay(camera: Camera) {

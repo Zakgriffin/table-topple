@@ -177,14 +177,47 @@ export function runAxesReconstruction(camera: Camera) {
       const t6 = performance.now();
 
       const overlaySpan = spanStart('poleMarkers+overlays');
+      let orientationErrorLine: string | null = null;
       if (camera.lastPositionDecode && rowDirRecovered && colDirRecovered) {
         const { recoveredCamQuat } = camera.lastPositionDecode;
         const rowDirWorld = rowDirRecovered.clone().applyQuaternion(recoveredCamQuat);
         const colDirWorld = colDirRecovered.clone().applyQuaternion(recoveredCamQuat);
-        camera.recoveredRowPoleA.position.copy(rowDirWorld).multiplyScalar(SPHERE_RADIUS);
-        camera.recoveredRowPoleB.position.copy(rowDirWorld).multiplyScalar(-SPHERE_RADIUS);
-        camera.recoveredColPoleA.position.copy(colDirWorld).multiplyScalar(SPHERE_RADIUS);
-        camera.recoveredColPoleB.position.copy(colDirWorld).multiplyScalar(-SPHERE_RADIUS);
+        // Decode's own 4-way disambiguation (tallyPositionVotes, see
+        // decodeGrid.ts) can legitimately swap which of Drow/Dcol maps to
+        // the world ROW vs COL axis (and negate either) -- fitPairOfPlanes
+        // only ever recovers the row/col PLANE PAIR up to that ambiguity,
+        // by construction (it's a property of the quadric fit, not a bug).
+        // axisErr is UNDIRECTED (angle to the nearer of +axis/-axis) since
+        // both ends of an axis already get their own pole marker -- a
+        // clean 180-degree flip isn't actually wrong, just a labeling
+        // choice for which end is which. Picking whichever of the two
+        // (row->ROW,col->COL) / (row->COL,col->ROW) pairings has the lower
+        // TOTAL undirected error is legitimate here (unlike the old
+        // pre-decode version of this check used to be) because
+        // rowDirWorld/colDirWorld are genuinely in world space now --
+        // decode has already resolved which pairing is physically correct,
+        // this just detects which one it was.
+        const axisErr = (v: THREE.Vector3, axis: THREE.Vector3) => Math.min(angleBetweenDegV(v, axis), angleBetweenDegV(v, axis.clone().negate()));
+        const errUnswapped = axisErr(rowDirWorld, ROW_DIR) + axisErr(colDirWorld, COL_DIR);
+        const errSwapped = axisErr(rowDirWorld, COL_DIR) + axisErr(colDirWorld, ROW_DIR);
+        const swapped = errSwapped < errUnswapped;
+        // Red pole markers always track whichever recovered vector ended
+        // up closest to the world ROW axis, blue always tracks whichever
+        // is closest to COL -- a fixed rowDirWorld->red assignment would
+        // sometimes put red poles next to the blue ground-truth poles
+        // whenever swapped is true.
+        const redDirWorld = swapped ? colDirWorld : rowDirWorld;
+        const blueDirWorld = swapped ? rowDirWorld : colDirWorld;
+        camera.recoveredRowPoleA.position.copy(redDirWorld).multiplyScalar(SPHERE_RADIUS);
+        camera.recoveredRowPoleB.position.copy(redDirWorld).multiplyScalar(-SPHERE_RADIUS);
+        camera.recoveredColPoleA.position.copy(blueDirWorld).multiplyScalar(SPHERE_RADIUS);
+        camera.recoveredColPoleB.position.copy(blueDirWorld).multiplyScalar(-SPHERE_RADIUS);
+
+        if (isSimulated(camera)) {
+          const rowErr = axisErr(redDirWorld, ROW_DIR);
+          const colErr = axisErr(blueDirWorld, COL_DIR);
+          orientationErrorLine = `row err ${rowErr.toFixed(2)}°  col err ${colErr.toFixed(2)}°  [post-decode${swapped ? ', swapped' : ''}]`;
+        }
       }
       updateRecoveredCamGizmo(camera);
       applyRecoveredFloorOverlay(camera);
@@ -195,13 +228,7 @@ export function runAxesReconstruction(camera: Camera) {
         const haveGroundTruth = isSimulated(camera);
         const lines = [`${votes.length} votes  (${fitVotes.length} fed to fit)`];
         if (rowDirRecovered && colDirRecovered) {
-          if (haveGroundTruth) {
-            const errUnswapped = angleBetweenDegV(rowDirRecovered, ROW_DIR) + angleBetweenDegV(colDirRecovered, COL_DIR);
-            const errSwapped = angleBetweenDegV(rowDirRecovered, COL_DIR) + angleBetweenDegV(colDirRecovered, ROW_DIR);
-            const rowErr = errSwapped < errUnswapped ? angleBetweenDegV(rowDirRecovered, COL_DIR) : angleBetweenDegV(rowDirRecovered, ROW_DIR);
-            const colErr = errSwapped < errUnswapped ? angleBetweenDegV(colDirRecovered, ROW_DIR) : angleBetweenDegV(colDirRecovered, COL_DIR);
-            lines.push(`row err ${rowErr.toFixed(2)}°  col err ${colErr.toFixed(2)}°  [Phase 1, vote-based${errSwapped < errUnswapped ? ', swapped' : ''}]`);
-          }
+          if (orientationErrorLine) lines.push(orientationErrorLine);
         } else {
           lines.push(`degenerate fit`);
         }

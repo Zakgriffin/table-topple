@@ -236,23 +236,23 @@ addEventListener('resize', () => {
 
 // Bounding box of every detected line's own gnomonically-projected
 // endpoints, in (xRow, xCol) tangent-plane space -- the shared coordinate
-// frame both the rectified-lines overlay and the new sample lattice below
-// map onto whatever screen rect they're given.
+// frame both the rectified-lines overlay and the sample lattice below map
+// onto whatever screen rect they're given.
 export function hideGridPeriodPhaseProjected() {
   gridPeriodPhaseProjectedCanvas.style.display = 'none';
 }
 
-// Draws, on the SAME projected-cam rect drawSampleLattice already uses: (1)
-// every detected composite line, gnomonically rectified (straight, per the
-// whole point of the projection) -- shown whenever the debug pipeline is
-// on, no separate toggle, since it's the direct visual evidence behind the
-// period/phase numbers; (2) a NEW sample lattice built purely from the
-// recovered (period, phiRow, phiCol) -- gated on its own toggle so it can be
-// compared side-by-side against the existing bins/autocorrelation-derived
-// lattice (drawSampleLattice), which is left completely untouched.
+// Draws, on the Projected-Cam rect: (1) every detected composite line,
+// gnomonically rectified (straight, per the whole point of the projection)
+// -- shown whenever the debug pipeline is on, no separate toggle, since
+// it's the direct visual evidence behind the period/phase numbers; (2) the
+// sample lattice, built purely from the recovered (period, phiRow, phiCol)
+// -- gated on its own toggle (showSampleLattice). This replaced the
+// original bins/autocorrelation-derived lattice (projectedCamOverlays.ts's
+// now-unused drawSampleLattice) once this pipeline proved out.
 //
 // Both reuse camera.lastProjectedBins' own bounds/bin-size and the exact
-// (bu,bv)->pixel convention drawSampleLattice uses (see
+// (bu,bv)->pixel convention drawSampleLattice used to (see
 // projectedCamOverlays.ts) -- NOT a bounding box computed from this
 // pipeline's own line endpoints -- so these lines land pixel-for-pixel on
 // top of the actual bucketed image instead of drifting by whatever the
@@ -263,7 +263,7 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
   const canvas = gridPeriodPhaseProjectedCanvas, ctx = gridPeriodPhaseProjectedCtx;
   const gpp = camera.lastGridPeriodPhase;
   const showLines = camera.settings.showGridPeriodPhaseDebug && gpp;
-  const showLattice = camera.settings.showNewSampleLattice && gpp;
+  const showLattice = camera.settings.showSampleLattice && gpp;
   if (!showLines && !showLattice) { hideGridPeriodPhaseProjected(); return; }
   const bins = camera.lastProjectedBins;
   const uvScale = projectedUVScale(camera);

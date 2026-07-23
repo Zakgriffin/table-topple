@@ -127,6 +127,12 @@ export function hideSampleLattice() {
   sampleLatticeCanvas.style.display = 'none';
 }
 
+// Unreferenced by the real app (replaced by gridPeriodPhaseOverlays.ts's
+// sample lattice, see this session's chat) -- left defined for reference/
+// dev-bridge use. NOTE: camera.settings.showSampleLattice was reassigned to
+// gate the NEW lattice when the old dedicated toggle was removed, so if
+// this is ever called manually again, it'll piggyback on that toggle's
+// current value rather than anything meant for this function specifically.
 export function drawSampleLattice(camera: Camera, x: number, y: number, w: number, h: number) {
   if (!camera.settings.showSampleLattice) { hideSampleLattice(); return; }
   const grid = camera.lastDecodeRotated;

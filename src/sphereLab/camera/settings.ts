@@ -30,7 +30,7 @@ function savedNum(id: string, fallback: number): number {
 
 export interface CameraSettingsCommon {
   showSphere: boolean; showCircles: boolean; showPoles: boolean; showFrustum: boolean; showPatch: boolean;
-  showGizmoBody: boolean; showRecoveredFloor: boolean; recoveredFloorOpacity: number; showSampleLattice: boolean;
+  showGizmoBody: boolean; showRecoveredFloor: boolean; recoveredFloorOpacity: number;
   showTrueContamination: boolean; showReconstructedContamination: boolean; hideField: boolean;
   showTopGradient: boolean;
   showBucketFillSegments: boolean; bucketFillToleranceDeg: number; bucketFillMagnitudeThreshold: number; bucketFillMinLengthPx: number;
@@ -57,7 +57,7 @@ export interface CameraSettingsCommon {
   showGridPeriodPhaseDebug: boolean;
   gridPeriodPhaseBinCount: number;
   showCompositeLineFamilies: boolean;
-  showNewSampleLattice: boolean;
+  showSampleLattice: boolean;
   fieldView: FieldView;
   axesAutoCapture: boolean; axesCaptureIntervalMs: number;
   viewportW: number; viewportH: number; aspectLocked: boolean;
@@ -85,7 +85,7 @@ export interface PhysicalCameraSettings extends CameraSettingsCommon {
 
 export function createDefaultCommonSettings(): CameraSettingsCommon {
   return {
-    showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: savedNum('recoveredFloorOpacity', 0.92), showSampleLattice: false,
+    showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: savedNum('recoveredFloorOpacity', 0.92),
     showTrueContamination: false, showReconstructedContamination: false, hideField: false,
     showTopGradient: false,
     showBucketFillSegments: savedBool('toggleBucketFill', false),
@@ -115,7 +115,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showGridPeriodPhaseDebug: savedBool('showGridPeriodPhaseDebug', false),
     gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
     showCompositeLineFamilies: savedBool('showCompositeLineFamilies', false),
-    showNewSampleLattice: savedBool('showNewSampleLattice', false),
+    showSampleLattice: savedBool('showSampleLattice', false),
     fieldView: 'gradient2x2',
     axesAutoCapture: false, axesCaptureIntervalMs: 500,
     viewportW: 512, viewportH: 384, aspectLocked: false,

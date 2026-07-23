@@ -257,7 +257,6 @@ function animate() {
       else { h = availW / active.aspect; y = (availH - h) / 2; }
       renderProjectedViewport(active, x, innerHeight - y - h, w, h);
       drawMarginalLines(active, x, y, w, h);
-      drawSampleLattice(active, x, y, w, h);
       drawGridPeriodPhaseProjected(active, x, y, w, h);
     }
   } else {

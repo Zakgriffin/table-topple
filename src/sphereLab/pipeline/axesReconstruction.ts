@@ -48,11 +48,9 @@ export function runAxesReconstruction(camera: Camera) {
       rootSpan = spanStart('axesReconstruction');
       // Painting projectedPreviewTex is a real GPU texture upload -- worth
       // skipping unless this camera's Projected-Cam view is what's actually
-      // on screen right now. The numeric half (bins/marginals) stays
-      // unconditional -- camera.lastProjectedBins feeds decode's own
-      // computeDecodeMarginals (pipeline/decodeGrid.ts) for every camera,
-      // not just the displayed one, and camera.lastMarginals still feeds
-      // the (display-only) marginal-line comparison overlay. The RGBA half
+      // on screen right now. The numeric half (bins) stays unconditional --
+      // camera.lastProjectedBins feeds the World-view floor overlay's decal
+      // map for every camera, not just the displayed one. The RGBA half
       // also has to run whenever the World-view floor overlay is on, though
       // -- that overlay (see overlays/recoveredOverlays.ts) reuses
       // projectedPreviewTex as its decal map, so skipping the paint here

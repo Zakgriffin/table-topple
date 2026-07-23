@@ -87,7 +87,7 @@ import { updateBucketFillOverlay } from './overlays/bucketFillOverlay.ts';
 import { updateBucketFillJoinOverlay } from './overlays/bucketFillJoinOverlay.ts';
 import { updateGizmo, updateSphereOverlays } from './overlays/sphereOverlays.ts';
 import { updateRecoveredCamGizmo } from './overlays/recoveredOverlays.ts';
-import { drawMarginalLines, drawSampleLattice, MARGINAL_THICKNESS } from './overlays/projectedCamOverlays.ts';
+import { drawSampleLattice } from './overlays/projectedCamOverlays.ts';
 import { drawGridPeriodPhaseProjected } from './overlays/gridPeriodPhaseOverlays.ts';
 import { computeThroughRect, lastHoverClientX, lastHoverClientY, updateHoverOverlays } from './overlays/hoverDebugOverlays.ts';
 import { sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
@@ -158,8 +158,8 @@ Object.assign(
     renderer, floorMesh, viewerCam, worldOrbit, insideCam, renderPreviewViewport, renderProjectedViewport,
     renderTrueContamOverlay, renderReconContamOverlay, getAnalysisVFovRad, markCaptureDirty, resizeCaptureBuffers,
     renderCamRT, updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS, buildProjectedTexture, runAxesReconstruction,
-    updateContaminationOverlays, updateGizmo, updateSphereOverlays, updateRecoveredCamGizmo, drawMarginalLines,
-    drawSampleLattice, MARGINAL_THICKNESS, computeThroughRect, drawGridPeriodPhaseProjected },
+    updateContaminationOverlays, updateGizmo, updateSphereOverlays, updateRecoveredCamGizmo,
+    drawSampleLattice, computeThroughRect, drawGridPeriodPhaseProjected },
 );
 
 type Mode = 'world' | 'through' | 'inside' | 'projected';
@@ -249,15 +249,25 @@ function animate() {
     }
   } else if (globalState.mode === 'projected') {
     if (active) {
-      const availW = innerWidth - MARGINAL_THICKNESS;
-      const availH = innerHeight - MARGINAL_THICKNESS;
+      // "use true cardinal orientation" (settings.ts) -- purely a display
+      // rotation by however many 90-degree steps decode found the pattern
+      // actually sitting at (camera.lastPositionDecode.orientation), so
+      // rotating 1 or 3 steps swaps which of the camera's own aspect/
+      // 1/aspect the ROTATED content's true shape needs, same as rotating a
+      // photo 90 degrees swaps its width/height. +2 (180 degrees) corrects
+      // an empirically-confirmed offset between decode's orientation index
+      // and the actual on-screen rotation direction (see this session's chat).
+      const rotationSteps = active.settings.useTrueCardinalOrientation && active.lastPositionDecode
+        ? (active.lastPositionDecode.orientation + 2) % 4 : 0;
+      const contentAspect = (rotationSteps === 1 || rotationSteps === 3) ? 1 / active.aspect : active.aspect;
+      const availW = innerWidth;
+      const availH = innerHeight;
       const winAspect = availW / availH;
       let w = availW, h = availH, x = 0, y = 0;
-      if (winAspect > active.aspect) { w = availH * active.aspect; x = (availW - w) / 2; }
-      else { h = availW / active.aspect; y = (availH - h) / 2; }
-      renderProjectedViewport(active, x, innerHeight - y - h, w, h);
-      drawMarginalLines(active, x, y, w, h);
-      drawGridPeriodPhaseProjected(active, x, y, w, h);
+      if (winAspect > contentAspect) { w = availH * contentAspect; x = (availW - w) / 2; }
+      else { h = availW / contentAspect; y = (availH - h) / 2; }
+      renderProjectedViewport(active, x, innerHeight - y - h, w, h, rotationSteps);
+      drawGridPeriodPhaseProjected(active, x, y, w, h, rotationSteps);
     }
   } else {
     // Inside-Sphere: only meaningful for a simulated camera's own ground-

@@ -58,6 +58,12 @@ export interface CameraSettingsCommon {
   gridPeriodPhaseBinCount: number;
   showCompositeLineFamilies: boolean;
   showSampleLattice: boolean;
+  // Purely a display-time rotation of the Projected-Cam view (WebGL texture
+  // + debug overlay) by camera.lastPositionDecode.orientation * 90 degrees,
+  // so "up" matches the pattern's true cardinal orientation instead of
+  // whichever of the 4 the raw sample buffer happened to land in -- doesn't
+  // touch the decode pipeline itself, see main.ts's projected-mode branch.
+  useTrueCardinalOrientation: boolean;
   fieldView: FieldView;
   axesAutoCapture: boolean; axesCaptureIntervalMs: number;
   viewportW: number; viewportH: number; aspectLocked: boolean;
@@ -116,6 +122,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
     showCompositeLineFamilies: savedBool('showCompositeLineFamilies', false),
     showSampleLattice: savedBool('showSampleLattice', false),
+    useTrueCardinalOrientation: false,
     fieldView: 'gradient2x2',
     axesAutoCapture: false, axesCaptureIntervalMs: 500,
     viewportW: 512, viewportH: 384, aspectLocked: false,

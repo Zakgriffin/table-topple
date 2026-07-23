@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { CompositeLineDisplay, SegmentMerge } from '../pipeline/bucketFillJoin.ts';
 import { BucketFillSegment } from '../pipeline/bucketFillSegments.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
-import { DecodeCellDebug, DecodeSampleGrid, GradientField, Marginals, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
+import { DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
 import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
 
 // ── Camera model ─────────────────────────────────────────────────────────
@@ -24,7 +24,6 @@ export interface CameraBase {
   lastDecodeRotated: DecodeSampleGrid | null;
   lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
   lastProjectedBins: ProjectedBins | null;
-  lastMarginals: Marginals | null;
   lastVotes: Vote[];
   axesComputed: boolean;
   axesCapturing: boolean;

@@ -16,10 +16,6 @@
     position: fixed; z-index: 5; pointer-events: none;
     color: #fff; font-size: 12px; text-shadow: 0 0 4px #000;
   }
-  #marginalRight, #marginalBottom {
-    position: fixed; z-index: 5; pointer-events: none; display: none;
-    background: rgba(0,0,0,0.35); border: 1px solid rgba(255,255,255,0.25);
-  }
   #sampleLattice {
     position: fixed; z-index: 6; pointer-events: none; display: none;
   }
@@ -65,6 +61,17 @@
   }
   #arrowToggles button.active { background: rgba(60,140,255,0.5); color: #fff; border-color: #6af; }
   #arrowToggles .row { margin-bottom: 0; width: 180px; }
+  #projectedToggles {
+    display: none; flex-direction: column; gap: 8px;
+    background: rgba(20,20,20,0.75); border-radius: 6px; padding: 8px;
+    backdrop-filter: blur(4px);
+  }
+  #projectedToggles button {
+    padding: 8px 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,0.25);
+    background: rgba(20,20,20,0.75); color: #ccc; font-family: monospace; font-size: 11px;
+    cursor: pointer; text-align: left;
+  }
+  #projectedToggles button.active { background: rgba(60,140,255,0.5); color: #fff; border-color: #6af; }
 
   #panel {
     position: fixed; top: 16px; left: 16px; z-index: 10;
@@ -151,8 +158,6 @@
 <canvas id="gl"></canvas>
 <div id="pipFrame"></div>
 <div id="pipLabel">through camera</div>
-<canvas id="marginalRight"></canvas>
-<canvas id="marginalBottom"></canvas>
 <canvas id="sampleLattice"></canvas>
 <canvas id="gridPeriodPhaseProjected"></canvas>
 <canvas id="gradientArrowOverlay"></canvas>
@@ -183,6 +188,9 @@
     <button id="toggleGradientArrow">gradient arrow (hover)</button>
     <button id="toggleGradientArrowMode">perpendicular (tangent)</button>
     <div class="row"><span class="label">arrow scale</span><input type="range" id="gradientArrowScale" min="0.1" max="10" step="0.1" value="2"><span class="val" id="gradientArrowScaleVal"></span></div>
+  </div>
+  <div id="projectedToggles">
+    <button id="toggleTrueCardinalOrientation">use true cardinal orientation</button>
   </div>
 </div>
 <div id="insideHint">drag to look around &middot; scroll to zoom &middot; you are standing at the camera's optical center</div>

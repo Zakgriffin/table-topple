@@ -14,8 +14,21 @@ export const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 export function makeQuadRenderer(matOpts: THREE.MeshBasicMaterialParameters) {
   const mat = new THREE.MeshBasicMaterial(matOpts);
   const scene = new THREE.Scene();
-  scene.add(new THREE.Mesh(new THREE.PlaneGeometry(2, 2), mat));
-  return { mat, scene };
+  const geometry = new THREE.PlaneGeometry(2, 2);
+  scene.add(new THREE.Mesh(geometry, mat));
+  return { mat, scene, geometry };
+}
+// PlaneGeometry(2,2)'s 4 vertices, in order, are TL/TR/BL/BR with default UVs
+// (0,1)/(1,1)/(0,0)/(1,0) -- rotating the sampled image 90 degrees clockwise
+// means each corner now shows what used to be one step counter-clockwise
+// from it (TL<-BL, TR<-TL, BR<-TR, BL<-BR); applying that permutation N
+// times gives every multiple of 90.
+const BASE_QUAD_UVS: [number, number][] = [[0, 1], [1, 1], [0, 0], [1, 0]];
+function rotatedQuadUVs(steps: number): [number, number][] {
+  let uv = BASE_QUAD_UVS;
+  const CW_FROM = [2, 0, 3, 1]; // new[i] = old[CW_FROM[i]], one 90-degree step
+  for (let s = 0; s < ((steps % 4) + 4) % 4; s++) uv = CW_FROM.map((i) => uv[i]) as [number, number][];
+  return uv;
 }
 export const previewQuad = makeQuadRenderer({});
 export const projectedQuad = makeQuadRenderer({});
@@ -33,7 +46,20 @@ export function renderQuad(q: { mat: THREE.MeshBasicMaterial; scene: THREE.Scene
   renderer.render(q.scene, quadCam);
 }
 export function renderPreviewViewport(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(previewQuad, camera.distortedPreviewTex, x, y, w, h); }
-export function renderProjectedViewport(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(projectedQuad, camera.projectedPreviewTex, x, y, w, h); }
+// rotationSteps: multiples of 90 degrees (0-3), purely a display-time
+// rotation for the "use true cardinal orientation" toggle -- see settings.ts's
+// useTrueCardinalOrientation doc comment. Applied by permuting projectedQuad's
+// OWN geometry UVs (never camera.projectedPreviewTex's rotation/center --
+// that texture object is also the World-view "recovered floor" overlay's
+// decal map, camera/factory.ts's recoveredFloorOverlayMat, so mutating ITS
+// state would leak the rotation into that unrelated overlay across mode
+// switches). Doesn't touch the texture's actual pixel data either way.
+export function renderProjectedViewport(camera: Camera, x: number, y: number, w: number, h: number, rotationSteps = 0) {
+  const uvAttr = projectedQuad.geometry.attributes.uv as THREE.BufferAttribute;
+  uvAttr.copyArray(rotatedQuadUVs(rotationSteps).flat());
+  uvAttr.needsUpdate = true;
+  renderQuad(projectedQuad, camera.projectedPreviewTex, x, y, w, h);
+}
 export function renderTrueContamOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(trueContamQuad, camera.trueContamTex, x, y, w, h); }
 export function renderReconContamOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(reconContamQuad, camera.reconContamTex, x, y, w, h); }
 export function renderTopGradientOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(topGradientQuad, camera.topGradientTex, x, y, w, h); }

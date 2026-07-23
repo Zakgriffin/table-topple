@@ -33,6 +33,12 @@ export interface PositionDecodeResult {
   // needs this to convert lastRecoveredAxes' Drow/Dcol/Dnormal (expressed in
   // MATH_QUAT's fixed math frame) into true world space first.
   recoveredCamQuat: THREE.Quaternion;
+  // Which of the 4 cardinal rotations (see decodeGrid.ts's readRotated/
+  // rotateGrid) tallyPositionVotes found the best De Bruijn match at --
+  // display-only consumers (Projected-Cam's "use true cardinal orientation"
+  // toggle) use this to rotate what's shown, purely visually; nothing in
+  // the actual decode pipeline reads this back.
+  orientation: number;
 }
 // u,v are the sample's world position (relative to camera, in Drow/Dcol
 // units); px,py are where that point projects to in the CURRENT capture's

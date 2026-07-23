@@ -2,13 +2,12 @@ import { activeCamera } from '../camera/store.ts';
 import { updateContaminationOverlays } from '../overlays/contaminationOverlays.ts';
 import { clearGradientArrowOverlay } from '../overlays/hoverDebugOverlays.ts';
 import { hideGridPeriodPhaseProjected } from '../overlays/gridPeriodPhaseOverlays.ts';
-import { hideMarginalLines } from '../overlays/projectedCamOverlays.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { worldOrbit } from '../scene/viewerControls.ts';
 import { globalState } from '../state.ts';
 import { Mode } from '../types.ts';
-import { arrowToggles, contamToggles, insideHint, modeBtns, panel, panelToggle, persistControl, pipFrame, pipLabel, savedControls } from './dom.ts';
+import { arrowToggles, contamToggles, insideHint, modeBtns, panel, panelToggle, persistControl, pipFrame, pipLabel, projectedToggles, savedControls } from './dom.ts';
 
 // ── Mode switching ───────────────────────────────────────────────────────
 
@@ -22,9 +21,10 @@ export function setMode(m: Mode) {
   pipLabel.style.display = m === 'through' || m === 'projected' ? 'none' : 'block';
   const cam = activeCamera();
   if (m === 'projected') { if (cam) buildProjectedTexture(cam); }
-  else { hideMarginalLines(); hideGridPeriodPhaseProjected(); }
+  else { hideGridPeriodPhaseProjected(); }
   contamToggles.style.display = m === 'through' ? 'flex' : 'none';
   arrowToggles.style.display = m === 'through' ? 'flex' : 'none';
+  projectedToggles.style.display = m === 'projected' ? 'flex' : 'none';
   if (m !== 'through') clearGradientArrowOverlay();
   if (m === 'through' && cam) { updateDistortedPreview(cam); updateContaminationOverlays(cam); }
 }

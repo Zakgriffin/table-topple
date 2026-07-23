@@ -246,10 +246,10 @@ export function hideGridPeriodPhaseProjected() {
 // gnomonically rectified (straight, per the whole point of the projection)
 // -- shown whenever the debug pipeline is on, no separate toggle, since
 // it's the direct visual evidence behind the period/phase numbers; (2) the
-// sample lattice, built purely from the recovered (period, phiRow, phiCol)
-// -- gated on its own toggle (showSampleLattice). This replaced the
-// original bins/autocorrelation-derived lattice (projectedCamOverlays.ts's
-// now-unused drawSampleLattice) once this pipeline proved out.
+// sample lattice -- gated on its own toggle (showSampleLattice), drawing the
+// real decode grid's own points (pipeline/decodeGrid.ts's
+// buildDecodeSampleGrid) directly, so it always matches decode's actual
+// corner-quad-bounded extent instead of an independently re-derived one.
 //
 // Both reuse camera.lastProjectedBins' own bounds/bin-size and the exact
 // (bu,bv)->pixel convention drawSampleLattice used to (see
@@ -259,7 +259,12 @@ export function hideGridPeriodPhaseProjected() {
 // (unrelated) extent of the detected lines happens to be. gpp's own
 // {xRow,xCol} are converted into that same u/v space via projectedUVScale
 // (pipeline/decodeGrid.ts), a single shared scalar.
-export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: number, w: number, h: number) {
+// rotationSteps: multiples of 90 degrees (0-3) -- see renderProjectedViewport's
+// matching param (scene/quadRenderers.ts), same "use true cardinal
+// orientation" toggle. Applied as a canvas transform around the rect's own
+// center, before any drawing, so every draw call below it (lines, lattice)
+// lands rotated consistently without needing its own rotated coordinates.
+export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: number, w: number, h: number, rotationSteps = 0) {
   const canvas = gridPeriodPhaseProjectedCanvas, ctx = gridPeriodPhaseProjectedCtx;
   const gpp = camera.lastGridPeriodPhase;
   const showLines = camera.settings.showGridPeriodPhaseDebug && gpp;
@@ -276,7 +281,13 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
   canvas.height = Math.round(h);
   canvas.style.width = w + 'px';
   canvas.style.height = h + 'px';
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.clearRect(0, 0, canvas.width, canvas.height);
+  if (rotationSteps !== 0) {
+    ctx.translate(canvas.width / 2, canvas.height / 2);
+    ctx.rotate(rotationSteps * (Math.PI / 2));
+    ctx.translate(-canvas.width / 2, -canvas.height / 2);
+  }
 
   const toScreen = (p: GnomonicPoint) => {
     const u = uvScale * p.xRow, v = uvScale * p.xCol;
@@ -301,49 +312,27 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
   }
 
   if (showLattice && gpp) {
-    const rowIdx = gpp.rowLines.map((s) => s.index), colIdx = gpp.colLines.map((s) => s.index);
-    if (rowIdx.length > 0 && colIdx.length > 0) {
-      const kMin = Math.min(...rowIdx) - 1, kMax = Math.max(...rowIdx) + 1;
-      const mMin = Math.min(...colIdx) - 1, mMax = Math.max(...colIdx) + 1;
-      // Same fill/stroke scheme drawSampleLattice (projectedCamOverlays.ts,
-      // the OLD marginals/decode-driven lattice this one is meant to
-      // replace) uses: fill = decoded bit (black=1, white=0, gray=no debug
-      // data), stroke = correct (green) vs wrong (red) vs no data (dark).
-      // This lattice's own (period, phiRow, phiCol) come from a totally
-      // independent estimator (pipeline/gridPeriodPhase.ts) from decode's
-      // own grid (pipeline/decodeGrid.ts's buildDecodeSampleGrid/
-      // computeDecodeMarginals) -- rather than re-deriving a bit read here,
-      // borrow whichever decode cell is physically nearest in (u,v) (same
-      // units camera.lastProjectedBins/camera.lastDecodeRotated already
-      // use, see projectedUVScale), since both lattices describe the same
-      // real floor when both pipelines are working.
-      const nearestDebug = (u: number, v: number): DecodeCellDebug | null => {
-        const grid = camera.lastDecodeRotated, correctness = camera.lastDecodeCorrectness;
-        if (!grid || !correctness) return null;
-        let best: DecodeCellDebug | null = null, bestD2 = Infinity;
-        for (let i = 0; i < grid.rows; i++) {
-          for (let j = 0; j < grid.cols; j++) {
-            const pt = grid.points[i][j];
-            if (!pt.valid) continue;
-            const d2 = (pt.u - u) * (pt.u - u) + (pt.v - v) * (pt.v - v);
-            if (d2 < bestD2) { bestD2 = d2; best = correctness[i][j]; }
-          }
-        }
-        return best;
-      };
-      for (let k = kMin; k <= kMax; k++) {
-        for (let m = mMin; m <= mMax; m++) {
-          // Row line k has constant xCol = k*period+phiRow; column line m
-          // has constant xRow = m*period+phiCol -- their intersection is
-          // this cell's own CORNER. Offset by half a period on each axis
-          // to land on the cell's center instead, since that's what a
-          // "sample point for this cell" should mean.
-          const point: GnomonicPoint = {
-            xRow: (m + 0.5) * gpp.period + gpp.phiCol,
-            xCol: (k + 0.5) * gpp.period + gpp.phiRow,
-          };
-          const { px, py } = toScreen(point);
-          const debug = nearestDebug(uvScale * point.xRow, uvScale * point.xCol);
+    // Draws the REAL decode grid's own points (pipeline/decodeGrid.ts's
+    // buildDecodeSampleGrid, corner-quad-bounded) rather than re-deriving an
+    // independent loop range from the detected composite lines' own index
+    // spread -- that used to draw a dot for every cell in a rectangle padded
+    // around the line detections, regardless of whether decode considered it
+    // inside the actual visible quad, which drifted from (and could draw
+    // well outside) the true bounds. camera.lastDecodeRotated is preferred
+    // (its indices line up with lastDecodeCorrectness), falling back to
+    // lastDecodeGrid (pre-rotation -- same u/v values either way, since
+    // rotation only permutes array indices, see decodeGrid.ts's readRotated)
+    // so the lattice still shows something before a De Bruijn match is found.
+    const grid = camera.lastDecodeRotated ?? camera.lastDecodeGrid;
+    const correctness = camera.lastDecodeRotated ? camera.lastDecodeCorrectness : null;
+    if (grid) {
+      for (let i = 0; i < grid.rows; i++) {
+        for (let j = 0; j < grid.cols; j++) {
+          const pt = grid.points[i][j];
+          if (!pt.valid) continue; // outside the quad (or failed grazing) -- zero, no dot
+          const bu = (bins.maxU - pt.u) / bins.binWidthU, bv = (pt.v - bins.minV) / bins.binWidthV;
+          const px = (bu / bins.w) * canvas.width, py = (1 - bv / bins.h) * canvas.height;
+          const debug: DecodeCellDebug | null = correctness ? correctness[i][j] : null;
           ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2);
           ctx.fillStyle = debug ? (debug.bit ? '#000' : '#fff') : '#888';
           ctx.fill();

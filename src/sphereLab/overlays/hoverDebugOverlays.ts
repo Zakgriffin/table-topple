@@ -6,7 +6,7 @@ import { segmentLength } from '../pipeline/bucketFillSegments.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
-import { canvas, gradientArrowCanvas, gradientArrowCtx, persistControl, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowCanvas, gradientArrowCtx, persistControl, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { updateBucketFillOverlay } from './bucketFillOverlay.ts';
 import { updateBucketFillCompositeAvailability, updateBucketFillJoinAvailability, updateBucketFillJoinOverlay, updateBucketFillMergeMarkersAvailability } from './bucketFillJoinOverlay.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
@@ -492,6 +492,14 @@ toggleGradientArrowModeBtn.addEventListener('click', () => {
   cam.settings.showGradientArrowPerpendicular = !cam.settings.showGradientArrowPerpendicular;
   toggleGradientArrowModeBtn.classList.toggle('active', cam.settings.showGradientArrowPerpendicular);
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+});
+// Purely a display-time rotation (see settings.ts's useTrueCardinalOrientation
+// doc comment) -- no recompute to trigger here, main.ts's animate() reads
+// this setting fresh every frame for the Projected-Cam render.
+toggleTrueCardinalOrientationBtn.addEventListener('click', () => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.useTrueCardinalOrientation = !cam.settings.useTrueCardinalOrientation;
+  toggleTrueCardinalOrientationBtn.classList.toggle('active', cam.settings.useTrueCardinalOrientation);
 });
 
 

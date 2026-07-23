@@ -291,18 +291,19 @@ export async function castAndBucketProjectedSamplesGPU(camera: Camera, bucketW: 
 
 type ProjectedSampleResult = ReturnType<typeof castAndBucketProjectedSamples>;
 
-// The numeric half of what used to be buildProjectedTexture -- bins +
-// marginals feed the spacing refinement in runAxesReconstruction regardless
-// of which mode is on screen (World view's recovered-pose overlay depends on
-// an accurate distance for every camera, not just the one being displayed),
-// so this always runs. Returns the raw result too, so a caller that also
-// wants to paint doesn't have to re-cast every ray a second time.
+// The numeric half of what used to be buildProjectedTexture -- bins feed the
+// spacing refinement in runAxesReconstruction regardless of which mode is on
+// screen (World view's recovered-pose overlay depends on an accurate
+// distance for every camera, not just the one being displayed), so this
+// always runs. Returns the raw result too, so a caller that also wants to
+// paint doesn't have to re-cast every ray a second time. No longer computes
+// marginals (autocorrelation) here -- see this session's chat: that was
+// display-only (the marginal-graph overlay, now removed) and decode gets its
+// own phase from gridPeriodPhase instead.
 export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampleResult {
   const result = camera.lastRecoveredAxes ? castAndBucketProjectedSamples(camera, camera.rtSize.w, camera.rtSize.h) : null;
-  if (!result) { camera.lastProjectedBins = null; camera.lastMarginals = null; return null; }
-  const { bins, counts, gradCxSum, gradCySum } = result;
-  camera.lastProjectedBins = bins;
-  camera.lastMarginals = computeProjectedMarginals(bins.w, bins.h, counts, gradCxSum, gradCySum);
+  if (!result) { camera.lastProjectedBins = null; return null; }
+  camera.lastProjectedBins = result.bins;
   return result;
 }
 
@@ -314,10 +315,8 @@ export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampl
 // async too. Only runAxesReconstruction (already async) calls this one.
 export async function computeProjectedBinsAndMarginalsGPU(camera: Camera): Promise<ProjectedSampleResult> {
   const result = camera.lastRecoveredAxes ? await castAndBucketProjectedSamplesGPU(camera, camera.rtSize.w, camera.rtSize.h) : null;
-  if (!result) { camera.lastProjectedBins = null; camera.lastMarginals = null; return null; }
-  const { bins, counts, gradCxSum, gradCySum } = result;
-  camera.lastProjectedBins = bins;
-  camera.lastMarginals = computeProjectedMarginals(bins.w, bins.h, counts, gradCxSum, gradCySum);
+  if (!result) { camera.lastProjectedBins = null; return null; }
+  camera.lastProjectedBins = result.bins;
   return result;
 }
 
@@ -385,8 +384,11 @@ export async function measurePeriodDistanceGPU(camera: Camera, currentDistance: 
 }
 
 // Own, axis-symmetric-bucket bins/marginals -- deliberately NOT
-// lastProjectedBins/lastMarginals (the display pipeline's own state) -- see
-// pre-Stage-A history for why sharing that state caused a real bug.
+// lastProjectedBins (the display pipeline's own state) -- see pre-Stage-A
+// history for why sharing that state caused a real bug.
+// Superseded by buildDecodeSampleGrid's own corner-projection + gridPeriodPhase
+// sourced bounds/phase (see this session's chat) -- left defined, unreferenced,
+// in case this autocorrelation-based approach is wanted again later.
 export function computeDecodeMarginals(camera: Camera): { bins: ProjectedBins; marginals: Marginals } | null {
   if (!camera.lastRecoveredAxes || !camera.lastProjectedBins) return null;
   const TARGET_BUCKETS_PER_CELL = 20;
@@ -402,15 +404,42 @@ export function computeDecodeMarginals(camera: Camera): { bins: ProjectedBins; m
   return { bins: result.bins, marginals };
 }
 
+// Forward-projects the 4 image corners onto the recovered floor plane --
+// same per-ray math projectSamplesCPU uses (normal flipped toward the floor,
+// grazing-cutoff rejected), just 4 rays instead of a full-image pass. Used
+// only to size buildDecodeSampleGrid's (u,v) bounding rectangle -- see this
+// session's chat for why this replaces the old autocorrelation-derived
+// bins.minU/maxU/minV/maxV as that extent's source, and why it's NOT also
+// used as a per-cell containment test (the reverse-projection-and-pixel-
+// bounds check every surviving cell already does for its own pixel read is
+// the same containment test, computed a different way, under the same
+// grazing-cutoff assumption this function itself relies on).
+export function projectImageCornersToPlane(camera: Camera): { u: number; v: number }[] | null {
+  if (!camera.lastRecoveredAxes) return null;
+  const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
+  const vFovRad = getAnalysisVFovRad(camera);
+  const normal = Dnormal.clone();
+  if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
+  const minGrazingCos = camera.settings.minGrazingCos;
+  const corners: { u: number; v: number }[] = [];
+  for (const [ndcU, ndcV] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
+    const rayDir = cornerDir(ndcU, ndcV, MATH_QUAT, vFovRad, camera.aspect);
+    const denom = rayDir.dot(normal);
+    if (denom >= -minGrazingCos) return null;
+    const t = -distance / denom;
+    const hit = rayDir.clone().multiplyScalar(t);
+    corners.push({ u: hit.dot(Drow), v: hit.dot(Dcol) });
+  }
+  return corners;
+}
+
 // Builds a sampling grid covering the FULL observed quadrilateral -- see
 // pre-Stage-A history for the full derivation.
 export function buildDecodeSampleGrid(camera: Camera, gray: Float64Array, w: number, h: number, vFovRad: number): DecodeSampleGrid | null {
-  if (!camera.lastRecoveredAxes) return null;
-  const decodeMarginals = computeDecodeMarginals(camera);
-  if (!decodeMarginals || decodeMarginals.marginals.colPeriod === null || decodeMarginals.marginals.rowPeriod === null) {
-    return null;
-  }
-  const { bins, marginals } = decodeMarginals;
+  if (!camera.lastRecoveredAxes || !camera.lastGridPeriodPhase) return null;
+  const gpp = camera.lastGridPeriodPhase;
+  const corners = projectImageCornersToPlane(camera);
+  if (!corners) return null;
   const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
   const normal = Dnormal.clone();
   if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
@@ -419,12 +448,19 @@ export function buildDecodeSampleGrid(camera: Camera, gray: Float64Array, w: num
   const bin = binarize(gray);
   const minGrazingCos = camera.settings.minGrazingCos;
 
-  const uBoundaryRaw = bins.maxU - marginals.colPhase * bins.binWidthU;
-  const vBoundaryRaw = bins.minV + marginals.rowPhase * bins.binWidthV;
+  // phiCol/phiRow are gnomonic xRow/xCol-space phases (pipeline/gridPeriodPhase.ts);
+  // u = uvScale*xRow, v = uvScale*xCol is the same conversion projectedUVScale's
+  // own doc comment establishes, so this reuses it rather than re-deriving it.
+  const uvScale = projectedUVScale(camera);
+  if (uvScale === null) return null;
+  const uBoundaryRaw = uvScale * gpp.phiCol;
+  const vBoundaryRaw = uvScale * gpp.phiRow;
   const uPhase = (uBoundaryRaw - Math.round(uBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
   const vPhase = (vBoundaryRaw - Math.round(vBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
 
-  const { minU, maxU, minV, maxV } = bins;
+  const cornerUs = corners.map((c) => c.u), cornerVs = corners.map((c) => c.v);
+  const minU = Math.min(...cornerUs), maxU = Math.max(...cornerUs);
+  const minV = Math.min(...cornerVs), maxV = Math.max(...cornerVs);
   const kMinU = Math.floor((minU - uPhase) / GRID_STEP), kMaxU = Math.ceil((maxU - uPhase) / GRID_STEP);
   const kMinV = Math.floor((minV - vPhase) / GRID_STEP), kMaxV = Math.ceil((maxV - vPhase) / GRID_STEP);
   const cols = kMaxU - kMinU + 1, rows = kMaxV - kMinV + 1;
@@ -517,6 +553,7 @@ export function runPositionDecode(camera: Camera, gray: Float64Array, w: number,
     row: refTorusRow, col: refTorusCol, consistency, votes: winner.votes, totalWindows: winner.totalWindows,
     camPos: worldPosTrue.sub(hitRelWorld),
     recoveredCamQuat,
+    orientation: winner.orientation,
   };
 }
 

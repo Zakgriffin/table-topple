@@ -176,9 +176,19 @@ export function segmentLength(seg: BucketFillSegment): number {
   return Math.hypot(seg.endAlongX - seg.endAgainstX, seg.endAlongY - seg.endAgainstY);
 }
 
-export function randomSegmentColors(count: number): [number, number, number][] {
+// Deterministic (index -> hue), NOT Math.random() -- segments[i] is the
+// SAME region (same seed pixel, same processing order) across repeated
+// calls with the same input settings, e.g. every frame while scrubbing the
+// "fill steps" slider (see computeBucketFillRegions's own maxSteps) -- a
+// fresh random color per call made every region flicker to a new color on
+// every single step change, even where the region itself hadn't changed at
+// all. Golden-angle hue spacing (137.508deg, the same trick used for
+// maximally-distinct color wheels without knowing the total count up
+// front) keeps adjacent indices visually distinct without needing to know
+// segments.length ahead of time.
+export function segmentColors(count: number): [number, number, number][] {
   const colors: [number, number, number][] = [];
-  for (let i = 0; i < count; i++) colors.push(hsvToRgb(Math.random() * 360, 0.85, 1));
+  for (let i = 0; i < count; i++) colors.push(hsvToRgb((i * 137.508) % 360, 0.85, 1));
   return colors;
 }
 

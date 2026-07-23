@@ -371,14 +371,14 @@ export function computeMergeGroups(numSegments: number, merges: readonly Segment
 }
 
 // Every segment in a group displays with the BLEND of every member
-// segment's own already-assigned random color (see randomSegmentColors) --
-// not just the root's color, so a 3+-way chain blends all of them, not only
+// segment's own already-assigned color (see segmentColors) -- not just the
+// root's color, so a 3+-way chain blends all of them, not only
 // the first two that happened to touch. Blended in HUE space (circular
 // mean, so e.g. 350deg and 10deg correctly average to 0deg, not 180deg),
 // not by averaging RGB directly -- averaging RGB pulls opposite-ish hues
 // (red+cyan, etc) toward gray, since it's not accounting for hue being
 // circular; segment colors are all generated at the same fixed
-// saturation/value (randomSegmentColors), so re-emitting the blended hue at
+// saturation/value (segmentColors), so re-emitting the blended hue at
 // that same s/v keeps the result exactly as vivid as any individual
 // segment's own color. Degenerates to a segment's own unchanged color when
 // it never merged with anything (its group has exactly one member: itself).

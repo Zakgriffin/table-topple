@@ -1,6 +1,6 @@
 import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
-import { computeBucketFillRegions, paintBucketFillOverlay, randomSegmentColors } from '../pipeline/bucketFillSegments.ts';
+import { computeBucketFillRegions, paintBucketFillOverlay, segmentColors } from '../pipeline/bucketFillSegments.ts';
 import { computeGradient2x2Field, computeGradientField } from '../pipeline/gradientField.ts';
 import { computeTopGradientAlpha } from '../pipeline/gradientHighlight.ts';
 import { FieldView } from '../types.ts';
@@ -27,7 +27,7 @@ export function updateBucketFillOverlay(camera: Camera) {
   // comment for why absorption was already unrestricted).
   const seedEligible = computeTopGradientAlpha(field, 0, 100);
   const { regionId, segments } = computeBucketFillRegions(field, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold, settings.bucketFillMaxSteps);
-  const colors = randomSegmentColors(segments.length);
+  const colors = segmentColors(segments.length);
   paintBucketFillOverlay(regionId, segments, colors, settings.bucketFillMinLengthPx, camera.bucketFillData);
   camera.bucketFillTex.needsUpdate = true;
   camera.lastBucketFillSegments = segments;

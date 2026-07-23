@@ -167,8 +167,8 @@ function projectSamplesCPU(camera: Camera): ProjectedSamplesDense | null {
   const normal = Dnormal.clone();
   if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
   const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, (py / h) * 2 - 1];
+  const minGrazingCos = camera.settings.minGrazingCos;
 
-  const MIN_GRAZING_COS = 0.15;
   const hit = new THREE.Vector3();
   const hit2 = new THREE.Vector3();
   const n = w * h;
@@ -182,7 +182,7 @@ function projectSamplesCPU(camera: Camera): ProjectedSamplesDense | null {
       const [ndcU, ndcV] = toNDC(x, y);
       const rayDir = cornerDir(ndcU, ndcV, MATH_QUAT, vFovRad, camera.aspect);
       const denom = rayDir.dot(normal);
-      if (denom >= -MIN_GRAZING_COS) continue;
+      if (denom >= -minGrazingCos) continue;
       const t = -distance / denom;
       hit.copy(rayDir).multiplyScalar(t);
       const u = hit.dot(Drow), v = hit.dot(Dcol);
@@ -199,7 +199,7 @@ function projectSamplesCPU(camera: Camera): ProjectedSamplesDense | null {
           const [ndcU2, ndcV2] = toNDC(x + tdx, y + tdy);
           const rayDir2 = cornerDir(ndcU2, ndcV2, MATH_QUAT, vFovRad, camera.aspect);
           const denom2 = rayDir2.dot(normal);
-          if (denom2 < -MIN_GRAZING_COS) {
+          if (denom2 < -minGrazingCos) {
             const t2 = -distance / denom2;
             hit2.copy(rayDir2).multiplyScalar(t2);
             const u2 = hit2.dot(Drow), v2 = hit2.dot(Dcol);
@@ -417,6 +417,7 @@ export function buildDecodeSampleGrid(camera: Camera, gray: Float64Array, w: num
   const invQuat = MATH_QUAT.clone().invert();
   const halfV = vFovRad / 2;
   const bin = binarize(gray);
+  const minGrazingCos = camera.settings.minGrazingCos;
 
   const uBoundaryRaw = bins.maxU - marginals.colPhase * bins.binWidthU;
   const vBoundaryRaw = bins.minV + marginals.rowPhase * bins.binWidthV;
@@ -432,6 +433,7 @@ export function buildDecodeSampleGrid(camera: Camera, gray: Float64Array, w: num
 
   const p = new THREE.Vector3();
   const local = new THREE.Vector3();
+  const rayDir = new THREE.Vector3();
   const points: DecodeSamplePoint[][] = [];
   for (let i = 0; i < rows; i++) {
     const v = vPhase + (kMinV + i) * GRID_STEP;
@@ -439,11 +441,23 @@ export function buildDecodeSampleGrid(camera: Camera, gray: Float64Array, w: num
     for (let j = 0; j < cols; j++) {
       const u = uPhase + (kMinU + j) * GRID_STEP;
       p.copy(Drow).multiplyScalar(u).addScaledVector(Dcol, v).addScaledVector(normal, -distance);
+      // p is this floor point's position relative to the camera (at the
+      // analysis-frame origin) -- same grazing-angle cutoff
+      // projectSamplesCPU applies going the OTHER direction (screen pixel
+      // -> floor point), so a lattice point only counts as "in the
+      // projected quad" (and gets fed to decode) if the ray to it is
+      // within the same cutoff the actual Projected-Cam image respects.
+      // Without this, decode could read bits from a region of the image
+      // that's blank/unreliable there (past the true quad, into a
+      // near-horizon sliver only the reverse on-screen-bounds check below
+      // would have let through).
+      rayDir.copy(p).normalize();
+      const grazingOk = rayDir.dot(normal) < -minGrazingCos;
       local.copy(p).applyQuaternion(invQuat);
       const ndcU = -local.x / (local.z * Math.tan(halfV) * camera.aspect);
       const ndcV = -local.y / (local.z * Math.tan(halfV));
       const px = ((ndcU + 1) / 2) * w, py = ((1 - ndcV) / 2) * h;
-      const valid = Number.isFinite(px) && Number.isFinite(py) && px >= 0 && px < w && py >= 0 && py < h;
+      const valid = grazingOk && Number.isFinite(px) && Number.isFinite(py) && px >= 0 && px < w && py >= 0 && py < h;
       if (!valid) { rowPoints.push({ u, v, px, py, valid: false, bit: 0 }); continue; }
       const xx = Math.round(px), yy = Math.round(py);
       rowPoints.push({ u, v, px, py, valid: true, bit: bin[yy * w + xx] });

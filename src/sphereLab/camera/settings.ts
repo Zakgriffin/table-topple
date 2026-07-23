@@ -48,6 +48,11 @@ export interface CameraSettingsCommon {
   showTopCircles: boolean;
   topCirclesLineWidth: number;
   weightSharpenPower: number;
+  // Grazing-angle cutoff (cosine) shared by projectSamplesCPU (forward:
+  // screen pixel -> floor point) and buildDecodeSampleGrid (reverse: floor
+  // point -> screen pixel) -- see pipeline/decodeGrid.ts's own comment.
+  // Higher = stricter (excludes more of the near-horizon view).
+  minGrazingCos: number;
   showGridPeriodPhaseDebug: boolean;
   gridPeriodPhaseBinCount: number;
   showCompositeLineFamilies: boolean;
@@ -104,6 +109,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showTopCircles: true,
     topCirclesLineWidth: savedNum('topCirclesLineWidth', 1),
     weightSharpenPower: 4,
+    minGrazingCos: savedNum('minGrazingCos', 0.15),
     showGridPeriodPhaseDebug: savedBool('showGridPeriodPhaseDebug', false),
     gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
     showCompositeLineFamilies: savedBool('showCompositeLineFamilies', false),

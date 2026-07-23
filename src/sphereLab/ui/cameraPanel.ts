@@ -172,6 +172,7 @@ export function refreshCameraPanel() {
   setBool('showTopCircles', cam.settings.showTopCircles);
   setNum('topCirclesLineWidth', cam.settings.topCirclesLineWidth);
   setNum('weightSharpenPower', cam.settings.weightSharpenPower);
+  setNum('minGrazingCos', cam.settings.minGrazingCos);
   setBool('axesAutoCapture', cam.settings.axesAutoCapture);
   setNum('axesCaptureInterval', cam.settings.axesCaptureIntervalMs);
 
@@ -354,6 +355,9 @@ bindCheckbox('showAxisVectors', (v) => { const cam = activeCamera(); if (cam) { 
 bindCheckbox('showTopCircles', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showTopCircles = v; if (v) updateGradientCirclesDebug(cam); } });
 bindSlider('topCirclesLineWidth', (v) => { const cam = activeCamera(); if (cam) { cam.settings.topCirclesLineWidth = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
 bindSlider('weightSharpenPower', (v) => { const cam = activeCamera(); if (cam) { cam.settings.weightSharpenPower = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
+// Only takes effect on the next capture (feeds projectSamplesCPU/
+// buildDecodeSampleGrid inside runAxesReconstruction, not any live preview).
+bindSlider('minGrazingCos', (v) => { const cam = activeCamera(); if (cam) cam.settings.minGrazingCos = v; }, (v) => v.toFixed(2));
 bindCheckbox('axesAutoCapture', (v) => { const cam = activeCamera(); if (cam) cam.settings.axesAutoCapture = v; });
 bindSlider('axesCaptureInterval', (v) => { const cam = activeCamera(); if (cam) cam.settings.axesCaptureIntervalMs = v; }, (v) => `${v.toFixed(0)}`);
 

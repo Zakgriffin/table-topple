@@ -52,7 +52,6 @@ function getViewRange(camera: Camera, gpp: GridPeriodPhaseResult): [number, numb
 // would here (a few dozen shapes, redrawn once per capture, not per frame).
 export function drawGridPeriodPhasePlot(camera: Camera) {
   const svg = gridPeriodPhasePlotSvg;
-  if (!camera.settings.showGridPeriodPhaseDebug) { svg.style.display = 'none'; return; }
   svg.style.display = 'block';
   while (svg.firstChild) svg.removeChild(svg.firstChild);
 
@@ -67,7 +66,7 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
 
   const gpp = camera.lastGridPeriodPhase;
   if (!gpp) {
-    svg.appendChild(svgText(8, H / 2, 'no data yet -- capture with the toggle on', { fill: '#888', 'font-size': 11, 'font-family': 'sans-serif' }));
+    svg.appendChild(svgText(8, H / 2, 'no data yet -- capture now', { fill: '#888', 'font-size': 11, 'font-family': 'sans-serif' }));
     return;
   }
   const { pooledGaps, seedPeriod, bracket, coarseSamples } = gpp.debug;
@@ -267,7 +266,7 @@ export function hideGridPeriodPhaseProjected() {
 export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: number, w: number, h: number, rotationSteps = 0) {
   const canvas = gridPeriodPhaseProjectedCanvas, ctx = gridPeriodPhaseProjectedCtx;
   const gpp = camera.lastGridPeriodPhase;
-  const showLines = camera.settings.showGridPeriodPhaseDebug && gpp;
+  const showLines = !!gpp;
   const showLattice = camera.settings.showSampleLattice && gpp;
   if (!showLines && !showLattice) { hideGridPeriodPhaseProjected(); return; }
   const bins = camera.lastProjectedBins;

@@ -148,7 +148,6 @@ export function refreshCameraPanel() {
   setBool('showPatch', cam.settings.showPatch); setBool('showGizmoBody', cam.settings.showGizmoBody);
   setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setNum('recoveredFloorOpacity', cam.settings.recoveredFloorOpacity);
   setBool('showSampleLattice', cam.settings.showSampleLattice);
-  setBool('showGridPeriodPhaseDebug', cam.settings.showGridPeriodPhaseDebug);
   setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
   setBool('showCompositeLineFamilies', cam.settings.showCompositeLineFamilies);
 
@@ -286,11 +285,6 @@ bindCheckbox('showGizmoBody', (v) => { const cam = activeCamera(); if (cam) cam.
 bindCheckbox('showRecoveredFloor', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredFloor = v; });
 bindSlider('recoveredFloorOpacity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.recoveredFloorOpacity = v; cam.recoveredFloorOverlayMat.opacity = v; } }, (v) => v.toFixed(2));
 bindCheckbox('showSampleLattice', (v) => { const cam = activeCamera(); if (cam) cam.settings.showSampleLattice = v; });
-bindCheckbox('showGridPeriodPhaseDebug', (v) => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.showGridPeriodPhaseDebug = v;
-  drawGridPeriodPhasePlot(cam);
-});
 bindSlider('gridPeriodPhaseBinCount', (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.gridPeriodPhaseBinCount = v;

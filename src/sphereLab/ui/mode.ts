@@ -1,9 +1,7 @@
 import { activeCamera } from '../camera/store.ts';
-import { updateContaminationOverlays } from '../overlays/contaminationOverlays.ts';
 import { clearGradientArrowOverlay } from '../overlays/hoverDebugOverlays.ts';
 import { hideGridPeriodPhaseProjected } from '../overlays/gridPeriodPhaseOverlays.ts';
-import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
-import { updateDistortedPreview } from '../pipeline/preview.ts';
+import { refreshModeVisualizations } from '../pipeline/modeRefresh.ts';
 import { worldOrbit } from '../scene/viewerControls.ts';
 import { globalState } from '../state.ts';
 import { Mode } from '../types.ts';
@@ -20,13 +18,14 @@ export function setMode(m: Mode) {
   pipFrame.style.display = m === 'through' || m === 'projected' ? 'none' : 'block';
   pipLabel.style.display = m === 'through' || m === 'projected' ? 'none' : 'block';
   const cam = activeCamera();
-  if (m === 'projected') { if (cam) buildProjectedTexture(cam); }
-  else { hideGridPeriodPhaseProjected(); }
+  if (m !== 'projected') hideGridPeriodPhaseProjected();
   contamToggles.style.display = m === 'through' ? 'flex' : 'none';
   arrowToggles.style.display = m === 'through' ? 'flex' : 'none';
   projectedToggles.style.display = m === 'projected' ? 'flex' : 'none';
   if (m !== 'through') clearGradientArrowOverlay();
-  if (m === 'through' && cam) { updateDistortedPreview(cam); updateContaminationOverlays(cam); }
+  // Whatever this mode actually renders may be stale from whenever it was
+  // last computed -- see pipeline/modeRefresh.ts.
+  if (cam) refreshModeVisualizations(cam, m);
 }
 modeBtns.world.addEventListener('click', () => setMode('world'));
 modeBtns.through.addEventListener('click', () => setMode('through'));

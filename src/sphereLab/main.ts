@@ -81,15 +81,13 @@ import { getAnalysisVFovRad, markCaptureDirty, resizeCaptureBuffers, renderCamRT
 import { updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS } from './pipeline/preview.ts';
 import { buildProjectedTexture } from './pipeline/decodeGrid.ts';
 import { runAxesReconstruction } from './pipeline/axesReconstruction.ts';
+import { refreshModeVisualizations } from './pipeline/modeRefresh.ts';
 import { updateContaminationOverlays } from './overlays/contaminationOverlays.ts';
-import { updateTopGradientOverlay } from './overlays/gradientHighlightOverlays.ts';
-import { updateBucketFillOverlay } from './overlays/bucketFillOverlay.ts';
-import { updateBucketFillJoinOverlay } from './overlays/bucketFillJoinOverlay.ts';
 import { updateGizmo, updateSphereOverlays } from './overlays/sphereOverlays.ts';
 import { updateRecoveredCamGizmo } from './overlays/recoveredOverlays.ts';
 import { drawSampleLattice } from './overlays/projectedCamOverlays.ts';
 import { drawGridPeriodPhaseProjected } from './overlays/gridPeriodPhaseOverlays.ts';
-import { computeThroughRect, lastHoverClientX, lastHoverClientY, updateHoverOverlays } from './overlays/hoverDebugOverlays.ts';
+import { computeThroughRect } from './overlays/hoverDebugOverlays.ts';
 import { sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
 
 // Every module's exports, purely so devBridge/client.ts's `eval(msg.code)`
@@ -213,13 +211,8 @@ function animate() {
     if (active.captureDirty && now - active.lastPreviewUpdate >= PREVIEW_UPDATE_INTERVAL_MS) {
       active.lastPreviewUpdate = now;
       active.captureDirty = false;
-      if (isSimulated(active)) renderCamRT(active);
-      updateDistortedPreview(active);
-      if (globalState.mode === 'projected') buildProjectedTexture(active);
-      if (globalState.mode === 'through') {
-        updateContaminationOverlays(active); updateTopGradientOverlay(active); updateBucketFillOverlay(active); updateBucketFillJoinOverlay(active);
-        updateHoverOverlays(lastHoverClientX, lastHoverClientY); // refreshes the persistent bucket-fill segment markers to match, even without a pointermove
-      }
+      if (isSimulated(active)) renderCamRT(active); // settings changed -- unlike a pure mode switch, this trigger genuinely needs a fresh render first
+      refreshModeVisualizations(active, globalState.mode);
     }
 
     if (active.settings.axesAutoCapture && !active.axesCapturing && now - active.lastAxesCapture >= active.settings.axesCaptureIntervalMs) {

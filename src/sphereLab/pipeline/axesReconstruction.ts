@@ -3,8 +3,6 @@ import { Camera } from '../camera/model.ts';
 import { activeCamera, isPhysical, isSimulated } from '../camera/store.ts';
 import { COL_DIR, GRID_STEP, MATH_QUAT, ROW_DIR, SPHERE_RADIUS } from '../constants.ts';
 import { angleBetweenDegV, cornerDir } from '../math/geometry.ts';
-import { updateContaminationOverlays } from '../overlays/contaminationOverlays.ts';
-import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { updatePositionReadoutText } from '../overlays/projectedCamOverlays.ts';
 import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo } from '../overlays/recoveredOverlays.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
@@ -14,6 +12,7 @@ import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
 import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, paintProjectedTexture, runPositionDecode } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { computeGridPeriodPhase } from './gridPeriodPhase.ts';
+import { refreshModeVisualizations } from './modeRefresh.ts';
 import { computeSegmentVotes, fitPairOfPlanes } from './votes.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
@@ -128,10 +127,11 @@ export function runAxesReconstruction(camera: Camera) {
       // placeholder-then-rescale dance, and don't need a second refine
       // pass. computeProjectedBinsAndMarginals/measurePeriodDistance are
       // left defined in pipeline/decodeGrid.ts, unreferenced here, in case
-      // this needs revisiting. This is no longer gated behind
-      // showGridPeriodPhaseDebug -- that toggle now only controls whether
-      // the debug PLOT/overlay draws, not whether this runs (real distance
-      // depends on it either way).
+      // this needs revisiting. This always runs unconditionally (real
+      // distance depends on it); the debug PLOT/overlay draws are likewise
+      // unconditional now too -- see this session's chat for why the old
+      // showGridPeriodPhaseDebug toggle (which by the end only gated the
+      // debug drawing, not the computation) was removed outright.
       const gppSpan = spanStart('gridPeriodPhase (distance source)');
       const gpp = rowDirRecovered && colDirRecovered && quadricPair
         ? computeGridPeriodPhase(
@@ -205,7 +205,6 @@ export function runAxesReconstruction(camera: Camera) {
       }
       updateRecoveredCamGizmo(camera);
       applyRecoveredFloorOverlay(camera);
-      if (isActive && globalState.mode === 'through') updateContaminationOverlays(camera);
       spanEnd(overlaySpan);
 
       if (isActive) {
@@ -234,7 +233,12 @@ export function runAxesReconstruction(camera: Camera) {
         lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  pose ${(t3 - t2).toFixed(0)}ms  distance ${(t4 - t3).toFixed(0)}ms  project ${(t5 - t4).toFixed(0)}ms  decode ${(t6 - t5).toFixed(0)}ms`);
         axesReadout.textContent = lines.join('\n');
         updatePositionReadoutText(camera);
-        drawGridPeriodPhasePlot(camera);
+        // Everything mode-specific (Through-Cam's contamination/top-gradient/
+        // bucket-fill/join/hover overlays and its grid-period/phase plot,
+        // Projected-Cam's texture, World's recovered-floor decal) -- see
+        // pipeline/modeRefresh.ts. Only meaningful for whichever camera is
+        // actually on screen.
+        refreshModeVisualizations(camera, globalState.mode);
       }
     } finally {
       spanEnd(rootSpan);

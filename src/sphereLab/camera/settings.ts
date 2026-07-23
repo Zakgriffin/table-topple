@@ -54,7 +54,6 @@ export interface CameraSettingsCommon {
   // point -> screen pixel) -- see pipeline/decodeGrid.ts's own comment.
   // Higher = stricter (excludes more of the near-horizon view).
   minGrazingCos: number;
-  showGridPeriodPhaseDebug: boolean;
   gridPeriodPhaseBinCount: number;
   showCompositeLineFamilies: boolean;
   showSampleLattice: boolean;
@@ -118,7 +117,6 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     topCirclesLineWidth: savedNum('topCirclesLineWidth', 1),
     weightSharpenPower: 4,
     minGrazingCos: savedNum('minGrazingCos', 0.15),
-    showGridPeriodPhaseDebug: savedBool('showGridPeriodPhaseDebug', false),
     gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
     showCompositeLineFamilies: savedBool('showCompositeLineFamilies', false),
     showSampleLattice: savedBool('showSampleLattice', false),

@@ -75,7 +75,7 @@ import { renderer } from './scene/renderer.ts';
 import { floorMesh } from './scene/floor.ts';
 import { viewerCam, worldOrbit, insideCam, insideYaw, insidePitch } from './scene/viewerControls.ts';
 import {
-  renderPreviewViewport, renderProjectedViewport, renderTrueContamOverlay, renderReconContamOverlay, renderTopGradientOverlay, renderTangentWalkPathOverlay, renderBucketFillOverlay, renderBucketFillJoinOverlay,
+  renderPreviewViewport, renderProjectedViewport, renderTrueContamOverlay, renderReconContamOverlay, renderTopGradientOverlay, renderBucketFillOverlay, renderBucketFillJoinOverlay,
 } from './scene/quadRenderers.ts';
 import { getAnalysisVFovRad, markCaptureDirty, resizeCaptureBuffers, renderCamRT } from './pipeline/capture.ts';
 import { updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS } from './pipeline/preview.ts';
@@ -244,7 +244,6 @@ function animate() {
       if (active.settings.showTrueContamination) renderTrueContamOverlay(active, x, y, w, h);
       if (active.settings.showReconstructedContamination) renderReconContamOverlay(active, x, y, w, h);
       if (active.settings.showTopGradient) renderTopGradientOverlay(active, x, y, w, h);
-      if (active.settings.showTangentWalkPath) renderTangentWalkPathOverlay(active, x, y, w, h);
       if (active.settings.showBucketFillSegments) renderBucketFillOverlay(active, x, y, w, h);
       if (active.settings.showBucketFillJoin) renderBucketFillJoinOverlay(active, x, y, w, h);
     }

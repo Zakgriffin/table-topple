@@ -33,7 +33,6 @@ export const gradientArrowCanvas = document.getElementById('gradientArrowOverlay
 export const gradientArrowCtx = gradientArrowCanvas.getContext('2d')!;
 export const toggleGradientArrowBtn = document.getElementById('toggleGradientArrow') as HTMLButtonElement;
 export const toggleGradientArrowModeBtn = document.getElementById('toggleGradientArrowMode') as HTMLButtonElement;
-export const toggleTangentWalkPathBtn = document.getElementById('toggleTangentWalkPath') as HTMLButtonElement;
 export const arrowToggles = document.getElementById('arrowToggles') as HTMLDivElement;
 export const simDistortionSection = document.getElementById('simDistortionSection') as HTMLDivElement;
 

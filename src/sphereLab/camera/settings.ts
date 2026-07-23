@@ -40,7 +40,6 @@ export interface CameraSettingsCommon {
   showBucketFillComposite: boolean;
   showBucketFillMergeMarkers: boolean;
   showGradientArrow: boolean; showGradientArrowPerpendicular: boolean; gradientArrowScale: number;
-  showTangentWalkPath: boolean;
   simGradRadius: number; coherenceRadius: number;
   tangentWalkMaxSteps: number; tangentWalkDeviationDeg: number; tangentWalkMagFraction: number; tangentWalkGraceSamples: number;
   tangentWalkAdaptive: boolean;
@@ -99,7 +98,6 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showBucketFillComposite: savedBool('toggleBucketFillComposite', false),
     showBucketFillMergeMarkers: savedBool('toggleBucketFillMergeMarkers', false),
     showGradientArrow: false, showGradientArrowPerpendicular: false, gradientArrowScale: 10,
-    showTangentWalkPath: false,
     simGradRadius: 1, coherenceRadius: 1,
     // See the pre-Stage-A history for the full derivation of these tangent-walk
     // defaults (guided tangent walk, simNoise=8 stability etc.) -- unchanged.

@@ -7,7 +7,7 @@ import { updateBucketFillAvailability, updateBucketFillOverlay } from '../overla
 import { updateBucketFillCompositeAvailability, updateBucketFillJoinAvailability, updateBucketFillJoinOverlay, updateBucketFillMergeMarkersAvailability } from '../overlays/bucketFillJoinOverlay.ts';
 import { updateContaminationAvailability } from '../overlays/contaminationOverlays.ts';
 import { updateTopGradientAvailability, updateTopGradientOverlay } from '../overlays/gradientHighlightOverlays.ts';
-import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, updateHoverOverlays, updateTangentWalkPathAvailability } from '../overlays/hoverDebugOverlays.ts';
+import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, updateHoverOverlays } from '../overlays/hoverDebugOverlays.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { runAxesReconstruction } from '../pipeline/axesReconstruction.ts';
@@ -20,7 +20,7 @@ import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTopGradientBtn, toggleTrueContamBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueContamBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -183,7 +183,6 @@ export function refreshCameraPanel() {
   toggleReconContamBtn.classList.toggle('active', cam.settings.showReconstructedContamination);
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
   toggleGradientArrowModeBtn.classList.toggle('active', cam.settings.showGradientArrowPerpendicular);
-  toggleTangentWalkPathBtn.classList.toggle('active', cam.settings.showTangentWalkPath);
   toggleTopGradientBtn.classList.toggle('active', cam.settings.showTopGradient);
   toggleBucketFillBtn.classList.toggle('active', cam.settings.showBucketFillSegments);
   toggleBucketFillMarkersBtn.classList.toggle('active', cam.settings.showBucketFillMarkers);
@@ -192,7 +191,6 @@ export function refreshCameraPanel() {
   toggleBucketFillMergeMarkersBtn.classList.toggle('active', cam.settings.showBucketFillMergeMarkers);
   updateContaminationAvailability();
   updateGradientArrowAvailability();
-  updateTangentWalkPathAvailability();
   updateTopGradientAvailability();
   updateBucketFillAvailability();
   updateBucketFillJoinAvailability();
@@ -330,7 +328,6 @@ bindRadioGroup('fieldView', (v) => {
   markCaptureDirty(cam);
   updateContaminationAvailability();
   updateGradientArrowAvailability();
-  updateTangentWalkPathAvailability();
   updateTopGradientAvailability();
   updateBucketFillAvailability();
   updateBucketFillJoinAvailability();
@@ -339,7 +336,6 @@ bindRadioGroup('fieldView', (v) => {
 });
 updateContaminationAvailability();
 updateGradientArrowAvailability();
-updateTangentWalkPathAvailability();
 updateTopGradientAvailability();
 updateBucketFillAvailability();
 updateBucketFillJoinAvailability();

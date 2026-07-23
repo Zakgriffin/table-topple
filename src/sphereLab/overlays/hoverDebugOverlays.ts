@@ -6,7 +6,7 @@ import { segmentLength } from '../pipeline/bucketFillSegments.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
-import { canvas, gradientArrowCanvas, gradientArrowCtx, persistControl, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTangentWalkPathBtn, toggleTopGradientBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowCanvas, gradientArrowCtx, persistControl, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { updateBucketFillOverlay } from './bucketFillOverlay.ts';
 import { updateBucketFillCompositeAvailability, updateBucketFillJoinAvailability, updateBucketFillJoinOverlay, updateBucketFillMergeMarkersAvailability } from './bucketFillJoinOverlay.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
@@ -357,11 +357,9 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
   if (!camera) { clearGradientArrowOverlay(); return; }
   const settings = camera.settings;
   const arrowsOn = settings.showGradientArrow || settings.showGradientArrowPerpendicular;
-  const walkOn = settings.showTangentWalkPath;
   const markersOn = settings.showBucketFillSegments;
 
   clearGradientArrowOverlay();
-  clearTangentWalkPathOverlay(camera);
 
   if (globalState.mode !== 'through') return;
 
@@ -369,7 +367,7 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
   if (settings.showBucketFillComposite) drawBucketFillCompositeLines(camera);
   drawBucketFillDirectionMerges(camera);
 
-  if (!arrowsOn && !walkOn) return;
+  if (!arrowsOn) return;
   const rect = computeThroughRect(camera);
   if (clientX < rect.x || clientX >= rect.x + rect.w || clientY < rect.y || clientY >= rect.y + rect.h) return; // cursor outside -- markers (if any) stay drawn, just no hover-specific content below
 
@@ -402,17 +400,6 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
       }
     }
   }
-
-  if (walkOn && camera.lastEffectiveField) {
-    const { fx, fy } = camera.lastEffectiveField;
-    const seedFx = fx[i], seedFy = fy[i];
-    if (seedFx !== 0 || seedFy !== 0) {
-      const included = settings.tangentWalkAdaptive
-        ? computeTangentWalkIncludedPixelsAdaptive(settings, fx, fy, fieldW, fieldH, fieldCol, fieldRow, seedFx, seedFy)
-        : computeTangentWalkIncludedPixels(settings, fx, fy, fieldW, fieldH, fieldCol, fieldRow, seedFx, seedFy);
-      paintTangentWalkPathOverlay(camera, fieldW, fx, fy, included);
-    }
-  }
 }
 export let lastHoverClientX = -1, lastHoverClientY = -1;
 canvas.addEventListener('pointermove', (e) => {
@@ -422,7 +409,6 @@ canvas.addEventListener('pointermove', (e) => {
 canvas.addEventListener('pointerleave', () => {
   lastHoverClientX = -1; lastHoverClientY = -1;
   clearGradientArrowOverlay();
-  const cam = activeCamera(); if (cam) clearTangentWalkPathOverlay(cam);
 });
 
 toggleHideFieldBtn.addEventListener('click', () => {
@@ -507,12 +493,6 @@ toggleGradientArrowModeBtn.addEventListener('click', () => {
   toggleGradientArrowModeBtn.classList.toggle('active', cam.settings.showGradientArrowPerpendicular);
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 });
-toggleTangentWalkPathBtn.addEventListener('click', () => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.showTangentWalkPath = !cam.settings.showTangentWalkPath;
-  toggleTangentWalkPathBtn.classList.toggle('active', cam.settings.showTangentWalkPath);
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
-});
 
 
 export function updateGradientArrowAvailability() {
@@ -526,16 +506,5 @@ export function updateGradientArrowAvailability() {
     toggleGradientArrowBtn.classList.remove('active');
     toggleGradientArrowModeBtn.classList.remove('active');
     clearGradientArrowOverlay();
-  }
-}
-export function updateTangentWalkPathAvailability() {
-  const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'effective' || cam.settings.fieldView === 'walked';
-  toggleTangentWalkPathBtn.disabled = !relevant;
-  if (!relevant) {
-    cam.settings.showTangentWalkPath = false;
-    toggleTangentWalkPathBtn.classList.remove('active');
-    clearGradientArrowOverlay();
-    clearTangentWalkPathOverlay(cam);
   }
 }

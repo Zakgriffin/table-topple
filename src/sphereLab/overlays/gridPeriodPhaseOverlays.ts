@@ -2,6 +2,7 @@ import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { projectedUVScale } from '../pipeline/decodeGrid.ts';
 import { circularFit, GnomonicPoint, GridPeriodPhaseResult, PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
+import { DecodeCellDebug } from '../types.ts';
 import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx } from '../ui/dom.ts';
 
 // ── Grid period/phase debug visualizations (pipeline/gridPeriodPhase.ts) ──
@@ -265,8 +266,8 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
   const showLattice = camera.settings.showNewSampleLattice && gpp;
   if (!showLines && !showLattice) { hideGridPeriodPhaseProjected(); return; }
   const bins = camera.lastProjectedBins;
-  const k = projectedUVScale(camera);
-  if (!bins || k === null) { hideGridPeriodPhaseProjected(); return; }
+  const uvScale = projectedUVScale(camera);
+  if (!bins || uvScale === null) { hideGridPeriodPhaseProjected(); return; }
 
   canvas.style.display = 'block';
   canvas.style.left = x + 'px';
@@ -278,7 +279,7 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
   ctx.clearRect(0, 0, canvas.width, canvas.height);
 
   const toScreen = (p: GnomonicPoint) => {
-    const u = k * p.xRow, v = k * p.xCol;
+    const u = uvScale * p.xRow, v = uvScale * p.xCol;
     const bu = (bins.maxU - u) / bins.binWidthU, bv = (v - bins.minV) / bins.binWidthV;
     return {
       px: (bu / bins.w) * canvas.width,
@@ -304,7 +305,32 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
     if (rowIdx.length > 0 && colIdx.length > 0) {
       const kMin = Math.min(...rowIdx) - 1, kMax = Math.max(...rowIdx) + 1;
       const mMin = Math.min(...colIdx) - 1, mMax = Math.max(...colIdx) + 1;
-      ctx.fillStyle = 'rgb(80,255,120)';
+      // Same fill/stroke scheme drawSampleLattice (projectedCamOverlays.ts,
+      // the OLD marginals/decode-driven lattice this one is meant to
+      // replace) uses: fill = decoded bit (black=1, white=0, gray=no debug
+      // data), stroke = correct (green) vs wrong (red) vs no data (dark).
+      // This lattice's own (period, phiRow, phiCol) come from a totally
+      // independent estimator (pipeline/gridPeriodPhase.ts) from decode's
+      // own grid (pipeline/decodeGrid.ts's buildDecodeSampleGrid/
+      // computeDecodeMarginals) -- rather than re-deriving a bit read here,
+      // borrow whichever decode cell is physically nearest in (u,v) (same
+      // units camera.lastProjectedBins/camera.lastDecodeRotated already
+      // use, see projectedUVScale), since both lattices describe the same
+      // real floor when both pipelines are working.
+      const nearestDebug = (u: number, v: number): DecodeCellDebug | null => {
+        const grid = camera.lastDecodeRotated, correctness = camera.lastDecodeCorrectness;
+        if (!grid || !correctness) return null;
+        let best: DecodeCellDebug | null = null, bestD2 = Infinity;
+        for (let i = 0; i < grid.rows; i++) {
+          for (let j = 0; j < grid.cols; j++) {
+            const pt = grid.points[i][j];
+            if (!pt.valid) continue;
+            const d2 = (pt.u - u) * (pt.u - u) + (pt.v - v) * (pt.v - v);
+            if (d2 < bestD2) { bestD2 = d2; best = correctness[i][j]; }
+          }
+        }
+        return best;
+      };
       for (let k = kMin; k <= kMax; k++) {
         for (let m = mMin; m <= mMax; m++) {
           // Row line k has constant xCol = k*period+phiRow; column line m
@@ -317,7 +343,13 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
             xCol: (k + 0.5) * gpp.period + gpp.phiRow,
           };
           const { px, py } = toScreen(point);
-          ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2); ctx.fill();
+          const debug = nearestDebug(uvScale * point.xRow, uvScale * point.xCol);
+          ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = debug ? (debug.bit ? '#000' : '#fff') : '#888';
+          ctx.fill();
+          ctx.strokeStyle = debug ? (debug.correct ? '#0f0' : '#f00') : 'rgba(0,0,0,0.6)';
+          ctx.lineWidth = debug ? 1.5 : 1;
+          ctx.stroke();
         }
       }
     }

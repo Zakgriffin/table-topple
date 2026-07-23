@@ -54,8 +54,6 @@ export interface CameraSettingsCommon {
   gridPeriodPhaseBinCount: number;
   showCompositeLineFamilies: boolean;
   showNewSampleLattice: boolean;
-  orientationLM: boolean;
-  positionLM: boolean;
   fieldView: FieldView;
   axesAutoCapture: boolean; axesCaptureIntervalMs: number;
   viewportW: number; viewportH: number; aspectLocked: boolean;
@@ -114,8 +112,6 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
     showCompositeLineFamilies: savedBool('showCompositeLineFamilies', false),
     showNewSampleLattice: savedBool('showNewSampleLattice', false),
-    orientationLM: false,
-    positionLM: false,
     fieldView: 'walked',
     axesAutoCapture: false, axesCaptureIntervalMs: 500,
     viewportW: 512, viewportH: 384, aspectLocked: false,

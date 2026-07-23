@@ -208,7 +208,6 @@
     <label class="chk"><input type="checkbox" id="useGPUFit"> GPU plane fit (WebGPU)</label>
     <label class="chk"><input type="checkbox" id="useGPUDecode"> GPU decode tally (WebGPU)</label>
     <label class="chk"><input type="checkbox" id="useGPUProject"> GPU projected-sample ray-cast (WebGPU)</label>
-    <label class="chk"><input type="checkbox" id="useGPUPositionLM"> GPU Phase 3 photometric LM (WebGPU)</label>
     <div class="hint" id="gpuVotesStatus" style="margin-bottom:0;"></div>
     <div class="hint" style="margin-bottom:0;">Applies to the shared floor/pattern, regardless of which camera (or none) is selected.</div>
   </div>
@@ -294,8 +293,6 @@
     <label class="chk"><input type="checkbox" id="showAxisVectors"> show vote axis vectors</label>
     <div class="row"><span class="label">weight sharpen</span><input type="range" id="weightSharpenPower" min="1" max="10" step="0.5" value="4"><span class="val" id="weightSharpenPowerVal"></span></div>
     <label class="chk"><input type="checkbox" id="useSegmentVotes"> use bucket-fill line segments for votes (experimental)</label>
-    <label class="chk"><input type="checkbox" id="orientationLM" checked> LM orientation refinement (Phase 1)</label>
-    <label class="chk"><input type="checkbox" id="positionLM" checked> LM photometric position refinement (Phase 3)</label>
     <button id="captureAxesBtn" class="captureBtn">&#9889; capture now</button>
     <label class="chk"><input type="checkbox" id="axesAutoCapture"> auto-recompute</label>
     <div class="row"><span class="label">interval (ms)</span><input type="range" id="axesCaptureInterval" min="50" max="2000" step="50" value="500"><span class="val" id="axesCaptureIntervalVal"></span></div>

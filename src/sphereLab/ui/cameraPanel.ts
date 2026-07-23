@@ -152,7 +152,6 @@ export function refreshCameraPanel() {
   setBool('showGridPeriodPhaseDebug', cam.settings.showGridPeriodPhaseDebug);
   setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
   setBool('showCompositeLineFamilies', cam.settings.showCompositeLineFamilies);
-  setBool('orientationLM', cam.settings.orientationLM); setBool('positionLM', cam.settings.positionLM);
 
   setNum('simGradRadius', cam.settings.simGradRadius); setNum('coherenceRadius', cam.settings.coherenceRadius);
   setNum('tangentWalkMaxSteps', cam.settings.tangentWalkMaxSteps); setNum('tangentWalkDeviationDeg', cam.settings.tangentWalkDeviationDeg);
@@ -280,7 +279,6 @@ bindCheckbox('useGPUVotes', (v) => { globalState.useGPUVotes = v; });
 bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; });
 bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; });
 bindCheckbox('useGPUProject', (v) => { globalState.useGPUProject = v; });
-bindCheckbox('useGPUPositionLM', (v) => { globalState.useGPUPositionLM = v; });
 gpuVotesStatus.textContent = isWebGPUSupported()
   ? 'WebGPU is available in this browser.'
   : 'WebGPU is not available in this browser -- the checkbox above will silently fall back to the CPU pipeline.';
@@ -304,8 +302,6 @@ bindCheckbox('showCompositeLineFamilies', (v) => {
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 });
 bindCheckbox('useSegmentVotes', (v) => { const cam = activeCamera(); if (cam) cam.settings.useSegmentVotes = v; });
-bindCheckbox('orientationLM', (v) => { const cam = activeCamera(); if (cam) cam.settings.orientationLM = v; });
-bindCheckbox('positionLM', (v) => { const cam = activeCamera(); if (cam) cam.settings.positionLM = v; });
 
 bindSlider('simNoise', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
 bindSlider('simBlur', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simBlur = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));

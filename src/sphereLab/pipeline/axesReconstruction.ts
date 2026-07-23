@@ -8,21 +8,16 @@ import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts'
 import { updatePositionReadoutText } from '../overlays/projectedCamOverlays.ts';
 import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo } from '../overlays/recoveredOverlays.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
-import { C, R, torus } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
-import { PositionFit } from '../types.ts';
 import { axesReadout, captureAxesBtn } from '../ui/dom.ts';
 import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
-import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, measurePeriodDistance, measurePeriodDistanceGPU, paintProjectedTexture, runPositionDecode, solveRecoveredCamQuat } from './decodeGrid.ts';
+import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, measurePeriodDistance, measurePeriodDistanceGPU, paintProjectedTexture, runPositionDecode } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
-import { refineOrientationLM } from './orientationLM.ts';
-import { computePhotometricSamples, refineOrientationAndPositionLM } from './positionLM.ts';
 import { computeGridPeriodPhase } from './gridPeriodPhase.ts';
 import { computeSegmentVotes, computeWorldVotes, fitPairOfPlanes, votesInMagnitudeBand } from './votes.ts';
 import { computeWorldVotesGPU } from '../pipelineGPU/voteGeneration.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { votesInMagnitudeBandGPU } from '../pipelineGPU/voteBandSelect.ts';
-import { refineOrientationAndPositionLMGPU } from '../pipelineGPU/positionLM.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
 // Falls back to CPU per-call if the GPU one returns null (WebGPU
@@ -134,28 +129,24 @@ export function runAxesReconstruction(camera: Camera) {
       spanEnd(fitSpan);
       const t2 = performance.now();
 
-      const lmSpan = spanStart('orientationLM (Phase 1)');
-      const refinedFit = quadricPair && camera.settings.orientationLM ? refineOrientationLM(fitVotes, quadricPair) : null;
-      const orientationFit = refinedFit ?? quadricPair;
-      spanEnd(lmSpan);
       const t2b = performance.now();
 
       camera.axesComputed = !!quadricPair;
 
       const poseAssemblySpan = spanStart('poseAssembly+roughSpacing');
       let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
-      if (orientationFit) {
-        const normalForHandedness = orientationFit.Dnormal.clone();
+      if (quadricPair) {
+        const normalForHandedness = quadricPair.Dnormal.clone();
         if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normalForHandedness) > 0) normalForHandedness.negate();
-        rowDirRecovered = orientationFit.Drow.clone();
-        colDirRecovered = orientationFit.Dcol.clone();
+        rowDirRecovered = quadricPair.Drow.clone();
+        colDirRecovered = quadricPair.Dcol.clone();
         const handedness = rowDirRecovered.clone().cross(colDirRecovered).dot(normalForHandedness);
         if (handedness > 0) colDirRecovered.negate();
       }
 
       const PLACEHOLDER_DISTANCE = 1;
-      camera.lastRecoveredAxes = rowDirRecovered && colDirRecovered && orientationFit
-        ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: orientationFit.Dnormal, distance: PLACEHOLDER_DISTANCE }
+      camera.lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair
+        ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: PLACEHOLDER_DISTANCE }
         : null;
       if (camera.lastRecoveredAxes) {
         const projResult = await projectBins(camera);
@@ -174,7 +165,6 @@ export function runAxesReconstruction(camera: Camera) {
 
       const refineSpan = spanStart('spacing refine (measurePeriodDistance + re-project)');
       let refinedSpacing: { distanceU: number; distanceV: number } | null = null;
-      let finalSpacing: { distanceU: number; distanceV: number } | null = null;
       if (camera.lastRecoveredAxes && spacing) {
         camera.lastRecoveredAxes.distance = (spacing.distanceU + spacing.distanceV) / 2;
 
@@ -202,71 +192,11 @@ export function runAxesReconstruction(camera: Camera) {
       await runPositionDecode(camera, gray, w, h, vFovRad);
       spanEnd(decodeSpan);
 
-      let lastPositionLMResult: (PositionFit & { iterations: number; initialCost: number; finalCost: number }) | null = null;
-      if (camera.settings.positionLM && camera.lastRecoveredAxes && camera.lastPositionDecode && camera.lastNoisedPreviewGray) {
-        const p3Span = spanStart('positionLM (Phase 3)');
-        const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
-        const normalForInit = Dnormal.clone();
-        if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normalForInit) > 0) normalForInit.negate();
-        const normalForInitWorld = normalForInit.clone().applyQuaternion(camera.lastPositionDecode.recoveredCamQuat);
-        const initialWorldX0 = camera.lastPositionDecode.camPos.x + normalForInitWorld.x * -distance;
-        const initialWorldZ0 = camera.lastPositionDecode.camPos.z + normalForInitWorld.z * -distance;
-        const photoSampleSpan = spanStart('computePhotometricSamples');
-        const photoSamples = computePhotometricSamples(camera.lastNoisedPreviewGray, w, h, 4);
-        spanEnd(photoSampleSpan);
-        // Same fallback pattern as the GPU vote path above: computeWorldVotes/
-        // refineOrientationAndPositionLM stay the source of truth, the GPU
-        // version is verified against them, not the other way around.
-        lastPositionLMResult = globalState.useGPUPositionLM
-          ? (await refineOrientationAndPositionLMGPU(
-              photoSamples, w, h, { Drow, Dcol, Dnormal }, distance, initialWorldX0, initialWorldZ0, MATH_QUAT, vFovRad, camera.aspect, torus, R, C,
-            ))
-            ?? refineOrientationAndPositionLM(photoSamples, w, h, { Drow, Dcol, Dnormal }, distance, initialWorldX0, initialWorldZ0, MATH_QUAT, vFovRad, camera.aspect)
-          : refineOrientationAndPositionLM(photoSamples, w, h, { Drow, Dcol, Dnormal }, distance, initialWorldX0, initialWorldZ0, MATH_QUAT, vFovRad, camera.aspect);
-        camera.lastRecoveredAxes.Drow = lastPositionLMResult.Drow;
-        camera.lastRecoveredAxes.Dcol = lastPositionLMResult.Dcol;
-        camera.lastRecoveredAxes.Dnormal = lastPositionLMResult.Dnormal;
-        const refinedNormal = lastPositionLMResult.Dnormal.clone();
-        if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(refinedNormal) > 0) refinedNormal.negate();
-        if (camera.lastDecodeRotated) {
-          const anchorRow = ((camera.lastPositionDecode.row - camera.lastDecodeRotated.zeroI) % R + R) % R;
-          const anchorCol = ((camera.lastPositionDecode.col - camera.lastDecodeRotated.zeroJ) % C + C) % C;
-          const refinedQuat = solveRecoveredCamQuat(
-            camera.lastDecodeRotated, anchorRow, anchorCol, camera.lastRecoveredAxes.Drow, camera.lastRecoveredAxes.Dcol, refinedNormal, distance,
-          );
-          if (refinedQuat) camera.lastPositionDecode.recoveredCamQuat = refinedQuat;
-        }
-        const refinedNormalWorld = refinedNormal.clone().applyQuaternion(camera.lastPositionDecode.recoveredCamQuat);
-        camera.lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormalWorld.x * distance;
-        camera.lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormalWorld.z * distance;
-        const projResult3 = await projectBins(camera);
-        if (showProjected) paintProjectedTexture(camera, projResult3);
-
-        const postPhase3Bins = camera.lastProjectedBins;
-        if (postPhase3Bins) {
-          const extentU = postPhase3Bins.maxU - postPhase3Bins.minU;
-          const extentV = postPhase3Bins.maxV - postPhase3Bins.minV;
-          const currentDistance = camera.lastRecoveredAxes.distance;
-          const measured = await measureSpacing(camera, currentDistance, extentU, extentV);
-          if (measured) {
-            finalSpacing = measured;
-            camera.lastRecoveredAxes.distance = (measured.distanceU + measured.distanceV) / 2;
-            camera.lastPositionDecode.camPos.x = lastPositionLMResult.worldX0 + refinedNormalWorld.x * camera.lastRecoveredAxes.distance;
-            camera.lastPositionDecode.camPos.z = lastPositionLMResult.worldZ0 + refinedNormalWorld.z * camera.lastRecoveredAxes.distance;
-            const projResult4 = await projectBins(camera);
-            if (showProjected) paintProjectedTexture(camera, projResult4);
-          }
-        }
-        spanEnd(p3Span);
-      }
-
       // Grid period/phase debug pipeline (pipeline/gridPeriodPhase.ts) --
       // opt-in (its own toggle, gated separately from the main vote/fit
       // path) since it recomputes the bucket-fill/join-walk/composite-line
       // steps a second time internally rather than threading identity
-      // through the existing anonymous Vote[] used above. Runs after every
-      // orientation refinement (LM Phase 1 and Phase 3) so it uses the BEST
-      // available Drow/Dcol/Dnormal, not the rough initial fit.
+      // through the existing anonymous Vote[] used above.
       camera.lastGridPeriodPhase = camera.settings.showGridPeriodPhaseDebug && camera.lastRecoveredAxes
         ? computeGridPeriodPhase(
             camera.settings, gray, w, h, MATH_QUAT, vFovRad, camera.aspect,
@@ -305,9 +235,6 @@ export function runAxesReconstruction(camera: Camera) {
         } else {
           lines.push(`degenerate fit`);
         }
-        if (refinedFit) {
-          lines.push(`LM: ${refinedFit.iterations} iters, cost ${refinedFit.initialCost.toExponential(2)} -> ${refinedFit.finalCost.toExponential(2)}`);
-        }
         if (spacing) {
           const trueDist = isSimulated(camera) ? camera.camPos.y : NaN;
           const distU = spacing.distanceU, distV = spacing.distanceV;
@@ -328,34 +255,13 @@ export function runAxesReconstruction(camera: Camera) {
               lines.push(`dist U ${rDistU.toFixed(2)}  dist V ${rDistV.toFixed(2)}  [refined, adaptive buckets]`);
             }
           }
-          if (finalSpacing) {
-            const fDistU = finalSpacing.distanceU, fDistV = finalSpacing.distanceV;
-            if (haveGroundTruth) {
-              const fErrU = (Math.abs(fDistU - trueDist) / trueDist) * 100;
-              const fErrV = (Math.abs(fDistV - trueDist) / trueDist) * 100;
-              lines.push(`dist U ${fDistU.toFixed(2)} (${fErrU.toFixed(1)}% err)  dist V ${fDistV.toFixed(2)} (${fErrV.toFixed(1)}% err)  [final, post-Phase-3 orientation]`);
-            } else {
-              lines.push(`dist U ${fDistU.toFixed(2)}  dist V ${fDistV.toFixed(2)}  [final, post-Phase-3 orientation]`);
-            }
-          }
         } else if (quadricPair) {
           lines.push(`spacing: no period found`);
         }
         if (camera.lastPositionDecode) {
           lines.push(`decoded torus (row,col): (${camera.lastPositionDecode.row}, ${camera.lastPositionDecode.col})  consistency ${(camera.lastPositionDecode.consistency * 100).toFixed(1)}%  camPos (${camera.lastPositionDecode.camPos.x.toFixed(2)}, ${camera.lastPositionDecode.camPos.y.toFixed(2)}, ${camera.lastPositionDecode.camPos.z.toFixed(2)})`);
         }
-        if (lastPositionLMResult) {
-          lines.push(`photoLM: ${lastPositionLMResult.iterations} iters, cost ${lastPositionLMResult.initialCost.toExponential(2)} -> ${lastPositionLMResult.finalCost.toExponential(2)}`);
-          if (camera.lastRecoveredAxes && haveGroundTruth) {
-            const { Drow: finalDrow, Dcol: finalDcol } = camera.lastRecoveredAxes;
-            const errUnswapped = angleBetweenDegV(finalDrow, ROW_DIR) + angleBetweenDegV(finalDcol, COL_DIR);
-            const errSwapped = angleBetweenDegV(finalDrow, COL_DIR) + angleBetweenDegV(finalDcol, ROW_DIR);
-            const finalRowErr = errSwapped < errUnswapped ? angleBetweenDegV(finalDrow, COL_DIR) : angleBetweenDegV(finalDrow, ROW_DIR);
-            const finalColErr = errSwapped < errUnswapped ? angleBetweenDegV(finalDcol, ROW_DIR) : angleBetweenDegV(finalDcol, COL_DIR);
-            lines.push(`row err ${finalRowErr.toFixed(2)}°  col err ${finalColErr.toFixed(2)}°  [Phase 3, final${errSwapped < errUnswapped ? ', swapped' : ''}]`);
-          }
-        }
-        lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  LM ${(t2b - t2).toFixed(0)}ms  spacing ${(t3 - t2b).toFixed(0)}ms  refine ${(t3b - t3).toFixed(0)}ms  decode ${(t4 - t3b).toFixed(0)}ms`);
+        lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  spacing ${(t3 - t2b).toFixed(0)}ms  refine ${(t3b - t3).toFixed(0)}ms  decode ${(t4 - t3b).toFixed(0)}ms`);
         axesReadout.textContent = lines.join('\n');
         updatePositionReadoutText(camera);
         drawGridPeriodPhasePlot(camera);

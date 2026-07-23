@@ -11,7 +11,7 @@ import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { globalState } from '../state.ts';
 import { axesReadout, captureAxesBtn } from '../ui/dom.ts';
 import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
-import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, measurePeriodDistance, measurePeriodDistanceGPU, paintProjectedTexture, runPositionDecode } from './decodeGrid.ts';
+import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, paintProjectedTexture, runPositionDecode } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { computeGridPeriodPhase } from './gridPeriodPhase.ts';
 import { computeSegmentVotes, computeWorldVotes, fitPairOfPlanes, votesInMagnitudeBand } from './votes.ts';
@@ -21,23 +21,12 @@ import { votesInMagnitudeBandGPU } from '../pipelineGPU/voteBandSelect.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
 // Falls back to CPU per-call if the GPU one returns null (WebGPU
-// unavailable) -- same pattern as every other GPU sub-pipeline in this
-// file, just factored into one helper since computeProjectedBinsAndMarginals
-// and measurePeriodDistance each have their own GPU/CPU pair called from
-// multiple sites below.
+// unavailable) -- same pattern as every other GPU sub-pipeline in this file.
 async function projectBins(camera: Camera) {
   const s = spanStart(globalState.useGPUProject ? 'projectBins (GPU stage 1 + CPU bucket)' : 'projectBins (CPU)');
   const result = globalState.useGPUProject
     ? (await computeProjectedBinsAndMarginalsGPU(camera)) ?? computeProjectedBinsAndMarginals(camera)
     : computeProjectedBinsAndMarginals(camera);
-  spanEnd(s);
-  return result;
-}
-async function measureSpacing(camera: Camera, currentDistance: number, extentU: number, extentV: number) {
-  const s = spanStart(globalState.useGPUProject ? 'measureSpacing (GPU stage 1 + CPU bucket)' : 'measureSpacing (CPU)');
-  const result = globalState.useGPUProject
-    ? (await measurePeriodDistanceGPU(camera, currentDistance, extentU, extentV)) ?? measurePeriodDistance(camera, currentDistance, extentU, extentV)
-    : measurePeriodDistance(camera, currentDistance, extentU, extentV);
   spanEnd(s);
   return result;
 }
@@ -60,17 +49,18 @@ export function runAxesReconstruction(camera: Camera) {
       const t0 = performance.now();
       rootSpan = spanStart('axesReconstruction');
       // Painting projectedPreviewTex is a real GPU texture upload -- worth
-      // skipping at every one of the intermediate buildProjectedTexture
-      // call sites below unless this camera's Projected-Cam view is what's
-      // actually on screen right now. The numeric half (bins/marginals)
-      // stays unconditional -- it feeds the spacing refinement that the
-      // always-on World view's recovered-pose overlay depends on for every
-      // camera, not just the displayed one. The RGBA half also has to run
-      // whenever the World-view floor overlay is on, though -- that overlay
-      // (see overlays/recoveredOverlays.ts) reuses projectedPreviewTex as
-      // its decal map, so skipping the paint here left it sitting at its
-      // all-zero (alpha 0, invisible) initial contents for any camera that
-      // never happened to be viewed in Projected-Cam mode first.
+      // skipping unless this camera's Projected-Cam view is what's actually
+      // on screen right now. The numeric half (bins/marginals) stays
+      // unconditional -- camera.lastProjectedBins feeds decode's own
+      // computeDecodeMarginals (pipeline/decodeGrid.ts) for every camera,
+      // not just the displayed one, and camera.lastMarginals still feeds
+      // the (display-only) marginal-line comparison overlay. The RGBA half
+      // also has to run whenever the World-view floor overlay is on, though
+      // -- that overlay (see overlays/recoveredOverlays.ts) reuses
+      // projectedPreviewTex as its decal map, so skipping the paint here
+      // left it sitting at its all-zero (alpha 0, invisible) initial
+      // contents for any camera that never happened to be viewed in
+      // Projected-Cam mode first.
       const showProjected = (isActive && globalState.mode === 'projected')
         || (globalState.mode === 'world' && camera.settings.showRecoveredFloor);
       if (isPhysical(camera) && !camera.lastRealCaptureGray) {
@@ -129,11 +119,9 @@ export function runAxesReconstruction(camera: Camera) {
       spanEnd(fitSpan);
       const t2 = performance.now();
 
-      const t2b = performance.now();
-
       camera.axesComputed = !!quadricPair;
 
-      const poseAssemblySpan = spanStart('poseAssembly+roughSpacing');
+      const poseAssemblySpan = spanStart('poseAssembly');
       let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
       if (quadricPair) {
         const normalForHandedness = quadricPair.Dnormal.clone();
@@ -143,67 +131,50 @@ export function runAxesReconstruction(camera: Camera) {
         const handedness = rowDirRecovered.clone().cross(colDirRecovered).dot(normalForHandedness);
         if (handedness > 0) colDirRecovered.negate();
       }
+      spanEnd(poseAssemblySpan);
+      const t3 = performance.now();
 
-      const PLACEHOLDER_DISTANCE = 1;
-      camera.lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair
-        ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: PLACEHOLDER_DISTANCE }
+      // Grid period/phase (pipeline/gridPeriodPhase.ts) is now the SOLE
+      // source of camera.lastRecoveredAxes.distance -- see this session's
+      // chat for why the old marginals/autocorrelation-based spacing
+      // estimate (computeProjectedBinsAndMarginals's colPeriod/rowPeriod,
+      // further refined via measurePeriodDistance's own re-bucket-and-
+      // remeasure pass) was disconnected: composite-line-derived period
+      // and height come out of a single narrowly-bracketed search, need no
+      // placeholder-then-rescale dance, and don't need a second refine
+      // pass. computeProjectedBinsAndMarginals/measurePeriodDistance are
+      // left defined in pipeline/decodeGrid.ts, unreferenced here, in case
+      // this needs revisiting. This is no longer gated behind
+      // showGridPeriodPhaseDebug -- that toggle now only controls whether
+      // the debug PLOT/overlay draws, not whether this runs (real distance
+      // depends on it either way).
+      const gppSpan = spanStart('gridPeriodPhase (distance source)');
+      const gpp = rowDirRecovered && colDirRecovered && quadricPair
+        ? computeGridPeriodPhase(
+            camera.settings, gray, w, h, MATH_QUAT, vFovRad, camera.aspect,
+            rowDirRecovered, colDirRecovered, quadricPair.Dnormal, GRID_STEP,
+          )
         : null;
+      camera.lastGridPeriodPhase = gpp;
+      spanEnd(gppSpan);
+      const t4 = performance.now();
+
+      camera.lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair && gpp
+        ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: gpp.height ?? 1 }
+        : null;
+
+      const projectSpan = spanStart('projectBins (display + decode-marginals bins)');
       if (camera.lastRecoveredAxes) {
         const projResult = await projectBins(camera);
         if (showProjected) paintProjectedTexture(camera, projResult);
       }
+      spanEnd(projectSpan);
+      const t5 = performance.now();
 
-      const marginals = camera.lastMarginals, bins = camera.lastProjectedBins;
-      const spacing = camera.lastRecoveredAxes && marginals && bins && marginals.colPeriod !== null && marginals.rowPeriod !== null
-        ? {
-          distanceU: PLACEHOLDER_DISTANCE * (GRID_STEP / (marginals.colPeriod * bins.binWidthU)),
-          distanceV: PLACEHOLDER_DISTANCE * (GRID_STEP / (marginals.rowPeriod * bins.binWidthV)),
-        }
-        : null;
-      spanEnd(poseAssemblySpan);
-      const t3 = performance.now();
-
-      const refineSpan = spanStart('spacing refine (measurePeriodDistance + re-project)');
-      let refinedSpacing: { distanceU: number; distanceV: number } | null = null;
-      if (camera.lastRecoveredAxes && spacing) {
-        camera.lastRecoveredAxes.distance = (spacing.distanceU + spacing.distanceV) / 2;
-
-        const roughBins = camera.lastProjectedBins;
-        if (roughBins) {
-          const rescale = camera.lastRecoveredAxes.distance / PLACEHOLDER_DISTANCE;
-          const trueExtentU = (roughBins.maxU - roughBins.minU) * rescale;
-          const trueExtentV = (roughBins.maxV - roughBins.minV) * rescale;
-          const roughDistance = camera.lastRecoveredAxes.distance;
-          const measured = await measureSpacing(camera, roughDistance, trueExtentU, trueExtentV);
-          if (measured) {
-            refinedSpacing = measured;
-            camera.lastRecoveredAxes.distance = (measured.distanceU + measured.distanceV) / 2;
-          }
-        }
-
-        const projResult2 = await projectBins(camera);
-        if (showProjected) paintProjectedTexture(camera, projResult2);
-      } else {
-        camera.lastRecoveredAxes = null;
-      }
-      spanEnd(refineSpan);
-      const t3b = performance.now();
       const decodeSpan = spanStart('positionDecode');
       await runPositionDecode(camera, gray, w, h, vFovRad);
       spanEnd(decodeSpan);
-
-      // Grid period/phase debug pipeline (pipeline/gridPeriodPhase.ts) --
-      // opt-in (its own toggle, gated separately from the main vote/fit
-      // path) since it recomputes the bucket-fill/join-walk/composite-line
-      // steps a second time internally rather than threading identity
-      // through the existing anonymous Vote[] used above.
-      camera.lastGridPeriodPhase = camera.settings.showGridPeriodPhaseDebug && camera.lastRecoveredAxes
-        ? computeGridPeriodPhase(
-            camera.settings, gray, w, h, MATH_QUAT, vFovRad, camera.aspect,
-            camera.lastRecoveredAxes.Drow, camera.lastRecoveredAxes.Dcol, camera.lastRecoveredAxes.Dnormal,
-            GRID_STEP,
-          )
-        : null;
+      const t6 = performance.now();
 
       const overlaySpan = spanStart('poleMarkers+overlays');
       if (camera.lastPositionDecode && rowDirRecovered && colDirRecovered) {
@@ -219,7 +190,6 @@ export function runAxesReconstruction(camera: Camera) {
       applyRecoveredFloorOverlay(camera);
       if (isActive && globalState.mode === 'through') updateContaminationOverlays(camera);
       spanEnd(overlaySpan);
-      const t4 = performance.now();
 
       if (isActive) {
         const haveGroundTruth = isSimulated(camera);
@@ -235,33 +205,22 @@ export function runAxesReconstruction(camera: Camera) {
         } else {
           lines.push(`degenerate fit`);
         }
-        if (spacing) {
+        if (camera.lastRecoveredAxes && gpp) {
           const trueDist = isSimulated(camera) ? camera.camPos.y : NaN;
-          const distU = spacing.distanceU, distV = spacing.distanceV;
+          const dist = camera.lastRecoveredAxes.distance;
           if (haveGroundTruth) {
-            const errU = (Math.abs(distU - trueDist) / trueDist) * 100;
-            const errV = (Math.abs(distV - trueDist) / trueDist) * 100;
-            lines.push(`dist U ${distU.toFixed(2)} (${errU.toFixed(1)}% err)  dist V ${distV.toFixed(2)} (${errV.toFixed(1)}% err)  true ${trueDist.toFixed(2)}  [rough, rtSize buckets]`);
+            const err = (Math.abs(dist - trueDist) / trueDist) * 100;
+            lines.push(`distance ${dist.toFixed(2)} (${err.toFixed(1)}% err)  true ${trueDist.toFixed(2)}  period ${gpp.period.toFixed(4)}  [gridPeriodPhase]`);
           } else {
-            lines.push(`dist U ${distU.toFixed(2)}  dist V ${distV.toFixed(2)}  [rough, rtSize buckets]`);
-          }
-          if (refinedSpacing) {
-            const rDistU = refinedSpacing.distanceU, rDistV = refinedSpacing.distanceV;
-            if (haveGroundTruth) {
-              const rErrU = (Math.abs(rDistU - trueDist) / trueDist) * 100;
-              const rErrV = (Math.abs(rDistV - trueDist) / trueDist) * 100;
-              lines.push(`dist U ${rDistU.toFixed(2)} (${rErrU.toFixed(1)}% err)  dist V ${rDistV.toFixed(2)} (${rErrV.toFixed(1)}% err)  [refined, adaptive buckets]`);
-            } else {
-              lines.push(`dist U ${rDistU.toFixed(2)}  dist V ${rDistV.toFixed(2)}  [refined, adaptive buckets]`);
-            }
+            lines.push(`distance ${dist.toFixed(2)}  period ${gpp.period.toFixed(4)}  [gridPeriodPhase]`);
           }
         } else if (quadricPair) {
-          lines.push(`spacing: no period found`);
+          lines.push(`distance: no period found (gridPeriodPhase)`);
         }
         if (camera.lastPositionDecode) {
           lines.push(`decoded torus (row,col): (${camera.lastPositionDecode.row}, ${camera.lastPositionDecode.col})  consistency ${(camera.lastPositionDecode.consistency * 100).toFixed(1)}%  camPos (${camera.lastPositionDecode.camPos.x.toFixed(2)}, ${camera.lastPositionDecode.camPos.y.toFixed(2)}, ${camera.lastPositionDecode.camPos.z.toFixed(2)})`);
         }
-        lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  spacing ${(t3 - t2b).toFixed(0)}ms  refine ${(t3b - t3).toFixed(0)}ms  decode ${(t4 - t3b).toFixed(0)}ms`);
+        lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  pose ${(t3 - t2).toFixed(0)}ms  distance ${(t4 - t3).toFixed(0)}ms  project ${(t5 - t4).toFixed(0)}ms  decode ${(t6 - t5).toFixed(0)}ms`);
         axesReadout.textContent = lines.join('\n');
         updatePositionReadoutText(camera);
         drawGridPeriodPhasePlot(camera);

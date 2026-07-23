@@ -30,7 +30,7 @@ function savedNum(id: string, fallback: number): number {
 
 export interface CameraSettingsCommon {
   showSphere: boolean; showCircles: boolean; showPoles: boolean; showFrustum: boolean; showPatch: boolean;
-  showGizmoBody: boolean; showRecoveredFloor: boolean; showSampleLattice: boolean;
+  showGizmoBody: boolean; showRecoveredFloor: boolean; recoveredFloorOpacity: number; showSampleLattice: boolean;
   showTrueContamination: boolean; showReconstructedContamination: boolean; hideField: boolean;
   showTopGradient: boolean;
   showBucketFillSegments: boolean; bucketFillToleranceDeg: number; bucketFillMagnitudeThreshold: number; bucketFillMinLengthPx: number;
@@ -84,7 +84,7 @@ export interface PhysicalCameraSettings extends CameraSettingsCommon {
 
 export function createDefaultCommonSettings(): CameraSettingsCommon {
   return {
-    showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, showSampleLattice: false,
+    showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: savedNum('recoveredFloorOpacity', 0.92), showSampleLattice: false,
     showTrueContamination: false, showReconstructedContamination: false, hideField: false,
     showTopGradient: false,
     showBucketFillSegments: savedBool('toggleBucketFill', false),

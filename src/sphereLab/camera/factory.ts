@@ -3,7 +3,7 @@ import { CIRCLE_SEGMENTS, DEBUG_LAYER, PATCH_RES, SPHERE_RADIUS } from '../const
 import { colLineKs, rowLineKs } from '../math/geometry.ts';
 import { scene } from '../scene/renderer.ts';
 import { Camera, CameraBase, PhysicalCamera, SimulatedCamera } from './model.ts';
-import { createDefaultPhysicalSettings, createDefaultSimulatedSettings } from './settings.ts';
+import { CameraSettingsCommon, createDefaultPhysicalSettings, createDefaultSimulatedSettings } from './settings.ts';
 import { bumpCameraSerial, cameras, isSimulated, nextCameraSerial } from './store.ts';
 
 // ── Camera factories ─────────────────────────────────────────────────────
@@ -14,7 +14,7 @@ import { bumpCameraSerial, cameras, isSimulated, nextCameraSerial } from './stor
 // (the tab bar's "+" button) and initDevBridge's realCapture handler (a
 // phone connecting) both call these.
 
-export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Color) {
+export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Color, settings: CameraSettingsCommon) {
   const aspect = rtSize.w / rtSize.h;
 
   // Recovered/decoded pose gizmo: TRANSLUCENT in the camera's own color --
@@ -140,7 +140,7 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
   // Reuses the SAME projectedPreviewTex "Projected Cam" mode already builds
   // (not a separate computation) as a decal on a plane placed at the
   // DECODED pose in the actual 3D world.
-  const recoveredFloorOverlayMat = new THREE.MeshBasicMaterial({ map: projectedPreviewTex, side: THREE.DoubleSide, transparent: true, opacity: 0.92 });
+  const recoveredFloorOverlayMat = new THREE.MeshBasicMaterial({ map: projectedPreviewTex, side: THREE.DoubleSide, transparent: true, opacity: settings.recoveredFloorOpacity });
   const recoveredFloorOverlay = new THREE.Mesh(new THREE.PlaneGeometry(1, 1), recoveredFloorOverlayMat);
   recoveredFloorOverlay.visible = false;
   scene.add(recoveredFloorOverlay);
@@ -201,7 +201,7 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
 export function createSimulatedCamera(color: THREE.Color): SimulatedCamera {
   const settings = createDefaultSimulatedSettings();
   const rtSize = { w: Math.round(settings.viewportW), h: Math.round(settings.viewportH) };
-  const base = makeCameraBaseParts(rtSize, color);
+  const base = makeCameraBaseParts(rtSize, color, settings);
   const aspect = rtSize.w / rtSize.h;
 
   const gizmoCam = new THREE.PerspectiveCamera(50, aspect, 0.05, 500);
@@ -258,7 +258,7 @@ export function createSimulatedCamera(color: THREE.Color): SimulatedCamera {
 export function createPhysicalCamera(color: THREE.Color, connectionId: string): PhysicalCamera {
   const settings = createDefaultPhysicalSettings();
   const rtSize = { w: Math.round(settings.viewportW), h: Math.round(settings.viewportH) };
-  const base = makeCameraBaseParts(rtSize, color);
+  const base = makeCameraBaseParts(rtSize, color, settings);
   const camera: PhysicalCamera = {
     ...base,
     id: `phys-${nextCameraSerial}`, name: `Physical ${nextCameraSerial}`, color,

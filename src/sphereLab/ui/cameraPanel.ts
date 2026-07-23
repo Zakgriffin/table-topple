@@ -146,7 +146,8 @@ export function refreshCameraPanel() {
   setBool('showSphere', cam.settings.showSphere); setBool('showCircles', cam.settings.showCircles);
   setBool('showPoles', cam.settings.showPoles); setBool('showFrustum', cam.settings.showFrustum);
   setBool('showPatch', cam.settings.showPatch); setBool('showGizmoBody', cam.settings.showGizmoBody);
-  setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setBool('showSampleLattice', cam.settings.showSampleLattice);
+  setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setNum('recoveredFloorOpacity', cam.settings.recoveredFloorOpacity);
+  setBool('showSampleLattice', cam.settings.showSampleLattice);
   setBool('showNewSampleLattice', cam.settings.showNewSampleLattice);
   setBool('showGridPeriodPhaseDebug', cam.settings.showGridPeriodPhaseDebug);
   setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
@@ -282,6 +283,7 @@ gpuVotesStatus.textContent = isWebGPUSupported()
   : 'WebGPU is not available in this browser -- the checkbox above will silently fall back to the CPU pipeline.';
 bindCheckbox('showGizmoBody', (v) => { const cam = activeCamera(); if (cam) cam.settings.showGizmoBody = v; });
 bindCheckbox('showRecoveredFloor', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredFloor = v; });
+bindSlider('recoveredFloorOpacity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.recoveredFloorOpacity = v; cam.recoveredFloorOverlayMat.opacity = v; } }, (v) => v.toFixed(2));
 bindCheckbox('showSampleLattice', (v) => { const cam = activeCamera(); if (cam) cam.settings.showSampleLattice = v; });
 bindCheckbox('showNewSampleLattice', (v) => { const cam = activeCamera(); if (cam) cam.settings.showNewSampleLattice = v; });
 bindCheckbox('showGridPeriodPhaseDebug', (v) => {

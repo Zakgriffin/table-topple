@@ -23,12 +23,18 @@ export function applyRecoveredFloorOverlay(camera: Camera) {
 
   camera.recoveredFloorOverlay.geometry.dispose();
   camera.recoveredFloorOverlay.geometry = new THREE.PlaneGeometry(width, height);
+  camera.recoveredFloorOverlayMat.opacity = camera.settings.recoveredFloorOpacity;
 
   const centerU = (minU + maxU) / 2, centerV = (minV + maxV) / 2;
   camera.recoveredFloorOverlay.position.copy(camera.lastPositionDecode.camPos)
     .addScaledVector(Drow, centerU)
     .addScaledVector(Dcol, centerV)
     .addScaledVector(normal, -distance);
+  // Sits exactly on the true floor plane (y=0) when the decode is accurate,
+  // which z-fights with floorMesh itself -- nudge up along world +Y (the
+  // true floor's own up axis, not the recovered `normal`, so this stays a
+  // fixed visual offset regardless of any residual orientation error).
+  camera.recoveredFloorOverlay.position.y += 0.02;
 
   const drowDisplay = Drow.clone().negate();
   const zAxis = new THREE.Vector3().crossVectors(drowDisplay, Dcol).normalize();

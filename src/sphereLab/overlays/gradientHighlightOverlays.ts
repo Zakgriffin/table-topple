@@ -33,7 +33,7 @@ export function updateTopGradientOverlay(camera: Camera) {
     field = computeWalkedGradientField(settings, effectiveField);
   }
 
-  const alpha = computeTopGradientAlpha(field, settings.circleSamplePercentMin, settings.circleSamplePercentMax);
+  const alpha = computeTopGradientAlpha(field, 0, 100);
   paintTopGradientOverlay(alpha, TOP_GRADIENT_COLOR, camera.topGradientData);
   camera.topGradientTex.needsUpdate = true;
 }

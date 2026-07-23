@@ -33,11 +33,10 @@ export function updateBucketFillOverlay(camera: Camera) {
     field = computeWalkedGradientField(settings, effectiveField);
   }
 
-  // Same top-N% band the circles/top-gradient overlay already use -- only
-  // pixels in that band are eligible to FOUND a region (see
-  // computeBucketFillRegions's own comment for why absorption stays
-  // unrestricted).
-  const seedEligible = computeTopGradientAlpha(field, settings.circleSamplePercentMin, settings.circleSamplePercentMax);
+  // No percentile cutoff anymore (see this session's chat) -- every pixel
+  // is eligible to FOUND a region (see computeBucketFillRegions's own
+  // comment for why absorption was already unrestricted).
+  const seedEligible = computeTopGradientAlpha(field, 0, 100);
   const { regionId, segments } = computeBucketFillRegions(field, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold);
   const colors = randomSegmentColors(segments.length);
   paintBucketFillOverlay(regionId, segments, colors, settings.bucketFillMinLengthPx, camera.bucketFillData);

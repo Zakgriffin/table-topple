@@ -163,7 +163,6 @@ export function refreshCameraPanel() {
   if (fieldViewInput) { fieldViewInput.checked = true; fieldViewInput.dispatchEvent(new Event('change')); }
 
   setNum('gradientArrowScale', cam.settings.gradientArrowScale);
-  setNum('circleSamplePercentMin', cam.settings.circleSamplePercentMin); setNum('circleSamplePercentMax', cam.settings.circleSamplePercentMax);
   setNum('bucketFillToleranceDeg', cam.settings.bucketFillToleranceDeg);
   setNum('bucketFillMagnitudeThreshold', cam.settings.bucketFillMagnitudeThreshold);
   setNum('bucketFillMinLengthPx', cam.settings.bucketFillMinLengthPx);
@@ -338,8 +337,6 @@ updateBucketFillJoinAvailability();
 updateBucketFillCompositeAvailability();
 updateBucketFillMergeMarkersAvailability();
 bindSlider('gradientArrowScale', (v) => { const cam = activeCamera(); if (cam) cam.settings.gradientArrowScale = v; updateHoverOverlays(lastHoverClientX, lastHoverClientY); }, (v) => v.toFixed(1));
-bindSlider('circleSamplePercentMin', (v) => { const cam = activeCamera(); if (cam) { cam.settings.circleSamplePercentMin = v; updateGradientCirclesDebug(cam); updateTopGradientOverlay(cam); updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => `${v.toFixed(0)}%`);
-bindSlider('circleSamplePercentMax', (v) => { const cam = activeCamera(); if (cam) { cam.settings.circleSamplePercentMax = v; updateGradientCirclesDebug(cam); updateTopGradientOverlay(cam); updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => `${v.toFixed(0)}%`);
 bindSlider('bucketFillToleranceDeg', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillToleranceDeg = v; updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => `${v.toFixed(1)}°`);
 bindSlider('bucketFillMagnitudeThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillMagnitudeThreshold = v; updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(1));
 bindSlider('bucketFillMinLengthPx', (v) => {

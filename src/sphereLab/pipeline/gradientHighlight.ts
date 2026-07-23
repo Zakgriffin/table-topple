@@ -2,12 +2,11 @@ import { GradientField } from '../types.ts';
 
 // ── Top-N%-by-magnitude overlay math (pure) ──────────────────────────────
 //
-// Same [minPercent, maxPercent) percentile-rank band votesInMagnitudeBand
-// (pipeline/votes.ts) uses to pick circle-visualization votes, applied to
-// every pixel of a vector field's magnitude instead of a sparse vote list --
-// reuses the same circleSamplePercentMin/Max settings as the band bounds, so
-// "highlight top N%" always means the same N% the circles overlay is already
-// selecting.
+// Same [minPercent, maxPercent) percentile-rank band shape
+// votesInMagnitudeBand (pipeline/votes.ts) uses, applied to every pixel of
+// a vector field's magnitude instead of a sparse vote list. Every current
+// call site passes (0, 100) -- no cutoff, see this session's chat -- but
+// the band logic itself is left in place in case a cutoff is wanted again.
 
 export function computeTopGradientAlpha(field: GradientField, minPercent: number, maxPercent: number): Float64Array {
   const { fx, fy, w, h, r } = field;

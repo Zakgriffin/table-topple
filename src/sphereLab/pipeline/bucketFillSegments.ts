@@ -52,9 +52,9 @@ export function computeBucketFillRegions(
   // excluded from both seeding AND absorption, i.e. it can never be part of
   // any segment, full stop.
   //
-  // Only pixels in the same top-N% magnitude band the circles/top-gradient
-  // overlay already use (settings.circleSamplePercentMin/Max, see
-  // seedEligible's caller) are allowed to FOUND a new region -- once a
+  // Only pixels in seedEligible's top-N% magnitude band (see the caller --
+  // every current caller passes (0, 100), i.e. no cutoff) are allowed to
+  // FOUND a new region -- once a
   // region exists, growth/absorption is open to any connected pixel above
   // magnitudeThreshold with a consistent orientation, same as LSD itself
   // (which only prioritizes strong pixels as seeds via magnitude-descending

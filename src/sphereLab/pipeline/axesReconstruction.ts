@@ -14,10 +14,9 @@ import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
 import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, paintProjectedTexture, runPositionDecode } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { computeGridPeriodPhase } from './gridPeriodPhase.ts';
-import { computeSegmentVotes, computeWorldVotes, fitPairOfPlanes, votesInMagnitudeBand } from './votes.ts';
+import { computeSegmentVotes, computeWorldVotes, fitPairOfPlanes } from './votes.ts';
 import { computeWorldVotesGPU } from '../pipelineGPU/voteGeneration.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
-import { votesInMagnitudeBandGPU } from '../pipelineGPU/voteBandSelect.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
 // Falls back to CPU per-call if the GPU one returns null (WebGPU
@@ -99,15 +98,14 @@ export function runAxesReconstruction(camera: Camera) {
       updateGradientCirclesDebug(camera);
       const t1 = performance.now();
 
-      const fitSpan = spanStart('fit (band-select + fitPairOfPlanes)');
-      const bandSpan = spanStart(globalState.useGPUFit ? 'votesInMagnitudeBand (GPU)' : 'votesInMagnitudeBand (CPU sort)');
-      // Same fallback pattern as the other GPU sub-pipelines: votesInMagnitudeBand
-      // stays the source of truth, the GPU version is verified against it.
-      const fitVotes = globalState.useGPUFit
-        ? (await votesInMagnitudeBandGPU(votes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax))
-          ?? votesInMagnitudeBand(votes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax)
-        : votesInMagnitudeBand(votes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax);
-      spanEnd(bandSpan);
+      const fitSpan = spanStart('fit (fitPairOfPlanes)');
+      // No band-select step anymore -- fitPairOfPlanes runs on every vote
+      // (see this session's chat: the old top-N%-by-magnitude cutoff,
+      // circleSamplePercentMin/Max, is gone entirely, not just defaulted).
+      // votesInMagnitudeBand/votesInMagnitudeBandGPU are left defined in
+      // pipeline/votes.ts / pipelineGPU/voteBandSelect.ts, unreferenced
+      // here, in case a cutoff is wanted again later.
+      const fitVotes = votes;
       // Same fallback pattern as the other GPU sub-pipelines: fitPairOfPlanes
       // stays the source of truth, the GPU version is verified against it.
       const fitOnlySpan = spanStart(globalState.useGPUFit ? 'fitPairOfPlanes (GPU)' : 'fitPairOfPlanes (CPU)');

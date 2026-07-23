@@ -3,21 +3,21 @@ import { Camera, SimulatedCamera } from '../camera/model.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { COL_DIR, PATCH_RES, ROW_DIR, SPHERE_RADIUS, euler } from '../constants.ts';
 import { colLineKs, cornerDir, greatCircleNormal, rowLineKs, slerpUnit, writeCirclePoints } from '../math/geometry.ts';
-import { votesInMagnitudeBand } from '../pipeline/votes.ts';
 import { readout } from '../ui/dom.ts';
 
 export const DEBUG_CIRCLE_SEGMENTS = 48;
 export const AXIS_VECTOR_LENGTH = 0.7;
 
 export function updateGradientCirclesDebug(camera: Camera) {
-  // Filters a percentile band of up to the full vote set (hundreds of
-  // thousands on a real capture) and builds circle-segment geometry for
-  // each -- skip entirely when neither toggle that would actually show it
-  // is on. Callers that flip one of those toggles ON call this directly to
-  // refresh (see ui/cameraPanel.ts), same as changing the percentile/
-  // sharpen sliders already does.
+  // Builds circle-segment geometry for every vote (no percentile cutoff
+  // anymore, see this session's chat) -- skip entirely when neither toggle
+  // that would actually show it is on. Callers that flip one of those
+  // toggles ON call this directly to refresh (see ui/cameraPanel.ts), same
+  // as changing the sharpen slider already does. NOTE: this can be
+  // hundreds of thousands of votes on a real capture -- showTopCircles
+  // defaults to off specifically because of this.
   if (!camera.settings.showTopCircles && !camera.settings.showAxisVectors) return;
-  const chosen = votesInMagnitudeBand(camera.lastVotes, camera.settings.circleSamplePercentMin, camera.settings.circleSamplePercentMax);
+  const chosen = camera.lastVotes;
   // vote.n lives in MATH_QUAT's fixed math frame (see PositionDecodeResult's
   // comment) -- rotate into true world space by the same anchorQuat
   // updateSphereOverlays uses (true camQuat for simulated cameras, so this

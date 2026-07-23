@@ -75,7 +75,7 @@ export function computeSegmentVotes(
   const field = computeGradientField(gray, w, h, gradientRadius);
   const agreement = computeGradientAgreementField(field, agreementRadius);
   const effective = computeEffectiveGradientField(field, agreement);
-  const seedEligible = computeTopGradientAlpha(effective, settings.circleSamplePercentMin, settings.circleSamplePercentMax);
+  const seedEligible = computeTopGradientAlpha(effective, 0, 100);
   const { regionId, segments } = computeBucketFillRegions(effective, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold);
 
   const { merges } = computeJoinWalk(

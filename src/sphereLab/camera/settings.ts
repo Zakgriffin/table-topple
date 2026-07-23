@@ -43,7 +43,6 @@ export interface CameraSettingsCommon {
   simGradRadius: number; coherenceRadius: number;
   tangentWalkMaxSteps: number; tangentWalkDeviationDeg: number; tangentWalkMagFraction: number; tangentWalkGraceSamples: number;
   tangentWalkAdaptive: boolean;
-  circleSamplePercentMin: number; circleSamplePercentMax: number;
   showRecoveredPoles: boolean;
   showAxisVectors: boolean;
   showTopCircles: boolean;
@@ -101,7 +100,6 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     // defaults (guided tangent walk, simNoise=8 stability etc.) -- unchanged.
     tangentWalkMaxSteps: 76, tangentWalkDeviationDeg: 45, tangentWalkMagFraction: 0, tangentWalkGraceSamples: 50,
     tangentWalkAdaptive: false,
-    circleSamplePercentMin: 0, circleSamplePercentMax: 10,
     showRecoveredPoles: true,
     showAxisVectors: false,
     showTopCircles: true,

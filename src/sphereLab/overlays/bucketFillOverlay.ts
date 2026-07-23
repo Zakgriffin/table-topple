@@ -8,9 +8,8 @@ import { FieldView } from '../types.ts';
 import { toggleBucketFillBtn } from '../ui/dom.ts';
 
 // Every FieldView that's an actual GradientField -- same set
-// overlays/gradientHighlightOverlays.ts uses, for the same reason
-// ("agreement" is scalar-only).
-const VECTOR_FIELD_VIEWS: readonly FieldView[] = ['gradient', 'gradient2x2', 'effective', 'walked'];
+// overlays/gradientHighlightOverlays.ts uses.
+const VECTOR_FIELD_VIEWS: readonly FieldView[] = ['gradient', 'gradient2x2', 'walked'];
 
 export function updateBucketFillOverlay(camera: Camera) {
   const settings = camera.settings;
@@ -26,10 +25,12 @@ export function updateBucketFillOverlay(camera: Camera) {
   } else if (settings.fieldView === 'gradient2x2') {
     field = computeGradient2x2Field(lum, w, h);
   } else {
+    // Only 'walked' can reach here -- VECTOR_FIELD_VIEWS already filtered
+    // out anything else at the top of this function.
     const rawField = computeGradientField(lum, w, h, Math.round(settings.simGradRadius));
     const agreement = computeGradientAgreementField(rawField, Math.round(settings.coherenceRadius));
     const effectiveField = computeEffectiveGradientField(rawField, agreement);
-    field = settings.fieldView === 'effective' ? effectiveField : computeWalkedGradientField(settings, effectiveField);
+    field = computeWalkedGradientField(settings, effectiveField);
   }
 
   // Same top-N% band the circles/top-gradient overlay already use -- only

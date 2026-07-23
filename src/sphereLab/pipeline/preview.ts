@@ -3,7 +3,7 @@ import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, separableBoxBlur } from './distortion.ts';
-import { computeEffectiveGradientField, computeGradient2x2Field, computeGradientAgreementField, computeGradientField, computeTriangleFold, fillGrayscalePreview, paintScalarFieldAsGray, paintVectorFieldAsColor } from './gradientField.ts';
+import { computeEffectiveGradientField, computeGradient2x2Field, computeGradientAgreementField, computeGradientField, computeTriangleFold, fillGrayscalePreview, paintVectorFieldAsColor } from './gradientField.ts';
 import { computeWalkedGradientField } from './tangentWalk.ts';
 
 // Shared tail for both capture sources: given a final analysis-resolution
@@ -30,30 +30,15 @@ export function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
     const field = computeGradientField(gray, w, h, Math.round(settings.simGradRadius));
     const agreement = computeGradientAgreementField(field, Math.round(settings.coherenceRadius));
     const effective = computeEffectiveGradientField(field, agreement);
-    camera.lastEffectiveField = effective;
     const walked = computeWalkedGradientField(settings, effective);
     camera.lastDisplayedVectorField = walked;
     paintVectorFieldAsColor(walked, camera.distortedPreviewData);
-    camera.distortedPreviewTex.needsUpdate = true;
-  } else if (settings.fieldView === 'agreement') {
-    const field = computeGradientField(gray, w, h, Math.round(settings.simGradRadius));
-    const agreement = computeGradientAgreementField(field, Math.round(settings.coherenceRadius));
-    paintScalarFieldAsGray(agreement, camera.distortedPreviewData);
-    camera.distortedPreviewTex.needsUpdate = true;
-  } else if (settings.fieldView === 'effective') {
-    const field = computeGradientField(gray, w, h, Math.round(settings.simGradRadius));
-    const agreement = computeGradientAgreementField(field, Math.round(settings.coherenceRadius));
-    const effective = computeEffectiveGradientField(field, agreement);
-    camera.lastEffectiveField = effective;
-    camera.lastDisplayedVectorField = effective;
-    paintVectorFieldAsColor(effective, camera.distortedPreviewData);
     camera.distortedPreviewTex.needsUpdate = true;
   }
 }
 
 export function updateDistortedPreview(camera: Camera) {
   camera.lastDisplayedVectorField = null;
-  camera.lastEffectiveField = null;
   const settings = camera.settings;
   if (settings.hideField) {
     for (let i = 0; i < camera.distortedPreviewData.length; i += 4) {

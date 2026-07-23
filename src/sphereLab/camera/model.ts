@@ -38,7 +38,6 @@ export interface CameraBase {
   lastPreviewUpdate: number;
   lastNoisedPreviewGray: Float64Array | null;
   lastDisplayedVectorField: GradientField | null;
-  lastEffectiveField: GradientField | null;
   lastBucketFillSegments: BucketFillSegment[] | null;
   lastBucketFillColors: [number, number, number][] | null;
   // Per-pixel segment ownership from the flood fill itself (computeBucketFillRegions),

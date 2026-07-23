@@ -497,7 +497,7 @@ toggleGradientArrowModeBtn.addEventListener('click', () => {
 
 export function updateGradientArrowAvailability() {
   const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'gradient' || cam.settings.fieldView === 'gradient2x2' || cam.settings.fieldView === 'effective' || cam.settings.fieldView === 'walked';
+  const relevant = cam.settings.fieldView === 'gradient' || cam.settings.fieldView === 'gradient2x2' || cam.settings.fieldView === 'walked';
   toggleGradientArrowBtn.disabled = !relevant;
   toggleGradientArrowModeBtn.disabled = !relevant;
   if (!relevant) {

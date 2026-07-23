@@ -11,7 +11,7 @@ import { toggleReconContamBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 export function updateContaminationOverlays(camera: Camera) {
   const settings = camera.settings;
   if (!settings.showTrueContamination && !settings.showReconstructedContamination) return;
-  if (settings.fieldView !== 'gradient' && settings.fieldView !== 'effective' && settings.fieldView !== 'walked') return;
+  if (settings.fieldView !== 'gradient' && settings.fieldView !== 'walked') return;
   if (!camera.lastNoisedPreviewGray) return;
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const lum = camera.lastNoisedPreviewGray;
@@ -19,7 +19,6 @@ export function updateContaminationOverlays(camera: Camera) {
   const rawField = computeGradientField(lum, w, h, Math.round(settings.simGradRadius));
   const agreement = computeGradientAgreementField(rawField, Math.round(settings.coherenceRadius));
   const field = settings.fieldView === 'gradient' ? rawField
-    : settings.fieldView === 'effective' ? computeEffectiveGradientField(rawField, agreement)
     : computeWalkedGradientField(settings, computeEffectiveGradientField(rawField, agreement));
 
   if (settings.showTrueContamination && isSimulated(camera)) {
@@ -47,7 +46,7 @@ export function updateContaminationOverlays(camera: Camera) {
 
 export function updateContaminationAvailability() {
   const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'gradient' || cam.settings.fieldView === 'effective' || cam.settings.fieldView === 'walked';
+  const relevant = cam.settings.fieldView === 'gradient' || cam.settings.fieldView === 'walked';
   toggleTrueContamBtn.disabled = !relevant;
   toggleReconContamBtn.disabled = !relevant;
   if (!relevant) {

@@ -116,7 +116,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showNewSampleLattice: savedBool('showNewSampleLattice', false),
     orientationLM: false,
     positionLM: false,
-    fieldView: 'effective',
+    fieldView: 'walked',
     axesAutoCapture: false, axesCaptureIntervalMs: 500,
     viewportW: 512, viewportH: 384, aspectLocked: false,
     horizFovDeg: 65,

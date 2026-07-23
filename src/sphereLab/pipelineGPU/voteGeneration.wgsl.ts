@@ -7,18 +7,17 @@
 //
 // One deliberate numeric deviation, worth flagging up front: the CPU
 // agreement field normalizes by the frame's max raw gradient magnitude
-// (maxRawMag in computeGradientAgreementField) purely so the 'agreement'
-// debug field-view displays as a sane [0,1] grayscale value. That
-// normalization is a uniform positive rescaling of every pixel's agreement
-// value, and every downstream consumer (the walk's magnitude-ratio
-// thresholds, fitPairOfPlanes' weight/maxWeight sharpening, the percentile-
-// rank vote filtering) is scale-invariant to a uniform rescaling -- so this
-// GPU path skips computing that normalization constant entirely (it would
-// need its own reduction pass) and uses the raw, unnormalized agreement
-// magnitude instead. Verified empirically (see this session's chat) to
-// produce numerically identical votes/fit/LM/decode output on the
-// saved-capture.json fixture. This ONLY affects a debug visualization this
-// GPU path doesn't drive; the CPU 'agreement' field view is untouched.
+// (maxRawMag in computeGradientAgreementField) -- originally so the (since
+// removed) 'agreement' debug field-view displayed as a sane [0,1] grayscale
+// value. That normalization is a uniform positive rescaling of every
+// pixel's agreement value, and every downstream consumer (the walk's
+// magnitude-ratio thresholds, fitPairOfPlanes' weight/maxWeight sharpening,
+// the percentile-rank vote filtering) is scale-invariant to a uniform
+// rescaling -- so this GPU path skips computing that normalization constant
+// entirely (it would need its own reduction pass) and uses the raw,
+// unnormalized agreement magnitude instead. Verified empirically (see
+// pre-Stage-A history) to produce numerically identical votes/fit/LM/decode
+// output on the saved-capture.json fixture.
 
 // ── Stage 1: gradient field (mirrors computeGradientField) ────────────────
 export const GRADIENT_WGSL = /* wgsl */ `

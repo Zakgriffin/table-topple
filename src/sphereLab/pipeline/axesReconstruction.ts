@@ -14,8 +14,7 @@ import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
 import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, paintProjectedTexture, runPositionDecode } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { computeGridPeriodPhase } from './gridPeriodPhase.ts';
-import { computeSegmentVotes, computeWorldVotes, fitPairOfPlanes } from './votes.ts';
-import { computeWorldVotesGPU } from '../pipelineGPU/voteGeneration.ts';
+import { computeSegmentVotes, fitPairOfPlanes } from './votes.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
@@ -74,25 +73,14 @@ export function runAxesReconstruction(camera: Camera) {
       const gray = flipRowsF64(rawGray, w, h);
       const vFovRad = getAnalysisVFovRad(camera);
       spanEnd(captureSpan);
-      // Falls back to the CPU path if the GPU one returns null (WebGPU
-      // unavailable, or the device request failed) -- see computeWorldVotesGPU's
-      // own comment. computeWorldVotes stays the source of truth either way;
-      // the GPU version is verified against it, not the other way around.
-      //
-      // useSegmentVotes is a separate, CPU-only, experimental swap of the
-      // vote SOURCE itself (see computeSegmentVotes's own comment) -- one
-      // vote per bucket-fill line segment instead of one per pixel. It
-      // bypasses the GPU vote path entirely (this is a comparison/accuracy
-      // experiment, not a perf-sensitive path) but still hands the same
-      // Vote[] shape to everything below, so band-select/fit/LM/decode/
-      // projected-cam all keep working completely unmodified.
-      const votesSpan = spanStart(camera.settings.useSegmentVotes ? 'votes (segments)' : globalState.useGPUVotes ? 'votes (GPU)' : 'votes (CPU)');
-      const votes = camera.settings.useSegmentVotes
-        ? computeSegmentVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect)
-        : globalState.useGPUVotes
-          ? (await computeWorldVotesGPU(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect))
-            ?? computeWorldVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect)
-          : computeWorldVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect);
+      // computeSegmentVotes is always the vote source now (see this
+      // session's chat) -- one vote per bucket-fill line segment instead
+      // of one per pixel. computeWorldVotes/computeWorldVotesGPU (the old
+      // per-pixel CPU/GPU path this used to fall back to) are left defined
+      // in pipeline/votes.ts / pipelineGPU/voteGeneration.ts, unreferenced
+      // here, in case that comparison is wanted again later.
+      const votesSpan = spanStart('votes (segments)');
+      const votes = computeSegmentVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect);
       spanEnd(votesSpan);
       camera.lastVotes = votes;
       updateGradientCirclesDebug(camera);

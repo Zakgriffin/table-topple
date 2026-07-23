@@ -17,14 +17,11 @@ export const globalState = {
   // board size" slider in ui/cameraPanel.ts). 256 matches that candidate's
   // original fixed cropSize, i.e. today's actual default board.
   boardSize: 256,
-  // Manual dev-time switch for the vote-generation pipeline (see
-  // pipelineGPU/voteGeneration.ts) -- not auto-detected/fallback yet, per an
+  // Manual dev-time switch for the plane-fit reduction (see
+  // pipelineGPU/fitPlanes.ts) -- not auto-detected/fallback yet, per an
   // explicit choice to keep that decision simple while the GPU path is
   // still being trusted. Silently no-ops back to the CPU path if WebGPU
   // isn't available even when this is true (see axesReconstruction.ts).
-  useGPUVotes: false,
-  // Same idea, independent toggle, for the plane-fit reduction (see
-  // pipelineGPU/fitPlanes.ts).
   useGPUFit: false,
   // Same idea, independent toggle, for the decode window-tally histogram
   // (see pipelineGPU/decodeTally.ts).

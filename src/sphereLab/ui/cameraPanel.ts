@@ -148,7 +148,6 @@ export function refreshCameraPanel() {
   setBool('showPatch', cam.settings.showPatch); setBool('showGizmoBody', cam.settings.showGizmoBody);
   setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setBool('showSampleLattice', cam.settings.showSampleLattice);
   setBool('showNewSampleLattice', cam.settings.showNewSampleLattice);
-  setBool('useSegmentVotes', cam.settings.useSegmentVotes);
   setBool('showGridPeriodPhaseDebug', cam.settings.showGridPeriodPhaseDebug);
   setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
   setBool('showCompositeLineFamilies', cam.settings.showCompositeLineFamilies);
@@ -274,7 +273,6 @@ bindSlider('boardSize', (v) => {
   invalidateTorusBufferCache(); // GPU Phase 3's torus-brightness buffer was built from the OLD torus
   for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render/re-decode against the new board
 }, (v) => v.toFixed(0));
-bindCheckbox('useGPUVotes', (v) => { globalState.useGPUVotes = v; });
 bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; });
 bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; });
 bindCheckbox('useGPUProject', (v) => { globalState.useGPUProject = v; });
@@ -300,8 +298,6 @@ bindCheckbox('showCompositeLineFamilies', (v) => {
   cam.settings.showCompositeLineFamilies = v;
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 });
-bindCheckbox('useSegmentVotes', (v) => { const cam = activeCamera(); if (cam) cam.settings.useSegmentVotes = v; });
-
 bindSlider('simNoise', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
 bindSlider('simBlur', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simBlur = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
 bindSlider('simGradRadius', (v) => { const cam = activeCamera(); if (cam) { cam.settings.simGradRadius = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));

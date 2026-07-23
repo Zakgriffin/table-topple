@@ -48,7 +48,6 @@ export interface CameraSettingsCommon {
   showTopCircles: boolean;
   topCirclesLineWidth: number;
   weightSharpenPower: number;
-  useSegmentVotes: boolean;
   showGridPeriodPhaseDebug: boolean;
   gridPeriodPhaseBinCount: number;
   showCompositeLineFamilies: boolean;
@@ -105,7 +104,6 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showTopCircles: true,
     topCirclesLineWidth: savedNum('topCirclesLineWidth', 1),
     weightSharpenPower: 4,
-    useSegmentVotes: savedBool('useSegmentVotes', false),
     showGridPeriodPhaseDebug: savedBool('showGridPeriodPhaseDebug', false),
     gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
     showCompositeLineFamilies: savedBool('showCompositeLineFamilies', false),

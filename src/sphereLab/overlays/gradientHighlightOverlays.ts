@@ -1,14 +1,13 @@
 import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { computeTopGradientAlpha, paintTopGradientOverlay, TOP_GRADIENT_COLOR } from '../pipeline/gradientHighlight.ts';
-import { computeEffectiveGradientField, computeGradient2x2Field, computeGradientAgreementField, computeGradientField } from '../pipeline/gradientField.ts';
-import { computeWalkedGradientField } from '../pipeline/tangentWalk.ts';
+import { computeGradient2x2Field, computeGradientField } from '../pipeline/gradientField.ts';
 import { FieldView } from '../types.ts';
 import { toggleTopGradientBtn } from '../ui/dom.ts';
 
 // Every FieldView that's an actual GradientField (has a direction, not just
 // a scalar).
-const VECTOR_FIELD_VIEWS: readonly FieldView[] = ['gradient', 'gradient2x2', 'walked'];
+const VECTOR_FIELD_VIEWS: readonly FieldView[] = ['gradient', 'gradient2x2'];
 
 // Recomputes the top-gradient overlay if it's actually toggled on.
 export function updateTopGradientOverlay(camera: Camera) {
@@ -19,19 +18,9 @@ export function updateTopGradientOverlay(camera: Camera) {
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const lum = camera.lastNoisedPreviewGray;
 
-  let field;
-  if (settings.fieldView === 'gradient') {
-    field = computeGradientField(lum, w, h, Math.round(settings.simGradRadius));
-  } else if (settings.fieldView === 'gradient2x2') {
-    field = computeGradient2x2Field(lum, w, h);
-  } else {
-    // Only 'walked' can reach here -- VECTOR_FIELD_VIEWS already filtered
-    // out anything else at the top of this function.
-    const rawField = computeGradientField(lum, w, h, Math.round(settings.simGradRadius));
-    const agreement = computeGradientAgreementField(rawField, Math.round(settings.coherenceRadius));
-    const effectiveField = computeEffectiveGradientField(rawField, agreement);
-    field = computeWalkedGradientField(settings, effectiveField);
-  }
+  const field = settings.fieldView === 'gradient'
+    ? computeGradientField(lum, w, h, Math.round(settings.simGradRadius))
+    : computeGradient2x2Field(lum, w, h);
 
   const alpha = computeTopGradientAlpha(field, 0, 100);
   paintTopGradientOverlay(alpha, TOP_GRADIENT_COLOR, camera.topGradientData);

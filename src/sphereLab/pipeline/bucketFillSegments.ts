@@ -40,6 +40,14 @@ export interface BucketFillSegment {
 
 export function computeBucketFillRegions(
   field: GradientField, toleranceDeg: number, seedEligible: Float64Array, magnitudeThreshold: number,
+  // Caps each region's growth to at most this many BFS hops from its own
+  // seed (0 = unbounded, i.e. today's existing behavior -- unlike
+  // pipeline/bucketFillJoin.ts's computeJoinWalk, where 0 steps IS the
+  // sane default/off state, "0 growth allowed" would make this a no-op by
+  // default, so the sentinel direction is deliberately flipped here). Lets
+  // a debug overlay scrub through the flood fill's growth ring by ring,
+  // same idea as computeJoinWalk's own numSteps.
+  maxSteps: number = 0,
 ): { regionId: Int32Array; segments: BucketFillSegment[] } {
   const { fx, fy, w, h } = field;
   const n = w * h;
@@ -65,6 +73,9 @@ export function computeBucketFillRegions(
 
   const cosTol = Math.cos(2 * THREE.MathUtils.degToRad(toleranceDeg));
   const regionId = new Int32Array(n).fill(-1);
+  // BFS depth (hops from this pixel's own seed) -- only meaningful once
+  // regionId[i] !== -1, only ever read/written when maxSteps > 0.
+  const depth = new Int32Array(n);
   // One shared queue, reused (never reset) across every region -- each pixel
   // is ever pushed at most once in total (it's marked claimed the instant
   // it's pushed), so a monotonically increasing tail pointer across the
@@ -78,6 +89,7 @@ export function computeBucketFillRegions(
     if (regionId[seed] !== -1) continue; // already absorbed by an earlier (stronger) region
     const id = segments.length;
     regionId[seed] = id;
+    depth[seed] = 0;
     const seedTheta = Math.atan2(fy[seed], fx[seed]);
     let sumCos = Math.cos(2 * seedTheta), sumSin = Math.sin(2 * seedTheta);
     const seedPx = seed % w, seedPy = (seed / w) | 0;
@@ -90,6 +102,8 @@ export function computeBucketFillRegions(
     queue[qTail++] = seed;
     while (qHead < qTail) {
       const p = queue[qHead++];
+      const pDepth = depth[p];
+      if (maxSteps > 0 && pDepth >= maxSteps) continue; // this ring is already at the cap -- absorbed, but doesn't expand further
       const px = p % w, py = (p / w) | 0;
       for (let dy = -1; dy <= 1; dy++) {
         for (let dx = -1; dx <= 1; dx++) {
@@ -104,6 +118,7 @@ export function computeBucketFillRegions(
           const cosDeviation = avgLen > 0 ? (c2 * sumCos + s2 * sumSin) / avgLen : 1;
           if (cosDeviation < cosTol) continue;
           regionId[ni] = id;
+          depth[ni] = pDepth + 1;
           sumCos += c2; sumSin += s2;
 
           // Gradient direction is axial (theta and theta+PI are the SAME

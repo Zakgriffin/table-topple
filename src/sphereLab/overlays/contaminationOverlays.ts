@@ -3,23 +3,21 @@ import { activeCamera, isSimulated } from '../camera/store.ts';
 import { COL_DIR, MATH_QUAT, ROW_DIR } from '../constants.ts';
 import { getAnalysisVFovRad } from '../pipeline/capture.ts';
 import { RECON_CONTAM_COLOR, TRUE_CONTAM_COLOR, computeContaminationAlpha, paintContaminationOverlay } from '../pipeline/contamination.ts';
-import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from '../pipeline/gradientField.ts';
-import { computeWalkedGradientField } from '../pipeline/tangentWalk.ts';
+import { computeGradient2x2Field, computeGradientAgreementField, computeGradientField } from '../pipeline/gradientField.ts';
 import { toggleReconContamBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 
 // Recomputes whichever contamination overlay(s) are actually toggled on.
 export function updateContaminationOverlays(camera: Camera) {
   const settings = camera.settings;
   if (!settings.showTrueContamination && !settings.showReconstructedContamination) return;
-  if (settings.fieldView !== 'gradient' && settings.fieldView !== 'walked') return;
+  if (settings.fieldView !== 'gradient' && settings.fieldView !== 'gradient2x2') return;
   if (!camera.lastNoisedPreviewGray) return;
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const lum = camera.lastNoisedPreviewGray;
   const vFovRad = getAnalysisVFovRad(camera);
   const rawField = computeGradientField(lum, w, h, Math.round(settings.simGradRadius));
   const agreement = computeGradientAgreementField(rawField, Math.round(settings.coherenceRadius));
-  const field = settings.fieldView === 'gradient' ? rawField
-    : computeWalkedGradientField(settings, computeEffectiveGradientField(rawField, agreement));
+  const field = settings.fieldView === 'gradient' ? rawField : computeGradient2x2Field(lum, w, h);
 
   if (settings.showTrueContamination && isSimulated(camera)) {
     const alpha = computeContaminationAlpha(field, agreement, ROW_DIR, COL_DIR, camera.camQuat, vFovRad, camera.aspect);
@@ -46,7 +44,7 @@ export function updateContaminationOverlays(camera: Camera) {
 
 export function updateContaminationAvailability() {
   const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'gradient' || cam.settings.fieldView === 'walked';
+  const relevant = cam.settings.fieldView === 'gradient' || cam.settings.fieldView === 'gradient2x2';
   toggleTrueContamBtn.disabled = !relevant;
   toggleReconContamBtn.disabled = !relevant;
   if (!relevant) {

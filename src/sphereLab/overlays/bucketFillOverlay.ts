@@ -1,15 +1,14 @@
 import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { computeBucketFillRegions, paintBucketFillOverlay, randomSegmentColors } from '../pipeline/bucketFillSegments.ts';
-import { computeEffectiveGradientField, computeGradient2x2Field, computeGradientAgreementField, computeGradientField } from '../pipeline/gradientField.ts';
+import { computeGradient2x2Field, computeGradientField } from '../pipeline/gradientField.ts';
 import { computeTopGradientAlpha } from '../pipeline/gradientHighlight.ts';
-import { computeWalkedGradientField } from '../pipeline/tangentWalk.ts';
 import { FieldView } from '../types.ts';
 import { toggleBucketFillBtn } from '../ui/dom.ts';
 
 // Every FieldView that's an actual GradientField -- same set
 // overlays/gradientHighlightOverlays.ts uses.
-const VECTOR_FIELD_VIEWS: readonly FieldView[] = ['gradient', 'gradient2x2', 'walked'];
+const VECTOR_FIELD_VIEWS: readonly FieldView[] = ['gradient', 'gradient2x2'];
 
 export function updateBucketFillOverlay(camera: Camera) {
   const settings = camera.settings;
@@ -19,25 +18,15 @@ export function updateBucketFillOverlay(camera: Camera) {
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const lum = camera.lastNoisedPreviewGray;
 
-  let field;
-  if (settings.fieldView === 'gradient') {
-    field = computeGradientField(lum, w, h, Math.round(settings.simGradRadius));
-  } else if (settings.fieldView === 'gradient2x2') {
-    field = computeGradient2x2Field(lum, w, h);
-  } else {
-    // Only 'walked' can reach here -- VECTOR_FIELD_VIEWS already filtered
-    // out anything else at the top of this function.
-    const rawField = computeGradientField(lum, w, h, Math.round(settings.simGradRadius));
-    const agreement = computeGradientAgreementField(rawField, Math.round(settings.coherenceRadius));
-    const effectiveField = computeEffectiveGradientField(rawField, agreement);
-    field = computeWalkedGradientField(settings, effectiveField);
-  }
+  const field = settings.fieldView === 'gradient'
+    ? computeGradientField(lum, w, h, Math.round(settings.simGradRadius))
+    : computeGradient2x2Field(lum, w, h);
 
   // No percentile cutoff anymore (see this session's chat) -- every pixel
   // is eligible to FOUND a region (see computeBucketFillRegions's own
   // comment for why absorption was already unrestricted).
   const seedEligible = computeTopGradientAlpha(field, 0, 100);
-  const { regionId, segments } = computeBucketFillRegions(field, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold);
+  const { regionId, segments } = computeBucketFillRegions(field, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold, settings.bucketFillMaxSteps);
   const colors = randomSegmentColors(segments.length);
   paintBucketFillOverlay(regionId, segments, colors, settings.bucketFillMinLengthPx, camera.bucketFillData);
   camera.bucketFillTex.needsUpdate = true;

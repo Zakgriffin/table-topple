@@ -166,6 +166,7 @@
     <div class="row"><span class="label">angle tolerance</span><input type="range" id="bucketFillToleranceDeg" min="1" max="90" step="0.5" value="22.5"><span class="val" id="bucketFillToleranceDegVal"></span></div>
     <div class="row"><span class="label">min magnitude</span><input type="range" id="bucketFillMagnitudeThreshold" min="0" max="100" step="0.5" value="0"><span class="val" id="bucketFillMagnitudeThresholdVal"></span></div>
     <div class="row"><span class="label">min length (px)</span><input type="range" id="bucketFillMinLengthPx" min="0" max="100" step="1" value="3"><span class="val" id="bucketFillMinLengthPxVal"></span></div>
+    <div class="row"><span class="label">fill steps (0=unbounded)</span><input type="range" id="bucketFillMaxSteps" min="0" max="600" step="1" value="0"><span class="val" id="bucketFillMaxStepsVal"></span></div>
     <button id="toggleBucketFillMarkers">segment endpoint markers</button>
     <button id="toggleBucketFillJoin">join walk (faded trail)</button>
     <div class="row"><span class="label">join steps</span><input type="range" id="bucketFillJoinSteps" min="0" max="600" step="1" value="0"><span class="val" id="bucketFillJoinStepsVal"></span></div>
@@ -261,12 +262,11 @@
     <div id="simOnlyFieldViews">
       <label class="chk"><input type="radio" name="fieldView" id="fieldViewAntialiased" value="antialiased"> antialiased (sensor AA filter, no lens blur yet)</label>
       <label class="chk"><input type="radio" name="fieldView" id="fieldViewDownsampled" value="downsampled"> downsampled (+lens blur, no noise yet)</label>
-      <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised" checked> noised (final image the algorithm sees)</label>
+      <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised"> noised (final image the algorithm sees)</label>
     </div>
     <div class="fieldViewDivider">&darr; 2D filter pipeline starts here &darr;</div>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewGradient" value="gradient"> gradient field (hue=direction, sat=magnitude)</label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewGradient2x2" value="gradient2x2"> gradient field (2x2 window, no radius slider)</label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewWalked" value="walked"> guided tangent walk (runs on the gradient x agreement field)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewGradient2x2" value="gradient2x2" checked> gradient field (2x2 window, no radius slider)</label>
   </div>
 
   <div class="section">

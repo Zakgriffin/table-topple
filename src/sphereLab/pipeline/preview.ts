@@ -3,12 +3,12 @@ import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, separableBoxBlur } from './distortion.ts';
-import { computeEffectiveGradientField, computeGradient2x2Field, computeGradientAgreementField, computeGradientField, computeTriangleFold, fillGrayscalePreview, paintVectorFieldAsColor } from './gradientField.ts';
-import { computeWalkedGradientField } from './tangentWalk.ts';
+import { computeGradient2x2Field, computeGradientField, computeTriangleFold, fillGrayscalePreview, paintVectorFieldAsColor } from './gradientField.ts';
 
 // Shared tail for both capture sources: given a final analysis-resolution
-// grayscale, paints whichever of the 4 direction/scalar field views is
-// currently selected.
+// grayscale, paints whichever of the direction/scalar field views is
+// currently selected (no-op for 'raw'/'antialiased'/'downsampled'/'noised',
+// handled by each capture path's own display branch before this runs).
 export function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const settings = camera.settings;
@@ -25,14 +25,6 @@ export function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
     const field = computeGradient2x2Field(gray, w, h);
     camera.lastDisplayedVectorField = field;
     paintVectorFieldAsColor(field, camera.distortedPreviewData);
-    camera.distortedPreviewTex.needsUpdate = true;
-  } else if (settings.fieldView === 'walked') {
-    const field = computeGradientField(gray, w, h, Math.round(settings.simGradRadius));
-    const agreement = computeGradientAgreementField(field, Math.round(settings.coherenceRadius));
-    const effective = computeEffectiveGradientField(field, agreement);
-    const walked = computeWalkedGradientField(settings, effective);
-    camera.lastDisplayedVectorField = walked;
-    paintVectorFieldAsColor(walked, camera.distortedPreviewData);
     camera.distortedPreviewTex.needsUpdate = true;
   }
 }

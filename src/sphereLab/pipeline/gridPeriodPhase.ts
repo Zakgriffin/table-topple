@@ -133,7 +133,7 @@ export function computeGridPeriodPhase(
   const agreement = computeGradientAgreementField(field, Math.round(settings.coherenceRadius));
   const effective = computeEffectiveGradientField(field, agreement);
   const seedEligible = computeTopGradientAlpha(effective, 0, 100);
-  const { regionId, segments } = computeBucketFillRegions(effective, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold);
+  const { regionId, segments } = computeBucketFillRegions(effective, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold, settings.bucketFillMaxSteps);
   const { merges } = computeJoinWalk(
     segments, regionId, w, h, settings.bucketFillMergeMinSimilarity, settings.bucketFillJoinSteps, settings.bucketFillMinLengthPx,
     settings.bucketFillMaxTravelFactor,

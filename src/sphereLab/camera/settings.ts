@@ -34,6 +34,7 @@ export interface CameraSettingsCommon {
   showTrueContamination: boolean; showReconstructedContamination: boolean; hideField: boolean;
   showTopGradient: boolean;
   showBucketFillSegments: boolean; bucketFillToleranceDeg: number; bucketFillMagnitudeThreshold: number; bucketFillMinLengthPx: number;
+  bucketFillMaxSteps: number;
   showBucketFillMarkers: boolean;
   showBucketFillJoin: boolean; bucketFillJoinSteps: number; bucketFillMergeMinSimilarity: number;
   bucketFillMaxTravelFactor: number;
@@ -91,6 +92,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     bucketFillToleranceDeg: savedNum('bucketFillToleranceDeg', 22.5),
     bucketFillMagnitudeThreshold: savedNum('bucketFillMagnitudeThreshold', 0),
     bucketFillMinLengthPx: savedNum('bucketFillMinLengthPx', 3),
+    bucketFillMaxSteps: savedNum('bucketFillMaxSteps', 0),
     showBucketFillMarkers: savedBool('toggleBucketFillMarkers', true),
     showBucketFillJoin: savedBool('toggleBucketFillJoin', false),
     bucketFillJoinSteps: savedNum('bucketFillJoinSteps', 0),
@@ -114,7 +116,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
     showCompositeLineFamilies: savedBool('showCompositeLineFamilies', false),
     showNewSampleLattice: savedBool('showNewSampleLattice', false),
-    fieldView: 'walked',
+    fieldView: 'gradient2x2',
     axesAutoCapture: false, axesCaptureIntervalMs: 500,
     viewportW: 512, viewportH: 384, aspectLocked: false,
     horizFovDeg: 65,

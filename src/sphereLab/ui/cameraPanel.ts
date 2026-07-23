@@ -166,6 +166,7 @@ export function refreshCameraPanel() {
   setNum('bucketFillToleranceDeg', cam.settings.bucketFillToleranceDeg);
   setNum('bucketFillMagnitudeThreshold', cam.settings.bucketFillMagnitudeThreshold);
   setNum('bucketFillMinLengthPx', cam.settings.bucketFillMinLengthPx);
+  setNum('bucketFillMaxSteps', cam.settings.bucketFillMaxSteps);
   setNum('bucketFillJoinSteps', cam.settings.bucketFillJoinSteps);
   setNum('bucketFillMergeMinSimilarity', cam.settings.bucketFillMergeMinSimilarity);
   setNum('bucketFillMaxTravelFactor', cam.settings.bucketFillMaxTravelFactor);
@@ -344,6 +345,13 @@ bindSlider('bucketFillMinLengthPx', (v) => {
   updateBucketFillOverlay(cam); // base raster: filtered segments disappear from it too
   updateBucketFillJoinOverlay(cam); // join walk: filtered segments never get fronts
   updateHoverOverlays(lastHoverClientX, lastHoverClientY); // endpoint markers
+}, (v) => v.toFixed(0));
+bindSlider('bucketFillMaxSteps', (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.bucketFillMaxSteps = v;
+  updateBucketFillOverlay(cam); // base raster: region shapes/sizes change directly
+  updateBucketFillJoinOverlay(cam); // join walk consumes the base overlay's own segments/regionId
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 }, (v) => v.toFixed(0));
 bindSlider('bucketFillJoinSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillJoinSteps = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(0));
 bindSlider('bucketFillMergeMinSimilarity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillMergeMinSimilarity = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(2));

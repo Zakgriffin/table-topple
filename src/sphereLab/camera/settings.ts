@@ -35,13 +35,26 @@ export interface CameraSettingsCommon {
   showTopGradient: boolean;
   showBucketFillSegments: boolean; bucketFillToleranceDeg: number; bucketFillMagnitudeThreshold: number; bucketFillMinLengthPx: number;
   bucketFillMaxSteps: number;
+  // false = the original serial BFS (pipeline/bucketFillSegments.ts); true =
+  // the round-synchronous, GPU-portable alternative
+  // (pipeline/labelPropagationSegments.ts) -- see that file's header for the
+  // algorithm. Both produce the exact same { regionId, segments } shape, so
+  // every downstream consumer (join walk, votes, overlays) is unaffected by
+  // which one ran.
+  bucketFillUseLabelPropagation: boolean;
+  // Toggles the base raster (paintBucketFillOverlay) between raw per-region
+  // output and a post-pass that unions directly-touching, collinear regions
+  // (pipeline/bucketFillAdjacencyMerge.ts) before coloring/eligibility --
+  // see that file's own header for why this is a separate, simpler pass
+  // than the join walk's gap-bridging front search.
+  bucketFillShowMerged: boolean;
   showBucketFillMarkers: boolean;
   showBucketFillJoin: boolean; bucketFillJoinSteps: number; bucketFillMergeMinSimilarity: number;
   bucketFillMaxTravelFactor: number;
   showBucketFillComposite: boolean;
   showBucketFillMergeMarkers: boolean;
   showGradientArrow: boolean; showGradientArrowPerpendicular: boolean; gradientArrowScale: number;
-  simGradRadius: number; coherenceRadius: number;
+  coherenceRadius: number;
   tangentWalkMaxSteps: number; tangentWalkDeviationDeg: number; tangentWalkMagFraction: number; tangentWalkGraceSamples: number;
   tangentWalkAdaptive: boolean;
   showRecoveredPoles: boolean;
@@ -55,6 +68,12 @@ export interface CameraSettingsCommon {
   // Higher = stricter (excludes more of the near-horizon view).
   minGrazingCos: number;
   gridPeriodPhaseBinCount: number;
+  // Below this, a red/blue neighbor gap (gridPeriodPhaseOverlays.ts's
+  // per-family median lines) is excluded from the median -- filters out the
+  // same near-duplicate-line noise gaps pipeline/gridPeriodPhase.ts's own
+  // seed-period mode search is built to shrug off, which would otherwise
+  // drag a small-sample median toward ~0 instead of the true spacing.
+  gridPeriodPhaseGapLowerBound: number;
   showCompositeLineFamilies: boolean;
   showSampleLattice: boolean;
   // Purely a display-time rotation of the Projected-Cam view (WebGL texture
@@ -98,6 +117,8 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     bucketFillMagnitudeThreshold: savedNum('bucketFillMagnitudeThreshold', 0),
     bucketFillMinLengthPx: savedNum('bucketFillMinLengthPx', 3),
     bucketFillMaxSteps: savedNum('bucketFillMaxSteps', 0),
+    bucketFillUseLabelPropagation: savedBool('bucketFillUseLabelPropagation', true),
+    bucketFillShowMerged: savedBool('bucketFillShowMerged', false),
     showBucketFillMarkers: savedBool('toggleBucketFillMarkers', true),
     showBucketFillJoin: savedBool('toggleBucketFillJoin', false),
     bucketFillJoinSteps: savedNum('bucketFillJoinSteps', 0),
@@ -106,7 +127,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showBucketFillComposite: savedBool('toggleBucketFillComposite', false),
     showBucketFillMergeMarkers: savedBool('toggleBucketFillMergeMarkers', false),
     showGradientArrow: false, showGradientArrowPerpendicular: false, gradientArrowScale: 10,
-    simGradRadius: 1, coherenceRadius: 1,
+    coherenceRadius: 1,
     // See the pre-Stage-A history for the full derivation of these tangent-walk
     // defaults (guided tangent walk, simNoise=8 stability etc.) -- unchanged.
     tangentWalkMaxSteps: 76, tangentWalkDeviationDeg: 45, tangentWalkMagFraction: 0, tangentWalkGraceSamples: 50,
@@ -118,6 +139,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     weightSharpenPower: 4,
     minGrazingCos: savedNum('minGrazingCos', 0.15),
     gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
+    gridPeriodPhaseGapLowerBound: savedNum('gridPeriodPhaseGapLowerBound', 0.005),
     showCompositeLineFamilies: savedBool('showCompositeLineFamilies', false),
     showSampleLattice: savedBool('showSampleLattice', false),
     useTrueCardinalOrientation: false,

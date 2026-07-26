@@ -11,11 +11,14 @@ import { axesReadout, captureAxesBtn } from '../ui/dom.ts';
 import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
 import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, paintProjectedTexture, runPositionDecode } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
+import { computeGradient2x2Field } from './gradientField.ts';
 import { computeGridPeriodPhase } from './gridPeriodPhase.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
-import { computeSegmentVotes, fitPairOfPlanes } from './votes.ts';
+import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes } from './votes.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
+import { computeGradient2x2FieldGPU } from '../pipelineGPU/gradient2x2.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
+import { GradientField } from '../types.ts';
 
 // Falls back to CPU per-call if the GPU one returns null (WebGPU
 // unavailable) -- same pattern as every other GPU sub-pipeline in this file.
@@ -26,6 +29,17 @@ async function projectBins(camera: Camera) {
     : computeProjectedBinsAndMarginals(camera);
   spanEnd(s);
   return result;
+}
+
+// Same pattern, for the 2x2 gradient field that feeds computeGradient2x2Composites
+// below (see pipelineGPU/gradient2x2.ts).
+async function gradient2x2Field(gray: Float64Array, w: number, h: number): Promise<GradientField> {
+  const s = spanStart(globalState.useGPUGradient ? 'gradient2x2 (GPU)' : 'gradient2x2 (CPU)');
+  const field = globalState.useGPUGradient
+    ? (await computeGradient2x2FieldGPU(gray, w, h)) ?? computeGradient2x2Field(gray, w, h)
+    : computeGradient2x2Field(gray, w, h);
+  spanEnd(s);
+  return field;
 }
 
 // ── Axes/position reconstruction (the big orchestrator) ──────────────────
@@ -70,6 +84,27 @@ export function runAxesReconstruction(camera: Camera) {
       const gray = flipRowsF64(rawGray, w, h);
       const vFovRad = getAnalysisVFovRad(camera);
       spanEnd(captureSpan);
+      // Composite lines (bucket-fill -> join walk -> merge groups -> one
+      // line per group, over the 2x2 gradient field -- see pipeline/votes.ts's
+      // computeGradient2x2Composites for why not the old radius-driven
+      // gradient x local-agreement "effective" field) are computed exactly
+      // once here and shared by every downstream consumer that needs them:
+      // vote casting below, row/col family classification in
+      // computeGridPeriodPhase further down, and the "color composite lines
+      // by row/col family" debug overlay (see overlays/hoverDebugOverlays.ts).
+      // Previously each of those either redid this same computation
+      // independently (harmless when the inputs matched, since it's
+      // deterministic) or -- the debug overlay -- redid it over a DIFFERENT
+      // field, producing composites whose root numbering had no relation to
+      // gridPeriodPhase's, so most lines silently fell back to an
+      // unclassified color. Sharing one array of {root, line} makes that
+      // mismatch structurally impossible now.
+      const compositesSpan = spanStart('composites (2x2 gradient field)');
+      const field2x2 = await gradient2x2Field(gray, w, h);
+      const voteComposites = computeGradient2x2Composites(camera.settings, field2x2, w, h);
+      spanEnd(compositesSpan);
+      camera.lastVoteComposites = voteComposites;
+
       // computeSegmentVotes is always the vote source now (see this
       // session's chat) -- one vote per bucket-fill line segment instead
       // of one per pixel. computeWorldVotes/computeWorldVotesGPU (the old
@@ -77,7 +112,7 @@ export function runAxesReconstruction(camera: Camera) {
       // in pipeline/votes.ts / pipelineGPU/voteGeneration.ts, unreferenced
       // here, in case that comparison is wanted again later.
       const votesSpan = spanStart('votes (segments)');
-      const votes = computeSegmentVotes(camera.settings, gray, w, h, camera.settings.simGradRadius, camera.settings.coherenceRadius, MATH_QUAT, vFovRad, camera.aspect);
+      const votes = computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, camera.aspect);
       spanEnd(votesSpan);
       camera.lastVotes = votes;
       updateGradientCirclesDebug(camera);
@@ -135,8 +170,9 @@ export function runAxesReconstruction(camera: Camera) {
       const gppSpan = spanStart('gridPeriodPhase (distance source)');
       const gpp = rowDirRecovered && colDirRecovered && quadricPair
         ? computeGridPeriodPhase(
-            camera.settings, gray, w, h, MATH_QUAT, vFovRad, camera.aspect,
+            voteComposites, w, h, MATH_QUAT, vFovRad, camera.aspect,
             rowDirRecovered, colDirRecovered, quadricPair.Dnormal, GRID_STEP,
+            camera.settings.gridPeriodPhaseGapLowerBound,
           )
         : null;
       camera.lastGridPeriodPhase = gpp;

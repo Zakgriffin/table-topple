@@ -3,11 +3,10 @@ import { CameraSettingsCommon } from '../camera/settings.ts';
 import { jacobiEigenSymmetric, smallestEigenvector } from '../../linalg.ts';
 import { cornerDir } from '../math/geometry.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
-import { Vote } from '../types.ts';
-import { compositeLineLength, computeCompositeLines, computeJoinWalk, computeMergeGroups } from './bucketFillJoin.ts';
+import { GradientField, Vote } from '../types.ts';
+import { CompositeLine, compositeLineLength, computeCompositeLines, computeJoinWalk, computeMergeGroups } from './bucketFillJoin.ts';
 import { computeBucketFillRegions } from './bucketFillSegments.ts';
 import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from './gradientField.ts';
-import { computeTopGradientAlpha } from './gradientHighlight.ts';
 import { guidedTangentDirectionForWalk } from './tangentWalk.ts';
 
 // gray is expected to already be captureDistortedGrayscale's output.
@@ -53,30 +52,33 @@ export function computeWorldVotes(
   return votes;
 }
 
-// Experimental alternative to computeWorldVotes: one vote per bucket-fill-
-// and-JOIN-WALK composite LINE (pipeline/bucketFillJoin.ts) instead of one
-// per pixel. Builds the exact same "effective" field (raw gradient x local
-// agreement) computeWorldVotes builds internally, flood-fills it into
+// One composite LINE per bucket-fill-and-JOIN-WALK merge group (see
+// pipeline/bucketFillJoin.ts), tagged with that group's root -- the shared
+// first stage behind computeSegmentVotes below AND pipeline/gridPeriodPhase.ts.
+// Flood-fills the 2x2 gradient field `field` (computeGradient2x2Field or its
+// GPU twin, computeGradient2x2FieldGPU -- see pipeline/axesReconstruction.ts's
+// gradient2x2Field for the CPU/GPU choice, same one bucketFillOverlay.ts's
+// live debug view uses when fieldView is 'gradient2x2') directly into
 // segments, then runs the full join walk (merge groups + composite lines,
-// same as the join-walk overlay) and casts a ray to each GROUP's composite
-// endpoints -- not each raw segment's own endpoints -- so a chain of
-// several short segments joined into one long line votes as ONE long,
-// well-conditioned ray instead of several separate short, noisier ones.
-// Reuses the SAME percentile-band, tolerance/magnitude/length, and join-
-// walk settings (steps, merge similarity) the bucket-fill/join overlays
-// already expose, so this is tunable from the existing sliders without new
-// UI just for this path.
-export function computeSegmentVotes(
+// same as the join-walk overlay). Deliberately NOT the radius-driven
+// gradient field x local-agreement "effective" field this used to run
+// through (computeGradientField/computeGradientAgreementField/
+// computeEffectiveGradientField, still defined in ./gradientField.ts for
+// computeWorldVotes and other debug views, just not called from here
+// anymore) -- see this session's chat for why. Pulled out as its own
+// function (and called exactly ONCE per reconstruction pass, see pipeline/
+// axesReconstruction.ts) so every downstream consumer -- vote casting here,
+// row/col family classification in gridPeriodPhase.ts, and the "color
+// composite lines by row/col family" debug overlay -- sees the exact same
+// lines under the exact same root numbers. Takes the field pre-computed
+// (rather than computing it from `gray` itself) so the caller can pick
+// CPU or GPU without this function -- or any of its downstream consumers --
+// needing to know or care which one produced it.
+export function computeGradient2x2Composites(
   settings: CameraSettingsCommon,
-  gray: Float64Array, w: number, h: number,
-  gradientRadius: number, agreementRadius: number,
-  quat: THREE.Quaternion, vFovRad: number, aspect: number,
-): Vote[] {
-  const field = computeGradientField(gray, w, h, gradientRadius);
-  const agreement = computeGradientAgreementField(field, agreementRadius);
-  const effective = computeEffectiveGradientField(field, agreement);
-  const seedEligible = computeTopGradientAlpha(effective, 0, 100);
-  const { regionId, segments } = computeBucketFillRegions(effective, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold, settings.bucketFillMaxSteps);
+  field: GradientField, w: number, h: number,
+): { root: number; line: CompositeLine }[] {
+  const { regionId, segments } = computeBucketFillRegions(field, settings.bucketFillToleranceDeg, settings.bucketFillMagnitudeThreshold, settings.bucketFillMaxSteps);
 
   const { merges } = computeJoinWalk(
     segments, regionId, w, h, settings.bucketFillMergeMinSimilarity, settings.bucketFillJoinSteps, settings.bucketFillMinLengthPx,
@@ -85,10 +87,28 @@ export function computeSegmentVotes(
   const groupOf = computeMergeGroups(segments.length, merges);
   const composites = computeCompositeLines(segments, groupOf);
 
+  const result: { root: number; line: CompositeLine }[] = [];
+  for (const [root, line] of composites) {
+    if (compositeLineLength(line) < settings.bucketFillMinLengthPx) continue; // an unmerged singleton whose own segment was already too short
+    result.push({ root, line });
+  }
+  return result;
+}
+
+// Experimental alternative to computeWorldVotes: one vote per composite LINE
+// (computeGradient2x2Composites above) instead of one per pixel -- casts
+// a ray to each GROUP's composite endpoints, not each raw segment's own
+// endpoints, so a chain of several short segments joined into one long line
+// votes as ONE long, well-conditioned ray instead of several separate short,
+// noisier ones.
+export function computeSegmentVotes(
+  composites: { root: number; line: CompositeLine }[],
+  w: number, h: number,
+  quat: THREE.Quaternion, vFovRad: number, aspect: number,
+): Vote[] {
   const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, 1 - (py / h) * 2];
   const votes: Vote[] = [];
-  for (const line of composites.values()) {
-    if (compositeLineLength(line) < settings.bucketFillMinLengthPx) continue; // an unmerged singleton whose own segment was already too short
+  for (const { line } of composites) {
     const [u1, v1] = toNDC(line.x1, line.y1);
     const [u2, v2] = toNDC(line.x2, line.y2);
     const ray1 = cornerDir(u1, v1, quat, vFovRad, aspect);

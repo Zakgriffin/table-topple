@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CompositeLineDisplay, SegmentMerge } from '../pipeline/bucketFillJoin.ts';
+import { CompositeLine, CompositeLineDisplay, SegmentMerge } from '../pipeline/bucketFillJoin.ts';
 import { BucketFillSegment } from '../pipeline/bucketFillSegments.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
 import { DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
@@ -25,6 +25,12 @@ export interface CameraBase {
   lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
   lastProjectedBins: ProjectedBins | null;
   lastVotes: Vote[];
+  // Root-tagged composite lines the votes above were cast from (pipeline/
+  // votes.ts's computeGradient2x2Composites) -- the SAME lines pipeline/
+  // gridPeriodPhase.ts classifies into rowLines/colLines, and what the
+  // "color composite lines by row/col family" debug overlay draws, so a
+  // line's root is guaranteed to mean the same thing in all three places.
+  lastVoteComposites: { root: number; line: CompositeLine }[] | null;
   axesComputed: boolean;
   axesCapturing: boolean;
   lastAxesCapture: number;

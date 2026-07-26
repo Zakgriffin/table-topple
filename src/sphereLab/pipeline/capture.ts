@@ -55,6 +55,9 @@ export function resizeCaptureBuffers(camera: Camera, explicitSize?: { w: number;
   camera.distortedPreviewTex.dispose();
   camera.distortedPreviewTex.needsUpdate = true;
 
+  // Initial size only -- see camera/factory.ts's own comment on
+  // projectedPreviewData/Tex; paintProjectedTexture reallocates this per
+  // capture to match its own square-cell bucket grid.
   camera.projectedPreviewData = new Uint8Array(w * h * 4);
   camera.projectedPreviewTex.image = { data: camera.projectedPreviewData, width: w, height: h };
   camera.projectedPreviewTex.dispose();

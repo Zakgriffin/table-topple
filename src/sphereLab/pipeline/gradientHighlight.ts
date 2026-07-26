@@ -1,41 +1,19 @@
-import { GradientField } from '../types.ts';
-
-// ── Top-N%-by-magnitude overlay math (pure) ──────────────────────────────
+// ── Top-gradient overlay paint (pure) ────────────────────────────────────
 //
-// Same [minPercent, maxPercent) percentile-rank band shape
-// votesInMagnitudeBand (pipeline/votes.ts) uses, applied to every pixel of
-// a vector field's magnitude instead of a sparse vote list. Every current
-// call site passes (0, 100) -- no cutoff, see this session's chat -- but
-// the band logic itself is left in place in case a cutoff is wanted again.
+// Used to gate which pixels get painted via a [minPercent, maxPercent)
+// percentile-rank band over the field's own magnitude (computeTopGradientAlpha,
+// same band shape votesInMagnitudeBand in pipeline/votes.ts uses) -- every
+// call site always passed (0, 100), which is mathematically a no-op (the
+// resulting [min, max] magnitude band trivially contains every pixel's
+// magnitude, by definition of min/max), so that dead computation (a full
+// sort of the field on every repaint, for a guaranteed-uniform result) was
+// removed along with every no-op seedEligible band it fed elsewhere (see
+// pipeline/bucketFillSegments.ts's computeBucketFillRegions and its two
+// callers) -- see this session's chat.
 
-export function computeTopGradientAlpha(field: GradientField, minPercent: number, maxPercent: number): Float64Array {
-  const { fx, fy, w, h, r } = field;
-  const n = w * h;
-  const mags = new Float64Array(n);
-  for (let y = r; y < h - r; y++) {
-    for (let x = r; x < w - r; x++) {
-      const i = y * w + x;
-      mags[i] = Math.hypot(fx[i], fy[i]);
-    }
-  }
-  const alpha = new Float64Array(n);
-  const lo = Math.round(n * (minPercent / 100));
-  const hi = Math.round(n * (maxPercent / 100));
-  if (hi <= lo) return alpha;
-  const sorted = Float64Array.from(mags).sort((a, b) => b - a);
-  const upperThresh = sorted[lo];
-  const lowerThresh = sorted[hi - 1];
-  for (let i = 0; i < n; i++) {
-    if (mags[i] <= upperThresh && mags[i] >= lowerThresh) alpha[i] = 1;
-  }
-  return alpha;
-}
-
-export function paintTopGradientOverlay(alpha: Float64Array, color: readonly [number, number, number], out: Uint8Array) {
-  for (let i = 0; i < alpha.length; i++) {
-    const o = i * 4;
-    out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2];
-    out[o + 3] = Math.round(alpha[i] * 200);
+export function paintTopGradientOverlay(color: readonly [number, number, number], out: Uint8Array) {
+  for (let o = 0; o < out.length; o += 4) {
+    out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2]; out[o + 3] = 200;
   }
 }
 

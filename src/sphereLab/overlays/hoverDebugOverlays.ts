@@ -269,8 +269,13 @@ function drawBucketFillSegmentMarkers(camera: Camera) {
 // "composite" line, not any one member segment's own extent. Same black-
 // outline-then-colored-stroke language as drawOneArrow/drawMarkerDot, in
 // the group's own blended color (matching the join overlay's raster).
+//
+// "color by row/col family" draws a COMPLETELY DIFFERENT line set
+// (drawVoteFamilyLines below) instead of just recoloring these -- see that
+// function's own comment for why the two can't be reconciled by root alone.
 function drawBucketFillCompositeLines(camera: Camera) {
   const settings = camera.settings;
+  if (settings.showCompositeLineFamilies) { drawVoteFamilyLines(camera); return; }
   if (!settings.showBucketFillComposite || !camera.lastBucketFillComposite) return;
   const rect = computeThroughRect(camera);
   const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
@@ -280,35 +285,72 @@ function drawBucketFillCompositeLines(camera: Camera) {
   });
   const ctx = gradientArrowCtx;
 
-  // Family coloring (pipeline/gridPeriodPhase.ts): blue = row family, red =
-  // column family, black -> full-color by each line's own RANK within its
-  // family (sorted by its rectified `value` -- the same order the
-  // period/phase fit itself assigns integer indices in), so this literally
-  // shows the sequence the fit will register each line as. Falls back to
-  // the usual group-blend color for any line the debug pipeline doesn't
-  // recognize (hasn't run yet, or settings changed between the two
-  // independent recomputes).
+  for (const c of camera.lastBucketFillComposite) {
+    const a = toScreen(c.x1, c.y1), b = toScreen(c.x2, c.y2);
+    ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 5;
+    ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
+    const [rr, gg, bb] = c.color;
+    ctx.strokeStyle = `rgb(${rr},${gg},${bb})`; ctx.lineWidth = 2.5;
+    ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
+  }
+}
+
+// Draws camera.lastVoteComposites -- the composite lines actually fed to
+// fitPairOfPlanes and classified by pipeline/gridPeriodPhase.ts (pipeline/
+// votes.ts's computeGradient2x2Composites), NOT camera.lastBucketFillComposite
+// above. Those used to be conflated (this function used to recolor
+// lastBucketFillComposite by looking up each line's root in gpp's row/col
+// maps), but lastBucketFillComposite is a SEPARATE, live-tunable debug
+// recompute over whichever raw field the fieldView toggle currently shows --
+// built from different segments, so its root numbers have no relation to
+// gpp's and most lines silently fell back to an unclassified color. Drawing
+// gpp's own lines directly makes that mismatch impossible: every line here
+// has a root that either IS or ISN'T in gpp's maps, for real.
+//
+// Family coloring (pipeline/gridPeriodPhase.ts): blue = row family, red =
+// column family, black -> full-color by each line's own RANK within its
+// family (sorted by its rectified `value` -- the same order the
+// period/phase fit itself assigns integer indices in), so this literally
+// shows the sequence the fit will register each line as. Gray for any line
+// gridPeriodPhase itself skipped (e.g. a degenerate gnomonic projection).
+function drawVoteFamilyLines(camera: Camera) {
+  if (!camera.lastVoteComposites) return;
+  const rect = computeThroughRect(camera);
+  const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
+  // lastVoteComposites' pixel coords come from the row-flipped `gray`
+  // pipeline/axesReconstruction.ts feeds the vote/grid-period-phase pipeline
+  // (its own flipRowsF64, kept separate from camera.lastNoisedPreviewGray) --
+  // flip the row index back before reusing every other overlay's raster
+  // toScreen convention, or lines land upside down.
+  const toScreen = (fx: number, fy: number) => {
+    const rasterY = fieldH - 1 - fy;
+    return {
+      px: rect.x + (fx + 0.5) * (rect.w / fieldW),
+      py: rect.y + rect.h - (rasterY + 0.5) * (rect.h / fieldH),
+    };
+  };
+  const ctx = gradientArrowCtx;
+
   let rowRank: Map<number, number> | null = null, colRank: Map<number, number> | null = null;
   const gpp = camera.lastGridPeriodPhase;
-  if (settings.showCompositeLineFamilies && gpp) {
+  if (gpp) {
     const sortedRow = [...gpp.rowLines].sort((a, b) => a.value - b.value);
     rowRank = new Map(sortedRow.map((s, i) => [s.root, sortedRow.length > 1 ? i / (sortedRow.length - 1) : 1]));
     const sortedCol = [...gpp.colLines].sort((a, b) => a.value - b.value);
     colRank = new Map(sortedCol.map((s, i) => [s.root, sortedCol.length > 1 ? i / (sortedCol.length - 1) : 1]));
   }
 
-  for (const c of camera.lastBucketFillComposite) {
-    const a = toScreen(c.x1, c.y1), b = toScreen(c.x2, c.y2);
+  for (const { root, line } of camera.lastVoteComposites) {
+    const a = toScreen(line.x1, line.y1), b = toScreen(line.x2, line.y2);
     ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 5;
     ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
     let strokeColor: string;
-    if (rowRank && rowRank.has(c.root)) {
-      strokeColor = `rgb(0,0,${Math.round(rowRank.get(c.root)! * 255)})`;
-    } else if (colRank && colRank.has(c.root)) {
-      strokeColor = `rgb(${Math.round(colRank.get(c.root)! * 255)},0,0)`;
+    if (rowRank && rowRank.has(root)) {
+      strokeColor = `rgb(0,0,${Math.round(rowRank.get(root)! * 255)})`;
+    } else if (colRank && colRank.has(root)) {
+      strokeColor = `rgb(${Math.round(colRank.get(root)! * 255)},0,0)`;
     } else {
-      const [rr, gg, bb] = c.color;
-      strokeColor = `rgb(${rr},${gg},${bb})`;
+      strokeColor = 'rgb(150,150,150)';
     }
     ctx.strokeStyle = strokeColor; ctx.lineWidth = 2.5;
     ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
@@ -364,7 +406,10 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
   if (globalState.mode !== 'through') return;
 
   if (markersOn) drawBucketFillSegmentMarkers(camera);
-  if (settings.showBucketFillComposite) drawBucketFillCompositeLines(camera);
+  // Family coloring draws its OWN line set (camera.lastVoteComposites, see
+  // drawVoteFamilyLines) independent of the raw-field composite-lines
+  // toggle, so it needs to run even when showBucketFillComposite is off.
+  if (settings.showBucketFillComposite || settings.showCompositeLineFamilies) drawBucketFillCompositeLines(camera);
   drawBucketFillDirectionMerges(camera);
 
   if (!arrowsOn) return;
@@ -505,7 +550,7 @@ toggleTrueCardinalOrientationBtn.addEventListener('click', () => {
 
 export function updateGradientArrowAvailability() {
   const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'gradient' || cam.settings.fieldView === 'gradient2x2';
+  const relevant = cam.settings.fieldView === 'gradient2x2' || cam.settings.fieldView === 'gradient2x2LocalMax';
   toggleGradientArrowBtn.disabled = !relevant;
   toggleGradientArrowModeBtn.disabled = !relevant;
   if (!relevant) {

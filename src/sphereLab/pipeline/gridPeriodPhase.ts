@@ -1,10 +1,6 @@
 import * as THREE from 'three';
-import { CameraSettingsCommon } from '../camera/settings.ts';
 import { cornerDir } from '../math/geometry.ts';
-import { computeCompositeLines, computeJoinWalk, computeMergeGroups } from './bucketFillJoin.ts';
-import { computeBucketFillRegions } from './bucketFillSegments.ts';
-import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from './gradientField.ts';
-import { computeTopGradientAlpha } from './gradientHighlight.ts';
+import { CompositeLine } from './bucketFillJoin.ts';
 
 // ── Grid period/phase recovery from composite lines (pure) ────────────────
 //
@@ -60,6 +56,14 @@ export interface GridLineSample {
 
 export interface PeriodSearchSample { period: number; score: number }
 
+// `rank` is each gap's two composite lines' averaged position within their
+// family's own value-sorted order, 0..1 -- the SAME rank convention
+// overlays/hoverDebugOverlays.ts's drawVoteFamilyLines colors composite
+// lines by (rank*255 in the blue or red channel), so a caller can color a
+// gap tick to match the two lines' own colors instead of a flat family
+// color, letting a tick be traced back to which pair of lines formed it.
+export interface NeighborGapSample { gap: number; rank: number }
+
 export interface GridPeriodPhaseResult {
   period: number;
   phiRow: number;
@@ -73,6 +77,8 @@ export interface GridPeriodPhaseResult {
   // plotting the search curve and marking where it landed).
   debug: {
     pooledGaps: number[];
+    rowNeighborGaps: NeighborGapSample[]; // adjacent-value gaps within rowSamples ONLY (sorted, consecutive differences) -- the actual n-1 genuinely-adjacent gaps this file's period seed relies on existing, as opposed to pooledGaps' O(n^2) all-pairs mix of both families
+    colNeighborGaps: NeighborGapSample[]; // same, for colSamples
     seedPeriod: number;
     bracket: [number, number];
     coarseSamples: PeriodSearchSample[];
@@ -103,6 +109,18 @@ export function circularFit(values: number[], weights: number[], period: number)
   return { resultant, phase };
 }
 
+// Even-length-safe median, shared by the real seed derivation below and by
+// overlays/gridPeriodPhaseOverlays.ts's own live preview of the same
+// per-family medians (drawn while the user drags the gap-lower-bound
+// slider, before the next real capture bakes a new value in via
+// computeGridPeriodPhase's own `gapLowerBound` argument).
+export function median(values: number[]): number | null {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0 ? (sorted[mid - 1] + sorted[mid]) / 2 : sorted[mid];
+}
+
 // Gnomonic projection of a ray direction onto the plane tangent to the unit
 // sphere at -Dnormal ("the bottom of the sphere") -- Drow/Dcol double as the
 // tangent plane's own in-plane basis for free, since {Drow,Dcol,Dnormal}
@@ -117,30 +135,23 @@ function gnomonic(r: THREE.Vector3, Drow: THREE.Vector3, Dcol: THREE.Vector3, Dn
 }
 
 export function computeGridPeriodPhase(
-  settings: CameraSettingsCommon,
-  gray: Float64Array, w: number, h: number,
+  composites: { root: number; line: CompositeLine }[],
+  w: number, h: number,
   quat: THREE.Quaternion, vFovRad: number, aspect: number,
   Drow: THREE.Vector3, Dcol: THREE.Vector3, Dnormal: THREE.Vector3,
   cellPitch: number | null,
+  gapLowerBound: number,
 ): GridPeriodPhaseResult | null {
-  // Rebuilds bucket-fill segments -> join walk -> merge groups -> composite
-  // lines from scratch (same steps computeSegmentVotes already runs) rather
-  // than threading identity through the existing anonymous Vote[] path --
-  // keeps this module fully self-contained and leaves the working vote/fit
-  // pipeline untouched. The extra recompute only happens while this debug
-  // pipeline is actually enabled.
-  const field = computeGradientField(gray, w, h, Math.round(settings.simGradRadius));
-  const agreement = computeGradientAgreementField(field, Math.round(settings.coherenceRadius));
-  const effective = computeEffectiveGradientField(field, agreement);
-  const seedEligible = computeTopGradientAlpha(effective, 0, 100);
-  const { regionId, segments } = computeBucketFillRegions(effective, settings.bucketFillToleranceDeg, seedEligible, settings.bucketFillMagnitudeThreshold, settings.bucketFillMaxSteps);
-  const { merges } = computeJoinWalk(
-    segments, regionId, w, h, settings.bucketFillMergeMinSimilarity, settings.bucketFillJoinSteps, settings.bucketFillMinLengthPx,
-    settings.bucketFillMaxTravelFactor,
-  );
-  const groupOf = computeMergeGroups(segments.length, merges);
-  const composites = computeCompositeLines(segments, groupOf);
-
+  // `composites` comes from pipeline/votes.ts's computeGradient2x2Composites
+  // -- the SAME composite lines (same root numbering) computeSegmentVotes
+  // casts its own votes from, computed exactly once per reconstruction pass
+  // (see pipeline/axesReconstruction.ts). Used to rebuild them here from
+  // scratch instead; that recompute agreed with computeSegmentVotes (same
+  // inputs, deterministic) but NOT with the "color composite lines by
+  // row/col family" debug overlay, which correlated against a third,
+  // independently-recomputed set of composites built over a DIFFERENT field
+  // entirely -- a different segmentation whose root numbers only matched
+  // this one by coincidence.
   const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, 1 - (py / h) * 2];
 
   // Step 1+2: classify each composite line as row- or column-type via its
@@ -150,7 +161,7 @@ export function computeGridPeriodPhase(
   // ratio, see this file's header for why the two forms don't mix.
   const rowSamples: { root: number; value: number; weight: number; p1: GnomonicPoint; p2: GnomonicPoint }[] = [];
   const colSamples: { root: number; value: number; weight: number; p1: GnomonicPoint; p2: GnomonicPoint }[] = [];
-  for (const [root, line] of composites) {
+  for (const { root, line } of composites) {
     const [u1, v1] = toNDC(line.x1, line.y1);
     const [u2, v2] = toNDC(line.x2, line.y2);
     const ray1 = cornerDir(u1, v1, quat, vFovRad, aspect);
@@ -176,20 +187,10 @@ export function computeGridPeriodPhase(
   }
   if (rowSamples.length === 0 && colSamples.length === 0) return null;
 
-  // Step 3: seed a period guess from the MODE of the pooled pairwise-gap
-  // distribution (row and column values pooled together -- same physical
-  // period forced on both axes by square cells), not the smallest few gaps
-  // directly. A near-duplicate line detection (e.g. a segment the join walk
-  // didn't fully merge -- two composite lines that are really the same
-  // physical grid line) produces a near-zero, essentially random gap that
-  // would completely dominate a "smallest few" average -- found live via
-  // dev-bridge: one such gap corrupted the seed by ~500x. The true period,
-  // in contrast, is shared by many genuinely-adjacent pairs (n-1 of them
-  // for n evenly spaced lines, more than any other spacing achieves), so it
-  // shows up as the single most heavily-populated bin in a coarse histogram
-  // of ALL pairwise gaps -- isolated duplicate-noise gaps scatter across
-  // many separate near-empty bins instead of piling into one, so a handful
-  // of them being individually tiny doesn't let them win the mode.
+  // Pooled pairwise gaps (row and column values pooled together, every
+  // combination -- not just adjacent ones) -- kept for the debug histogram
+  // (gridPeriodPhaseOverlays.ts's plot) even though the seed itself no
+  // longer comes from this (see below).
   const allValues = [...rowSamples.map((s) => s.value), ...colSamples.map((s) => s.value)];
   const pooledGaps: number[] = [];
   for (let i = 0; i < allValues.length; i++) {
@@ -200,29 +201,64 @@ export function computeGridPeriodPhase(
   }
   if (pooledGaps.length === 0) return null;
   pooledGaps.sort((a, b) => a - b);
-  const maxGap = pooledGaps[pooledGaps.length - 1];
-  if (maxGap < 1e-9) return null;
-  const HIST_BINS = Math.min(1000, Math.max(20, Math.floor(pooledGaps.length / 10)));
-  const histCounts = new Array(HIST_BINS).fill(0);
-  for (const g of pooledGaps) {
-    const bi = Math.min(HIST_BINS - 1, Math.floor((g / maxGap) * HIST_BINS));
-    histCounts[bi]++;
-  }
-  let modeBin = 0;
-  for (let i = 1; i < HIST_BINS; i++) if (histCounts[i] > histCounts[modeBin]) modeBin = i;
-  const binLo = (modeBin / HIST_BINS) * maxGap, binHi = ((modeBin + 1) / HIST_BINS) * maxGap;
-  const modeGaps = pooledGaps.filter((g) => g >= binLo && g < binHi);
-  const seedPeriod = modeGaps.reduce((a, b) => a + b, 0) / modeGaps.length;
+
+  // Within EACH family alone (not pooled), sort by value and diff
+  // consecutive entries -- the actual n-1 genuinely-adjacent gaps, rather
+  // than every pairwise combination across both axes. Each gap's `rank` is
+  // the midpoint of its two lines' own i/(n-1) rank (matching
+  // drawVoteFamilyLines' convention), so a caller can color it as those
+  // two lines' averaged color -- see NeighborGapSample's own comment.
+  const neighborGaps = (samples: { value: number }[]): NeighborGapSample[] => {
+    const sorted = samples.map((s) => s.value).sort((a, b) => a - b);
+    const n = sorted.length;
+    const gaps: NeighborGapSample[] = [];
+    for (let i = 1; i < n; i++) {
+      const g = sorted[i] - sorted[i - 1];
+      if (g > 1e-9) gaps.push({ gap: g, rank: (i - 0.5) / (n - 1) });
+    }
+    return gaps;
+  };
+  const rowNeighborGaps = neighborGaps(rowSamples);
+  const colNeighborGaps = neighborGaps(colSamples);
+
+  // Step 3: seed the period from each family's own MEDIAN neighbor gap,
+  // not the pooled all-pairs histogram mode this used to use. A family's
+  // neighbor gaps ARE the n-1 genuinely-adjacent spacings the period is
+  // trying to measure, whereas pooledGaps mixes both axes together and
+  // includes every pairwise combination, most of which are multi-period
+  // outliers (row-1-to-row-3, etc) that the old mode search had to filter
+  // out via a whole histogram. `gapLowerBound` prunes near-duplicate-line
+  // noise gaps (an imperfectly-merged join producing two composite lines
+  // that are really the same physical line -- see this file's original
+  // dev-bridge history, where one such gap corrupted the old seed by
+  // ~500x) before the median, the same protection via a much simpler
+  // mechanism. Center the search between the two families' own medians
+  // (square cells force the same true period on both axes, so they SHOULD
+  // agree; centering hedges against either one being individually biased)
+  // and set the bracket's half-width to the distance BETWEEN them, so a
+  // bigger row/col disagreement widens the search instead of silently
+  // trusting whichever one happened to come out first. Bails out (rather
+  // than falling back to the old mode estimate) if either family has fewer
+  // than 2 lines, or every one of its gaps is below gapLowerBound --
+  // there's no reliable seed to center a narrow search on in that case.
+  const rowGapMedian = median(rowNeighborGaps.map((s) => s.gap).filter((g) => g >= gapLowerBound));
+  const colGapMedian = median(colNeighborGaps.map((s) => s.gap).filter((g) => g >= gapLowerBound));
+  if (rowGapMedian === null || colGapMedian === null) return null;
+  const seedPeriod = (rowGapMedian + colGapMedian) / 2;
   if (seedPeriod < 1e-9) return null;
 
   // Step 4: bracketed coarse-to-fine search for the period, scored by the
-  // COMBINED (row + column) circular resultant -- deliberately narrow
-  // (0.5x-1.5x the seed) so the search structurally never evaluates the
-  // sub-multiple periods (P0/2, P0/3, ...) that would otherwise alias as
+  // COMBINED (row + column) circular resultant -- centered on the seed,
+  // total width = 50x |rowGapMedian - colGapMedian| (half-width = 25x).
+  // Originally kept much narrower (2x) so the search structurally could
+  // never reach the sub-multiple periods (P0/2, P0/3, ...) that alias as
   // false peaks -- every true lattice point trivially also sits on any
-  // finer sub-lattice, so a wide/blind search risks locking onto one of
-  // those instead of the true, fundamental period.
-  const bracket: [number, number] = [seedPeriod * 0.5, seedPeriod * 1.5];
+  // finer sub-lattice, so a wide search risks locking onto one of those
+  // instead of the true, fundamental period. Widened to 50x on request;
+  // if false-peak locks start showing up, that tradeoff is why.
+  const halfWidth = Math.abs(rowGapMedian - colGapMedian) * 25;
+  const bracket: [number, number] = [seedPeriod - halfWidth, seedPeriod + halfWidth];
+  if (bracket[0] < 1e-9) return null; // row/col medians disagreed enough to push the bracket to/past zero -- not a usable search range
   const COARSE_SAMPLES = 40;
   const rowValues = rowSamples.map((s) => s.value), rowWeights = rowSamples.map((s) => s.weight);
   const colValues = colSamples.map((s) => s.value), colWeights = colSamples.map((s) => s.weight);
@@ -272,6 +308,6 @@ export function computeGridPeriodPhase(
     period: bestP, phiRow: finalRow.phase, phiCol: finalCol.phase,
     height: cellPitch !== null ? cellPitch / bestP : null,
     rowLines, colLines,
-    debug: { pooledGaps, seedPeriod, bracket, coarseSamples },
+    debug: { pooledGaps, rowNeighborGaps, colNeighborGaps, seedPeriod, bracket, coarseSamples },
   };
 }

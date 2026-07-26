@@ -31,4 +31,8 @@ export const globalState = {
   // castAndBucketProjectedSamples; the bucket-accumulation stage 2 stays on
   // CPU regardless of this toggle.
   useGPUProject: false,
+  // Same idea, independent toggle, for the 2x2 forward-difference gradient
+  // field that feeds computeGradient2x2Composites (see
+  // pipelineGPU/gradient2x2.ts).
+  useGPUGradient: false,
 };

@@ -32,6 +32,39 @@ export function computeGradient2x2Field(gray: Float64Array, w: number, h: number
   return { fx, fy, w, h, r: 1 };
 }
 
+// 1 where a pixel's gradient magnitude is strictly greater than all 8
+// neighbors in its 3x3 neighborhood (a local maximum) AND above
+// minMagnitude, 0 elsewhere -- border pixels (no full 3x3 neighborhood) are
+// always 0. minMagnitude only gates the CENTER pixel's own eligibility, not
+// its neighbors' -- a sub-threshold neighbor still counts as a valid "beats
+// me" comparison, same as bucketFillSegments.ts's magnitudeThreshold gating
+// absorption but not the running direction average. Feeds
+// paintScalarFieldAsGray directly (white=1, black=0) for the
+// 'gradient2x2LocalMax' field view.
+export function computeGradientLocalMaxima(field: GradientField, minMagnitude = 0): Float64Array {
+  const { fx, fy, w, h } = field;
+  const n = w * h;
+  const mag = new Float64Array(n);
+  for (let i = 0; i < n; i++) mag[i] = Math.hypot(fx[i], fy[i]);
+  const out = new Float64Array(n);
+  for (let y = 1; y < h - 1; y++) {
+    for (let x = 1; x < w - 1; x++) {
+      const i = y * w + x;
+      const m = mag[i];
+      if (m <= minMagnitude) continue;
+      let isMax = true;
+      for (let dy = -1; dy <= 1 && isMax; dy++) {
+        for (let dx = -1; dx <= 1; dx++) {
+          if (dx === 0 && dy === 0) continue;
+          if (mag[i + dy * w + dx] >= m) { isMax = false; break; }
+        }
+      }
+      out[i] = isMax ? 1 : 0;
+    }
+  }
+  return out;
+}
+
 // Magnitude of the local VECTOR SUM of gradients (double-angle folded so
 // alternating-polarity edges reinforce instead of cancelling) -- see
 // pre-Stage-A history for the full derivation. Normalized against this
@@ -85,7 +118,13 @@ export function computeTriangleFold(gray: Float64Array, maxVal = 255): Float64Ar
 
 // ── Display: colorizes a value field, only for whichever one is on screen ─
 
-export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array) {
+// mask (optional): when given, a pixel with mask[i] === 0 is painted plain
+// black instead of its hue/sat color -- used by the 'gradient2x2LocalMax'
+// field view to pass through this SAME coloring for local-maxima pixels
+// only, rather than a separate flat white. maxMag is still taken over every
+// pixel in the field (not just the masked-in ones), so saturation stays
+// directly comparable to the unmasked 'gradient2x2' view.
+export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array, mask?: Float64Array) {
   const { fx, fy, w, h } = field;
   const n = w * h;
   const mags = new Float64Array(n);
@@ -96,12 +135,13 @@ export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array) {
     if (mag > maxMag) maxMag = mag;
   }
   for (let i = 0; i < n; i++) {
+    const o = i * 4;
+    if (mask && mask[i] === 0) { out[o] = 0; out[o + 1] = 0; out[o + 2] = 0; out[o + 3] = 255; continue; }
     let theta = Math.atan2(fy[i], fx[i]);
     if (theta < 0) theta += Math.PI;
     if (theta >= Math.PI) theta -= Math.PI;
     const sat = maxMag > 0 ? mags[i] / maxMag : 0;
     const [rr, gg, bb] = hsvToRgb((theta / Math.PI) * 360, sat, 1);
-    const o = i * 4;
     out[o] = rr; out[o + 1] = gg; out[o + 2] = bb; out[o + 3] = 255;
   }
 }

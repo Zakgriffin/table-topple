@@ -1,7 +1,7 @@
 import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { projectedUVScale } from '../pipeline/decodeGrid.ts';
-import { circularFit, GnomonicPoint, GridPeriodPhaseResult, PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
+import { circularFit, GnomonicPoint, GridPeriodPhaseResult, median, PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
 import { DecodeCellDebug } from '../types.ts';
 import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx } from '../ui/dom.ts';
 
@@ -69,19 +69,29 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
     svg.appendChild(svgText(8, H / 2, 'no data yet -- capture now', { fill: '#888', 'font-size': 11, 'font-family': 'sans-serif' }));
     return;
   }
-  const { pooledGaps, seedPeriod, bracket, coarseSamples } = gpp.debug;
+  const { pooledGaps, rowNeighborGaps, colNeighborGaps, seedPeriod, bracket, coarseSamples } = gpp.debug;
   const marginBottom = 16, marginTop = 14;
   const plotH = H - marginBottom - marginTop;
 
   const [xMin, xMax] = getViewRange(camera, gpp);
   const span = xMax - xMin || 1;
   const xToPx = (x: number) => ((x - xMin) / span) * W;
+  const gapLowerBound = camera.settings.gridPeriodPhaseGapLowerBound;
 
   // Bracket shading -- the search never evaluates outside this range, see
   // gridPeriodPhase.ts's own comment on why it's kept deliberately narrow.
   svg.appendChild(svgEl('rect', {
     x: xToPx(bracket[0]), y: marginTop, width: Math.max(0, xToPx(bracket[1]) - xToPx(bracket[0])), height: plotH,
     fill: 'rgba(100,180,255,0.15)',
+  }));
+
+  // Gray "excluded by gap lower bound" band, [0, gapLowerBound] -- the exact
+  // same threshold the per-family median lines below prune by, so a glance
+  // shows how much of the visible ticks/histogram sits inside the zone
+  // being excluded from those medians.
+  svg.appendChild(svgEl('rect', {
+    x: xToPx(0), y: marginTop, width: Math.max(0, xToPx(gapLowerBound) - xToPx(0)), height: plotH,
+    fill: 'rgba(128,128,128,0.25)',
   }));
 
   // Step 3: histogram of pooled pairwise gaps -- SKIP (not clamp) anything
@@ -107,6 +117,50 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
     }));
   }
 
+  // rowNeighborGaps/colNeighborGaps: unlike pooledGaps' O(n^2) all-pairs mix
+  // of both families, these are each family's own n-1 genuinely-adjacent
+  // gaps (sorted values, consecutive differences) -- ticks at the TOP of the
+  // plot, opposite the bottom-anchored histogram/candidate ticks below, so a
+  // family's real adjacent spacings can be compared directly against where
+  // the pooled histogram piles up. Drawn outside the [xMin,xMax] skip used
+  // for pooledGaps too, for the same reason (see the comment above Step 3).
+  // Colored by `rank` (each gap's two lines' averaged position in their
+  // family's value-sorted order) using the EXACT same rank->channel mapping
+  // drawVoteFamilyLines uses for the composite lines themselves
+  // (hoverDebugOverlays.ts) -- rgb(0,0,rank*255) for rows, rgb(rank*255,0,0)
+  // for columns -- so a tick's color visually traces back to the specific
+  // pair of composite lines that produced it.
+  for (const { gap, rank } of rowNeighborGaps) {
+    if (gap < xMin || gap > xMax) continue;
+    const px = xToPx(gap);
+    svg.appendChild(svgEl('line', { x1: px, y1: marginTop, x2: px, y2: marginTop + 10, stroke: `rgb(0,0,${Math.round(rank * 255)})`, 'stroke-width': 1 }));
+  }
+  for (const { gap, rank } of colNeighborGaps) {
+    if (gap < xMin || gap > xMax) continue;
+    const px = xToPx(gap);
+    svg.appendChild(svgEl('line', { x1: px, y1: marginTop, x2: px, y2: marginTop + 10, stroke: `rgb(${Math.round(rank * 255)},0,0)`, 'stroke-width': 1 }));
+  }
+
+  // Tall solid line at each family's own MEDIAN neighbor gap -- same
+  // full-height treatment as the winning-period line further down, but one
+  // per family (not pooled), so the two can be compared directly against
+  // each other and against the pooled seed/winning period. Gaps below the
+  // gap-lower-bound slider are pruned out FIRST (before median()'s own
+  // sort) -- the same near-duplicate-line noise gaps the seed-mode search
+  // in gridPeriodPhase.ts is built to shrug off via its histogram-mode
+  // trick, but a plain median over a small per-family sample has no such
+  // protection and would get dragged toward ~0 by even one of them.
+  const rowGapMedian = median(rowNeighborGaps.map((s) => s.gap).filter((g) => g >= gapLowerBound));
+  if (rowGapMedian !== null) {
+    const px = xToPx(rowGapMedian);
+    svg.appendChild(svgEl('line', { x1: px, y1: marginTop, x2: px, y2: marginTop + plotH, stroke: 'rgb(80,140,255)', 'stroke-width': 2 }));
+  }
+  const colGapMedian = median(colNeighborGaps.map((s) => s.gap).filter((g) => g >= gapLowerBound));
+  if (colGapMedian !== null) {
+    const px = xToPx(colGapMedian);
+    svg.appendChild(svgEl('line', { x1: px, y1: marginTop, x2: px, y2: marginTop + plotH, stroke: 'rgb(255,90,90)', 'stroke-width': 2 }));
+  }
+
   // Step 4: a tick per coarse-sampled candidate period.
   for (const s of coarseSamples) {
     const px = xToPx(s.period);
@@ -116,43 +170,35 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
   // Step 5 extension (VISUALIZATION ONLY -- not part of the real bracketed
   // search, see pipeline/gridPeriodPhase.ts's own comment on why the real
   // search stays deliberately narrow, and mergeAt-style "don't widen the
-  // decision path" reasoning elsewhere in this session). If panning/zooming
-  // reveals area outside the actual searched bracket, recompute the SAME
-  // circular-resultant score out there too using the same row/col samples
-  // -- otherwise the curve would just stop dead at the bracket edge. Drawn
-  // BEFORE the real curve (so the real one renders on top at the boundary)
-  // and in a lighter, more transparent orange to keep it visually distinct
-  // from the actual decision-driving search.
+  // decision path" reasoning elsewhere in this session). Recomputes the SAME
+  // circular-resultant score across the plot's ENTIRE current view range
+  // [xMin, xMax] -- not just the area outside the bracket -- at a fixed
+  // TRANSLUCENT_SAMPLES evenly-spaced points, redone on every redraw
+  // (including pan/zoom, since this whole function reruns on those) so
+  // resolution always matches whatever span is on screen right now instead
+  // of thinning out as you zoom in or clumping as you zoom out. Drawn
+  // BEFORE the real curve (so the real one renders on top over the
+  // bracket) and in a lighter, more transparent orange to keep it visually
+  // distinct from the actual decision-driving search.
   const rowValues = gpp.rowLines.map((s) => s.value), rowWeights = gpp.rowLines.map((s) => s.weight);
   const colValues = gpp.colLines.map((s) => s.value), colWeights = gpp.colLines.map((s) => s.weight);
-  const bracketWidth = bracket[1] - bracket[0];
-  const samplesPerUnit = bracketWidth > 1e-9 ? (coarseSamples.length - 1) / bracketWidth : 40;
-  function extraSamples(lo: number, hi: number): PeriodSearchSample[] {
-    if (hi <= lo) return [];
-    const n = Math.max(4, Math.min(150, Math.round((hi - lo) * samplesPerUnit)));
-    const out: PeriodSearchSample[] = [];
-    for (let i = 0; i <= n; i++) {
-      const period = lo + ((hi - lo) * i) / n;
-      if (period <= 1e-9) continue;
-      const rowFit = circularFit(rowValues, rowWeights, period);
-      const colFit = circularFit(colValues, colWeights, period);
-      out.push({ period, score: rowFit.resultant + colFit.resultant });
-    }
-    return out;
+  const TRANSLUCENT_SAMPLES = 100;
+  const translucentSamples: PeriodSearchSample[] = [];
+  for (let i = 0; i < TRANSLUCENT_SAMPLES; i++) {
+    const period = xMin + ((xMax - xMin) * i) / (TRANSLUCENT_SAMPLES - 1);
+    if (period <= 1e-9) continue;
+    const rowFit = circularFit(rowValues, rowWeights, period);
+    const colFit = circularFit(colValues, colWeights, period);
+    translucentSamples.push({ period, score: rowFit.resultant + colFit.resultant });
   }
-  const leftExtra = xMin < bracket[0] ? extraSamples(xMin, bracket[0]) : [];
-  const rightExtra = xMax > bracket[1] ? extraSamples(bracket[1], xMax) : [];
 
-  // Shared height scale across the real search AND the extended (dimmer)
-  // curve, so a stray taller peak outside the bracket doesn't get clipped.
-  const maxScore = Math.max(1e-6, ...coarseSamples.map((s) => s.score), ...leftExtra.map((s) => s.score), ...rightExtra.map((s) => s.score));
+  // Shared height scale across the real search AND the translucent curve,
+  // so a stray taller peak outside the bracket doesn't get clipped.
+  const maxScore = Math.max(1e-6, ...coarseSamples.map((s) => s.score), ...translucentSamples.map((s) => s.score));
   const toCurvePoints = (samples: PeriodSearchSample[]) =>
     samples.map((s) => `${xToPx(s.period)},${marginTop + plotH - (s.score / maxScore) * plotH}`).join(' ');
-  if (leftExtra.length > 0) {
-    svg.appendChild(svgEl('polyline', { points: toCurvePoints(leftExtra), fill: 'none', stroke: 'rgba(255,200,60,0.3)', 'stroke-width': 2 }));
-  }
-  if (rightExtra.length > 0) {
-    svg.appendChild(svgEl('polyline', { points: toCurvePoints(rightExtra), fill: 'none', stroke: 'rgba(255,200,60,0.3)', 'stroke-width': 2 }));
+  if (translucentSamples.length > 0) {
+    svg.appendChild(svgEl('polyline', { points: toCurvePoints(translucentSamples), fill: 'none', stroke: 'rgba(255,200,60,0.3)', 'stroke-width': 2 }));
   }
 
   // Step 5: the REAL R(P) search curve, scaled to the same height scale.

@@ -61,8 +61,13 @@ zoomSlider.addEventListener('input', () => {
 });
 
 async function startCamera(desiredFacing: string) {
+  // width/height `ideal` far above any real sensor -- getUserMedia treats
+  // `ideal` as "get as close as you can", so an unreachably high target
+  // just resolves to whatever the device's actual max is, without needing
+  // to query getCapabilities() (unavailable pre-stream anyway) or hardcode
+  // a specific resolution that undershoots newer/higher-res phones.
   const newStream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: desiredFacing } },
+    video: { facingMode: { ideal: desiredFacing }, width: { ideal: 7680 }, height: { ideal: 4320 } },
   });
   if (currentStream) currentStream.getTracks().forEach((t) => t.stop());
   currentStream = newStream;

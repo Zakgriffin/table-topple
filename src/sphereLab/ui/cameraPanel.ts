@@ -149,12 +149,10 @@ export function refreshCameraPanel() {
   setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setNum('recoveredFloorOpacity', cam.settings.recoveredFloorOpacity);
   setBool('showSampleLattice', cam.settings.showSampleLattice);
   setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
+  setNum('gridPeriodPhaseGapLowerBound', cam.settings.gridPeriodPhaseGapLowerBound);
   setBool('showCompositeLineFamilies', cam.settings.showCompositeLineFamilies);
 
-  setNum('simGradRadius', cam.settings.simGradRadius); setNum('coherenceRadius', cam.settings.coherenceRadius);
-  setNum('tangentWalkMaxSteps', cam.settings.tangentWalkMaxSteps); setNum('tangentWalkDeviationDeg', cam.settings.tangentWalkDeviationDeg);
-  setNum('tangentWalkMagFraction', cam.settings.tangentWalkMagFraction); setNum('tangentWalkGraceSamples', cam.settings.tangentWalkGraceSamples);
-  setBool('tangentWalkAdaptive', cam.settings.tangentWalkAdaptive);
+  setNum('coherenceRadius', cam.settings.coherenceRadius);
 
   const fieldViewId = 'fieldView' + cam.settings.fieldView[0].toUpperCase() + cam.settings.fieldView.slice(1);
   const fieldViewInput = document.getElementById(fieldViewId) as HTMLInputElement | null;
@@ -165,6 +163,8 @@ export function refreshCameraPanel() {
   setNum('bucketFillMagnitudeThreshold', cam.settings.bucketFillMagnitudeThreshold);
   setNum('bucketFillMinLengthPx', cam.settings.bucketFillMinLengthPx);
   setNum('bucketFillMaxSteps', cam.settings.bucketFillMaxSteps);
+  setBool('bucketFillUseLabelPropagation', cam.settings.bucketFillUseLabelPropagation);
+  setBool('bucketFillShowMerged', cam.settings.bucketFillShowMerged);
   setNum('bucketFillJoinSteps', cam.settings.bucketFillJoinSteps);
   setNum('bucketFillMergeMinSimilarity', cam.settings.bucketFillMergeMinSimilarity);
   setNum('bucketFillMaxTravelFactor', cam.settings.bucketFillMaxTravelFactor);
@@ -278,6 +278,7 @@ bindSlider('boardSize', (v) => {
 bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; });
 bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; });
 bindCheckbox('useGPUProject', (v) => { globalState.useGPUProject = v; });
+bindCheckbox('useGPUGradient', (v) => { globalState.useGPUGradient = v; });
 gpuVotesStatus.textContent = isWebGPUSupported()
   ? 'WebGPU is available in this browser.'
   : 'WebGPU is not available in this browser -- the checkbox above will silently fall back to the CPU pipeline.';
@@ -290,6 +291,11 @@ bindSlider('gridPeriodPhaseBinCount', (v) => {
   cam.settings.gridPeriodPhaseBinCount = v;
   drawGridPeriodPhasePlot(cam);
 }, (v) => v.toFixed(0));
+bindSlider('gridPeriodPhaseGapLowerBound', (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.gridPeriodPhaseGapLowerBound = v;
+  drawGridPeriodPhasePlot(cam);
+}, (v) => v.toFixed(4));
 bindCheckbox('showCompositeLineFamilies', (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showCompositeLineFamilies = v;
@@ -297,19 +303,8 @@ bindCheckbox('showCompositeLineFamilies', (v) => {
 });
 bindSlider('simNoise', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
 bindSlider('simBlur', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simBlur = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
-bindSlider('simGradRadius', (v) => { const cam = activeCamera(); if (cam) { cam.settings.simGradRadius = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
 bindSlider('captureSupersample', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.captureSupersample = v; resizeCaptureBuffers(cam); } }, (v) => `${v.toFixed(0)}x`);
 bindSlider('coherenceRadius', (v) => { const cam = activeCamera(); if (cam) { cam.settings.coherenceRadius = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
-bindSlider('tangentWalkMaxSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.tangentWalkMaxSteps = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
-bindSlider('tangentWalkDeviationDeg', (v) => { const cam = activeCamera(); if (cam) { cam.settings.tangentWalkDeviationDeg = v; markCaptureDirty(cam); } }, (v) => `${v.toFixed(0)}°`);
-bindSlider('tangentWalkMagFraction', (v) => { const cam = activeCamera(); if (cam) { cam.settings.tangentWalkMagFraction = v; markCaptureDirty(cam); } }, (v) => v.toFixed(2));
-bindSlider('tangentWalkGraceSamples', (v) => { const cam = activeCamera(); if (cam) { cam.settings.tangentWalkGraceSamples = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
-bindCheckbox('tangentWalkAdaptive', (v) => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.tangentWalkAdaptive = v;
-  markCaptureDirty(cam);
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
-});
 bindRadioGroup('fieldView', (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.fieldView = v as FieldView;
@@ -330,8 +325,30 @@ updateBucketFillJoinAvailability();
 updateBucketFillCompositeAvailability();
 updateBucketFillMergeMarkersAvailability();
 bindSlider('gradientArrowScale', (v) => { const cam = activeCamera(); if (cam) cam.settings.gradientArrowScale = v; updateHoverOverlays(lastHoverClientX, lastHoverClientY); }, (v) => v.toFixed(1));
+bindCheckbox('bucketFillUseLabelPropagation', (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.bucketFillUseLabelPropagation = v;
+  updateBucketFillOverlay(cam);
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+});
+bindCheckbox('bucketFillShowMerged', (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.bucketFillShowMerged = v;
+  updateBucketFillOverlay(cam);
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+});
 bindSlider('bucketFillToleranceDeg', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillToleranceDeg = v; updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => `${v.toFixed(1)}°`);
-bindSlider('bucketFillMagnitudeThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillMagnitudeThreshold = v; updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(1));
+bindSlider('bucketFillMagnitudeThreshold', (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.bucketFillMagnitudeThreshold = v;
+  updateBucketFillOverlay(cam);
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+  // Also feeds the 'gradient2x2LocalMax' field view's own black/white cutoff
+  // (see pipeline/preview.ts) -- unlike the bucket-fill overlay repainted
+  // directly above, that base field-view paint only happens through the
+  // normal throttled captureDirty pipeline, so it needs this nudge too.
+  markCaptureDirty(cam);
+}, (v) => v.toFixed(1));
 bindSlider('bucketFillMinLengthPx', (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.bucketFillMinLengthPx = v;
@@ -347,7 +364,13 @@ bindSlider('bucketFillMaxSteps', (v) => {
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 }, (v) => v.toFixed(0));
 bindSlider('bucketFillJoinSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillJoinSteps = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(0));
-bindSlider('bucketFillMergeMinSimilarity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillMergeMinSimilarity = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(2));
+bindSlider('bucketFillMergeMinSimilarity', (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.bucketFillMergeMinSimilarity = v;
+  updateBucketFillOverlay(cam); // also feeds the base raster's own adjacency-merge pass (bucketFillShowMerged), not just the join walk
+  updateBucketFillJoinOverlay(cam);
+  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+}, (v) => v.toFixed(2));
 bindSlider('bucketFillMaxTravelFactor', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillMaxTravelFactor = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(1));
 bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
 // Turning either on refreshes immediately -- updateGradientCirclesDebug now

@@ -48,15 +48,19 @@ export function rotateGrid(grid: DecodeSampleGrid, o: number): DecodeSampleGrid 
   const [rr, cc] = rotatedDims(grid.rows, grid.cols, o);
   const points: DecodeSamplePoint[][] = Array.from({ length: rr }, (_, a) =>
     Array.from({ length: cc }, (_, b) => readRotated(grid, o, a, b)));
-  let zeroI = 0, zeroJ = 0, bestD2 = Infinity;
-  for (let a = 0; a < rr; a++) {
-    for (let b = 0; b < cc; b++) {
-      const pt = points[a][b];
-      if (!pt.valid) continue;
-      const d2 = pt.u * pt.u + pt.v * pt.v;
-      if (d2 < bestD2) { bestD2 = d2; zeroI = a; zeroJ = b; }
-    }
-  }
+  // Carries the ORIGINAL grid's own zero-reference index through the same
+  // rotation every other cell goes through -- the inverse of readRotated's
+  // index map above -- rather than rescanning the whole rotated grid for
+  // "closest to the true origin, and valid". That rescan (and its "and
+  // valid" filter) existed only to dodge an invalid reference point for
+  // solveRecoveredCamQuat's old per-cell neighbor search, which no longer
+  // exists -- see this session's chat. With that gone, no downstream
+  // consumer cares whether the reference cell is valid (u/v and the torus
+  // row/col it maps to are defined for every index either way), so simply
+  // preserving the SAME physical point buildDecodeSampleGrid already chose
+  // (nearest the true world origin) is both simpler and just as correct.
+  const { rows: gr, cols: gc, zeroI: i, zeroJ: j } = grid;
+  const [zeroI, zeroJ] = o === 1 ? [j, gr - 1 - i] : o === 2 ? [gr - 1 - i, gc - 1 - j] : [gc - 1 - j, i];
   return { rows: rr, cols: cc, zeroI, zeroJ, points };
 }
 
@@ -103,51 +107,49 @@ export function tallyPositionVotes(grid: DecodeSampleGrid): VoteResult | null {
   return best;
 }
 
-// Solves for the camera's ACTUAL world orientation, entirely from the
-// pattern -- see pre-Stage-A history (solveRecoveredCamQuat's own comment)
-// for the full derivation. Pure function of the (already math-frame)
-// geometry plus the shared torus's true world layout.
-export function solveRecoveredCamQuat(
-  rotated: DecodeSampleGrid, anchorRow: number, anchorCol: number,
-  Drow: THREE.Vector3, Dcol: THREE.Vector3, normal: THREE.Vector3, distance: number,
-): THREE.Quaternion | null {
-  const mathPos = (i: number, j: number) => new THREE.Vector3()
-    .addScaledVector(Drow, rotated.points[i][j].u)
-    .addScaledVector(Dcol, rotated.points[i][j].v)
-    .addScaledVector(normal, -distance);
-  const worldPos = (i: number, j: number) => {
-    const tRow = ((anchorRow + i) % R + R) % R, tCol = ((anchorCol + j) % C + C) % C;
-    return new THREE.Vector3((tCol + 0.5 - C / 2) * GRID_STEP, 0, (tRow + 0.5 - R / 2) * GRID_STEP);
-  };
-  function findStep(i0: number, j0: number, di: number, dj: number): { i: number; j: number } | null {
-    const maxSteps = di !== 0 ? rotated.rows : rotated.cols;
-    for (let k = 1; k <= maxSteps; k++) {
-      const i = i0 + di * k, j = j0 + dj * k;
-      if (i < 0 || i >= rotated.rows || j < 0 || j >= rotated.cols) return null;
-      if (rotated.points[i][j].valid) return { i, j };
-    }
-    return null;
+// Solves for the camera's ACTUAL world orientation -- closed form, from
+// the analysis-frame row/col axes fitPairOfPlanes already recovered, no
+// per-cell grid/validity lookup needed. Drow/Dcol are defined against the
+// UNROTATED sample grid's own row/col indexing (buildDecodeSampleGrid,
+// before any rotation) -- but tallyPositionVotes doesn't know in advance
+// which of the 4 index-rotations of that grid actually matches the
+// board's own pattern, so it tries all 4 and reports the winner as
+// `orientation`. Whenever that winner isn't the identity, the sample
+// grid's row/col axes are offset from Drow/Dcol by exactly `orientation`
+// steps of 90 degrees, and rowMath/colMath below apply that SAME 90-degree
+// rotation `orientation` times: (x,y) -> (y,-x), a proper rotation
+// (determinant +1, cycles back to the start after 4 applications -- a
+// reflection would have order 2, not 4), not a per-case reflection fix.
+// fitPairOfPlanes' own handedness enforcement (axesReconstruction.ts,
+// right after the fit) is what makes ONE rotation formula sufficient
+// uniformly across all 4 orientations -- it guarantees {Drow,Dcol,Dnormal}
+// is consistently right-handed, so thirdMath below never needs its own
+// independent handedness correction; without that guarantee, rotating
+// (Dcol,Drow) alone wouldn't be enough. Verified numerically against a
+// simulated camera's true position at all 4 orientations via dev-bridge
+// (position error 0.05-0.5, matching a working capture's own baseline
+// noise) -- an earlier version of this got the o=1/3 axis swap right but
+// missed these sign flips entirely, silently correct only at o=0 (most
+// captures) while still reporting perfect bit consistency at o=1/2/3
+// (period/phase/anchor recovery are all independently correct; only this
+// rotation was missing) -- caught live via dev-bridge at yaw=+2
+// (orientation 3), where a +2/-2 yaw swing flipped which orientation won.
+// See this session's chat, and the yaw=-65 dev-bridge investigation for
+// the separate, earlier bug this same closed form replaced (walking
+// outward from one fixed grid index for ANY valid neighbor, which could
+// fail outright if that index landed on an invalid quad edge).
+export function solveRecoveredCamQuat(Drow: THREE.Vector3, Dcol: THREE.Vector3, orientation: number): THREE.Quaternion {
+  let rowMath = Dcol.clone(), colMath = Drow.clone();
+  for (let step = 0; step < orientation; step++) {
+    const nextRow = colMath, nextCol = rowMath.negate();
+    rowMath = nextRow; colMath = nextCol;
   }
-
-  const zi = rotated.zeroI, zj = rotated.zeroJ;
-  const rowStep = findStep(zi, zj, 1, 0) ?? findStep(zi, zj, -1, 0);
-  const colStep = findStep(zi, zj, 0, 1) ?? findStep(zi, zj, 0, -1);
-  if (!rowStep || !colStep) return null;
-
-  const originMath = mathPos(zi, zj), originWorld = worldPos(zi, zj);
-  const rowMath = mathPos(rowStep.i, rowStep.j).sub(originMath).normalize();
-  const rowWorld = worldPos(rowStep.i, rowStep.j).sub(originWorld).normalize();
-  const colMath = mathPos(colStep.i, colStep.j).sub(originMath).normalize();
-  const colWorld = worldPos(colStep.i, colStep.j).sub(originWorld).normalize();
-
   const thirdMath = new THREE.Vector3().crossVectors(rowMath, colMath).normalize();
-  const thirdWorld = new THREE.Vector3().crossVectors(rowWorld, colWorld).normalize();
-  if (thirdMath.lengthSq() < 1e-9 || thirdWorld.lengthSq() < 1e-9) return null;
-
   const mathBasis = new THREE.Matrix4().makeBasis(rowMath, colMath, thirdMath);
+  const rowWorld = new THREE.Vector3(0, 0, 1), colWorld = new THREE.Vector3(1, 0, 0);
+  const thirdWorld = new THREE.Vector3().crossVectors(rowWorld, colWorld).normalize();
   const worldBasis = new THREE.Matrix4().makeBasis(rowWorld, colWorld, thirdWorld);
-  const mathBasisInv = mathBasis.clone().invert();
-  return new THREE.Quaternion().setFromRotationMatrix(worldBasis.clone().multiply(mathBasisInv));
+  return new THREE.Quaternion().setFromRotationMatrix(worldBasis.multiply(mathBasis.invert()));
 }
 
 
@@ -291,6 +293,25 @@ export async function castAndBucketProjectedSamplesGPU(camera: Camera, bucketW: 
 
 type ProjectedSampleResult = ReturnType<typeof castAndBucketProjectedSamples>;
 
+// Picks bucketW/bucketH so every bucket is a SQUARE in world (floor-plane)
+// units -- binWidthU === binWidthV -- rather than one bucket per screen
+// pixel on each axis independently (the old behavior, castAndBucket*'s
+// default call pattern below used to use), which only produced square cells
+// when the projected floor extent itself happened to be square. The longer
+// of the two floor axes gets a full max(rtSize.w, rtSize.h) buckets; the
+// shorter axis gets proportionally fewer, so the shared bin width tracks
+// the EXTENT's own aspect ratio instead of the viewport's -- meaning
+// bucketW and bucketH will generally differ from each other (and from
+// rtSize.w/h), unlike a same-count-both-axes "square grid" (which does NOT
+// by itself guarantee square cells). `|| 1` / `Math.max(1, ...)` guard the
+// degenerate near-zero-extent case (e.g. a single valid ray) from producing
+// a zero-width bin or a zero-bucket axis.
+function squareCellBucketDims(camera: Camera, extentU: number, extentV: number): { bucketW: number; bucketH: number } {
+  const longAxisBuckets = Math.max(camera.rtSize.w, camera.rtSize.h);
+  const binWidth = Math.max(extentU, extentV) / longAxisBuckets || 1;
+  return { bucketW: Math.max(1, Math.round(extentU / binWidth)), bucketH: Math.max(1, Math.round(extentV / binWidth)) };
+}
+
 // The numeric half of what used to be buildProjectedTexture -- bins feed the
 // spacing refinement in runAxesReconstruction regardless of which mode is on
 // screen (World view's recovered-pose overlay depends on an accurate
@@ -299,10 +320,16 @@ type ProjectedSampleResult = ReturnType<typeof castAndBucketProjectedSamples>;
 // paint doesn't have to re-cast every ray a second time. No longer computes
 // marginals (autocorrelation) here -- see this session's chat: that was
 // display-only (the marginal-graph overlay, now removed) and decode gets its
-// own phase from gridPeriodPhase instead.
+// own phase from gridPeriodPhase instead. Projects once (stage 1) so the
+// resulting extent can size a square-cell bucket grid (stage 2) BEFORE
+// bucketing -- can't use castAndBucketProjectedSamples' single-call
+// convenience here since that picks bucketW/bucketH before the extent
+// (which stage 1 alone produces) is known.
 export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampleResult {
-  const result = camera.lastRecoveredAxes ? castAndBucketProjectedSamples(camera, camera.rtSize.w, camera.rtSize.h) : null;
-  if (!result) { camera.lastProjectedBins = null; return null; }
+  const proj = camera.lastRecoveredAxes ? projectSamplesCPU(camera) : null;
+  if (!proj) { camera.lastProjectedBins = null; return null; }
+  const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
+  const result = bucketSamples(camera, bucketW, bucketH, proj);
   camera.lastProjectedBins = result.bins;
   return result;
 }
@@ -314,8 +341,10 @@ export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampl
 // synchronous, and making it async would force all of those to become
 // async too. Only runAxesReconstruction (already async) calls this one.
 export async function computeProjectedBinsAndMarginalsGPU(camera: Camera): Promise<ProjectedSampleResult> {
-  const result = camera.lastRecoveredAxes ? await castAndBucketProjectedSamplesGPU(camera, camera.rtSize.w, camera.rtSize.h) : null;
-  if (!result) { camera.lastProjectedBins = null; return null; }
+  const proj = camera.lastRecoveredAxes ? await projectSamplesGPU(camera) : null;
+  if (!proj) { camera.lastProjectedBins = null; return null; }
+  const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
+  const result = bucketSamples(camera, bucketW, bucketH, proj);
   camera.lastProjectedBins = result.bins;
   return result;
 }
@@ -327,6 +356,18 @@ export async function computeProjectedBinsAndMarginalsGPU(camera: Camera): Promi
 export function paintProjectedTexture(camera: Camera, result: ProjectedSampleResult) {
   if (!result) { camera.projectedPreviewData.fill(0); camera.projectedPreviewTex.needsUpdate = true; return; }
   const { bins, sums, counts } = result;
+  // bins.w x bins.h (squareCellBucketDims' square-CELL grid) varies per
+  // capture with the recovered floor extent's own aspect ratio -- unlike
+  // every other preview buffer here, fixed at viewport-resize time --
+  // reallocate whenever this capture's bucket grid differs from the buffer
+  // camera/factory.ts or pipeline/capture.ts's resizeCaptureBuffers last
+  // sized this to (or the previous capture left it at).
+  const img = camera.projectedPreviewTex.image as { width: number; height: number };
+  if (img.width !== bins.w || img.height !== bins.h) {
+    camera.projectedPreviewData = new Uint8Array(bins.w * bins.h * 4);
+    camera.projectedPreviewTex.image = { data: camera.projectedPreviewData, width: bins.w, height: bins.h };
+    camera.projectedPreviewTex.dispose();
+  }
   for (let bi = 0; bi < bins.w * bins.h; bi++) {
     const c = counts[bi];
     const o = bi * 4;
@@ -538,8 +579,7 @@ export function runPositionDecode(camera: Camera, gray: Float64Array, w: number,
   const refTorusRow = ((anchorRow + rotated.zeroI) % R + R) % R;
   const refTorusCol = ((anchorCol + rotated.zeroJ) % C + C) % C;
 
-  const recoveredCamQuat = solveRecoveredCamQuat(rotated, anchorRow, anchorCol, Drow, Dcol, normal, distance);
-  if (!recoveredCamQuat) { camera.lastPositionDecode = null; return; }
+  const recoveredCamQuat = solveRecoveredCamQuat(Drow, Dcol, winner.orientation);
 
   const DrowWorld = Drow.clone().applyQuaternion(recoveredCamQuat);
   const DcolWorld = Dcol.clone().applyQuaternion(recoveredCamQuat);

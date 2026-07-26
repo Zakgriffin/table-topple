@@ -252,7 +252,16 @@ function animate() {
       // and the actual on-screen rotation direction (see this session's chat).
       const rotationSteps = active.settings.useTrueCardinalOrientation && active.lastPositionDecode
         ? (active.lastPositionDecode.orientation + 2) % 4 : 0;
-      const contentAspect = (rotationSteps === 1 || rotationSteps === 3) ? 1 / active.aspect : active.aspect;
+      // The bucket grid's OWN aspect (bins.w/bins.h), not active.aspect (the
+      // viewport's) -- pipeline/decodeGrid.ts's squareCellBucketDims sizes
+      // bucketW/bucketH from the recovered floor extent's aspect ratio
+      // specifically so each bucket is a square in world units; stretching
+      // that onto a rect shaped for the viewport's own (generally
+      // different) aspect would undo it on screen. Falls back to
+      // active.aspect before the first capture (no bins yet).
+      const bins = active.lastProjectedBins;
+      const binsAspect = bins ? bins.w / bins.h : active.aspect;
+      const contentAspect = (rotationSteps === 1 || rotationSteps === 3) ? 1 / binsAspect : binsAspect;
       const availW = innerWidth;
       const availH = innerHeight;
       const winAspect = availW / availH;

@@ -20,6 +20,7 @@ import { hsvToRgb } from './distortion.ts';
 // direction-averaging step already in this codebase.
 
 export interface BucketFillSegment {
+  seedIndex: number; // the pixel index this region grew from -- unlike count/cx/cy/endpoints (all of which shift as growth/merging changes), this is fixed for a given region's whole lifetime, so it's what segmentColors keys off to keep a region's color STABLE across reruns (scrubbing "fill steps", swapping BFS vs label-propagation, etc.)
   count: number; // pixel "mass" -- every member pixel counts equally, see cx/cy
   cx: number; cy: number; // center of mass: plain mean of member pixel (x,y), UNweighted by magnitude -- kept around, just not currently visualized
   avgFx: number; avgFy: number; // average gradient vector, sign-resolved (see below) -- NOT normalized, its length reflects how tightly the region's directions actually agree
@@ -39,7 +40,7 @@ export interface BucketFillSegment {
 }
 
 export function computeBucketFillRegions(
-  field: GradientField, toleranceDeg: number, seedEligible: Float64Array, magnitudeThreshold: number,
+  field: GradientField, toleranceDeg: number, magnitudeThreshold: number,
   // Caps each region's growth to at most this many BFS hops from its own
   // seed (0 = unbounded, i.e. today's existing behavior -- unlike
   // pipeline/bucketFillJoin.ts's computeJoinWalk, where 0 steps IS the
@@ -55,20 +56,18 @@ export function computeBucketFillRegions(
   for (let i = 0; i < n; i++) mag[i] = Math.hypot(fx[i], fy[i]);
 
   // magnitudeThreshold is a hard floor on which pixels ever participate at
-  // ALL -- unlike seedEligible's top-N% band (which only restricts who's
-  // allowed to FOUND a region), anything at or below this threshold is
-  // excluded from both seeding AND absorption, i.e. it can never be part of
-  // any segment, full stop.
-  //
-  // Only pixels in seedEligible's top-N% magnitude band (see the caller --
-  // every current caller passes (0, 100), i.e. no cutoff) are allowed to
-  // FOUND a new region -- once a
-  // region exists, growth/absorption is open to any connected pixel above
-  // magnitudeThreshold with a consistent orientation, same as LSD itself
-  // (which only prioritizes strong pixels as seeds via magnitude-descending
-  // order, and never additionally restricts absorption by magnitude).
+  // ALL -- anything at or below this threshold is excluded from both
+  // seeding AND absorption, i.e. it can never be part of any segment, full
+  // stop. Every pixel above it is eligible to FOUND a new region (used to
+  // also require passing a seedEligible top-N% magnitude band, but every
+  // caller always passed (0, 100) -- no actual cutoff -- so that parameter
+  // was pure dead weight, removed); once a region exists, growth/absorption
+  // is open to any connected pixel above magnitudeThreshold with a
+  // consistent orientation, same as LSD itself (which only prioritizes
+  // strong pixels as seeds via magnitude-descending order, and never
+  // additionally restricts absorption by magnitude).
   const order: number[] = [];
-  for (let i = 0; i < n; i++) if (seedEligible[i] > 0 && mag[i] > magnitudeThreshold) order.push(i);
+  for (let i = 0; i < n; i++) if (mag[i] > magnitudeThreshold) order.push(i);
   order.sort((a, b) => mag[b] - mag[a]);
 
   const cosTol = Math.cos(2 * THREE.MathUtils.degToRad(toleranceDeg));
@@ -157,6 +156,7 @@ export function computeBucketFillRegions(
     }
 
     segments.push({
+      seedIndex: seed,
       count, cx: sumX / count, cy: sumY / count, avgFx: sumFx / count, avgFy: sumFy / count,
       endAlongX, endAlongY, endAgainstX, endAgainstY,
     });
@@ -176,29 +176,43 @@ export function segmentLength(seg: BucketFillSegment): number {
   return Math.hypot(seg.endAlongX - seg.endAgainstX, seg.endAlongY - seg.endAgainstY);
 }
 
-// Deterministic (index -> hue), NOT Math.random() -- segments[i] is the
-// SAME region (same seed pixel, same processing order) across repeated
-// calls with the same input settings, e.g. every frame while scrubbing the
-// "fill steps" slider (see computeBucketFillRegions's own maxSteps) -- a
-// fresh random color per call made every region flicker to a new color on
-// every single step change, even where the region itself hadn't changed at
-// all. Golden-angle hue spacing (137.508deg, the same trick used for
-// maximally-distinct color wheels without knowing the total count up
-// front) keeps adjacent indices visually distinct without needing to know
-// segments.length ahead of time.
-export function segmentColors(count: number): [number, number, number][] {
-  const colors: [number, number, number][] = [];
-  for (let i = 0; i < count; i++) colors.push(hsvToRgb((i * 137.508) % 360, 0.85, 1));
-  return colors;
+// Deterministic (seed pixel index -> hue), NOT array position and NOT
+// Math.random() -- keyed off seedIndex specifically because it's the one
+// thing about a region that's fixed for its whole lifetime. count/cx/cy/
+// endpoints all shift as growth progresses, and even segments.length and
+// each region's RANK within the array can shift once merging enters the
+// picture (overlays/bucketFillOverlay.ts's post-merge mode) -- keying by
+// array position (the previous scheme, golden-angle hue spacing by index)
+// made a region's color drift for reasons that have nothing to do with the
+// region itself (another region merging away, or fewer/more seeds passing
+// the local-maxima test at a different fill-steps value). A simple integer
+// hash isn't as visually evenly-spaced as golden-angle spacing, but doesn't
+// need to know anything about sibling segments to compute, which is exactly
+// the property needed here.
+function hashSeedIndexToHueDeg(seedIndex: number): number {
+  let x = seedIndex | 0;
+  x = Math.imul(x ^ (x >>> 16), 0x45d9f3b);
+  x = Math.imul(x ^ (x >>> 16), 0x45d9f3b);
+  x = x ^ (x >>> 16);
+  return ((x >>> 0) / 0xffffffff) * 360;
+}
+export function segmentColors(segments: readonly BucketFillSegment[]): [number, number, number][] {
+  return segments.map((seg) => hsvToRgb(hashSeedIndexToHueDeg(seg.seedIndex), 0.85, 1));
 }
 
 export function paintBucketFillOverlay(
   regionId: Int32Array, segments: readonly BucketFillSegment[], colors: readonly [number, number, number][],
   minLengthPx: number, out: Uint8Array,
+  // Post-merge mode (overlays/bucketFillOverlay.ts) wants eligibility
+  // measured by each MERGE GROUP's combined composite length, not any one
+  // raw segment's own length -- a fragment too short to pass on its own is
+  // exactly the case merging is supposed to rescue. When omitted, falls back
+  // to the plain per-segment check every other (unmerged) caller wants.
+  eligibleOverride?: readonly boolean[],
 ) {
   // Precomputed once per segment (not per pixel) -- a segment can own many
   // pixels, no need to re-measure its length for each one.
-  const eligible = segments.map((seg) => segmentLength(seg) >= minLengthPx);
+  const eligible = eligibleOverride ?? segments.map((seg) => segmentLength(seg) >= minLengthPx);
   for (let i = 0; i < regionId.length; i++) {
     const o = i * 4;
     const id = regionId[i];

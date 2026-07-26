@@ -95,6 +95,11 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
   sphereAnchor.add(patchMesh);
   patchMesh.layers.set(DEBUG_LAYER);
 
+  // Initial size only -- pipeline/decodeGrid.ts's paintProjectedTexture
+  // reallocates this to match its own SQUARE-CELL bucket grid (bucketW x
+  // bucketH, generally NOT rtSize.w x .h and NOT square itself -- see its
+  // own comment) on every capture, since that grid's shape depends on the
+  // recovered floor extent's aspect ratio, not the viewport's.
   const projectedPreviewData = new Uint8Array(rtSize.w * rtSize.h * 4);
   const projectedPreviewTex = new THREE.DataTexture(projectedPreviewData, rtSize.w, rtSize.h, THREE.RGBAFormat);
   projectedPreviewTex.flipY = false;
@@ -177,7 +182,7 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
 
   const base: Omit<CameraBase, 'id' | 'name' | 'color'> = {
     lastRecoveredAxes: null, lastPositionDecode: null, lastDecodeGrid: null, lastDecodeRotated: null,
-    lastDecodeCorrectness: null, lastProjectedBins: null, lastVotes: [],
+    lastDecodeCorrectness: null, lastProjectedBins: null, lastVotes: [], lastVoteComposites: null,
     axesComputed: false, axesCapturing: false, lastAxesCapture: 0,
     rtSize: { ...rtSize }, aspect, pipRect: { x: 0, y: 0, w: 0, h: 0 }, captureDirty: true, lastPreviewUpdate: 0,
     lastNoisedPreviewGray: null, lastDisplayedVectorField: null,

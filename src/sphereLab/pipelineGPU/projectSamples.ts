@@ -64,7 +64,7 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   const vFovRad = getAnalysisVFovRad(camera);
   const normal = Dnormal.clone();
   if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
-  const MIN_GRAZING_COS = 0.15;
+  const minGrazingCos = camera.settings.minGrazingCos;
   const n = w * h;
 
   // Gradient field (reuses voteGeneration.ts's own GRADIENT_WGSL kernel --
@@ -80,7 +80,7 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   }
   const gradDimsBuf = uploadUniform(device, new Uint32Array([w, h, 1, 0]).buffer);
   const projUniformBuf = uploadUniform(device, buildProjectUniforms(
-    w, h, MIN_GRAZING_COS, distance, vFovRad, camera.aspect, MATH_QUAT, Drow, Dcol, normal,
+    w, h, minGrazingCos, distance, vFovRad, camera.aspect, MATH_QUAT, Drow, Dcol, normal,
   ));
   spanEnd(uploadSpan);
 

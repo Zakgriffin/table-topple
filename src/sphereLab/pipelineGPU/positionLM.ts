@@ -68,7 +68,7 @@ function buildP3Uniforms(
 export async function refineOrientationAndPositionLMGPU(
   samples: PhotometricSample[], w: number, h: number,
   initial: OrientationFit, distance: number, initialWorldX0: number, initialWorldZ0: number,
-  camQuat: THREE.Quaternion, vFovRad: number, aspect: number,
+  camQuat: THREE.Quaternion, vFovRad: number, aspect: number, minGrazingCos: number,
   torus: Uint8Array[], torusR: number, torusC: number,
   maxIterations = 20,
 ): Promise<(PositionFit & { iterations: number; initialCost: number; finalCost: number }) | null> {
@@ -83,7 +83,6 @@ export async function refineOrientationAndPositionLMGPU(
   const obsBuf = uploadFloat32(device, Float32Array.from(samples, (s) => s.observed));
   const outBuf = createStorageBuffer(device, n * 6 * 8); // vec2<f32> x 6 per sample
 
-  const MIN_GRAZING_COS = 0.15;
   const EPS_ROT = 1e-5, EPS_POS = 1e-3;
   const Drow0 = initial.Drow.clone(), Dcol0 = initial.Dcol.clone(), Dnormal0 = initial.Dnormal.clone();
 
@@ -93,7 +92,7 @@ export async function refineOrientationAndPositionLMGPU(
   async function evalResiduals(q: THREE.Quaternion, wx0: number, wz0: number, label: string): Promise<Float32Array> {
     const dispatchSpan = spanStart(`${label} (GPU round-trip)`);
     const uniformsBuf = uploadUniform(device!, buildP3Uniforms(
-      w, h, n, torusR, torusC, distance, vFovRad, aspect, MIN_GRAZING_COS, EPS_ROT, EPS_POS,
+      w, h, n, torusR, torusC, distance, vFovRad, aspect, minGrazingCos, EPS_ROT, EPS_POS,
       wx0, wz0, q, camQuat, Drow0, Dcol0, Dnormal0,
     ));
     const bindGroup = device!.createBindGroup({

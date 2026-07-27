@@ -35,13 +35,12 @@ export function computePhotometricSamples(gray: Float64Array, w: number, h: numb
 export function refineOrientationAndPositionLM(
   samples: PhotometricSample[], w: number, h: number,
   initial: OrientationFit, distance: number, initialWorldX0: number, initialWorldZ0: number,
-  camQuat: THREE.Quaternion, vFovRad: number, aspect: number,
+  camQuat: THREE.Quaternion, vFovRad: number, aspect: number, minGrazingCos: number,
   maxIterations = 20,
 ): PositionFit & { iterations: number; initialCost: number; finalCost: number } {
   const q = new THREE.Quaternion();
   const Drow0 = initial.Drow.clone(), Dcol0 = initial.Dcol.clone(), Dnormal0 = initial.Dnormal.clone();
   let worldX0 = initialWorldX0, worldZ0 = initialWorldZ0;
-  const MIN_GRAZING_COS = 0.15;
   const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, (py / h) * 2 - 1];
 
   const candidateNormal = (qq: THREE.Quaternion) => {
@@ -58,7 +57,7 @@ export function refineOrientationAndPositionLM(
       const [ndcU, ndcV] = toNDC(s.px, s.py);
       const rayDir = cornerDir(ndcU, ndcV, camQuat, vFovRad, aspect);
       const denom = rayDir.dot(normal);
-      if (denom >= -MIN_GRAZING_COS) continue;
+      if (denom >= -minGrazingCos) continue;
       const hit = rayDir.multiplyScalar(-distance / denom);
       const u = hit.dot(Drow), v = hit.dot(Dcol);
       const predicted = predictedBilinear(wx0 + u, wz0 + v);

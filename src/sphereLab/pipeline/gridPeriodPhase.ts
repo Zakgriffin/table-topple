@@ -269,6 +269,15 @@ export function computeGridPeriodPhase(
   let bestP = seedPeriod, bestScore = -1;
   for (let i = 0; i < COARSE_SAMPLES; i++) {
     const P = bracket[0] + ((bracket[1] - bracket[0]) * i) / (COARSE_SAMPLES - 1);
+    // circularFit divides by P -- since bracket[0] is now clamped to (not
+    // bailed out below) 0, the FIRST sample can land exactly on 0. Skipping
+    // it (rather than letting it produce a NaN score) matches the same
+    // guard overlays/gridPeriodPhaseOverlays.ts's translucent extension
+    // curve already uses, and keeps every coarseSamples entry a valid
+    // number -- a single NaN score used to break that plot's entire
+    // polyline (SVG rejects the whole `points` attribute if any one point
+    // is malformed), not just the one bad point.
+    if (P <= 1e-9) continue;
     const rowFit = circularFit(rowValues, rowWeights, P);
     const colFit = circularFit(colValues, colWeights, P);
     const score = rowFit.resultant + colFit.resultant;

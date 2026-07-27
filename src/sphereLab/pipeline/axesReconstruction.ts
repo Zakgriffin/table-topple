@@ -9,7 +9,7 @@ import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { globalState } from '../state.ts';
 import { axesReadout, captureAxesBtn } from '../ui/dom.ts';
 import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
-import { computeProjectedBinsAndMarginals, computeProjectedBinsAndMarginalsGPU, paintProjectedTexture, runPositionDecode } from './decodeGrid.ts';
+import { computeProjectedBinsAndMarginalsAuto, paintProjectedTexture, ProjectedSampleResult, runPositionDecode } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { computeGradient2x2Field } from './gradientField.ts';
 import { computeGridPeriodPhase } from './gridPeriodPhase.ts';
@@ -19,17 +19,6 @@ import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { computeGradient2x2FieldGPU } from '../pipelineGPU/gradient2x2.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 import { GradientField } from '../types.ts';
-
-// Falls back to CPU per-call if the GPU one returns null (WebGPU
-// unavailable) -- same pattern as every other GPU sub-pipeline in this file.
-async function projectBins(camera: Camera) {
-  const s = spanStart(globalState.useGPUProject ? 'projectBins (GPU stage 1 + CPU bucket)' : 'projectBins (CPU)');
-  const result = globalState.useGPUProject
-    ? (await computeProjectedBinsAndMarginalsGPU(camera)) ?? computeProjectedBinsAndMarginals(camera)
-    : computeProjectedBinsAndMarginals(camera);
-  spanEnd(s);
-  return result;
-}
 
 // Same pattern, for the 2x2 gradient field that feeds computeGradient2x2Composites
 // below (see pipelineGPU/gradient2x2.ts).
@@ -178,8 +167,13 @@ async function recomputeStages(camera: Camera, isActive: boolean) {
     : null;
 
   const projectSpan = spanStart('projectBins (display + decode-marginals bins)');
+  // Captured outside the `if` (stays null when there's no recovered axes to
+  // project) so it can be handed to refreshModeVisualizations below instead
+  // of that call recomputing the exact same (possibly GPU) result a second
+  // time -- see modeRefresh.ts's own comment on precomputedProjection.
+  let projResult: ProjectedSampleResult = null;
   if (camera.lastRecoveredAxes) {
-    const projResult = await projectBins(camera);
+    projResult = await computeProjectedBinsAndMarginalsAuto(camera);
     if (showProjected) paintProjectedTexture(camera, projResult);
   }
   spanEnd(projectSpan);
@@ -267,8 +261,10 @@ async function recomputeStages(camera: Camera, isActive: boolean) {
     // bucket-fill/join/hover overlays and its grid-period/phase plot,
     // Projected-Cam's texture, World's recovered-floor decal) -- see
     // pipeline/modeRefresh.ts. Only meaningful for whichever camera is
-    // actually on screen.
-    refreshModeVisualizations(camera, globalState.mode);
+    // actually on screen. projResult (computed above, possibly null) is
+    // handed over so this doesn't pay for a second (possibly GPU)
+    // re-projection of data it already has in hand.
+    await refreshModeVisualizations(camera, globalState.mode, { value: projResult });
   }
 }
 

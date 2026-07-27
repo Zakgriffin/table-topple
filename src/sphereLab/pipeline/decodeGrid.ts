@@ -291,7 +291,7 @@ export async function castAndBucketProjectedSamplesGPU(camera: Camera, bucketW: 
   return bucketSamples(camera, bucketW, bucketH, proj);
 }
 
-type ProjectedSampleResult = ReturnType<typeof castAndBucketProjectedSamples>;
+export type ProjectedSampleResult = ReturnType<typeof castAndBucketProjectedSamples>;
 
 // Picks bucketW/bucketH so every bucket is a SQUARE in world (floor-plane)
 // units -- binWidthU === binWidthV -- rather than one bucket per screen
@@ -337,15 +337,33 @@ export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampl
 // GPU-aware twin, deliberately kept separate rather than folded into
 // computeProjectedBinsAndMarginals above -- that function has several
 // call sites outside the reconstruction pipeline (throttled preview
-// updates, mode switches, camera creation) that are perfectly fine staying
-// synchronous, and making it async would force all of those to become
-// async too. Only runAxesReconstruction (already async) calls this one.
+// updates, mode switches, camera creation) that used to be perfectly fine
+// staying synchronous; now that those call sites (see modeRefresh.ts/
+// main.ts/ui/mode.ts) have all gone async too (see this session's chat --
+// buildProjectedTexture used to silently bypass globalState.useGPUProject
+// entirely, running a redundant CPU-only re-projection on every
+// reconstruction pass and every throttled preview tick), every caller can
+// safely go through computeProjectedBinsAndMarginalsAuto below instead of
+// picking CPU vs GPU itself.
 export async function computeProjectedBinsAndMarginalsGPU(camera: Camera): Promise<ProjectedSampleResult> {
   const proj = camera.lastRecoveredAxes ? await projectSamplesGPU(camera) : null;
   if (!proj) { camera.lastProjectedBins = null; return null; }
   const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
   const result = bucketSamples(camera, bucketW, bucketH, proj);
   camera.lastProjectedBins = result.bins;
+  return result;
+}
+
+// Single dispatch point for every caller (axesReconstruction.ts's
+// recomputeStages, and modeRefresh.ts's buildProjectedTexture) --
+// centralizes the globalState.useGPUProject check once instead of
+// duplicating the GPU-with-CPU-fallback ternary at each call site.
+export async function computeProjectedBinsAndMarginalsAuto(camera: Camera): Promise<ProjectedSampleResult> {
+  const s = spanStart(globalState.useGPUProject ? 'projectBins (GPU stage 1 + CPU bucket)' : 'projectBins (CPU)');
+  const result = globalState.useGPUProject
+    ? (await computeProjectedBinsAndMarginalsGPU(camera)) ?? computeProjectedBinsAndMarginals(camera)
+    : computeProjectedBinsAndMarginals(camera);
+  spanEnd(s);
   return result;
 }
 
@@ -383,12 +401,33 @@ export function paintProjectedTexture(camera: Camera, result: ProjectedSampleRes
   camera.projectedPreviewTex.needsUpdate = true;
 }
 
-// Convenience for call sites that always want both (buildProjectedTexture's
-// old all-in-one behavior) -- currently just the throttled preview-update
-// path in main.ts's animate loop, which already only runs for the active
-// camera while Projected-Cam mode is on screen.
-export function buildProjectedTexture(camera: Camera) {
-  paintProjectedTexture(camera, computeProjectedBinsAndMarginals(camera));
+// Convenience for call sites that always want both (paint AND, unless
+// already provided, compute) -- the throttled preview-update path in
+// main.ts's animate loop, mode switches (ui/mode.ts), and camera creation
+// (camera/lifecycle.ts) all still need a real computation here since they
+// have no fresher result lying around; modeRefresh.ts's
+// refreshModeVisualizations, called at the tail of a reconstruction pass
+// that JUST computed this same result a few lines earlier, passes it in via
+// `precomputed` instead of paying for a second (possibly GPU) round trip.
+// Wrapped in `{ value }` rather than passed bare so "not provided" (recompute)
+// and "provided, and IS null" (recovered axes genuinely missing -- paint
+// blank) stay distinguishable.
+//
+// Per-camera sequence guard: main.ts's throttled preview loop can call this
+// again (captureDirty re-set by some other slider) before a slow -- e.g.
+// GPU -- in-flight call finishes; without this, whichever call happened to
+// finish LAST would win even if it was started FIRST, painting a stale
+// result over a newer one. Keyed per-camera (not one shared counter) since
+// World mode can have several cameras' textures updating concurrently (every
+// camera's own recovered-floor decal, not just the active one) -- a shared
+// counter would let one camera's call wrongly invalidate another's.
+const projTextureSeq = new WeakMap<Camera, number>();
+export async function buildProjectedTexture(camera: Camera, precomputed?: { value: ProjectedSampleResult }): Promise<void> {
+  const seq = (projTextureSeq.get(camera) ?? 0) + 1;
+  projTextureSeq.set(camera, seq);
+  const result = precomputed ? precomputed.value : await computeProjectedBinsAndMarginalsAuto(camera);
+  if (projTextureSeq.get(camera) !== seq) return; // a newer call started meanwhile -- its result wins instead
+  paintProjectedTexture(camera, result);
 }
 
 // Re-buckets castAndBucketProjectedSamples' rays at a resolution sized to

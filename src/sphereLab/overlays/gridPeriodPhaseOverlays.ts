@@ -1,7 +1,7 @@
 import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { projectedUVScale } from '../pipeline/decodeGrid.ts';
-import { circularFit, GnomonicPoint, GridPeriodPhaseResult, median, PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
+import { circularFit, computePooledGaps, GnomonicPoint, GridPeriodPhaseResult, median, PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
 import { DecodeCellDebug } from '../types.ts';
 import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx } from '../ui/dom.ts';
 import { svgEl, svgText } from './svgUtil.ts';
@@ -58,7 +58,11 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
     svg.appendChild(svgText(8, H / 2, 'no data yet -- capture now', { fill: '#888', 'font-size': 11, 'font-family': 'sans-serif' }));
     return;
   }
-  const { pooledGaps, rowNeighborGaps, colNeighborGaps, seedPeriod, bracket, coarseSamples } = gpp.debug;
+  const { rowNeighborGaps, colNeighborGaps, seedPeriod, bracket, coarseSamples } = gpp.debug;
+  // Computed here, on demand, rather than eagerly inside computeGridPeriodPhase
+  // itself -- see that function's own comment (O(n^2), debug-only, used to
+  // run on every capture regardless of whether this plot was ever drawn).
+  const pooledGaps = computePooledGaps(gpp.rowLines, gpp.colLines);
   const marginBottom = 16, marginTop = 14;
   const plotH = H - marginBottom - marginTop;
 

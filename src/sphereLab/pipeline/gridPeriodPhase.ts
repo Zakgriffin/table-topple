@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { cornerDir } from '../math/geometry.ts';
+import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { CompositeLine } from './bucketFillJoin.ts';
 
 // ── Grid period/phase recovery from composite lines (pure) ────────────────
@@ -71,13 +72,19 @@ export interface GridPeriodPhaseResult {
   height: number | null; // cellPitch / period, null if cellPitch wasn't supplied
   rowLines: GridLineSample[];
   colLines: GridLineSample[];
-  // Everything a debug visualization needs to show its work -- the pooled
-  // pairwise gaps (for a histogram), the seed period derived from them, the
-  // search bracket, and every coarse sample's own (period, score) pair (for
-  // plotting the search curve and marking where it landed).
+  // Everything a debug visualization needs to show its work -- the seed
+  // period, the search bracket, and every coarse sample's own (period,
+  // score) pair (for plotting the search curve and marking where it
+  // landed). Does NOT include the pooled all-pairs gap histogram -- that's
+  // an O(n^2) computation that fed ONLY a debug plot and nothing about the
+  // actual period/distance result, yet used to run unconditionally on
+  // every single capture regardless of whether anyone was even looking at
+  // that plot (measured 47% of total reconstruction time at n=983 lines --
+  // see this session's chat). computePooledGaps below recomputes it
+  // on-demand instead, from rowLines/colLines, only when
+  // overlays/gridPeriodPhaseOverlays.ts's plot is actually being drawn.
   debug: {
-    pooledGaps: number[];
-    rowNeighborGaps: NeighborGapSample[]; // adjacent-value gaps within rowSamples ONLY (sorted, consecutive differences) -- the actual n-1 genuinely-adjacent gaps this file's period seed relies on existing, as opposed to pooledGaps' O(n^2) all-pairs mix of both families
+    rowNeighborGaps: NeighborGapSample[]; // adjacent-value gaps within rowSamples ONLY (sorted, consecutive differences) -- the actual n-1 genuinely-adjacent gaps this file's period seed relies on existing, as opposed to computePooledGaps' O(n^2) all-pairs mix of both families
     colNeighborGaps: NeighborGapSample[]; // same, for colSamples
     seedPeriod: number;
     bracket: [number, number];
@@ -134,6 +141,26 @@ function gnomonic(r: THREE.Vector3, Drow: THREE.Vector3, Dcol: THREE.Vector3, Dn
   return { xRow: -r.dot(Drow) / dn, xCol: -r.dot(Dcol) / dn };
 }
 
+// Pooled pairwise gaps (row and column values pooled together, every
+// combination -- not just adjacent ones), sorted ascending -- ONLY used by
+// overlays/gridPeriodPhaseOverlays.ts's debug histogram plot, and not cheap
+// (O(n^2) in the total line count). Deliberately NOT computed inside
+// computeGridPeriodPhase itself (see GridPeriodPhaseResult's own comment on
+// why) -- call this separately, only when that plot is actually being
+// drawn, from its already-computed rowLines/colLines.
+export function computePooledGaps(rowLines: readonly GridLineSample[], colLines: readonly GridLineSample[]): number[] {
+  const allValues = [...rowLines.map((s) => s.value), ...colLines.map((s) => s.value)];
+  const pooledGaps: number[] = [];
+  for (let i = 0; i < allValues.length; i++) {
+    for (let j = i + 1; j < allValues.length; j++) {
+      const g = Math.abs(allValues[i] - allValues[j]);
+      if (g > 1e-9) pooledGaps.push(g);
+    }
+  }
+  pooledGaps.sort((a, b) => a - b);
+  return pooledGaps;
+}
+
 export function computeGridPeriodPhase(
   composites: { root: number; line: CompositeLine }[],
   w: number, h: number,
@@ -159,6 +186,7 @@ export function computeGridPeriodPhase(
   // plane-pair fit itself relies on), then rectify to one scalar via the
   // gnomonic projection of its own two endpoints -- NOT the normal-vector
   // ratio, see this file's header for why the two forms don't mix.
+  const classifySpan = spanStart('classify lines (cornerDir+gnomonic x2 per line)');
   const rowSamples: { root: number; value: number; weight: number; p1: GnomonicPoint; p2: GnomonicPoint }[] = [];
   const colSamples: { root: number; value: number; weight: number; p1: GnomonicPoint; p2: GnomonicPoint }[] = [];
   for (const { root, line } of composites) {
@@ -185,22 +213,8 @@ export function computeGridPeriodPhase(
       colSamples.push({ root, value: (p1.xRow + p2.xRow) / 2, weight: arcLen, p1, p2 });
     }
   }
+  spanEnd(classifySpan);
   if (rowSamples.length === 0 && colSamples.length === 0) return null;
-
-  // Pooled pairwise gaps (row and column values pooled together, every
-  // combination -- not just adjacent ones) -- kept for the debug histogram
-  // (gridPeriodPhaseOverlays.ts's plot) even though the seed itself no
-  // longer comes from this (see below).
-  const allValues = [...rowSamples.map((s) => s.value), ...colSamples.map((s) => s.value)];
-  const pooledGaps: number[] = [];
-  for (let i = 0; i < allValues.length; i++) {
-    for (let j = i + 1; j < allValues.length; j++) {
-      const g = Math.abs(allValues[i] - allValues[j]);
-      if (g > 1e-9) pooledGaps.push(g);
-    }
-  }
-  if (pooledGaps.length === 0) return null;
-  pooledGaps.sort((a, b) => a - b);
 
   // Within EACH family alone (not pooled), sort by value and diff
   // consecutive entries -- the actual n-1 genuinely-adjacent gaps, rather
@@ -208,6 +222,7 @@ export function computeGridPeriodPhase(
   // the midpoint of its two lines' own i/(n-1) rank (matching
   // drawVoteFamilyLines' convention), so a caller can color it as those
   // two lines' averaged color -- see NeighborGapSample's own comment.
+  const seedSpan = spanStart('neighbor gaps + median seed');
   const neighborGaps = (samples: { value: number }[]): NeighborGapSample[] => {
     const sorted = samples.map((s) => s.value).sort((a, b) => a - b);
     const n = sorted.length;
@@ -243,6 +258,7 @@ export function computeGridPeriodPhase(
   // there's no reliable seed to center a narrow search on in that case.
   const rowGapMedian = median(rowNeighborGaps.map((s) => s.gap).filter((g) => g >= gapLowerBound));
   const colGapMedian = median(colNeighborGaps.map((s) => s.gap).filter((g) => g >= gapLowerBound));
+  spanEnd(seedSpan);
   if (rowGapMedian === null || colGapMedian === null) return null;
   const seedPeriod = (rowGapMedian + colGapMedian) / 2;
   if (seedPeriod < 1e-9) return null;
@@ -262,6 +278,7 @@ export function computeGridPeriodPhase(
   // negative anyway, so the search is still perfectly usable over
   // [0, seedPeriod + halfWidth], just asymmetric around the seed.
   const bracket: [number, number] = [Math.max(0, seedPeriod - halfWidth), seedPeriod + halfWidth];
+  const searchSpan = spanStart('coarse search (40 samples) + parabolic polish');
   const COARSE_SAMPLES = 40;
   const rowValues = rowSamples.map((s) => s.value), rowWeights = rowSamples.map((s) => s.weight);
   const colValues = colSamples.map((s) => s.value), colWeights = colSamples.map((s) => s.weight);
@@ -301,6 +318,7 @@ export function computeGridPeriodPhase(
       }
     }
   }
+  spanEnd(searchSpan);
 
   // Step 5: final phases at the winning period.
   const finalRow = circularFit(rowValues, rowWeights, bestP);
@@ -320,6 +338,6 @@ export function computeGridPeriodPhase(
     period: bestP, phiRow: finalRow.phase, phiCol: finalCol.phase,
     height: cellPitch !== null ? cellPitch / bestP : null,
     rowLines, colLines,
-    debug: { pooledGaps, rowNeighborGaps, colNeighborGaps, seedPeriod, bracket, coarseSamples },
+    debug: { rowNeighborGaps, colNeighborGaps, seedPeriod, bracket, coarseSamples },
   };
 }

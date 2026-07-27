@@ -2,7 +2,7 @@ import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import { computeLsdRectangles, LsdRectangle } from '../pipeline/lsdSegments.ts';
+import { computeLsdRectanglesAuto, LsdRectangle } from '../pipeline/lsdSegments.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import {
   lsdReadout, lsdRectanglesGroup, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn,
@@ -106,7 +106,17 @@ function drawRectanglesSvg(camera: Camera, rects: readonly LsdRectangle[]) {
 // Recomputes the from-scratch traditional LSD pipeline (pipeline/
 // lsdSegments.ts) and repaints its 3 independent debug views (accepted
 // rectangles + rejected candidates, both SVG; raw region pixels, raster).
-export function updateLsdOverlay(camera: Camera) {
+//
+// Async now that computeLsdRectanglesAuto can go through a GPU round trip
+// (see lsdSegments.ts/lsdFit.ts) -- every caller here fires this off without
+// awaiting it (a live "redraw when ready" refresh, same pattern
+// runAxesReconstruction's own RAF callback already uses), which on its own
+// would let a slow call's stale result clobber a faster, NEWER call's result
+// if two land out of start order (e.g. a fast slider drag). lsdOverlaySeq
+// guards against that: only the most-recently-STARTED call is allowed to
+// actually apply its result.
+let lsdOverlaySeq = 0;
+export async function updateLsdOverlay(camera: Camera) {
   const settings = camera.settings;
   if (!settings.showLsdSegments && !settings.showLsdRejected && !settings.showLsdRawRegions) {
     while (lsdRectanglesGroup.firstChild) lsdRectanglesGroup.removeChild(lsdRectanglesGroup.firstChild);
@@ -116,7 +126,8 @@ export function updateLsdOverlay(camera: Camera) {
   if (!camera.lastNoisedPreviewGray) return;
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const field = computeGradient2x2Field(camera.lastNoisedPreviewGray, w, h);
-  const rects = computeLsdRectangles(field, {
+  const seq = ++lsdOverlaySeq;
+  const rects = await computeLsdRectanglesAuto(field, {
     toleranceDeg: settings.lsdToleranceDeg,
     rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
     magnitudeBuckets: settings.lsdMagnitudeBuckets,
@@ -126,6 +137,7 @@ export function updateLsdOverlay(camera: Camera) {
     retryToleranceFactor: settings.lsdRetryToleranceFactor,
     retryShrinkFraction: settings.lsdRetryShrinkFraction,
   });
+  if (seq !== lsdOverlaySeq) return; // a newer call started while this one was in flight -- its result wins instead
   camera.lastLsdRectangles = rects;
 
   if (settings.showLsdRawRegions) {

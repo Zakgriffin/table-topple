@@ -95,7 +95,7 @@ async function recomputeStages(camera: Camera, isActive: boolean) {
   // mismatch structurally impossible now.
   const compositesSpan = spanStart('composites (2x2 gradient field)');
   const field2x2 = await gradient2x2Field(gray, w, h);
-  const voteComposites = computeGradient2x2Composites(camera.settings, field2x2, w, h);
+  const voteComposites = await computeGradient2x2Composites(camera.settings, field2x2, w, h);
   spanEnd(compositesSpan);
   camera.lastVoteComposites = voteComposites;
 

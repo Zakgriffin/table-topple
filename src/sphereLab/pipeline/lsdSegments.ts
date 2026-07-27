@@ -1,5 +1,7 @@
 import * as THREE from 'three';
 import { BucketFillSegment } from './bucketFillSegments.ts';
+import { fitAndTestRegionsGPU } from '../pipelineGPU/lsdFit.ts';
+import { globalState } from '../state.ts';
 import { GradientField } from '../types.ts';
 
 // ── LSD (Line Segment Detector, von Gioi/Jakubowicz/Morel/Randall 2010) ───
@@ -20,15 +22,39 @@ import { GradientField } from '../types.ts';
 //
 // GPU-friendliness note: stages 2, 4, and 5 all map onto standard parallel
 // primitives (bucket/counting sort, segmented reduction, per-object bounded
-// scan). Stage 3 (region growing) does NOT -- LSD's own real behavior
-// depends on growing one region all the way to completion, strictly in
-// magnitude-priority order, before even looking at the next seed; that
-// serial commitment is WHY a strong seed's region absorbs an entire ridge
-// before a weaker pixel on the same ridge ever gets a chance to start its
-// own competing region. A synchronous/parallel restructuring of this stage
-// reintroduces exactly that fragmentation. Left serial (CPU) for now --
-// premature optimization here isn't worth the correctness cost until this
-// stage is actually shown to be the bottleneck.
+// scan) -- but only stages 4+5's FIRST NFA pass actually got a GPU port
+// (pipelineGPU/lsdFit.ts, gated by globalState.useGPULsdFit, see
+// computeLsdRectanglesGPU below). Stage 2 (the counting sort) did NOT,
+// despite being an equally standard GPU primitive in the abstract: its
+// output (`order`) and inputs (mag/theta) all have to be CPU-resident
+// regardless, since stage 3 (next) is CPU-only and needs them as plain JS
+// arrays -- so a GPU stage 2 would upload fx/fy (again -- they're already
+// CPU-resident by the time this function is called, see GradientField's own
+// contract), dispatch, and read the SAME data straight back, for a linear-
+// time operation that's already cheap on CPU. That round-trip overhead is
+// exactly the failure mode pipelineGPU/decodeTally.ts's own header
+// documents (measured net-negative at realistic sizes) -- not worth
+// repeating here without evidence stage 2 is an actual bottleneck.
+//
+// Stage 3 (region growing) isn't GPU-friendly AT ALL, round-trip cost
+// aside -- LSD's own real behavior depends on growing one region all the
+// way to completion, strictly in magnitude-priority order, before even
+// looking at the next seed; that serial commitment is WHY a strong seed's
+// region absorbs an entire ridge before a weaker pixel on the same ridge
+// ever gets a chance to start its own competing region. A synchronous/
+// parallel restructuring of this stage reintroduces exactly that
+// fragmentation, changing WHICH regions form, not just how fast. Left
+// serial (CPU) unconditionally.
+//
+// Stage 5's retry loop (tighten-then-shrink on NFA rejection) also stayed
+// CPU-only -- retry 1 (angle refilter) would be easy, but retry 2+ needs a
+// per-region partial sort/selection (drop the farthest-from-center
+// fraction), a genuinely harder GPU problem than anything else here. Any
+// region the GPU's first pass rejects falls through to fitRegionWithRetries
+// below (the exact same CPU code the pure-CPU path uses for every region),
+// re-attempting from scratch rather than resuming GPU state -- simpler and
+// risk-free, at the minor cost of redoing that region's attempt 0 on CPU
+// too.
 
 // The level-line angle (LSD's own convention): the gradient rotated -90
 // degrees, a DIRECTED angle (encodes which side is darker) -- unlike this
@@ -297,11 +323,84 @@ export interface LsdSettings {
   maxRetries: number; retryToleranceFactor: number; retryShrinkFraction: number;
 }
 
-export function computeLsdRectangles(field: GradientField, settings: LsdSettings): LsdRectangle[] {
+function computeMagTheta(field: GradientField): { mag: Float64Array; theta: Float64Array } {
   const { fx, fy, w, h } = field;
   const n = w * h;
   const mag = new Float64Array(n), theta = new Float64Array(n);
   for (let i = 0; i < n; i++) { mag[i] = Math.hypot(fx[i], fy[i]); theta[i] = levelLineAngle(fx[i], fy[i]); }
+  return { mag, theta };
+}
+
+// Stage 5's full accept/retry loop for ONE region -- shared by the pure-CPU
+// path (every region) and the GPU path (only regions lsdFit.wgsl.ts's first
+// pass rejected, re-attempted from scratch rather than resuming GPU state,
+// see this file's header). Returns null only for a degenerate region (< 2
+// members even before any retry).
+function fitRegionWithRetries(
+  region: GrownRegion, mag: Float64Array, theta: Float64Array, w: number, h: number,
+  settings: LsdSettings, logNTests: number, logEpsilon: number,
+): LsdRectangle | null {
+  let members = region.members;
+  let toleranceDeg = settings.toleranceDeg;
+  let retries = 0;
+  let accepted = false;
+  let rect: RectangleCandidate | null = null;
+  let nfaLog10 = Infinity;
+
+  for (;;) {
+    if (members.length < 2) break; // degenerate -- no meaningful axis, leave as rejected
+    rect = fitRectangle(members, mag, w, region.meanAngle);
+    const toleranceRad = THREE.MathUtils.degToRad(toleranceDeg);
+    const p = toleranceRad / Math.PI;
+    const { n: rn, k: rk } = countRectanglePixels(rect, mag, theta, w, h, settings.rhoNoiseThreshold, toleranceRad);
+    const logNfa = logNTests + logBinomialTail(rn, rk, p);
+    nfaLog10 = logNfa / Math.LN10;
+    if (logNfa < logEpsilon) { accepted = true; break; }
+    if (retries >= settings.maxRetries) break;
+    retries++;
+    if (retries === 1) {
+      // Retighten first (LSD's own first move): a simplified stand-in for
+      // re-growing the region from its seed under a stricter tolerance --
+      // re-filters the CURRENT members down to those still within the
+      // new, tighter tolerance of the region's own (fixed) mean angle,
+      // rather than a full re-grow from scratch. Same intent (shrink to
+      // the self-consistent "core" of the region) with far less
+      // machinery than repeating stage 3 per retry.
+      toleranceDeg *= settings.retryToleranceFactor;
+      const cosTol = Math.cos(THREE.MathUtils.degToRad(toleranceDeg));
+      const meanAx = Math.cos(region.meanAngle), meanAy = Math.sin(region.meanAngle);
+      const kept: number[] = [];
+      for (let mi = 0; mi < members.length; mi++) {
+        const i = members[mi];
+        if (Math.cos(theta[i]) * meanAx + Math.sin(theta[i]) * meanAy >= cosTol) kept.push(i);
+      }
+      members = Int32Array.from(kept);
+    } else {
+      // Subsequent retries: drop the farthest-from-center fraction of
+      // members -- LSD's own "reduce region radius," aimed at cutting
+      // away a spuriously-attached side branch (e.g. two near-parallel
+      // lines the growth pass glued together) rather than tightening
+      // angle further.
+      const { cx, cy } = rect;
+      const withDist: { i: number; d: number }[] = [];
+      for (let mi = 0; mi < members.length; mi++) {
+        const i = members[mi];
+        const x = (i % w) - cx, y = ((i / w) | 0) - cy;
+        withDist.push({ i, d: x * x + y * y });
+      }
+      withDist.sort((a, b) => a.d - b.d);
+      const keep = Math.max(2, Math.round(members.length * (1 - settings.retryShrinkFraction)));
+      members = Int32Array.from(withDist.slice(0, keep).map((e) => e.i));
+    }
+  }
+
+  if (!rect) return null;
+  return { cx: rect.cx, cy: rect.cy, theta: rect.theta, length: rect.length, width: rect.width, accepted, retries, nfaLog10, rawMembers: region.members };
+}
+
+export function computeLsdRectangles(field: GradientField, settings: LsdSettings): LsdRectangle[] {
+  const { w, h } = field;
+  const { mag, theta } = computeMagTheta(field);
 
   const order = orderPixelsByMagnitudeDescending(mag, settings.rhoNoiseThreshold, settings.magnitudeBuckets);
   const { regions } = growRegions(mag, theta, w, h, order, settings.toleranceDeg, settings.rhoNoiseThreshold);
@@ -312,63 +411,58 @@ export function computeLsdRectangles(field: GradientField, settings: LsdSettings
 
   const results: LsdRectangle[] = [];
   for (const region of regions) {
-    let members = region.members;
-    let toleranceDeg = settings.toleranceDeg;
-    let retries = 0;
-    let accepted = false;
-    let rect: RectangleCandidate | null = null;
-    let nfaLog10 = Infinity;
-
-    for (;;) {
-      if (members.length < 2) break; // degenerate -- no meaningful axis, leave as rejected
-      rect = fitRectangle(members, mag, w, region.meanAngle);
-      const toleranceRad = THREE.MathUtils.degToRad(toleranceDeg);
-      const p = toleranceRad / Math.PI;
-      const { n: rn, k: rk } = countRectanglePixels(rect, mag, theta, w, h, settings.rhoNoiseThreshold, toleranceRad);
-      const logNfa = logNTests + logBinomialTail(rn, rk, p);
-      nfaLog10 = logNfa / Math.LN10;
-      if (logNfa < logEpsilon) { accepted = true; break; }
-      if (retries >= settings.maxRetries) break;
-      retries++;
-      if (retries === 1) {
-        // Retighten first (LSD's own first move): a simplified stand-in for
-        // re-growing the region from its seed under a stricter tolerance --
-        // re-filters the CURRENT members down to those still within the
-        // new, tighter tolerance of the region's own (fixed) mean angle,
-        // rather than a full re-grow from scratch. Same intent (shrink to
-        // the self-consistent "core" of the region) with far less
-        // machinery than repeating stage 3 per retry.
-        toleranceDeg *= settings.retryToleranceFactor;
-        const cosTol = Math.cos(THREE.MathUtils.degToRad(toleranceDeg));
-        const meanAx = Math.cos(region.meanAngle), meanAy = Math.sin(region.meanAngle);
-        const kept: number[] = [];
-        for (let mi = 0; mi < members.length; mi++) {
-          const i = members[mi];
-          if (Math.cos(theta[i]) * meanAx + Math.sin(theta[i]) * meanAy >= cosTol) kept.push(i);
-        }
-        members = Int32Array.from(kept);
-      } else {
-        // Subsequent retries: drop the farthest-from-center fraction of
-        // members -- LSD's own "reduce region radius," aimed at cutting
-        // away a spuriously-attached side branch (e.g. two near-parallel
-        // lines the growth pass glued together) rather than tightening
-        // angle further.
-        const { cx, cy } = rect;
-        const withDist: { i: number; d: number }[] = [];
-        for (let mi = 0; mi < members.length; mi++) {
-          const i = members[mi];
-          const x = (i % w) - cx, y = ((i / w) | 0) - cy;
-          withDist.push({ i, d: x * x + y * y });
-        }
-        withDist.sort((a, b) => a.d - b.d);
-        const keep = Math.max(2, Math.round(members.length * (1 - settings.retryShrinkFraction)));
-        members = Int32Array.from(withDist.slice(0, keep).map((e) => e.i));
-      }
-    }
-
-    if (rect) results.push({ cx: rect.cx, cy: rect.cy, theta: rect.theta, length: rect.length, width: rect.width, accepted, retries, nfaLog10, rawMembers: region.members });
+    const r = fitRegionWithRetries(region, mag, theta, w, h, settings, logNTests, logEpsilon);
+    if (r) results.push(r);
   }
   return results;
+}
+
+// GPU-resident counterpart to computeLsdRectangles -- stages 0-3 (mag/theta,
+// counting sort, region growing) stay identical/CPU (see this file's own
+// header for why), only stage 4 + stage 5's first pass move to GPU
+// (pipelineGPU/lsdFit.ts). Any region that pass rejects falls through to
+// fitRegionWithRetries on CPU, same as the pure-CPU path. Returns null only
+// if WebGPU itself is unavailable -- computeLsdRectanglesAuto below is what
+// callers actually use, and handles that fallback.
+export async function computeLsdRectanglesGPU(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[] | null> {
+  const { w, h } = field;
+  const { mag, theta } = computeMagTheta(field);
+
+  const order = orderPixelsByMagnitudeDescending(mag, settings.rhoNoiseThreshold, settings.magnitudeBuckets);
+  const { regions } = growRegions(mag, theta, w, h, order, settings.toleranceDeg, settings.rhoNoiseThreshold);
+
+  const maxDim = Math.max(w, h);
+  const logNTests = settings.nfaTestExponent * Math.log(maxDim);
+  const logEpsilon = Math.log(settings.nfaEpsilon);
+
+  const gpuResults = await fitAndTestRegionsGPU(
+    mag, theta, w, h, regions, settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon,
+  );
+  if (!gpuResults) return null;
+
+  const results: LsdRectangle[] = [];
+  for (let i = 0; i < regions.length; i++) {
+    const region = regions[i];
+    const g = gpuResults[i];
+    if (g.accepted) {
+      results.push({
+        cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
+        accepted: true, retries: 0, nfaLog10: g.nfaLog10, rawMembers: region.members,
+      });
+    } else {
+      const r = fitRegionWithRetries(region, mag, theta, w, h, settings, logNTests, logEpsilon);
+      if (r) results.push(r);
+    }
+  }
+  return results;
+}
+
+// Single dispatch point both production callers (pipeline/votes.ts,
+// overlays/lsdOverlay.ts) use -- centralizes the globalState.useGPULsdFit
+// check once instead of duplicating it at each call site.
+export async function computeLsdRectanglesAuto(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[]> {
+  if (!globalState.useGPULsdFit) return computeLsdRectangles(field, settings);
+  return (await computeLsdRectanglesGPU(field, settings)) ?? computeLsdRectangles(field, settings);
 }
 
 // ── Adapter: LSD rectangles -> bucketFillJoin.ts's expected input shape ──

@@ -6,7 +6,7 @@ import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { GradientField, Vote } from '../types.ts';
 import { CompositeLine, compositeLineLength, computeCompositeLines, computeJoinWalk, computeMergeGroups } from './bucketFillJoin.ts';
 import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from './gradientField.ts';
-import { computeLsdRectangles, lsdRectanglesToBucketFillShape } from './lsdSegments.ts';
+import { computeLsdRectangles, computeLsdRectanglesAuto, lsdRectanglesToBucketFillShape } from './lsdSegments.ts';
 import { guidedTangentDirectionForWalk } from './tangentWalk.ts';
 
 // gray is expected to already be captureDistortedGrayscale's output.
@@ -76,11 +76,11 @@ export function computeWorldVotes(
 // `gray` itself) so the caller can pick CPU or GPU without this function --
 // or any of its downstream consumers -- needing to know or care which one
 // produced it.
-export function computeGradient2x2Composites(
+export async function computeGradient2x2Composites(
   settings: CameraSettingsCommon,
   field: GradientField, w: number, h: number,
-): { root: number; line: CompositeLine }[] {
-  const rects = computeLsdRectangles(field, {
+): Promise<{ root: number; line: CompositeLine }[]> {
+  const rects = await computeLsdRectanglesAuto(field, {
     toleranceDeg: settings.lsdToleranceDeg,
     rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
     magnitudeBuckets: settings.lsdMagnitudeBuckets,

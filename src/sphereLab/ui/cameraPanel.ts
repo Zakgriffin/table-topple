@@ -289,6 +289,7 @@ bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; const cam = active
 bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
 bindCheckbox('useGPUProject', (v) => { globalState.useGPUProject = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
 bindCheckbox('useGPUGradient', (v) => { globalState.useGPUGradient = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
+bindCheckbox('useGPULsdFit', (v) => { globalState.useGPULsdFit = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
 gpuVotesStatus.textContent = isWebGPUSupported()
   ? 'WebGPU is available in this browser.'
   : 'WebGPU is not available in this browser -- the checkbox above will silently fall back to the CPU pipeline.';

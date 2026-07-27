@@ -35,4 +35,9 @@ export const globalState = {
   // field that feeds computeGradient2x2Composites (see
   // pipelineGPU/gradient2x2.ts).
   useGPUGradient: false,
+  // Same idea, independent toggle, for the LSD pipeline's stage 4 (PCA
+  // rectangle fit) + stage 5's first NFA pass (see pipelineGPU/lsdFit.ts) --
+  // the retry loop and everything before stage 4 (region growing etc.) stay
+  // CPU-only regardless, see pipeline/lsdSegments.ts's own header.
+  useGPULsdFit: false,
 };

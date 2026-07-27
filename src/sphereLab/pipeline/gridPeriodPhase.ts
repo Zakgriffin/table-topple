@@ -257,8 +257,11 @@ export function computeGridPeriodPhase(
   // instead of the true, fundamental period. Widened to 50x on request;
   // if false-peak locks start showing up, that tradeoff is why.
   const halfWidth = Math.abs(rowGapMedian - colGapMedian) * 25;
-  const bracket: [number, number] = [seedPeriod - halfWidth, seedPeriod + halfWidth];
-  if (bracket[0] < 1e-9) return null; // row/col medians disagreed enough to push the bracket to/past zero -- not a usable search range
+  // Clamped rather than bailing out when the row/col median disagreement is
+  // large enough to push the lower bound past zero -- a period can't be
+  // negative anyway, so the search is still perfectly usable over
+  // [0, seedPeriod + halfWidth], just asymmetric around the seed.
+  const bracket: [number, number] = [Math.max(0, seedPeriod - halfWidth), seedPeriod + halfWidth];
   const COARSE_SAMPLES = 40;
   const rowValues = rowSamples.map((s) => s.value), rowWeights = rowSamples.map((s) => s.weight);
   const colValues = colSamples.map((s) => s.value), colWeights = colSamples.map((s) => s.weight);

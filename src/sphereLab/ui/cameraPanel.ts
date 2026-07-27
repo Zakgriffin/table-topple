@@ -9,7 +9,7 @@ import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, up
 import { updateLsdAvailability, updateLsdOverlay } from '../overlays/lsdOverlay.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
-import { runAxesReconstruction } from '../pipeline/axesReconstruction.ts';
+import { recomputeFromLastCapture, runAxesReconstruction } from '../pipeline/axesReconstruction.ts';
 import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
@@ -215,12 +215,18 @@ bindSlider('realCaptureFovDeg', (v) => {
   clearTimeout(realCaptureFovRerunTimer);
   realCaptureFovRerunTimer = window.setTimeout(rerunOnRealCaptureSettingChange, 200);
 }, (v) => `${v.toFixed(0)}°`);
-bindSlider('camX', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camX = v; markCaptureDirty(cam); } });
-bindSlider('camY', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camY = v; markCaptureDirty(cam); } });
-bindSlider('camZ', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camZ = v; markCaptureDirty(cam); } });
-bindSlider('camYaw', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camYawDeg = v; markCaptureDirty(cam); } }, (v) => `${v.toFixed(0)}°`);
-bindSlider('camPitch', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camPitchDeg = v; markCaptureDirty(cam); } }, (v) => `${v.toFixed(0)}°`);
-bindSlider('camFov', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.horizFovDeg = v; markCaptureDirty(cam); } }, (v) => `${v.toFixed(0)}°`);
+// Tier 1 (invalidates the capture itself -- see this session's chat on
+// "every setting recomputes everything downstream of it"): markCaptureDirty
+// still drives the passive preview loop, runAxesReconstruction is the real
+// recompute -- it self-throttles via camera.axesCapturing, so a fast drag
+// just drops overlapping calls rather than queueing them, same as an
+// overlapping "capture now" click.
+bindSlider('camX', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camX = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
+bindSlider('camY', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camY = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
+bindSlider('camZ', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camZ = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
+bindSlider('camYaw', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camYawDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
+bindSlider('camPitch', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camPitchDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
+bindSlider('camFov', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.horizFovDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
 
 export let syncingViewportAspect = false;
 export function clampViewport(v: number, lo: number, hi: number): number {
@@ -238,6 +244,7 @@ bindSlider('viewportW', (v) => {
     syncingViewportAspect = false;
   }
   resizeCaptureBuffers(cam);
+  runAxesReconstruction(cam);
 }, (v) => v.toFixed(0));
 bindSlider('viewportH', (v) => {
   const cam = activeCamera(); if (!cam) return;
@@ -251,6 +258,7 @@ bindSlider('viewportH', (v) => {
     syncingViewportAspect = false;
   }
   resizeCaptureBuffers(cam);
+  runAxesReconstruction(cam);
 }, (v) => v.toFixed(0));
 bindCheckbox('aspectLocked', (v) => { const cam = activeCamera(); if (cam) cam.settings.aspectLocked = v; });
 
@@ -273,10 +281,14 @@ bindSlider('boardSize', (v) => {
   invalidateTorusBufferCache(); // GPU Phase 3's torus-brightness buffer was built from the OLD torus
   for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render/re-decode against the new board
 }, (v) => v.toFixed(0));
-bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; });
-bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; });
-bindCheckbox('useGPUProject', (v) => { globalState.useGPUProject = v; });
-bindCheckbox('useGPUGradient', (v) => { globalState.useGPUGradient = v; });
+// Global (not per-camera) toggles selecting the code path for the
+// gradient/fit/project/decode stages -- flipping one changes what the NEXT
+// recompute produces, so re-run it against whichever camera's on screen
+// immediately rather than waiting for the next unrelated capture/slider.
+bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
+bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
+bindCheckbox('useGPUProject', (v) => { globalState.useGPUProject = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
+bindCheckbox('useGPUGradient', (v) => { globalState.useGPUGradient = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
 gpuVotesStatus.textContent = isWebGPUSupported()
   ? 'WebGPU is available in this browser.'
   : 'WebGPU is not available in this browser -- the checkbox above will silently fall back to the CPU pipeline.';
@@ -293,10 +305,11 @@ bindSlider('gridPeriodPhaseGapLowerBound', (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.gridPeriodPhaseGapLowerBound = v;
   drawGridPeriodPhasePlot(cam);
+  recomputeFromLastCapture(cam); // feeds computeGridPeriodPhase (stage 7) directly
 }, (v) => v.toFixed(4));
-bindSlider('simNoise', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
-bindSlider('simBlur', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simBlur = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
-bindSlider('captureSupersample', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.captureSupersample = v; resizeCaptureBuffers(cam); } }, (v) => `${v.toFixed(0)}x`);
+bindSlider('simNoise', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
+bindSlider('simBlur', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simBlur = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
+bindSlider('captureSupersample', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.captureSupersample = v; resizeCaptureBuffers(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}x`);
 bindSlider('coherenceRadius', (v) => { const cam = activeCamera(); if (cam) { cam.settings.coherenceRadius = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
 bindRadioGroup('fieldView', (v) => {
   const cam = activeCamera(); if (!cam) return;
@@ -320,24 +333,28 @@ function refreshLsd() {
   const cam = activeCamera(); if (!cam) return;
   updateLsdOverlay(cam); // handles its own full redraw (SVG rectangles + raster raw-regions/rejected) internally
 }
-bindSlider('lsdToleranceDeg', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdToleranceDeg = v; refreshLsd(); }, (v) => `${v.toFixed(1)}°`);
-bindSlider('lsdRhoNoiseThreshold', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); }, (v) => v.toFixed(1));
-bindSlider('lsdMagnitudeBuckets', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdMagnitudeBuckets = v; refreshLsd(); }, (v) => v.toFixed(0));
-bindSlider('lsdNfaEpsilon', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdNfaEpsilon = v; refreshLsd(); }, (v) => v.toFixed(2));
-bindSlider('lsdNfaTestExponent', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdNfaTestExponent = v; refreshLsd(); }, (v) => v.toFixed(0));
-bindSlider('lsdMaxRetries', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdMaxRetries = v; refreshLsd(); }, (v) => v.toFixed(0));
-bindSlider('lsdRetryToleranceFactor', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdRetryToleranceFactor = v; refreshLsd(); }, (v) => v.toFixed(2));
-bindSlider('lsdRetryShrinkFraction', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdRetryShrinkFraction = v; refreshLsd(); }, (v) => v.toFixed(2));
+// refreshLsd() updates the live-preview LSD debug overlay only (reads
+// camera.lastNoisedPreviewGray) -- a separate, already-correct concern from
+// the PRODUCTION composite lines these same settings feed (stage 3, see
+// pipeline/votes.ts's computeGradient2x2Composites), so recomputeFromLastCapture
+// is also needed here or camera.lastVoteComposites/lastGridPeriodPhase go stale.
+bindSlider('lsdToleranceDeg', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdToleranceDeg = v; refreshLsd(); recomputeFromLastCapture(cam); } }, (v) => `${v.toFixed(1)}°`);
+bindSlider('lsdRhoNoiseThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } }, (v) => v.toFixed(1));
+bindSlider('lsdMagnitudeBuckets', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMagnitudeBuckets = v; refreshLsd(); recomputeFromLastCapture(cam); } }, (v) => v.toFixed(0));
+bindSlider('lsdNfaEpsilon', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaEpsilon = v; refreshLsd(); recomputeFromLastCapture(cam); } }, (v) => v.toFixed(2));
+bindSlider('lsdNfaTestExponent', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaTestExponent = v; refreshLsd(); recomputeFromLastCapture(cam); } }, (v) => v.toFixed(0));
+bindSlider('lsdMaxRetries', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMaxRetries = v; refreshLsd(); recomputeFromLastCapture(cam); } }, (v) => v.toFixed(0));
+bindSlider('lsdRetryToleranceFactor', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRetryToleranceFactor = v; refreshLsd(); recomputeFromLastCapture(cam); } }, (v) => v.toFixed(2));
+bindSlider('lsdRetryShrinkFraction', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRetryShrinkFraction = v; refreshLsd(); recomputeFromLastCapture(cam); } }, (v) => v.toFixed(2));
 // The join walk's own 4 params -- feed pipeline/votes.ts's
-// computeGradient2x2Composites (production, run fresh on every real
-// capture) directly, not a live debug overlay, so no repaint call needed
-// here -- the next "capture now" (or axesAutoCapture tick) picks up the
-// new value on its own, same as the stage 2-5 sliders used to before this
-// section existed.
-bindSlider('lsdJoinSteps', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdJoinSteps = v; }, (v) => v.toFixed(0));
-bindSlider('lsdMergeMinSimilarity', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdMergeMinSimilarity = v; }, (v) => v.toFixed(2));
-bindSlider('lsdMaxTravelFactor', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdMaxTravelFactor = v; }, (v) => v.toFixed(1));
-bindSlider('lsdMinLengthPx', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdMinLengthPx = v; }, (v) => v.toFixed(0));
+// computeGradient2x2Composites (production) directly, not a live debug
+// overlay, so recomputeFromLastCapture (not a repaint call) is what picks
+// up the new value -- reusing the last capture rather than waiting for the
+// next unrelated "capture now"/axesAutoCapture tick.
+bindSlider('lsdJoinSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdJoinSteps = v; recomputeFromLastCapture(cam); } }, (v) => v.toFixed(0));
+bindSlider('lsdMergeMinSimilarity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMergeMinSimilarity = v; recomputeFromLastCapture(cam); } }, (v) => v.toFixed(2));
+bindSlider('lsdMaxTravelFactor', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMaxTravelFactor = v; recomputeFromLastCapture(cam); } }, (v) => v.toFixed(1));
+bindSlider('lsdMinLengthPx', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinLengthPx = v; recomputeFromLastCapture(cam); } }, (v) => v.toFixed(0));
 bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
 // Turning either on refreshes immediately -- updateGradientCirclesDebug now
 // skips its work while both are off (see its own comment), so the geometry
@@ -346,10 +363,10 @@ bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam)
 bindCheckbox('showAxisVectors', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showAxisVectors = v; if (v) updateGradientCirclesDebug(cam); } });
 bindCheckbox('showTopCircles', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showTopCircles = v; if (v) updateGradientCirclesDebug(cam); } });
 bindSlider('topCirclesLineWidth', (v) => { const cam = activeCamera(); if (cam) { cam.settings.topCirclesLineWidth = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
-bindSlider('weightSharpenPower', (v) => { const cam = activeCamera(); if (cam) { cam.settings.weightSharpenPower = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
-// Only takes effect on the next capture (feeds projectSamplesCPU/
-// buildDecodeSampleGrid inside runAxesReconstruction, not any live preview).
-bindSlider('minGrazingCos', (v) => { const cam = activeCamera(); if (cam) cam.settings.minGrazingCos = v; }, (v) => v.toFixed(2));
+bindSlider('weightSharpenPower', (v) => { const cam = activeCamera(); if (cam) { cam.settings.weightSharpenPower = v; updateGradientCirclesDebug(cam); recomputeFromLastCapture(cam); } }, (v) => v.toFixed(1));
+// Feeds projectSamplesCPU/buildDecodeSampleGrid (stages 9+10) -- recompute
+// from the last capture rather than waiting for the next unrelated one.
+bindSlider('minGrazingCos', (v) => { const cam = activeCamera(); if (cam) { cam.settings.minGrazingCos = v; recomputeFromLastCapture(cam); } }, (v) => v.toFixed(2));
 bindCheckbox('axesAutoCapture', (v) => { const cam = activeCamera(); if (cam) cam.settings.axesAutoCapture = v; });
 bindSlider('axesCaptureInterval', (v) => { const cam = activeCamera(); if (cam) cam.settings.axesCaptureIntervalMs = v; }, (v) => `${v.toFixed(0)}`);
 

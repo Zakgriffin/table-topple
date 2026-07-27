@@ -34,6 +34,21 @@ export interface CameraBase {
   axesComputed: boolean;
   axesCapturing: boolean;
   lastAxesCapture: number;
+  // Cached output of runAxesReconstruction's own capture stage (a fresh GPU
+  // render+readback for simulated, or whatever's currently in
+  // lastRealCaptureGray for physical), already flipped to analysis row
+  // order -- recomputeFromLastCapture (pipeline/axesReconstruction.ts)
+  // reads this instead of taking a fresh capture, so settings that only
+  // affect stages downstream of capture (LSD/join-walk tuning,
+  // weightSharpenPower, gridPeriodPhaseGapLowerBound, minGrazingCos, the
+  // useGPU* toggles) can recompute without re-rendering/re-photographing.
+  // Deliberately a SEPARATE buffer from lastNoisedPreviewGray -- that one is
+  // also written by the passive preview loop on its own throttled cycle
+  // (see pipeline/preview.ts), which would otherwise risk this drifting
+  // from what reconstruction actually last used. Invalidated (set to null)
+  // by resizeCaptureBuffers so a stale-sized buffer can never be reused
+  // after a viewport/supersample resize.
+  lastAxesCaptureGray: { gray: Float64Array; w: number; h: number } | null;
 
   // -- capture/analysis buffers, shared shape for both camera types --
   rtSize: { w: number; h: number };

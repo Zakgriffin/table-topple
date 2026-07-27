@@ -39,6 +39,10 @@ export function resizeCaptureBuffers(camera: Camera, explicitSize?: { w: number;
   camera.rtSize = explicitSize ?? { w: Math.round(camera.settings.viewportW), h: Math.round(camera.settings.viewportH) };
   camera.aspect = camera.rtSize.w / camera.rtSize.h;
   const { w, h } = camera.rtSize;
+  // Same "stale buffer, wrong offsets" bug class as the overlay buffers
+  // below -- a cached capture at the OLD size must never be fed to
+  // recomputeFromLastCapture after a resize.
+  camera.lastAxesCaptureGray = null;
 
   if (isSimulated(camera)) {
     camera.captureRTSize = { w: w * camera.settings.captureSupersample, h: h * camera.settings.captureSupersample };

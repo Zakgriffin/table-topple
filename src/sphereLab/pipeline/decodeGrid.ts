@@ -546,12 +546,20 @@ export function buildDecodeSampleGrid(camera: Camera, gray: Float64Array, w: num
 
 // Decodes the camera's absolute world position -- see pre-Stage-A history
 // for the full derivation.
-export function runPositionDecode(camera: Camera, gray: Float64Array, w: number, h: number, vFovRad: number) {
+export async function runPositionDecode(camera: Camera, gray: Float64Array, w: number, h: number, vFovRad: number) {
   const grid = buildDecodeSampleGrid(camera, gray, w, h, vFovRad);
   camera.lastDecodeGrid = grid;
   camera.lastDecodeRotated = null;
   if (!grid) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return; }
-  const winner = tallyPositionVotes(grid);
+  // Same GPU-source-of-truth-verified-by-CPU-fallback pattern as every other
+  // GPU sub-pipeline (axesReconstruction.ts's gradient2x2Field/projectBins/
+  // fitPairOfPlanes) -- see tallyPositionVotesGPU's own header for why this
+  // one is currently a manual toggle rather than always-on (measured SLOWER
+  // than CPU for typical grid sizes, expected to flip in the GPU's favor for
+  // larger decode grids).
+  const winner = globalState.useGPUDecode
+    ? (await tallyPositionVotesGPU(grid)) ?? tallyPositionVotes(grid)
+    : tallyPositionVotes(grid);
   if (!winner) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return; }
 
   const { anchorRow, anchorCol } = winner;

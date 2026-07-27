@@ -63,6 +63,16 @@
   #zoomBox span { color: #fff; font-family: monospace; font-size: 13px; }
   #zoom { flex: 1; accent-color: #0f0; height: 20px; }
   #zoom:disabled { accent-color: #f00; opacity: 0.5; }
+  #resBox {
+    position: fixed; bottom: max(242px, calc(env(safe-area-inset-bottom) + 230px)); left: 24px; right: 24px; z-index: 10;
+    display: flex; align-items: center; gap: 12px;
+    background: rgba(255,255,255,0.15); backdrop-filter: blur(4px);
+    border-radius: 999px; padding: 10px 20px;
+  }
+  #resBox span { color: #fff; font-family: monospace; font-size: 13px; }
+  #resValue { min-width: 82px; text-align: right; }
+  #res { flex: 1; accent-color: #0f0; height: 20px; }
+  #res:disabled { opacity: 0.5; }
   #homeLink {
     position: fixed; top: max(12px, env(safe-area-inset-top)); left: 50%; transform: translateX(-50%); z-index: 20;
     color: #6c9; font-family: monospace; font-size: 12px; text-decoration: none;
@@ -76,6 +86,7 @@
 <canvas id="captureCanvas" style="display:none;"></canvas>
 <div id="status"><span id="camStatus">starting camera…</span><span id="relayStatus">relay: connecting…</span></div>
 <div id="zoomBox"><span>zoom</span><input type="range" id="zoom" min="0" max="1" step="0.01" value="0" disabled></div>
+<div id="resBox"><span>res</span><input type="range" id="res" min="0" max="1" step="0.001" value="1" disabled><span id="resValue">—</span></div>
 <div id="modeToggle">
   <button id="modeSingleBtn" class="active" data-mode="single">photo</button>
   <button id="modeVideoBtn" data-mode="video">video</button>

@@ -19,6 +19,8 @@ const captureCtx = captureCanvas.getContext('2d')!;
 const camStatus = document.getElementById('camStatus')!;
 const relayStatus = document.getElementById('relayStatus')!;
 const zoomSlider = document.getElementById('zoom') as HTMLInputElement;
+const resSlider = document.getElementById('res') as HTMLInputElement;
+const resValue = document.getElementById('resValue')!;
 const switchCamBtn = document.getElementById('switchCam') as HTMLButtonElement;
 const shutterBtn = document.getElementById('shutter') as HTMLButtonElement;
 const modeSingleBtn = document.getElementById('modeSingleBtn') as HTMLButtonElement;
@@ -60,6 +62,76 @@ zoomSlider.addEventListener('input', () => {
   track?.applyConstraints({ advanced: [{ zoom } as any] }).catch(() => {});
 });
 
+// ── Sent-image resolution ───────────────────────────────────────────────
+//
+// Controls the SENT frame's long-edge pixel size (captureAndSendFrame's own
+// canvas downscale, replacing what used to be the fixed MAX_DIM=1600
+// constant) -- not a camera hardware constraint, so this is a plain canvas
+// resize with the short edge always scaled by the same factor to preserve
+// the native aspect ratio, same as the old fixed-MAX_DIM math already did.
+//
+// The two ends of the slider aren't equally well-defined:
+//  - HIGH end has a real technical ceiling: the stream's own native
+//    resolution (video.videoWidth/Height once getUserMedia has negotiated
+//    it, via the same "request an unreachably high `ideal`" trick
+//    startCamera already uses) -- upscaling past that wouldn't add any
+//    actual detail, so it's a genuine max, not a guess.
+//  - LOW end has no such floor -- a canvas resize could go arbitrarily low
+//    (down to 1x1). RES_MIN_DIM_FLOOR below is a judgment call, not a
+//    hardware limit: 512px picks up the SAME number this app's own
+//    simulated-camera default analysis resolution already uses
+//    (camera/settings.ts's viewportW default) -- since a physical camera's
+//    whatever arrives becomes ITS analysis resolution directly (see
+//    pipeline/capture.ts's ingestRealCapture -- no further downsample the
+//    way simulated captures get), that's the same "how few pixels does
+//    this reconstruction pipeline actually need" question the app already
+//    answered once, reused here rather than picking a fresh arbitrary
+//    number.
+const RES_MIN_DIM_FLOOR = 512;
+const RES_DEFAULT_DIM = 1600; // matches the old fixed MAX_DIM, kept as the default so behavior doesn't silently change until the slider is touched
+let resMinDim = RES_MIN_DIM_FLOOR, resMaxDim = RES_MIN_DIM_FLOOR;
+let targetLongEdge = RES_DEFAULT_DIM;
+let nativeShortOverLong = 1; // aspect ratio of the current stream, short edge / long edge
+
+function sliderToDim(t: number): number {
+  return resMinDim * Math.pow(resMaxDim / resMinDim, t);
+}
+function dimToSlider(dim: number): number {
+  if (resMaxDim <= resMinDim) return 0;
+  return Math.min(1, Math.max(0, Math.log(dim / resMinDim) / Math.log(resMaxDim / resMinDim)));
+}
+function updateResLabel() {
+  const shortEdge = Math.round(targetLongEdge * nativeShortOverLong);
+  resValue.textContent = `${targetLongEdge}×${shortEdge}`;
+}
+
+function setupResolutionControl() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) { resSlider.disabled = true; return; }
+  const nativeLongEdge = Math.max(vw, vh);
+  nativeShortOverLong = Math.min(vw, vh) / nativeLongEdge;
+  resMaxDim = nativeLongEdge;
+  // A device/webcam whose native resolution is already below the floor --
+  // just pin the slider to that single value instead of presenting a
+  // (min > max) range.
+  resMinDim = Math.min(RES_MIN_DIM_FLOOR, resMaxDim);
+  if (resMaxDim <= resMinDim) {
+    resSlider.disabled = true;
+    targetLongEdge = resMaxDim;
+    updateResLabel();
+    return;
+  }
+  resSlider.disabled = false;
+  targetLongEdge = Math.min(Math.max(targetLongEdge, resMinDim), resMaxDim);
+  resSlider.value = String(dimToSlider(targetLongEdge));
+  updateResLabel();
+}
+
+resSlider.addEventListener('input', () => {
+  targetLongEdge = Math.round(sliderToDim(parseFloat(resSlider.value)));
+  updateResLabel();
+});
+
 async function startCamera(desiredFacing: string) {
   // width/height `ideal` far above any real sensor -- getUserMedia treats
   // `ideal` as "get as close as you can", so an unreachably high target
@@ -77,6 +149,7 @@ async function startCamera(desiredFacing: string) {
   currentFacing = settings.facingMode || 'environment';
   video.classList.toggle('mirror', currentFacing === 'user');
   setupZoomControl();
+  setupResolutionControl();
   camStatus.textContent = `${currentFacing} camera, ${settings.width}x${settings.height}`;
 }
 
@@ -176,11 +249,12 @@ connectRelay();
 
 // ── Shutter / video streaming ────────────────────────────────────────────
 //
-// Capped to MAX_DIM on the long edge before encoding -- Sphere Lab
-// resamples whatever arrives down to its own analysis resolution anyway
-// (see ingestRealCapture), so sending a phone's full native resolution
-// (often 3000-4000px) would just be a slower base64 transfer for no benefit.
-const MAX_DIM = 1600;
+// Downscaled to the resolution slider's own targetLongEdge before encoding
+// -- NOT just a transfer-speed knob: Sphere Lab's ingestRealCapture resizes
+// a physical camera's analysis buffers to match whatever resolution
+// actually arrives (unlike a simulated capture, there's no further
+// downsample step after this), so targetLongEdge IS the real analysis
+// resolution, not merely a cap on top of one.
 
 // Grabs the current video frame and sends it, if there's anywhere to send
 // it to. Shared by the single-tap shutter and the video-mode loop below --
@@ -189,7 +263,7 @@ const MAX_DIM = 1600;
 function captureAndSendFrame() {
   if (!currentStream || video.videoWidth === 0) return;
   const vw = video.videoWidth, vh = video.videoHeight;
-  const scale = Math.min(1, MAX_DIM / Math.max(vw, vh));
+  const scale = Math.min(1, targetLongEdge / Math.max(vw, vh));
   const cw = Math.round(vw * scale), ch = Math.round(vh * scale);
   captureCanvas.width = cw; captureCanvas.height = ch;
   // Mirror the draw too if the front camera's own preview is mirrored, so

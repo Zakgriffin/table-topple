@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import { CompositeLine, CompositeLineDisplay, SegmentMerge } from '../pipeline/bucketFillJoin.ts';
-import { BucketFillSegment } from '../pipeline/bucketFillSegments.ts';
+import { CompositeLine } from '../pipeline/bucketFillJoin.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
+import { LsdRectangle } from '../pipeline/lsdSegments.ts';
 import { DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
 import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
 
@@ -43,20 +43,11 @@ export interface CameraBase {
   lastPreviewUpdate: number;
   lastNoisedPreviewGray: Float64Array | null;
   lastDisplayedVectorField: GradientField | null;
-  lastBucketFillSegments: BucketFillSegment[] | null;
-  lastBucketFillColors: [number, number, number][] | null;
-  // Per-pixel segment ownership from the flood fill itself (computeBucketFillRegions),
-  // -1 = no segment -- kept around so the join walk can seed its own buffer
-  // from it (see pipeline/bucketFillJoin.ts's computeJoinWalk).
-  lastBucketFillRegionId: Int32Array | null;
-  lastBucketFillMerges: SegmentMerge[] | null;
-  lastBucketFillComposite: CompositeLineDisplay[] | null;
-  // Merge-point markers, classified by how each merge's winning pair of
-  // points was chosen -- see pipeline/bucketFillJoin.ts's computeJoinWalk
-  // (mergeAt) for how blue/red/purple are decided.
-  lastBucketFillBlueMerges: { x: number; y: number }[] | null;
-  lastBucketFillOrangeMerges: { x: number; y: number }[] | null;
-  lastBucketFillRedMerges: { x: number; y: number }[] | null;
+  // The from-scratch traditional LSD pipeline's own debug output (pipeline/
+  // lsdSegments.ts) -- accepted rectangles AND rejected/retried candidates
+  // (see LsdRectangle's own `accepted`/`retries` fields), so the debug
+  // overlay can show both, not just the survivors.
+  lastLsdRectangles: LsdRectangle[] | null;
   lastGridPeriodPhase: GridPeriodPhaseResult | null;
   // Interactive pan/zoom state for the period/phase debug plot (overlays/
   // gridPeriodPhaseOverlays.ts) -- null means "no interaction yet, use the
@@ -73,8 +64,15 @@ export interface CameraBase {
   reconContamData: Uint8Array; reconContamTex: THREE.DataTexture;
   topGradientData: Uint8Array; topGradientTex: THREE.DataTexture;
   tangentWalkPathData: Uint8Array; tangentWalkPathTex: THREE.DataTexture;
-  bucketFillData: Uint8Array; bucketFillTex: THREE.DataTexture;
-  bucketFillJoinData: Uint8Array; bucketFillJoinTex: THREE.DataTexture;
+  // Per-pixel raster overlays for pipeline/lsdSegments.ts's own debug views
+  // (overlays/lsdOverlay.ts) -- same "flat Uint8Array + DataTexture + quad"
+  // shape as trueContamData/reconContamData above, not the shared SVG
+  // overlay LSD rectangles/composite lines use, since these paint a colored
+  // pixel PER MEMBER PIXEL of a region rather than a small number of
+  // vector shapes. lsdRawRegionsData: accepted rectangles' own rawMembers,
+  // colored per-blob. lsdRejectedData: rejected rectangles' rawMembers, flat red.
+  lsdRawRegionsData: Uint8Array; lsdRawRegionsTex: THREE.DataTexture;
+  lsdRejectedData: Uint8Array; lsdRejectedTex: THREE.DataTexture;
 
   // -- THREE objects: recovered side (both camera types have these) --
   recoveredCamGizmo: THREE.Mesh; recoveredCamAxes: THREE.AxesHelper;

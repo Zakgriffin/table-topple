@@ -5,8 +5,8 @@ import { cornerDir } from '../math/geometry.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { GradientField, Vote } from '../types.ts';
 import { CompositeLine, compositeLineLength, computeCompositeLines, computeJoinWalk, computeMergeGroups } from './bucketFillJoin.ts';
-import { computeBucketFillRegions } from './bucketFillSegments.ts';
 import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from './gradientField.ts';
+import { computeLsdRectangles, lsdRectanglesToBucketFillShape } from './lsdSegments.ts';
 import { guidedTangentDirectionForWalk } from './tangentWalk.ts';
 
 // gray is expected to already be captureDistortedGrayscale's output.
@@ -52,44 +52,67 @@ export function computeWorldVotes(
   return votes;
 }
 
-// One composite LINE per bucket-fill-and-JOIN-WALK merge group (see
-// pipeline/bucketFillJoin.ts), tagged with that group's root -- the shared
-// first stage behind computeSegmentVotes below AND pipeline/gridPeriodPhase.ts.
-// Flood-fills the 2x2 gradient field `field` (computeGradient2x2Field or its
-// GPU twin, computeGradient2x2FieldGPU -- see pipeline/axesReconstruction.ts's
-// gradient2x2Field for the CPU/GPU choice, same one bucketFillOverlay.ts's
-// live debug view uses when fieldView is 'gradient2x2') directly into
-// segments, then runs the full join walk (merge groups + composite lines,
-// same as the join-walk overlay). Deliberately NOT the radius-driven
-// gradient field x local-agreement "effective" field this used to run
-// through (computeGradientField/computeGradientAgreementField/
-// computeEffectiveGradientField, still defined in ./gradientField.ts for
-// computeWorldVotes and other debug views, just not called from here
-// anymore) -- see this session's chat for why. Pulled out as its own
-// function (and called exactly ONCE per reconstruction pass, see pipeline/
-// axesReconstruction.ts) so every downstream consumer -- vote casting here,
-// row/col family classification in gridPeriodPhase.ts, and the "color
-// composite lines by row/col family" debug overlay -- sees the exact same
-// lines under the exact same root numbers. Takes the field pre-computed
-// (rather than computing it from `gray` itself) so the caller can pick
-// CPU or GPU without this function -- or any of its downstream consumers --
-// needing to know or care which one produced it.
+// One composite LINE per LSD-rectangle-and-JOIN-WALK merge group (see
+// pipeline/lsdSegments.ts and pipeline/bucketFillJoin.ts), tagged with that
+// group's root -- the shared first stage behind computeSegmentVotes below
+// AND pipeline/gridPeriodPhase.ts. Runs the full traditional LSD pipeline
+// (region growing -> rectangle fit -> NFA validation, see
+// pipeline/lsdSegments.ts's own header) over the 2x2 gradient field `field`
+// (computeGradient2x2Field or its GPU twin, computeGradient2x2FieldGPU --
+// see pipeline/axesReconstruction.ts's gradient2x2Field for the CPU/GPU
+// choice), adapts the accepted rectangles into the join walk's expected
+// input shape, then runs the join walk (merge groups + composite lines).
+// Deliberately NOT the radius-driven gradient field x local-agreement
+// "effective" field this used to run through (computeGradientField/
+// computeGradientAgreementField/computeEffectiveGradientField, still
+// defined in ./gradientField.ts for computeWorldVotes and other debug
+// views, just not called from here) -- see this session's chat for why.
+// Pulled out as its own function (and called exactly ONCE per
+// reconstruction pass, see pipeline/axesReconstruction.ts) so every
+// downstream consumer -- vote casting here, row/col family classification
+// in gridPeriodPhase.ts, and the "color composite lines by row/col family"
+// debug overlay -- sees the exact same lines under the exact same root
+// numbers. Takes the field pre-computed (rather than computing it from
+// `gray` itself) so the caller can pick CPU or GPU without this function --
+// or any of its downstream consumers -- needing to know or care which one
+// produced it.
 export function computeGradient2x2Composites(
   settings: CameraSettingsCommon,
   field: GradientField, w: number, h: number,
 ): { root: number; line: CompositeLine }[] {
-  const { regionId, segments } = computeBucketFillRegions(field, settings.bucketFillToleranceDeg, settings.bucketFillMagnitudeThreshold, settings.bucketFillMaxSteps);
+  const rects = computeLsdRectangles(field, {
+    toleranceDeg: settings.lsdToleranceDeg,
+    rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
+    magnitudeBuckets: settings.lsdMagnitudeBuckets,
+    nfaEpsilon: settings.lsdNfaEpsilon,
+    nfaTestExponent: settings.lsdNfaTestExponent,
+    maxRetries: settings.lsdMaxRetries,
+    retryToleranceFactor: settings.lsdRetryToleranceFactor,
+    retryShrinkFraction: settings.lsdRetryShrinkFraction,
+  });
+  return compositesFromLsdRectangles(rects, w, h, settings);
+}
+
+// The join-walk half of computeGradient2x2Composites, split out so
+// overlays/lsdOverlay.ts's live debug preview (which already has its own
+// freshly-computed LsdRectangle[] for the rectangle/rejected/raw-region
+// views) can produce composite lines from that SAME array instead of
+// re-running stages 2-5 a second time just to get here.
+export function compositesFromLsdRectangles(
+  rects: ReturnType<typeof computeLsdRectangles>, w: number, h: number, settings: CameraSettingsCommon,
+): { root: number; line: CompositeLine }[] {
+  const { regionId, segments } = lsdRectanglesToBucketFillShape(rects, w, h);
 
   const { merges } = computeJoinWalk(
-    segments, regionId, w, h, settings.bucketFillMergeMinSimilarity, settings.bucketFillJoinSteps, settings.bucketFillMinLengthPx,
-    settings.bucketFillMaxTravelFactor,
+    segments, regionId, w, h, settings.lsdMergeMinSimilarity, settings.lsdJoinSteps, settings.lsdMinLengthPx,
+    settings.lsdMaxTravelFactor,
   );
   const groupOf = computeMergeGroups(segments.length, merges);
   const composites = computeCompositeLines(segments, groupOf);
 
   const result: { root: number; line: CompositeLine }[] = [];
   for (const [root, line] of composites) {
-    if (compositeLineLength(line) < settings.bucketFillMinLengthPx) continue; // an unmerged singleton whose own segment was already too short
+    if (compositeLineLength(line) < settings.lsdMinLengthPx) continue; // an unmerged singleton whose own segment was already too short
     result.push({ root, line });
   }
   return result;

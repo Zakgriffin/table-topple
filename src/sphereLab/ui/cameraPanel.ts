@@ -3,11 +3,10 @@ import { PhysicalCamera } from '../camera/model.ts';
 import { activeCamera, activeCameraId, cameras, isPhysical, isSimulated, setActiveCameraId } from '../camera/store.ts';
 import { sendToDevBridge } from '../devBridge/client.ts';
 import { rebuildGridLineKs } from '../math/geometry.ts';
-import { updateBucketFillAvailability, updateBucketFillOverlay } from '../overlays/bucketFillOverlay.ts';
-import { updateBucketFillCompositeAvailability, updateBucketFillJoinAvailability, updateBucketFillJoinOverlay, updateBucketFillMergeMarkersAvailability } from '../overlays/bucketFillJoinOverlay.ts';
 import { updateContaminationAvailability } from '../overlays/contaminationOverlays.ts';
 import { updateTopGradientAvailability, updateTopGradientOverlay } from '../overlays/gradientHighlightOverlays.ts';
 import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, updateHoverOverlays } from '../overlays/hoverDebugOverlays.ts';
+import { updateLsdAvailability, updateLsdOverlay } from '../overlays/lsdOverlay.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { runAxesReconstruction } from '../pipeline/axesReconstruction.ts';
@@ -20,7 +19,7 @@ import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -150,7 +149,6 @@ export function refreshCameraPanel() {
   setBool('showSampleLattice', cam.settings.showSampleLattice);
   setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
   setNum('gridPeriodPhaseGapLowerBound', cam.settings.gridPeriodPhaseGapLowerBound);
-  setBool('showCompositeLineFamilies', cam.settings.showCompositeLineFamilies);
 
   setNum('coherenceRadius', cam.settings.coherenceRadius);
 
@@ -159,15 +157,18 @@ export function refreshCameraPanel() {
   if (fieldViewInput) { fieldViewInput.checked = true; fieldViewInput.dispatchEvent(new Event('change')); }
 
   setNum('gradientArrowScale', cam.settings.gradientArrowScale);
-  setNum('bucketFillToleranceDeg', cam.settings.bucketFillToleranceDeg);
-  setNum('bucketFillMagnitudeThreshold', cam.settings.bucketFillMagnitudeThreshold);
-  setNum('bucketFillMinLengthPx', cam.settings.bucketFillMinLengthPx);
-  setNum('bucketFillMaxSteps', cam.settings.bucketFillMaxSteps);
-  setBool('bucketFillUseLabelPropagation', cam.settings.bucketFillUseLabelPropagation);
-  setBool('bucketFillShowMerged', cam.settings.bucketFillShowMerged);
-  setNum('bucketFillJoinSteps', cam.settings.bucketFillJoinSteps);
-  setNum('bucketFillMergeMinSimilarity', cam.settings.bucketFillMergeMinSimilarity);
-  setNum('bucketFillMaxTravelFactor', cam.settings.bucketFillMaxTravelFactor);
+  setNum('lsdToleranceDeg', cam.settings.lsdToleranceDeg);
+  setNum('lsdRhoNoiseThreshold', cam.settings.lsdRhoNoiseThreshold);
+  setNum('lsdMagnitudeBuckets', cam.settings.lsdMagnitudeBuckets);
+  setNum('lsdNfaEpsilon', cam.settings.lsdNfaEpsilon);
+  setNum('lsdNfaTestExponent', cam.settings.lsdNfaTestExponent);
+  setNum('lsdMaxRetries', cam.settings.lsdMaxRetries);
+  setNum('lsdRetryToleranceFactor', cam.settings.lsdRetryToleranceFactor);
+  setNum('lsdRetryShrinkFraction', cam.settings.lsdRetryShrinkFraction);
+  setNum('lsdJoinSteps', cam.settings.lsdJoinSteps);
+  setNum('lsdMergeMinSimilarity', cam.settings.lsdMergeMinSimilarity);
+  setNum('lsdMaxTravelFactor', cam.settings.lsdMaxTravelFactor);
+  setNum('lsdMinLengthPx', cam.settings.lsdMinLengthPx);
   setBool('showRecoveredPoles', cam.settings.showRecoveredPoles); setBool('showAxisVectors', cam.settings.showAxisVectors);
   setBool('showTopCircles', cam.settings.showTopCircles);
   setNum('topCirclesLineWidth', cam.settings.topCirclesLineWidth);
@@ -183,18 +184,15 @@ export function refreshCameraPanel() {
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
   toggleGradientArrowModeBtn.classList.toggle('active', cam.settings.showGradientArrowPerpendicular);
   toggleTopGradientBtn.classList.toggle('active', cam.settings.showTopGradient);
-  toggleBucketFillBtn.classList.toggle('active', cam.settings.showBucketFillSegments);
-  toggleBucketFillMarkersBtn.classList.toggle('active', cam.settings.showBucketFillMarkers);
-  toggleBucketFillJoinBtn.classList.toggle('active', cam.settings.showBucketFillJoin);
-  toggleBucketFillCompositeBtn.classList.toggle('active', cam.settings.showBucketFillComposite);
-  toggleBucketFillMergeMarkersBtn.classList.toggle('active', cam.settings.showBucketFillMergeMarkers);
+  toggleLsdSegmentsBtn.classList.toggle('active', cam.settings.showLsdSegments);
+  toggleLsdRejectedBtn.classList.toggle('active', cam.settings.showLsdRejected);
+  toggleLsdRawRegionsBtn.classList.toggle('active', cam.settings.showLsdRawRegions);
+  toggleLsdCompositeBtn.classList.toggle('active', cam.settings.showLsdComposite);
+  toggleCompositeLineFamiliesBtn.classList.toggle('active', cam.settings.showCompositeLineFamilies);
   updateContaminationAvailability();
   updateGradientArrowAvailability();
   updateTopGradientAvailability();
-  updateBucketFillAvailability();
-  updateBucketFillJoinAvailability();
-  updateBucketFillCompositeAvailability();
-  updateBucketFillMergeMarkersAvailability();
+  updateLsdAvailability();
 
   updateDistortedPreview(cam);
   if (globalState.mode === 'projected') buildProjectedTexture(cam);
@@ -296,11 +294,6 @@ bindSlider('gridPeriodPhaseGapLowerBound', (v) => {
   cam.settings.gridPeriodPhaseGapLowerBound = v;
   drawGridPeriodPhasePlot(cam);
 }, (v) => v.toFixed(4));
-bindCheckbox('showCompositeLineFamilies', (v) => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.showCompositeLineFamilies = v;
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
-});
 bindSlider('simNoise', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
 bindSlider('simBlur', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simBlur = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
 bindSlider('captureSupersample', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.captureSupersample = v; resizeCaptureBuffers(cam); } }, (v) => `${v.toFixed(0)}x`);
@@ -312,66 +305,39 @@ bindRadioGroup('fieldView', (v) => {
   updateContaminationAvailability();
   updateGradientArrowAvailability();
   updateTopGradientAvailability();
-  updateBucketFillAvailability();
-  updateBucketFillJoinAvailability();
-  updateBucketFillCompositeAvailability();
-  updateBucketFillMergeMarkersAvailability();
+  updateLsdAvailability();
 });
 updateContaminationAvailability();
 updateGradientArrowAvailability();
 updateTopGradientAvailability();
-updateBucketFillAvailability();
-updateBucketFillJoinAvailability();
-updateBucketFillCompositeAvailability();
-updateBucketFillMergeMarkersAvailability();
+updateLsdAvailability();
 bindSlider('gradientArrowScale', (v) => { const cam = activeCamera(); if (cam) cam.settings.gradientArrowScale = v; updateHoverOverlays(lastHoverClientX, lastHoverClientY); }, (v) => v.toFixed(1));
-bindCheckbox('bucketFillUseLabelPropagation', (v) => {
+// The from-scratch traditional LSD pipeline (pipeline/lsdSegments.ts) --
+// this DOES have a live debug overlay (the accepted/rejected/raw-region
+// views), so every stage-2..5 change here recomputes and redraws it
+// immediately.
+function refreshLsd() {
   const cam = activeCamera(); if (!cam) return;
-  cam.settings.bucketFillUseLabelPropagation = v;
-  updateBucketFillOverlay(cam);
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
-});
-bindCheckbox('bucketFillShowMerged', (v) => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.bucketFillShowMerged = v;
-  updateBucketFillOverlay(cam);
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
-});
-bindSlider('bucketFillToleranceDeg', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillToleranceDeg = v; updateBucketFillOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => `${v.toFixed(1)}°`);
-bindSlider('bucketFillMagnitudeThreshold', (v) => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.bucketFillMagnitudeThreshold = v;
-  updateBucketFillOverlay(cam);
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
-  // Also feeds the 'gradient2x2LocalMax' field view's own black/white cutoff
-  // (see pipeline/preview.ts) -- unlike the bucket-fill overlay repainted
-  // directly above, that base field-view paint only happens through the
-  // normal throttled captureDirty pipeline, so it needs this nudge too.
-  markCaptureDirty(cam);
-}, (v) => v.toFixed(1));
-bindSlider('bucketFillMinLengthPx', (v) => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.bucketFillMinLengthPx = v;
-  updateBucketFillOverlay(cam); // base raster: filtered segments disappear from it too
-  updateBucketFillJoinOverlay(cam); // join walk: filtered segments never get fronts
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY); // endpoint markers
-}, (v) => v.toFixed(0));
-bindSlider('bucketFillMaxSteps', (v) => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.bucketFillMaxSteps = v;
-  updateBucketFillOverlay(cam); // base raster: region shapes/sizes change directly
-  updateBucketFillJoinOverlay(cam); // join walk consumes the base overlay's own segments/regionId
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
-}, (v) => v.toFixed(0));
-bindSlider('bucketFillJoinSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillJoinSteps = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(0));
-bindSlider('bucketFillMergeMinSimilarity', (v) => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.bucketFillMergeMinSimilarity = v;
-  updateBucketFillOverlay(cam); // also feeds the base raster's own adjacency-merge pass (bucketFillShowMerged), not just the join walk
-  updateBucketFillJoinOverlay(cam);
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
-}, (v) => v.toFixed(2));
-bindSlider('bucketFillMaxTravelFactor', (v) => { const cam = activeCamera(); if (cam) { cam.settings.bucketFillMaxTravelFactor = v; updateBucketFillJoinOverlay(cam); updateHoverOverlays(lastHoverClientX, lastHoverClientY); } }, (v) => v.toFixed(1));
+  updateLsdOverlay(cam); // handles its own full redraw (SVG rectangles + raster raw-regions/rejected) internally
+}
+bindSlider('lsdToleranceDeg', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdToleranceDeg = v; refreshLsd(); }, (v) => `${v.toFixed(1)}°`);
+bindSlider('lsdRhoNoiseThreshold', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); }, (v) => v.toFixed(1));
+bindSlider('lsdMagnitudeBuckets', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdMagnitudeBuckets = v; refreshLsd(); }, (v) => v.toFixed(0));
+bindSlider('lsdNfaEpsilon', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdNfaEpsilon = v; refreshLsd(); }, (v) => v.toFixed(2));
+bindSlider('lsdNfaTestExponent', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdNfaTestExponent = v; refreshLsd(); }, (v) => v.toFixed(0));
+bindSlider('lsdMaxRetries', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdMaxRetries = v; refreshLsd(); }, (v) => v.toFixed(0));
+bindSlider('lsdRetryToleranceFactor', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdRetryToleranceFactor = v; refreshLsd(); }, (v) => v.toFixed(2));
+bindSlider('lsdRetryShrinkFraction', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdRetryShrinkFraction = v; refreshLsd(); }, (v) => v.toFixed(2));
+// The join walk's own 4 params -- feed pipeline/votes.ts's
+// computeGradient2x2Composites (production, run fresh on every real
+// capture) directly, not a live debug overlay, so no repaint call needed
+// here -- the next "capture now" (or axesAutoCapture tick) picks up the
+// new value on its own, same as the stage 2-5 sliders used to before this
+// section existed.
+bindSlider('lsdJoinSteps', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdJoinSteps = v; }, (v) => v.toFixed(0));
+bindSlider('lsdMergeMinSimilarity', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdMergeMinSimilarity = v; }, (v) => v.toFixed(2));
+bindSlider('lsdMaxTravelFactor', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdMaxTravelFactor = v; }, (v) => v.toFixed(1));
+bindSlider('lsdMinLengthPx', (v) => { const cam = activeCamera(); if (cam) cam.settings.lsdMinLengthPx = v; }, (v) => v.toFixed(0));
 bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
 // Turning either on refreshes immediately -- updateGradientCirclesDebug now
 // skips its work while both are off (see its own comment), so the geometry

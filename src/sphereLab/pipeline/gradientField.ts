@@ -17,52 +17,24 @@ export function computeGradientField(gray: Float64Array, w: number, h: number, g
   return { fx, fy, w, h, r };
 }
 
-// Quick throwaway comparison view -- forward difference over a bare 2x2
-// window (this pixel, one right, one down) instead of the radius-driven
-// centered difference above.
+// LSD's own gradient definition (von Gioi et al. 2010): for the 2x2 block
+// at (x,y)-(x+1,y+1), gx is the average of the block's two HORIZONTAL edge
+// differences and gy the average of its two VERTICAL edge differences --
+// uses all 4 corners of the block for both components, not just one edge of
+// it (a bare forward difference, this function's previous behavior, reads
+// only 2 of the 4 corners per component and ignores the other edge
+// entirely). Leaves the last row/column at zero (no full 2x2 block there),
+// same footprint as before.
 export function computeGradient2x2Field(gray: Float64Array, w: number, h: number): GradientField {
   const fx = new Float64Array(w * h), fy = new Float64Array(w * h);
   for (let y = 0; y < h - 1; y++) {
     for (let x = 0; x < w - 1; x++) {
       const i = y * w + x;
-      fx[i] = gray[i + 1] - gray[i];
-      fy[i] = gray[i + w] - gray[i];
+      fx[i] = ((gray[i + 1] + gray[i + 1 + w]) - (gray[i] + gray[i + w])) / 2;
+      fy[i] = ((gray[i + w] + gray[i + 1 + w]) - (gray[i] + gray[i + 1])) / 2;
     }
   }
   return { fx, fy, w, h, r: 1 };
-}
-
-// 1 where a pixel's gradient magnitude is strictly greater than all 8
-// neighbors in its 3x3 neighborhood (a local maximum) AND above
-// minMagnitude, 0 elsewhere -- border pixels (no full 3x3 neighborhood) are
-// always 0. minMagnitude only gates the CENTER pixel's own eligibility, not
-// its neighbors' -- a sub-threshold neighbor still counts as a valid "beats
-// me" comparison, same as bucketFillSegments.ts's magnitudeThreshold gating
-// absorption but not the running direction average. Feeds
-// paintScalarFieldAsGray directly (white=1, black=0) for the
-// 'gradient2x2LocalMax' field view.
-export function computeGradientLocalMaxima(field: GradientField, minMagnitude = 0): Float64Array {
-  const { fx, fy, w, h } = field;
-  const n = w * h;
-  const mag = new Float64Array(n);
-  for (let i = 0; i < n; i++) mag[i] = Math.hypot(fx[i], fy[i]);
-  const out = new Float64Array(n);
-  for (let y = 1; y < h - 1; y++) {
-    for (let x = 1; x < w - 1; x++) {
-      const i = y * w + x;
-      const m = mag[i];
-      if (m <= minMagnitude) continue;
-      let isMax = true;
-      for (let dy = -1; dy <= 1 && isMax; dy++) {
-        for (let dx = -1; dx <= 1; dx++) {
-          if (dx === 0 && dy === 0) continue;
-          if (mag[i + dy * w + dx] >= m) { isMax = false; break; }
-        }
-      }
-      out[i] = isMax ? 1 : 0;
-    }
-  }
-  return out;
 }
 
 // Magnitude of the local VECTOR SUM of gradients (double-angle folded so
@@ -118,13 +90,7 @@ export function computeTriangleFold(gray: Float64Array, maxVal = 255): Float64Ar
 
 // ── Display: colorizes a value field, only for whichever one is on screen ─
 
-// mask (optional): when given, a pixel with mask[i] === 0 is painted plain
-// black instead of its hue/sat color -- used by the 'gradient2x2LocalMax'
-// field view to pass through this SAME coloring for local-maxima pixels
-// only, rather than a separate flat white. maxMag is still taken over every
-// pixel in the field (not just the masked-in ones), so saturation stays
-// directly comparable to the unmasked 'gradient2x2' view.
-export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array, mask?: Float64Array) {
+export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array) {
   const { fx, fy, w, h } = field;
   const n = w * h;
   const mags = new Float64Array(n);
@@ -136,7 +102,6 @@ export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array, m
   }
   for (let i = 0; i < n; i++) {
     const o = i * 4;
-    if (mask && mask[i] === 0) { out[o] = 0; out[o + 1] = 0; out[o + 2] = 0; out[o + 3] = 255; continue; }
     let theta = Math.atan2(fy[i], fx[i]);
     if (theta < 0) theta += Math.PI;
     if (theta >= Math.PI) theta -= Math.PI;

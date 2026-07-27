@@ -1,6 +1,5 @@
 import * as THREE from 'three';
 import { GradientField } from '../types.ts';
-import { hsvToRgb } from './distortion.ts';
 
 // ── "Guided bucket fill" line-segment join (pure) ────────────────────────
 //
@@ -8,8 +7,12 @@ import { hsvToRgb } from './distortion.ts';
 // growing step: flood-fill outward from strong seed pixels, absorbing any
 // connected pixel whose gradient direction stays within toleranceDeg of the
 // region's own running-average direction. Deliberately skips LSD's
-// rectangle-fit + NFA statistical validation -- this is purely the
-// visual/exploratory join step, see overlays/bucketFillOverlay.ts.
+// rectangle-fit + NFA statistical validation -- pipeline/lsdSegments.ts is
+// the separate, full from-scratch pipeline that includes those, and (via
+// its own lsdRectanglesToBucketFillShape) is what pipeline/votes.ts's
+// computeGradient2x2Composites and pipeline/bucketFillJoin.ts's join walk
+// actually run in production now. This function is NOT currently called
+// from anywhere live -- kept as a reference/comparison implementation.
 //
 // Orientation comparisons use the same double-angle (mod PI) convention as
 // pipeline/gradientField.ts's computeGradientAgreementField and
@@ -20,7 +23,6 @@ import { hsvToRgb } from './distortion.ts';
 // direction-averaging step already in this codebase.
 
 export interface BucketFillSegment {
-  seedIndex: number; // the pixel index this region grew from -- unlike count/cx/cy/endpoints (all of which shift as growth/merging changes), this is fixed for a given region's whole lifetime, so it's what segmentColors keys off to keep a region's color STABLE across reruns (scrubbing "fill steps", swapping BFS vs label-propagation, etc.)
   count: number; // pixel "mass" -- every member pixel counts equally, see cx/cy
   cx: number; cy: number; // center of mass: plain mean of member pixel (x,y), UNweighted by magnitude -- kept around, just not currently visualized
   avgFx: number; avgFy: number; // average gradient vector, sign-resolved (see below) -- NOT normalized, its length reflects how tightly the region's directions actually agree
@@ -156,7 +158,6 @@ export function computeBucketFillRegions(
     }
 
     segments.push({
-      seedIndex: seed,
       count, cx: sumX / count, cy: sumY / count, avgFx: sumFx / count, avgFy: sumFy / count,
       endAlongX, endAlongY, endAgainstX, endAgainstY,
     });
@@ -176,48 +177,3 @@ export function segmentLength(seg: BucketFillSegment): number {
   return Math.hypot(seg.endAlongX - seg.endAgainstX, seg.endAlongY - seg.endAgainstY);
 }
 
-// Deterministic (seed pixel index -> hue), NOT array position and NOT
-// Math.random() -- keyed off seedIndex specifically because it's the one
-// thing about a region that's fixed for its whole lifetime. count/cx/cy/
-// endpoints all shift as growth progresses, and even segments.length and
-// each region's RANK within the array can shift once merging enters the
-// picture (overlays/bucketFillOverlay.ts's post-merge mode) -- keying by
-// array position (the previous scheme, golden-angle hue spacing by index)
-// made a region's color drift for reasons that have nothing to do with the
-// region itself (another region merging away, or fewer/more seeds passing
-// the local-maxima test at a different fill-steps value). A simple integer
-// hash isn't as visually evenly-spaced as golden-angle spacing, but doesn't
-// need to know anything about sibling segments to compute, which is exactly
-// the property needed here.
-function hashSeedIndexToHueDeg(seedIndex: number): number {
-  let x = seedIndex | 0;
-  x = Math.imul(x ^ (x >>> 16), 0x45d9f3b);
-  x = Math.imul(x ^ (x >>> 16), 0x45d9f3b);
-  x = x ^ (x >>> 16);
-  return ((x >>> 0) / 0xffffffff) * 360;
-}
-export function segmentColors(segments: readonly BucketFillSegment[]): [number, number, number][] {
-  return segments.map((seg) => hsvToRgb(hashSeedIndexToHueDeg(seg.seedIndex), 0.85, 1));
-}
-
-export function paintBucketFillOverlay(
-  regionId: Int32Array, segments: readonly BucketFillSegment[], colors: readonly [number, number, number][],
-  minLengthPx: number, out: Uint8Array,
-  // Post-merge mode (overlays/bucketFillOverlay.ts) wants eligibility
-  // measured by each MERGE GROUP's combined composite length, not any one
-  // raw segment's own length -- a fragment too short to pass on its own is
-  // exactly the case merging is supposed to rescue. When omitted, falls back
-  // to the plain per-segment check every other (unmerged) caller wants.
-  eligibleOverride?: readonly boolean[],
-) {
-  // Precomputed once per segment (not per pixel) -- a segment can own many
-  // pixels, no need to re-measure its length for each one.
-  const eligible = eligibleOverride ?? segments.map((seg) => segmentLength(seg) >= minLengthPx);
-  for (let i = 0; i < regionId.length; i++) {
-    const o = i * 4;
-    const id = regionId[i];
-    if (id < 0 || !eligible[id]) { out[o + 3] = 0; continue; } // too-short segments simply don't get painted -- they "disappear" from the field view
-    const [rr, gg, bb] = colors[id];
-    out[o] = rr; out[o + 1] = gg; out[o + 2] = bb; out[o + 3] = 255;
-  }
-}

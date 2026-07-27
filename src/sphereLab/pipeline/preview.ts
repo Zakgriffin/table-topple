@@ -3,7 +3,7 @@ import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, separableBoxBlur } from './distortion.ts';
-import { computeGradient2x2Field, computeGradientLocalMaxima, computeTriangleFold, fillGrayscalePreview, paintVectorFieldAsColor } from './gradientField.ts';
+import { computeGradient2x2Field, computeTriangleFold, fillGrayscalePreview, paintVectorFieldAsColor } from './gradientField.ts';
 
 // Shared tail for both capture sources: given a final analysis-resolution
 // grayscale, paints whichever of the direction/scalar field views is
@@ -20,12 +20,6 @@ export function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
     const field = computeGradient2x2Field(gray, w, h);
     camera.lastDisplayedVectorField = field;
     paintVectorFieldAsColor(field, camera.distortedPreviewData);
-    camera.distortedPreviewTex.needsUpdate = true;
-  } else if (settings.fieldView === 'gradient2x2LocalMax') {
-    const field = computeGradient2x2Field(gray, w, h);
-    camera.lastDisplayedVectorField = field;
-    const localMax = computeGradientLocalMaxima(field, settings.bucketFillMagnitudeThreshold);
-    paintVectorFieldAsColor(field, camera.distortedPreviewData, localMax);
     camera.distortedPreviewTex.needsUpdate = true;
   }
 }
@@ -45,14 +39,9 @@ export function updateDistortedPreview(camera: Camera) {
   // the STALE gray buffer (e.g. from before a viewport resize, when it was
   // a different width/height) then gets reused at the CURRENT rtSize.w/h by
   // whichever overlay reads it, reading/writing at systematically wrong
-  // offsets -- the diagonal "streaking" artifact. Bucket-fill and top-
-  // gradient (overlays/bucketFillOverlay.ts, overlays/
-  // gradientHighlightOverlays.ts) were both missing here; showBucketFillJoin/
-  // Composite/MergeMarkers don't need their own entry since their
-  // availability gating already forces them off whenever
-  // showBucketFillSegments is off.
+  // offsets -- the diagonal "streaking" artifact.
   const needGrayForOverlay = settings.showTrueContamination || settings.showReconstructedContamination
-    || settings.showBucketFillSegments || settings.showTopGradient;
+    || settings.showLsdSegments || settings.showTopGradient;
   if (settings.hideField && !needGrayForOverlay) return;
 
   if (isPhysical(camera)) {

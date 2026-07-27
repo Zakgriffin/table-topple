@@ -69,13 +69,14 @@ import { euler } from './constants.ts';
 import { canvas, readout, savedControls } from './ui/dom.ts';
 import { setMode, setPanelCollapsed } from './ui/mode.ts';
 import { renderCameraTabs, refreshCameraPanel } from './ui/cameraPanel.ts';
-import { renderViewport, layoutPip, resize } from './ui/layout.ts';
+import { renderViewport, layoutPip, resize, computeThroughRect } from './ui/layout.ts';
 import './ui/cameraPanel.ts'; // side effect: wires every slider/checkbox to the active camera
 import { renderer } from './scene/renderer.ts';
 import { floorMesh } from './scene/floor.ts';
 import { viewerCam, worldOrbit, insideCam, insideYaw, insidePitch } from './scene/viewerControls.ts';
 import {
-  renderPreviewViewport, renderProjectedViewport, renderTrueContamOverlay, renderReconContamOverlay, renderTopGradientOverlay, renderBucketFillOverlay, renderBucketFillJoinOverlay,
+  renderPreviewViewport, renderProjectedViewport, renderTrueContamOverlay, renderReconContamOverlay, renderTopGradientOverlay,
+  renderLsdRawRegionsOverlay, renderLsdRejectedOverlay,
 } from './scene/quadRenderers.ts';
 import { getAnalysisVFovRad, markCaptureDirty, resizeCaptureBuffers, renderCamRT } from './pipeline/capture.ts';
 import { updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS } from './pipeline/preview.ts';
@@ -87,7 +88,6 @@ import { updateGizmo, updateSphereOverlays } from './overlays/sphereOverlays.ts'
 import { updateRecoveredCamGizmo } from './overlays/recoveredOverlays.ts';
 import { drawSampleLattice } from './overlays/projectedCamOverlays.ts';
 import { drawGridPeriodPhaseProjected } from './overlays/gridPeriodPhaseOverlays.ts';
-import { computeThroughRect } from './overlays/hoverDebugOverlays.ts';
 import { sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
 
 // Every module's exports, purely so devBridge/client.ts's `eval(msg.code)`
@@ -141,16 +141,16 @@ import * as NS40 from './pipelineGPU/voteBandSelect.ts';
 import * as NS41 from './pipelineGPU/projectSamples.ts';
 import * as NS42 from './overlays/gradientHighlightOverlays.ts';
 import * as NS43 from './pipeline/gradientHighlight.ts';
-import * as NS44 from './overlays/bucketFillOverlay.ts';
 import * as NS45 from './pipeline/bucketFillSegments.ts';
-import * as NS46 from './overlays/bucketFillJoinOverlay.ts';
 import * as NS47 from './pipeline/bucketFillJoin.ts';
 import * as NS48 from './overlays/gridPeriodPhaseOverlays.ts';
 import * as NS49 from './pipeline/gridPeriodPhase.ts';
+import * as NS50 from './overlays/lsdOverlay.ts';
+import * as NS51 from './pipeline/lsdSegments.ts';
 Object.assign(
   globalThis,
   NS0, NS1, NS2, NS3, NS4, NS5, NS6, NS7, NS8, NS9, NS10, NS11, NS12, NS13, NS14, NS15, NS16, NS17,
-  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS44, NS45, NS46, NS47, NS48, NS49,
+  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS45, NS47, NS48, NS49, NS50, NS51,
   { THREE, activeCamera, cameras, isSimulated, isPhysical, globalState, euler, canvas, readout, savedControls,
     setMode, setPanelCollapsed, renderCameraTabs, refreshCameraPanel, renderViewport, layoutPip, resize,
     renderer, floorMesh, viewerCam, worldOrbit, insideCam, renderPreviewViewport, renderProjectedViewport,
@@ -237,8 +237,8 @@ function animate() {
       if (active.settings.showTrueContamination) renderTrueContamOverlay(active, x, y, w, h);
       if (active.settings.showReconstructedContamination) renderReconContamOverlay(active, x, y, w, h);
       if (active.settings.showTopGradient) renderTopGradientOverlay(active, x, y, w, h);
-      if (active.settings.showBucketFillSegments) renderBucketFillOverlay(active, x, y, w, h);
-      if (active.settings.showBucketFillJoin) renderBucketFillJoinOverlay(active, x, y, w, h);
+      if (active.settings.showLsdRawRegions) renderLsdRawRegionsOverlay(active, x, y, w, h);
+      if (active.settings.showLsdRejected) renderLsdRejectedOverlay(active, x, y, w, h);
     }
   } else if (globalState.mode === 'projected') {
     if (active) {

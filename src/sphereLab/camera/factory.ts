@@ -120,27 +120,27 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
   const tangentWalkPathData = new Uint8Array(rtSize.w * rtSize.h * 4);
   const tangentWalkPathTex = new THREE.DataTexture(tangentWalkPathData, rtSize.w, rtSize.h, THREE.RGBAFormat);
   tangentWalkPathTex.flipY = false;
-  // These 3 overlays (unlike trueContam/reconContam/topGradient, which paint
+
+  const lsdRawRegionsData = new Uint8Array(rtSize.w * rtSize.h * 4);
+  const lsdRawRegionsTex = new THREE.DataTexture(lsdRawRegionsData, rtSize.w, rtSize.h, THREE.RGBAFormat);
+  lsdRawRegionsTex.flipY = false;
+
+  const lsdRejectedData = new Uint8Array(rtSize.w * rtSize.h * 4);
+  const lsdRejectedTex = new THREE.DataTexture(lsdRejectedData, rtSize.w, rtSize.h, THREE.RGBAFormat);
+  lsdRejectedTex.flipY = false;
+  // These 5 overlays (unlike trueContam/reconContam/topGradient, which paint
   // one FIXED color everywhere and only vary alpha) paint a DIFFERENT color
   // per claimed pixel, next to unclaimed pixels left at RGB=0,alpha=0 --
   // under the default LinearFilter, GPU bilinear sampling blends RGB across
   // texel boundaries independent of alpha, so every claimed pixel bleeds
-  // toward black at its edges. Sparse claims (bucket-fill-join especially,
-  // at low step counts) make this read as an overall gray wash rather than
-  // a subtle edge fringe. NearestFilter (already used by scene/floor.ts's
-  // pattern texture for the same "don't blur discrete per-cell data"
-  // reason) shows each field pixel as one flat block instead.
+  // toward black at its edges. Sparse claims (at low fill-steps counts,
+  // etc.) make this read as an overall gray wash rather than a subtle edge
+  // fringe. NearestFilter (already used by scene/floor.ts's pattern texture
+  // for the same "don't blur discrete per-cell data" reason) shows each
+  // field pixel as one flat block instead.
   tangentWalkPathTex.magFilter = THREE.NearestFilter;
-
-  const bucketFillData = new Uint8Array(rtSize.w * rtSize.h * 4);
-  const bucketFillTex = new THREE.DataTexture(bucketFillData, rtSize.w, rtSize.h, THREE.RGBAFormat);
-  bucketFillTex.flipY = false;
-  bucketFillTex.magFilter = THREE.NearestFilter;
-
-  const bucketFillJoinData = new Uint8Array(rtSize.w * rtSize.h * 4);
-  const bucketFillJoinTex = new THREE.DataTexture(bucketFillJoinData, rtSize.w, rtSize.h, THREE.RGBAFormat);
-  bucketFillJoinTex.flipY = false;
-  bucketFillJoinTex.magFilter = THREE.NearestFilter;
+  lsdRawRegionsTex.magFilter = THREE.NearestFilter;
+  lsdRejectedTex.magFilter = THREE.NearestFilter;
 
   // Reuses the SAME projectedPreviewTex "Projected Cam" mode already builds
   // (not a separate computation) as a decal on a plane placed at the
@@ -186,13 +186,13 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
     axesComputed: false, axesCapturing: false, lastAxesCapture: 0,
     rtSize: { ...rtSize }, aspect, pipRect: { x: 0, y: 0, w: 0, h: 0 }, captureDirty: true, lastPreviewUpdate: 0,
     lastNoisedPreviewGray: null, lastDisplayedVectorField: null,
-    lastBucketFillSegments: null, lastBucketFillColors: null, lastBucketFillRegionId: null, lastBucketFillMerges: null, lastBucketFillComposite: null,
-    lastBucketFillBlueMerges: null, lastBucketFillOrangeMerges: null, lastBucketFillRedMerges: null,
+    lastLsdRectangles: null,
     lastGridPeriodPhase: null,
     gridPeriodPhaseViewMin: null, gridPeriodPhaseViewMax: null,
     distortedPreviewData, distortedPreviewTex, projectedPreviewData, projectedPreviewTex,
     trueContamData, trueContamTex, reconContamData, reconContamTex, topGradientData, topGradientTex,
-    tangentWalkPathData, tangentWalkPathTex, bucketFillData, bucketFillTex, bucketFillJoinData, bucketFillJoinTex,
+    tangentWalkPathData, tangentWalkPathTex,
+    lsdRawRegionsData, lsdRawRegionsTex, lsdRejectedData, lsdRejectedTex,
     recoveredCamGizmo, recoveredCamAxes,
     recoveredRowPoleA, recoveredRowPoleB, recoveredColPoleA, recoveredColPoleB,
     recoveredFloorOverlayMat, recoveredFloorOverlay,
@@ -300,8 +300,8 @@ export function destroyCamera(camera: Camera) {
   camera.reconContamTex.dispose();
   camera.topGradientTex.dispose();
   camera.tangentWalkPathTex.dispose();
-  camera.bucketFillTex.dispose();
-  camera.bucketFillJoinTex.dispose();
+  camera.lsdRawRegionsTex.dispose();
+  camera.lsdRejectedTex.dispose();
   if (isSimulated(camera)) {
     disposeObj(camera.gizmoBody);
     scene.remove(camera.gizmoCam);

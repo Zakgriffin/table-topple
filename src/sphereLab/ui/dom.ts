@@ -15,16 +15,22 @@ export const sampleLatticeCtx = sampleLatticeCanvas.getContext('2d')!;
 export const gridPeriodPhasePlotSvg = document.getElementById('gridPeriodPhasePlot') as unknown as SVGSVGElement;
 export const gridPeriodPhaseProjectedCanvas = document.getElementById('gridPeriodPhaseProjected') as HTMLCanvasElement;
 export const gridPeriodPhaseProjectedCtx = gridPeriodPhaseProjectedCanvas.getContext('2d')!;
+export const overlayPanel = document.getElementById('overlayPanel') as HTMLDivElement;
+export const overlayPanelToggle = document.getElementById('overlayPanelToggle') as HTMLButtonElement;
 export const contamToggles = document.getElementById('contamToggles') as HTMLDivElement;
 export const toggleHideFieldBtn = document.getElementById('toggleHideField') as HTMLButtonElement;
 export const toggleTrueContamBtn = document.getElementById('toggleTrueContam') as HTMLButtonElement;
 export const toggleReconContamBtn = document.getElementById('toggleReconContam') as HTMLButtonElement;
 export const toggleTopGradientBtn = document.getElementById('toggleTopGradient') as HTMLButtonElement;
-export const toggleBucketFillBtn = document.getElementById('toggleBucketFill') as HTMLButtonElement;
-export const toggleBucketFillMarkersBtn = document.getElementById('toggleBucketFillMarkers') as HTMLButtonElement;
-export const toggleBucketFillJoinBtn = document.getElementById('toggleBucketFillJoin') as HTMLButtonElement;
-export const toggleBucketFillCompositeBtn = document.getElementById('toggleBucketFillComposite') as HTMLButtonElement;
-export const toggleBucketFillMergeMarkersBtn = document.getElementById('toggleBucketFillMergeMarkers') as HTMLButtonElement;
+export const toggleLsdSegmentsBtn = document.getElementById('toggleLsdSegments') as HTMLButtonElement;
+export const toggleLsdRejectedBtn = document.getElementById('toggleLsdRejected') as HTMLButtonElement;
+export const toggleLsdRawRegionsBtn = document.getElementById('toggleLsdRawRegions') as HTMLButtonElement;
+export const toggleLsdCompositeBtn = document.getElementById('toggleLsdComposite') as HTMLButtonElement;
+export const toggleCompositeLineFamiliesBtn = document.getElementById('toggleCompositeLineFamilies') as HTMLButtonElement;
+export const lsdReadout = document.getElementById('lsdReadout') as HTMLDivElement;
+export const lsdSvgOverlay = document.getElementById('lsdSvgOverlay') as unknown as SVGSVGElement;
+export const lsdRectanglesGroup = document.getElementById('lsdRectanglesGroup') as unknown as SVGGElement;
+export const lsdCompositeGroup = document.getElementById('lsdCompositeGroup') as unknown as SVGGElement;
 export const gradientArrowCanvas = document.getElementById('gradientArrowOverlay') as HTMLCanvasElement;
 export const gradientArrowCtx = gradientArrowCanvas.getContext('2d')!;
 export const toggleGradientArrowBtn = document.getElementById('toggleGradientArrow') as HTMLButtonElement;
@@ -89,6 +95,20 @@ export function bindRadioGroup(name: string, onChange: (v: string) => void) {
 
 export function setSectionHidden(el: HTMLElement, hidden: boolean) {
   el.classList.toggle('hidden', hidden);
+}
+
+// LSD rectangles/composite lines are real DOM elements (an <svg>'s
+// children), not a Three.js quad gated by the per-frame mode branch in
+// main.ts's animate() -- unlike the raster overlays (rendered only inside
+// the `mode === 'through'` branch, so they naturally stop drawing the
+// instant mode changes) and gradientArrowCanvas (explicitly cleared by
+// ui/mode.ts's setMode), nothing else clears this SVG content on a mode
+// switch, so it would otherwise sit on screen indefinitely on top of
+// World/Projected/Inside-Sphere too. Call from setMode alongside
+// clearGradientArrowOverlay.
+export function clearLsdSvgOverlay() {
+  while (lsdRectanglesGroup.firstChild) lsdRectanglesGroup.removeChild(lsdRectanglesGroup.firstChild);
+  while (lsdCompositeGroup.firstChild) lsdCompositeGroup.removeChild(lsdCompositeGroup.firstChild);
 }
 
 export const globalSettingsSectionEl = document.getElementById('globalSettingsSection') as HTMLDivElement;

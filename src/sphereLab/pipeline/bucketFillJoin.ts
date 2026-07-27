@@ -1,5 +1,4 @@
 import { BucketFillSegment, segmentLength } from './bucketFillSegments.ts';
-import { hsvToRgb, rgbToHueDeg } from './distortion.ts';
 
 // ── Line-segment joining (pure) ───────────────────────────────────────────
 //
@@ -370,45 +369,6 @@ export function computeMergeGroups(numSegments: number, merges: readonly Segment
   return groupOf;
 }
 
-// Every segment in a group displays with the BLEND of every member
-// segment's own already-assigned color (see segmentColors) -- not just the
-// root's color, so a 3+-way chain blends all of them, not only
-// the first two that happened to touch. Blended in HUE space (circular
-// mean, so e.g. 350deg and 10deg correctly average to 0deg, not 180deg),
-// not by averaging RGB directly -- averaging RGB pulls opposite-ish hues
-// (red+cyan, etc) toward gray, since it's not accounting for hue being
-// circular; segment colors are all generated at the same fixed
-// saturation/value (segmentColors), so re-emitting the blended hue at
-// that same s/v keeps the result exactly as vivid as any individual
-// segment's own color. Degenerates to a segment's own unchanged color when
-// it never merged with anything (its group has exactly one member: itself).
-export function groupDisplayColors(
-  groupOf: Int32Array, colors: readonly [number, number, number][],
-): [number, number, number][] {
-  const n = groupOf.length;
-  const sumCos = new Float64Array(n), sumSin = new Float64Array(n);
-  for (let i = 0; i < n; i++) {
-    const root = groupOf[i];
-    const [r, g, b] = colors[i];
-    const rad = (rgbToHueDeg(r, g, b) * Math.PI) / 180;
-    sumCos[root] += Math.cos(rad); sumSin[root] += Math.sin(rad);
-  }
-  const blendedByRoot = new Map<number, [number, number, number]>();
-  const out: [number, number, number][] = new Array(n);
-  for (let i = 0; i < n; i++) {
-    const root = groupOf[i];
-    let blended = blendedByRoot.get(root);
-    if (!blended) {
-      let meanDeg = (Math.atan2(sumSin[root], sumCos[root]) * 180) / Math.PI;
-      if (meanDeg < 0) meanDeg += 360;
-      blended = hsvToRgb(meanDeg, 0.85, 1);
-      blendedByRoot.set(root, blended);
-    }
-    out[i] = blended;
-  }
-  return out;
-}
-
 export interface CompositeLine { x1: number; y1: number; x2: number; y2: number }
 
 // Pixel-space length of a composite line -- same idea as
@@ -458,20 +418,3 @@ export function computeCompositeLines(segments: BucketFillSegment[], groupOf: In
   return result;
 }
 
-// root: the merge-group root this composite line was built from -- lets a
-// caller (e.g. overlays/hoverDebugOverlays.ts's family recoloring) match a
-// displayed line back to pipeline/gridPeriodPhase.ts's own per-line results,
-// which are keyed the same way.
-export interface CompositeLineDisplay extends CompositeLine { color: [number, number, number]; root: number }
-
-const JOIN_ALPHA = 130; // "faded" relative to the base fill's fully-opaque 255
-
-export function paintJoinOverlay(joinBuffer: Int32Array, colors: readonly [number, number, number][], out: Uint8Array) {
-  for (let i = 0; i < joinBuffer.length; i++) {
-    const o = i * 4;
-    const id = joinBuffer[i];
-    if (id < 0) { out[o + 3] = 0; continue; }
-    const [rr, gg, bb] = colors[id];
-    out[o] = rr; out[o + 1] = gg; out[o + 2] = bb; out[o + 3] = JOIN_ALPHA;
-  }
-}

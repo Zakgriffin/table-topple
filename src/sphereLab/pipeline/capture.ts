@@ -73,16 +73,14 @@ export function resizeCaptureBuffers(camera: Camera, explicitSize?: { w: number;
   camera.reconContamTex.dispose();
   camera.reconContamTex.needsUpdate = true;
 
-  // These four overlay buffers (top-gradient, tangent-walk-path, bucket-fill
-  // base, bucket-fill join) were missing from this function entirely --
-  // their Uint8Array stayed allocated at whatever size they were created at
-  // while camera.rtSize moved on, so painting into them (e.g.
-  // paintBucketFillOverlay's y*w+x indexing, using the NEW w) read/wrote the
-  // OLD-sized buffer at the wrong offsets -- the diagonal "streaking"
-  // artifact. magFilter is reapplied since a fresh DataTexture doesn't carry
-  // it over from the disposed one (see camera/factory.ts's own comment on
-  // why these four specifically need NearestFilter, unlike the other four
-  // above).
+  // These overlay buffers (top-gradient, tangent-walk-path, LSD raw-regions/
+  // rejected) were missing from this function entirely -- their Uint8Array
+  // stayed allocated at whatever size they were created at while
+  // camera.rtSize moved on, so painting into them read/wrote the OLD-sized
+  // buffer at the wrong offsets -- the diagonal "streaking" artifact.
+  // magFilter is reapplied since a fresh DataTexture doesn't carry it over
+  // from the disposed one (see camera/factory.ts's own comment on why these
+  // specifically need NearestFilter).
   camera.topGradientData = new Uint8Array(w * h * 4);
   camera.topGradientTex.image = { data: camera.topGradientData, width: w, height: h };
   camera.topGradientTex.dispose();
@@ -94,17 +92,17 @@ export function resizeCaptureBuffers(camera: Camera, explicitSize?: { w: number;
   camera.tangentWalkPathTex.dispose();
   camera.tangentWalkPathTex.needsUpdate = true;
 
-  camera.bucketFillData = new Uint8Array(w * h * 4);
-  camera.bucketFillTex.image = { data: camera.bucketFillData, width: w, height: h };
-  camera.bucketFillTex.magFilter = THREE.NearestFilter;
-  camera.bucketFillTex.dispose();
-  camera.bucketFillTex.needsUpdate = true;
+  camera.lsdRawRegionsData = new Uint8Array(w * h * 4);
+  camera.lsdRawRegionsTex.image = { data: camera.lsdRawRegionsData, width: w, height: h };
+  camera.lsdRawRegionsTex.magFilter = THREE.NearestFilter;
+  camera.lsdRawRegionsTex.dispose();
+  camera.lsdRawRegionsTex.needsUpdate = true;
 
-  camera.bucketFillJoinData = new Uint8Array(w * h * 4);
-  camera.bucketFillJoinTex.image = { data: camera.bucketFillJoinData, width: w, height: h };
-  camera.bucketFillJoinTex.magFilter = THREE.NearestFilter;
-  camera.bucketFillJoinTex.dispose();
-  camera.bucketFillJoinTex.needsUpdate = true;
+  camera.lsdRejectedData = new Uint8Array(w * h * 4);
+  camera.lsdRejectedTex.image = { data: camera.lsdRejectedData, width: w, height: h };
+  camera.lsdRejectedTex.magFilter = THREE.NearestFilter;
+  camera.lsdRejectedTex.dispose();
+  camera.lsdRejectedTex.needsUpdate = true;
 
   if (camera === activeCamera()) layoutPip(camera);
 }

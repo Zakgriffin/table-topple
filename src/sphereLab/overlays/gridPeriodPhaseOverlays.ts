@@ -4,20 +4,9 @@ import { projectedUVScale } from '../pipeline/decodeGrid.ts';
 import { circularFit, GnomonicPoint, GridPeriodPhaseResult, median, PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
 import { DecodeCellDebug } from '../types.ts';
 import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx } from '../ui/dom.ts';
+import { svgEl, svgText } from './svgUtil.ts';
 
 // ── Grid period/phase debug visualizations (pipeline/gridPeriodPhase.ts) ──
-
-const SVG_NS = 'http://www.w3.org/2000/svg';
-function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number>): SVGElementTagNameMap[K] {
-  const el = document.createElementNS(SVG_NS, tag) as SVGElementTagNameMap[K];
-  for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, String(v));
-  return el;
-}
-function svgText(x: number, y: number, content: string, attrs: Record<string, string | number>): SVGTextElement {
-  const el = svgEl('text', { x, y, ...attrs });
-  el.textContent = content;
-  return el;
-}
 
 // Default view: a modest 1.1x padding around the search BRACKET's own
 // width, centered on its midpoint -- deliberately NOT based on pooledGaps'

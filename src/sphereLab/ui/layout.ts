@@ -3,13 +3,28 @@ import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { renderer, scene } from '../scene/renderer.ts';
 import { insideCam, viewerCam } from '../scene/viewerControls.ts';
-import { gradientArrowCanvas, pipFrame, pipLabel } from './dom.ts';
+import { gradientArrowCanvas, lsdSvgOverlay, pipFrame, pipLabel } from './dom.ts';
 
 export function renderViewport(cam: THREE.Camera, x: number, y: number, w: number, h: number) {
   renderer.setViewport(x, y, w, h);
   renderer.setScissor(x, y, w, h);
   renderer.setScissorTest(true);
   renderer.render(scene, cam);
+}
+
+// Letterbox rect for the fixed-aspect gizmo camera within whatever shape the
+// window currently is -- shared by every overlay that needs to map a field-
+// space (pixel) coordinate to screen space for the Through-Cam view (hover
+// arrows, LSD rectangles/composite lines, vote-family lines). Lives here
+// (not in an overlays/ file) specifically so overlays/lsdOverlay.ts and
+// overlays/hoverDebugOverlays.ts can both import it without one importing
+// the other.
+export function computeThroughRect(camera: Camera): { x: number; y: number; w: number; h: number } {
+  const winAspect = innerWidth / innerHeight;
+  let w = innerWidth, h = innerHeight, x = 0, y = 0;
+  if (winAspect > camera.aspect) { w = innerHeight * camera.aspect; x = (innerWidth - w) / 2; }
+  else { h = innerWidth / camera.aspect; y = (innerHeight - h) / 2; }
+  return { x, y, w, h };
 }
 
 export function layoutPip(camera: Camera) {
@@ -37,6 +52,9 @@ export function resize() {
   gradientArrowCanvas.height = innerHeight;
   gradientArrowCanvas.style.width = innerWidth + 'px';
   gradientArrowCanvas.style.height = innerHeight + 'px';
+  // viewBox in raw pixel units so SVG user-space coordinates match
+  // computeThroughRect's screen-pixel output 1:1, same as the canvas above.
+  lsdSvgOverlay.setAttribute('viewBox', `0 0 ${innerWidth} ${innerHeight}`);
 }
 addEventListener('resize', resize);
 resize();

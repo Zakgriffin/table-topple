@@ -1,11 +1,10 @@
 import { Camera } from '../camera/model.ts';
 import { Mode } from '../types.ts';
-import { updateBucketFillOverlay } from '../overlays/bucketFillOverlay.ts';
-import { updateBucketFillJoinOverlay } from '../overlays/bucketFillJoinOverlay.ts';
 import { updateContaminationOverlays } from '../overlays/contaminationOverlays.ts';
 import { updateTopGradientOverlay } from '../overlays/gradientHighlightOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { lastHoverClientX, lastHoverClientY, updateHoverOverlays } from '../overlays/hoverDebugOverlays.ts';
+import { updateLsdOverlay } from '../overlays/lsdOverlay.ts';
 import { buildProjectedTexture } from './decodeGrid.ts';
 import { updateDistortedPreview } from './preview.ts';
 
@@ -26,8 +25,7 @@ export function refreshModeVisualizations(camera: Camera, mode: Mode) {
   if (mode === 'through') {
     updateContaminationOverlays(camera);
     updateTopGradientOverlay(camera);
-    updateBucketFillOverlay(camera);
-    updateBucketFillJoinOverlay(camera); // needs lastBucketFillSegments, hence after updateBucketFillOverlay
+    updateLsdOverlay(camera);
     updateHoverOverlays(lastHoverClientX, lastHoverClientY);
     // The grid period/phase SVG plot lives in the Through-Cam toggle panel
     // (#contamToggles, sphere-lab.html), not Projected-Cam's, despite what

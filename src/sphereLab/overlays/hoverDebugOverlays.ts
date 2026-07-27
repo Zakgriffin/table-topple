@@ -2,56 +2,18 @@ import * as THREE from 'three';
 import { Camera } from '../camera/model.ts';
 import { CameraSettingsCommon } from '../camera/settings.ts';
 import { activeCamera } from '../camera/store.ts';
-import { segmentLength } from '../pipeline/bucketFillSegments.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
-import { canvas, gradientArrowCanvas, gradientArrowCtx, persistControl, toggleBucketFillBtn, toggleBucketFillCompositeBtn, toggleBucketFillJoinBtn, toggleBucketFillMarkersBtn, toggleBucketFillMergeMarkersBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
-import { updateBucketFillOverlay } from './bucketFillOverlay.ts';
-import { updateBucketFillCompositeAvailability, updateBucketFillJoinAvailability, updateBucketFillJoinOverlay, updateBucketFillMergeMarkersAvailability } from './bucketFillJoinOverlay.ts';
+import { canvas, gradientArrowCanvas, gradientArrowCtx, lsdCompositeGroup, persistControl, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { computeThroughRect } from '../ui/layout.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
 import { updateTopGradientOverlay } from './gradientHighlightOverlays.ts';
-
-// Letterbox rect for the fixed-aspect gizmo camera within whatever shape the
-// window currently is.
-export function computeThroughRect(camera: Camera): { x: number; y: number; w: number; h: number } {
-  const winAspect = innerWidth / innerHeight;
-  let w = innerWidth, h = innerHeight, x = 0, y = 0;
-  if (winAspect > camera.aspect) { w = innerHeight * camera.aspect; x = (innerWidth - w) / 2; }
-  else { h = innerWidth / camera.aspect; y = (innerHeight - h) / 2; }
-  return { x, y, w, h };
-}
+import { hashSeedIndexToHueDeg, updateLsdOverlay } from './lsdOverlay.ts';
+import { svgEl } from './svgUtil.ts';
 
 export function clearGradientArrowOverlay() {
   gradientArrowCtx.clearRect(0, 0, gradientArrowCanvas.width, gradientArrowCanvas.height);
-}
-// Same black-outline-then-colored-fill dot drawOneArrow plants at its own
-// origin point -- extracted so other markers (bucket-fill endpoints) can
-// reuse the exact same visual language without also drawing a shaft/arrow.
-export function drawMarkerDot(px: number, py: number, color: string) {
-  const ctx = gradientArrowCtx;
-  ctx.fillStyle = 'rgba(0,0,0,0.85)';
-  ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
-  ctx.fillStyle = color;
-  ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2); ctx.fill();
-}
-// Same black-outline-then-colored-stroke language as drawMarkerDot, an X
-// instead of a dot (used for the same/opposite-direction join merge points,
-// so they read as a distinct marker kind from segment-endpoint dots).
-export function drawMarkerX(px: number, py: number, color: string) {
-  const ctx = gradientArrowCtx;
-  const r = 4.5;
-  ctx.lineCap = 'round';
-  ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 4;
-  ctx.beginPath();
-  ctx.moveTo(px - r, py - r); ctx.lineTo(px + r, py + r);
-  ctx.moveTo(px - r, py + r); ctx.lineTo(px + r, py - r);
-  ctx.stroke();
-  ctx.strokeStyle = color; ctx.lineWidth = 2;
-  ctx.beginPath();
-  ctx.moveTo(px - r, py - r); ctx.lineTo(px + r, py + r);
-  ctx.moveTo(px - r, py + r); ctx.lineTo(px + r, py - r);
-  ctx.stroke();
 }
 export function drawOneArrow(px: number, py: number, dirVecX: number, dirVecY: number, color: string, scale: number) {
   const tipX = px + dirVecX * scale, tipY = py + dirVecY * scale;
@@ -231,81 +193,11 @@ export function paintSpokedWalkOverlay(camera: Camera, fieldW: number, included:
   camera.tangentWalkPathTex.needsUpdate = true;
 }
 
-// Two dots per bucket-fill segment (see pipeline/bucketFillSegments.ts and
-// overlays/bucketFillOverlay.ts) -- one at each of the segment's tracked
-// endpoints (endAlong/endAgainst), same dot styling the center-of-mass
-// marker used before. Colored to match that segment's own random fill
-// color, so a marker can be visually traced back to its blob in the
-// bucket-fill raster overlay underneath. Unlike the hover arrows below,
-// this is PERSISTENT (tied to whenever segments were last recomputed, not
-// to cursor position) -- see this function's caller for why it still lives
-// inside the same clear-then-redraw cycle as the hover-only content.
-function drawBucketFillSegmentMarkers(camera: Camera) {
-  const settings = camera.settings;
-  if (!settings.showBucketFillSegments || !settings.showBucketFillMarkers || !camera.lastBucketFillSegments || !camera.lastBucketFillColors) return;
-  const rect = computeThroughRect(camera);
-  const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
-  const segments = camera.lastBucketFillSegments;
-  const colors = camera.lastBucketFillColors;
-  const toScreen = (fx: number, fy: number) => ({
-    px: rect.x + (fx + 0.5) * (rect.w / fieldW),
-    py: rect.y + rect.h - (fy + 0.5) * (rect.h / fieldH),
-  });
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i];
-    if (segmentLength(seg) < settings.bucketFillMinLengthPx) continue; // too short -- disappears the same as in the base raster
-    const [rr, gg, bb] = colors[i];
-    const color = `rgb(${rr},${gg},${bb})`;
-    const a = toScreen(seg.endAlongX, seg.endAlongY);
-    const b = toScreen(seg.endAgainstX, seg.endAgainstY);
-    drawMarkerDot(a.px, a.py, color);
-    drawMarkerDot(b.px, b.py, color);
-  }
-}
-
-// One line per merge GROUP (see pipeline/bucketFillJoin.ts's
-// computeCompositeLines) -- the two farthest-apart endpoints across every
-// segment the join walk decided belongs to that group, i.e. the group's own
-// "composite" line, not any one member segment's own extent. Same black-
-// outline-then-colored-stroke language as drawOneArrow/drawMarkerDot, in
-// the group's own blended color (matching the join overlay's raster).
-//
-// "color by row/col family" draws a COMPLETELY DIFFERENT line set
-// (drawVoteFamilyLines below) instead of just recoloring these -- see that
-// function's own comment for why the two can't be reconciled by root alone.
-function drawBucketFillCompositeLines(camera: Camera) {
-  const settings = camera.settings;
-  if (settings.showCompositeLineFamilies) { drawVoteFamilyLines(camera); return; }
-  if (!settings.showBucketFillComposite || !camera.lastBucketFillComposite) return;
-  const rect = computeThroughRect(camera);
-  const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
-  const toScreen = (fx: number, fy: number) => ({
-    px: rect.x + (fx + 0.5) * (rect.w / fieldW),
-    py: rect.y + rect.h - (fy + 0.5) * (rect.h / fieldH),
-  });
-  const ctx = gradientArrowCtx;
-
-  for (const c of camera.lastBucketFillComposite) {
-    const a = toScreen(c.x1, c.y1), b = toScreen(c.x2, c.y2);
-    ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
-    const [rr, gg, bb] = c.color;
-    ctx.strokeStyle = `rgb(${rr},${gg},${bb})`; ctx.lineWidth = 2.5;
-    ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
-  }
-}
-
 // Draws camera.lastVoteComposites -- the composite lines actually fed to
 // fitPairOfPlanes and classified by pipeline/gridPeriodPhase.ts (pipeline/
-// votes.ts's computeGradient2x2Composites), NOT camera.lastBucketFillComposite
-// above. Those used to be conflated (this function used to recolor
-// lastBucketFillComposite by looking up each line's root in gpp's row/col
-// maps), but lastBucketFillComposite is a SEPARATE, live-tunable debug
-// recompute over whichever raw field the fieldView toggle currently shows --
-// built from different segments, so its root numbers have no relation to
-// gpp's and most lines silently fell back to an unclassified color. Drawing
-// gpp's own lines directly makes that mismatch impossible: every line here
-// has a root that either IS or ISN'T in gpp's maps, for real.
+// votes.ts's computeGradient2x2Composites). Drawing this exact same array
+// (rather than an independently-recomputed copy) guarantees a line's root
+// here means the same thing as it does in gpp's own row/col maps.
 //
 // Family coloring (pipeline/gridPeriodPhase.ts): blue = row family, red =
 // column family, black -> full-color by each line's own RANK within its
@@ -313,27 +205,44 @@ function drawBucketFillCompositeLines(camera: Camera) {
 // period/phase fit itself assigns integer indices in), so this literally
 // shows the sequence the fit will register each line as. Gray for any line
 // gridPeriodPhase itself skipped (e.g. a degenerate gnomonic projection).
-function drawVoteFamilyLines(camera: Camera) {
-  if (!camera.lastVoteComposites) return;
+// Draws camera.lastVoteComposites -- the composite lines actually fed to
+// fitPairOfPlanes and classified by pipeline/gridPeriodPhase.ts (pipeline/
+// votes.ts's computeGradient2x2Composites) -- as SVG lines in
+// lsdCompositeGroup. Populated once per REAL capture (not live-recomputed
+// per LSD slider tweak, unlike the rectangle/rejected/raw-region views in
+// overlays/lsdOverlay.ts): lastVoteComposites' pixel coords come from the
+// row-flipped `gray` axesReconstruction.ts feeds the vote/grid-period-phase
+// pipeline (its own flipRowsF64, kept separate from
+// camera.lastNoisedPreviewGray), and recomputing that same row-flip
+// live from the raw preview would risk exactly the kind of "two different
+// computations of the same thing" mismatch a past version of this file
+// already had and fixed -- see this file's git history.
+//
+// Two color modes over the SAME line set, not two different line sets:
+// default is a unique per-line color hashed from that line's own merge-
+// group root (overlays/lsdOverlay.ts's hashSeedIndexToHueDeg); toggling
+// showCompositeLineFamilies switches every line to blue=row family /
+// red=column family instead, shaded by each line's own RANK within its
+// family (sorted by its rectified `value` -- the same order the
+// period/phase fit itself assigns integer indices in) -- gray for any line
+// gridPeriodPhase itself skipped (e.g. a degenerate gnomonic projection).
+function drawCompositeLines(camera: Camera) {
+  while (lsdCompositeGroup.firstChild) lsdCompositeGroup.removeChild(lsdCompositeGroup.firstChild);
+  const settings = camera.settings;
+  if (!settings.showLsdComposite || !camera.lastVoteComposites) return;
   const rect = computeThroughRect(camera);
   const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
-  // lastVoteComposites' pixel coords come from the row-flipped `gray`
-  // pipeline/axesReconstruction.ts feeds the vote/grid-period-phase pipeline
-  // (its own flipRowsF64, kept separate from camera.lastNoisedPreviewGray) --
-  // flip the row index back before reusing every other overlay's raster
-  // toScreen convention, or lines land upside down.
   const toScreen = (fx: number, fy: number) => {
     const rasterY = fieldH - 1 - fy;
     return {
-      px: rect.x + (fx + 0.5) * (rect.w / fieldW),
-      py: rect.y + rect.h - (rasterY + 0.5) * (rect.h / fieldH),
+      x: rect.x + (fx + 0.5) * (rect.w / fieldW),
+      y: rect.y + rect.h - (rasterY + 0.5) * (rect.h / fieldH),
     };
   };
-  const ctx = gradientArrowCtx;
 
   let rowRank: Map<number, number> | null = null, colRank: Map<number, number> | null = null;
   const gpp = camera.lastGridPeriodPhase;
-  if (gpp) {
+  if (settings.showCompositeLineFamilies && gpp) {
     const sortedRow = [...gpp.rowLines].sort((a, b) => a.value - b.value);
     rowRank = new Map(sortedRow.map((s, i) => [s.root, sortedRow.length > 1 ? i / (sortedRow.length - 1) : 1]));
     const sortedCol = [...gpp.colLines].sort((a, b) => a.value - b.value);
@@ -342,75 +251,38 @@ function drawVoteFamilyLines(camera: Camera) {
 
   for (const { root, line } of camera.lastVoteComposites) {
     const a = toScreen(line.x1, line.y1), b = toScreen(line.x2, line.y2);
-    ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 5;
-    ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
     let strokeColor: string;
-    if (rowRank && rowRank.has(root)) {
-      strokeColor = `rgb(0,0,${Math.round(rowRank.get(root)! * 255)})`;
-    } else if (colRank && colRank.has(root)) {
-      strokeColor = `rgb(${Math.round(colRank.get(root)! * 255)},0,0)`;
+    if (rowRank || colRank) {
+      if (rowRank && rowRank.has(root)) strokeColor = `rgb(0,0,${Math.round(rowRank.get(root)! * 255)})`;
+      else if (colRank && colRank.has(root)) strokeColor = `rgb(${Math.round(colRank.get(root)! * 255)},0,0)`;
+      else strokeColor = 'rgb(150,150,150)';
     } else {
-      strokeColor = 'rgb(150,150,150)';
+      const [hr, hg, hb] = hsvToRgb(hashSeedIndexToHueDeg(root), 0.85, 1);
+      strokeColor = `rgb(${hr},${hg},${hb})`;
     }
-    ctx.strokeStyle = strokeColor; ctx.lineWidth = 2.5;
-    ctx.beginPath(); ctx.moveTo(a.px, a.py); ctx.lineTo(b.px, b.py); ctx.stroke();
+    lsdCompositeGroup.appendChild(svgEl('line', { x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: 'rgba(0,0,0,0.85)', 'stroke-width': 5 }));
+    lsdCompositeGroup.appendChild(svgEl('line', { x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: strokeColor, 'stroke-width': 2.5 }));
   }
 }
 
-// Merge-point X markers, classified by how the merge's winning pair of
-// points was chosen (see pipeline/bucketFillJoin.ts's computeJoinWalk,
-// mergeAt): blue = one point from each group, those points' fronts were
-// walking roughly opposite ("closing a gap"); orange = one point from each
-// group, but walking roughly the same way; red = both winning points came
-// from the SAME group, so the other group's own contribution was discarded
-// entirely. Tracks the join toggle, not the composite toggle -- these
-// points exist as soon as the join walk itself runs.
-function drawBucketFillDirectionMerges(camera: Camera) {
-  const settings = camera.settings;
-  if (!settings.showBucketFillJoin || !settings.showBucketFillMergeMarkers) return;
-  const rect = computeThroughRect(camera);
-  const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
-  const toScreen = (fx: number, fy: number) => ({
-    px: rect.x + (fx + 0.5) * (rect.w / fieldW),
-    py: rect.y + rect.h - (fy + 0.5) * (rect.h / fieldH),
-  });
-  const drawAll = (points: { x: number; y: number }[] | null, color: string) => {
-    if (!points) return;
-    for (const p of points) {
-      const { px, py } = toScreen(p.x, p.y);
-      drawMarkerX(px, py, color);
-    }
-  };
-  drawAll(camera.lastBucketFillBlueMerges, 'rgb(60,140,255)');
-  drawAll(camera.lastBucketFillOrangeMerges, 'rgb(255,140,0)');
-  drawAll(camera.lastBucketFillRedMerges, 'rgb(255,0,0)');
-}
-
 // Single per-hover entry point -- operates on the ACTIVE camera, since only
-// its Through-Cam view is ever on screen. Also doubles as the redraw
-// entry point for the PERSISTENT bucket-fill segment markers above (see
-// their callers in overlays/bucketFillOverlay.ts's own callers) -- they
-// don't depend on cursor position, but share this canvas/clear cycle with
-// the cursor-driven content below, so anything that recomputes them re-
-// invokes this function (with the last-known cursor position) to get them
-// back on screen without waiting for the next pointermove.
+// its Through-Cam view is ever on screen. Also doubles as the redraw entry
+// point for PERSISTENT content (LSD rectangles, vote-family lines) below --
+// they don't depend on cursor position, but share this canvas/clear cycle
+// with the cursor-driven content further down, so anything that recomputes
+// them re-invokes this function (with the last-known cursor position) to
+// get them back on screen without waiting for the next pointermove.
 export function updateHoverOverlays(clientX: number, clientY: number) {
   const camera = activeCamera();
   if (!camera) { clearGradientArrowOverlay(); return; }
   const settings = camera.settings;
   const arrowsOn = settings.showGradientArrow || settings.showGradientArrowPerpendicular;
-  const markersOn = settings.showBucketFillSegments;
 
   clearGradientArrowOverlay();
 
   if (globalState.mode !== 'through') return;
 
-  if (markersOn) drawBucketFillSegmentMarkers(camera);
-  // Family coloring draws its OWN line set (camera.lastVoteComposites, see
-  // drawVoteFamilyLines) independent of the raw-field composite-lines
-  // toggle, so it needs to run even when showBucketFillComposite is off.
-  if (settings.showBucketFillComposite || settings.showCompositeLineFamilies) drawBucketFillCompositeLines(camera);
-  drawBucketFillDirectionMerges(camera);
+  drawCompositeLines(camera);
 
   if (!arrowsOn) return;
   const rect = computeThroughRect(camera);
@@ -484,47 +356,45 @@ toggleTopGradientBtn.addEventListener('click', () => {
   updateDistortedPreview(cam);
   updateTopGradientOverlay(cam);
 });
-toggleBucketFillBtn.addEventListener('click', () => {
+// These 3 (rectangles/rejected/raw-regions) no longer touch the shared
+// gradientArrowCtx canvas at all -- rectangles draw into their own SVG
+// group and raw-regions/rejected paint their own raster textures, both
+// handled entirely inside updateLsdOverlay -- so no updateHoverOverlays
+// call is needed after any of them.
+toggleLsdSegmentsBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
-  cam.settings.showBucketFillSegments = !cam.settings.showBucketFillSegments;
-  toggleBucketFillBtn.classList.toggle('active', cam.settings.showBucketFillSegments);
-  persistControl('toggleBucketFill', cam.settings.showBucketFillSegments ? '1' : '0');
-  updateDistortedPreview(cam);
-  updateBucketFillOverlay(cam);
-  updateBucketFillJoinAvailability(); // the join button's enabled state depends on this toggle -- refresh it now, not just on fieldView change
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+  cam.settings.showLsdSegments = !cam.settings.showLsdSegments;
+  toggleLsdSegmentsBtn.classList.toggle('active', cam.settings.showLsdSegments);
+  persistControl('toggleLsdSegments', cam.settings.showLsdSegments ? '1' : '0');
+  updateLsdOverlay(cam);
 });
-toggleBucketFillMarkersBtn.addEventListener('click', () => {
+toggleLsdRejectedBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
-  cam.settings.showBucketFillMarkers = !cam.settings.showBucketFillMarkers;
-  toggleBucketFillMarkersBtn.classList.toggle('active', cam.settings.showBucketFillMarkers);
-  persistControl('toggleBucketFillMarkers', cam.settings.showBucketFillMarkers ? '1' : '0');
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+  cam.settings.showLsdRejected = !cam.settings.showLsdRejected;
+  toggleLsdRejectedBtn.classList.toggle('active', cam.settings.showLsdRejected);
+  persistControl('toggleLsdRejected', cam.settings.showLsdRejected ? '1' : '0');
+  updateLsdOverlay(cam); // may be the first of the 3 toggles turned on
 });
-toggleBucketFillJoinBtn.addEventListener('click', () => {
+toggleLsdRawRegionsBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
-  cam.settings.showBucketFillJoin = !cam.settings.showBucketFillJoin;
-  toggleBucketFillJoinBtn.classList.toggle('active', cam.settings.showBucketFillJoin);
-  persistControl('toggleBucketFillJoin', cam.settings.showBucketFillJoin ? '1' : '0');
-  updateBucketFillJoinOverlay(cam);
-  updateBucketFillCompositeAvailability(); // composite's enabled state depends on this toggle -- refresh it now, not just on some other trigger
-  updateBucketFillMergeMarkersAvailability(); // same for the merge-direction X markers
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+  cam.settings.showLsdRawRegions = !cam.settings.showLsdRawRegions;
+  toggleLsdRawRegionsBtn.classList.toggle('active', cam.settings.showLsdRawRegions);
+  persistControl('toggleLsdRawRegions', cam.settings.showLsdRawRegions ? '1' : '0');
+  updateLsdOverlay(cam);
 });
-toggleBucketFillCompositeBtn.addEventListener('click', () => {
+toggleLsdCompositeBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
-  cam.settings.showBucketFillComposite = !cam.settings.showBucketFillComposite;
-  toggleBucketFillCompositeBtn.classList.toggle('active', cam.settings.showBucketFillComposite);
-  persistControl('toggleBucketFillComposite', cam.settings.showBucketFillComposite ? '1' : '0');
-  updateBucketFillJoinOverlay(cam); // composites are computed inside this, gated on the toggle just flipped
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+  cam.settings.showLsdComposite = !cam.settings.showLsdComposite;
+  toggleLsdCompositeBtn.classList.toggle('active', cam.settings.showLsdComposite);
+  persistControl('toggleLsdComposite', cam.settings.showLsdComposite ? '1' : '0');
+  drawCompositeLines(cam);
 });
-toggleBucketFillMergeMarkersBtn.addEventListener('click', () => {
+toggleCompositeLineFamiliesBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
-  cam.settings.showBucketFillMergeMarkers = !cam.settings.showBucketFillMergeMarkers;
-  toggleBucketFillMergeMarkersBtn.classList.toggle('active', cam.settings.showBucketFillMergeMarkers);
-  persistControl('toggleBucketFillMergeMarkers', cam.settings.showBucketFillMergeMarkers ? '1' : '0');
-  updateHoverOverlays(lastHoverClientX, lastHoverClientY);
+  cam.settings.showCompositeLineFamilies = !cam.settings.showCompositeLineFamilies;
+  toggleCompositeLineFamiliesBtn.classList.toggle('active', cam.settings.showCompositeLineFamilies);
+  persistControl('toggleCompositeLineFamilies', cam.settings.showCompositeLineFamilies ? '1' : '0');
+  drawCompositeLines(cam); // recolors the SAME lines, doesn't recompute them
 });
 toggleGradientArrowBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
@@ -550,7 +420,7 @@ toggleTrueCardinalOrientationBtn.addEventListener('click', () => {
 
 export function updateGradientArrowAvailability() {
   const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'gradient2x2' || cam.settings.fieldView === 'gradient2x2LocalMax';
+  const relevant = cam.settings.fieldView === 'gradient2x2';
   toggleGradientArrowBtn.disabled = !relevant;
   toggleGradientArrowModeBtn.disabled = !relevant;
   if (!relevant) {

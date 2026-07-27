@@ -78,7 +78,7 @@ import {
   renderPreviewViewport, renderProjectedViewport, renderTrueContamOverlay, renderReconContamOverlay, renderTopGradientOverlay,
   renderLsdRawRegionsOverlay, renderLsdRejectedOverlay,
 } from './scene/quadRenderers.ts';
-import { getAnalysisVFovRad, markCaptureDirty, resizeCaptureBuffers, renderCamRT } from './pipeline/capture.ts';
+import { getAnalysisVFovRad, ingestRealCapture, markCaptureDirty, resizeCaptureBuffers, renderCamRT } from './pipeline/capture.ts';
 import { updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS } from './pipeline/preview.ts';
 import { buildProjectedTexture } from './pipeline/decodeGrid.ts';
 import { runAxesReconstruction } from './pipeline/axesReconstruction.ts';
@@ -88,7 +88,7 @@ import { updateGizmo, updateSphereOverlays } from './overlays/sphereOverlays.ts'
 import { updateRecoveredCamGizmo } from './overlays/recoveredOverlays.ts';
 import { drawSampleLattice } from './overlays/projectedCamOverlays.ts';
 import { drawGridPeriodPhaseProjected } from './overlays/gridPeriodPhaseOverlays.ts';
-import { sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
+import { pushSettingsSync, sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
 
 // Every module's exports, purely so devBridge/client.ts's `eval(msg.code)`
 // can still see the whole app as one flat scope -- back when this was a
@@ -186,17 +186,53 @@ function animate() {
       camera.camHelper.visible = globalState.mode === 'world' && camera.settings.showFrustum;
     }
     updateRecoveredCamGizmo(camera);
-    camera.recoveredFloorOverlay.visible = globalState.mode === 'world' && camera.settings.showRecoveredFloor && !!camera.lastPositionDecode;
+    // recoveredFloorOverlay (the projected-image FILL) still requires real
+    // pixel data (lastProjectedBins); recoveredFloorOutline (pose+FOV only,
+    // see this session's on-device-pose-recovery plan) shows whenever pose
+    // data exists at all, in EITHER compute mode.
+    camera.recoveredFloorOverlay.visible = globalState.mode === 'world' && camera.settings.showRecoveredFloor && !!camera.lastPositionDecode && !!camera.lastProjectedBins;
+    camera.recoveredFloorOutline.visible = globalState.mode === 'world' && camera.settings.showRecoveredFloor && !!camera.lastPositionDecode;
 
-    // Tell the phone behind a physical camera whether it's safe to send
-    // another frame -- axesCapturing is exactly "still crunching the last
-    // one" (see runAxesReconstruction). Only fires on an actual true/false
-    // transition, not every frame, via the lastReportedReady comparison.
     if (isPhysical(camera)) {
+      // On-connect settingsSync push -- mirrors lastReportedPipelined's own
+      // "force a mismatch on the first tick" trick (see its own comment):
+      // neverSyncedSettings starts true, so a freshly-connected phone gets
+      // the desktop's current settings immediately instead of waiting for a
+      // slider to actually change first (see this session's
+      // on-device-pose-recovery plan).
+      if (camera.neverSyncedSettings) {
+        camera.neverSyncedSettings = false;
+        pushSettingsSync(camera);
+      }
+      // Drain the mailbox every tick a frame's sitting in it and the camera
+      // is actually free (see devBridge/client.ts's realCapture handler,
+      // which always writes here now rather than calling ingestRealCapture
+      // directly -- the mailbox is strictly safer than a direct call even
+      // when useCapturePipelining is off, since it can never overlap two
+      // decodes of the same camera's capture buffers).
+      if (!camera.axesCapturing && !camera.captureIngestBusy && camera.pendingCapture) {
+        const pending = camera.pendingCapture;
+        camera.pendingCapture = null;
+        camera.captureIngestBusy = true;
+        ingestRealCapture(camera, pending)
+          .catch((e) => console.error('[realCapture] ingest failed:', e))
+          .finally(() => { camera.captureIngestBusy = false; });
+      }
+      // Tell the phone behind a physical camera (a) whether Sphere Lab is
+      // actually still crunching the last frame -- axesCapturing, exactly
+      // what drives the shutter button's yellow "working" state -- and (b)
+      // whether useCapturePipelining is on, which the phone uses to decide
+      // whether that yellow state should also BLOCK sending (off: old
+      // strict one-frame-in-flight handshake) or is purely informational
+      // (on: freshest-wins mailbox absorbs a send at any time, so the
+      // phone can capture while yellow). Only sent on an actual change to
+      // either value, not every frame.
       const ready = !camera.axesCapturing;
-      if (ready !== camera.lastReportedReady) {
+      const pipelined = globalState.useCapturePipelining;
+      if (ready !== camera.lastReportedReady || pipelined !== camera.lastReportedPipelined) {
         camera.lastReportedReady = ready;
-        sendToDevBridge({ type: 'captureReady', captureId: camera.connectionId, ready });
+        camera.lastReportedPipelined = pipelined;
+        sendToDevBridge({ type: 'captureReady', captureId: camera.connectionId, ready, pipelined });
       }
     }
   }

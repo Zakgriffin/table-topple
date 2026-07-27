@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { CIRCLE_SEGMENTS, GRID_STEP, VIS_HALF_EXTENT } from '../constants.ts';
-import { HALF_C, HALF_R } from '../scene/floor.ts';
+import { HALF_C, HALF_R } from '../floorPattern.ts';
 
 // ── Math helpers (pure, shared) ──────────────────────────────────────────
 
@@ -31,6 +31,28 @@ export function cornerDir(u: number, v: number, quat: THREE.Quaternion, vFovRad:
 
 export function angleBetweenDegV(a: THREE.Vector3, b: THREE.Vector3): number {
   return THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(Math.abs(a.dot(b)), -1, 1)));
+}
+
+// Central place for "what FOV should ray-casting assume" -- settings.
+// horizFovDeg is HORIZONTAL (shared by both camera types, see
+// CameraSettingsCommon's own comment on why); this function always returns
+// VERTICAL (THREE.js's camera.fov convention), via the caller's current
+// aspect ratio. updateGizmo sets a SimulatedCamera's actual gizmoCam.fov via
+// this exact same formula, so reading it back here (rather than
+// recomputing) would give the identical answer either way -- recomputing
+// directly from settings just means this function works uniformly for both
+// types without needing a per-type branch at all.
+//
+// Originally lived on pipeline/capture.ts (taking a full `Camera`), which
+// made it (and everything downstream that called it: decodeGrid.ts,
+// pipelineGPU/projectSamples.ts) transitively hazardous to import on a page
+// with no #gl canvas -- capture.ts imports the scene/renderer.ts singleton.
+// Relocated here (already dependency-free, home of cornerDir) and narrowed
+// to just the two fields it actually needs; re-exported from capture.ts so
+// every existing desktop import keeps working unchanged.
+export function getAnalysisVFovRad(camera: { aspect: number; settings: { horizFovDeg: number } }): number {
+  const hFovRad = THREE.MathUtils.degToRad(camera.settings.horizFovDeg);
+  return 2 * Math.atan(Math.tan(hFovRad / 2) / camera.aspect);
 }
 
 export function writeCirclePoints(line: THREE.Line, normal: THREE.Vector3, radius: number) {

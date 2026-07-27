@@ -7,11 +7,20 @@
 // off the phone and onto the laptop.
 //
 // Two capture modes: single (tap the shutter each time, as before) and
-// video (streams frames automatically). Either way, Sphere Lab's own
-// reconstruction pass is slow enough that it needs to gate how fast frames
-// arrive -- see the "Capture mode + readiness" section below for the
-// signaling that makes that safe instead of flooding the relay with frames
-// Sphere Lab hasn't finished the last one yet.
+// video (streams frames automatically). Sphere Lab's own reconstruction
+// pass is slow enough that it needs to say something about pacing -- see
+// the "Capture mode + readiness" section below. Exactly what that signal
+// MEANS depends on Sphere Lab's own useCapturePipelining toggle, relayed
+// alongside it: off, "not ready" blocks sending outright (old strict
+// one-frame-in-flight handshake); on, it's purely a status indicator for
+// the shutter button's yellow "working" state -- Sphere Lab's mailbox can
+// always take a fresher frame, busy or not, so sending is never blocked.
+
+import { toGrayscale } from './decode.ts';
+import { globalState } from './sphereLab/state.ts';
+import { rebuildFloorPatternData } from './sphereLab/floorPattern.ts';
+import { flipRowsF64 } from './sphereLab/pipeline/distortion.ts';
+import { computePoseFromCapture, PoseComputeState } from './sphereLab/pipeline/poseCompute.ts';
 
 const video = document.getElementById('v') as HTMLVideoElement;
 const captureCanvas = document.getElementById('captureCanvas') as HTMLCanvasElement;
@@ -25,6 +34,8 @@ const switchCamBtn = document.getElementById('switchCam') as HTMLButtonElement;
 const shutterBtn = document.getElementById('shutter') as HTMLButtonElement;
 const modeSingleBtn = document.getElementById('modeSingleBtn') as HTMLButtonElement;
 const modeVideoBtn = document.getElementById('modeVideoBtn') as HTMLButtonElement;
+const computeOnDeviceCheckbox = document.getElementById('computeOnDevice') as HTMLInputElement;
+const poseReadoutEl = document.getElementById('poseReadout')!;
 
 // ── Camera + zoom (ported from src/main.ts:33-99, same reasoning) ─────────
 
@@ -132,6 +143,107 @@ resSlider.addEventListener('input', () => {
   updateResLabel();
 });
 
+// ── On-device compute: settings mirror ──────────────────────────────────
+//
+// globalState here is THIS page's own module instance (mobile-capture.html
+// is a separate Vite entry point from sphere-lab.html -- a totally separate
+// JS realm/module graph, not shared memory), so mutating it locally from a
+// settingsSync message is safe -- see this session's on-device-pose-recovery
+// plan. Source of truth stays the desktop's own sliders; this just mirrors
+// whatever it last pushed. Defaults below match camera/settings.ts's own
+// createDefaultCommonSettings so a device-compute cycle run before the
+// first settingsSync arrives (e.g. right after toggling the checkbox on
+// before the desktop's on-connect push lands) still produces a sane result.
+let cameraSettings: PoseComputeState['settings'] = {
+  horizFovDeg: 65, weightSharpenPower: 4, gridPeriodPhaseGapLowerBound: 0.005, minGrazingCos: 0.15,
+  lsdToleranceDeg: 22.5, lsdRhoNoiseThreshold: 4, lsdMagnitudeBuckets: 1024, lsdNfaEpsilon: 1,
+  lsdNfaTestExponent: 5, lsdMaxRetries: 2, lsdRetryToleranceFactor: 0.5, lsdRetryShrinkFraction: 0.2,
+  lsdMergeMinSimilarity: 0.9, lsdJoinSteps: 0, lsdMinLengthPx: 3, lsdMaxTravelFactor: 1,
+};
+// Tracks the last boardSize a settingsSync actually applied, so
+// rebuildFloorPatternData (which rebuilds the whole De Bruijn lookup table --
+// not cheap) only runs when boardSize genuinely changed, not on every
+// unrelated slider nudge riding along in the same message -- mirrors how
+// only the desktop's own board-size slider handler calls the THREE-side
+// rebuildFloorPattern today (see ui/cameraPanel.ts's 'boardSize' binding).
+let knownBoardSize: number | null = null;
+
+function applySettingsSync(msg: any) {
+  if (msg.globalState) {
+    globalState.useGPUFit = !!msg.globalState.useGPUFit;
+    globalState.useGPUGradient = !!msg.globalState.useGPUGradient;
+    globalState.useGPULsdFit = !!msg.globalState.useGPULsdFit;
+    globalState.useGPUDecode = !!msg.globalState.useGPUDecode;
+    const boardSize = msg.globalState.boardSize;
+    if (typeof boardSize === 'number' && boardSize !== knownBoardSize) {
+      knownBoardSize = boardSize;
+      rebuildFloorPatternData(boardSize);
+    }
+  }
+  if (msg.cameraSettings) cameraSettings = { ...cameraSettings, ...msg.cameraSettings };
+}
+
+// ── Producer frame-rate diagnostics ─────────────────────────────────────
+//
+// Answers "is the camera hardware itself the bottleneck" independently of
+// anything the capture/relay round trip does. requestVideoFrameCallback
+// fires once per actually-decoded video frame (unlike requestAnimationFrame,
+// which just ticks at the display's own rate regardless of whether a new
+// camera frame has actually arrived), and its metadata.mediaTime is the
+// frame's own timestamp on the media timeline -- so diffing consecutive
+// mediaTimes measures real delivered-frame spacing, not callback jitter.
+let nominalFrameRate: number | null = null;
+let lastMediaTime: number | null = null;
+let frameIntervalsMs: number[] = [];
+
+function onVideoFrame(_now: number, metadata: { mediaTime: number }) {
+  if (lastMediaTime !== null) {
+    const dt = (metadata.mediaTime - lastMediaTime) * 1000;
+    if (dt > 0) frameIntervalsMs.push(dt);
+  }
+  lastMediaTime = metadata.mediaTime;
+  rvfc?.(onVideoFrame);
+}
+// Cast: requestVideoFrameCallback isn't in every TS DOM lib version yet;
+// feature-detected at runtime regardless, so a missing type just means no
+// diagnostics on a browser too old to have shipped it.
+const rvfc = (video as any).requestVideoFrameCallback?.bind(video) as
+  ((cb: (now: number, metadata: { mediaTime: number }) => void) => void) | undefined;
+rvfc?.(onVideoFrame);
+
+// Loop-tick accounting -- answers "is the video loop itself even running as
+// often as expected on this phone" independently of network/encode cost
+// entirely. loopTicks counts every requestAnimationFrame callback
+// regardless of outcome; if loopTicks over a 2s window is well under
+// ~120 (60Hz), requestAnimationFrame itself is being starved (backgrounded
+// tab, thermal throttling, main-thread contention) -- a phone-side
+// scheduling problem, not network. Of the ticks that DO run,
+// backpressureBlockedTicks/readinessBlockedTicks say WHY a send was
+// skipped: backpressure means the previous frame is still physically
+// draining over the network (see canSend()'s own comment), readiness means
+// Sphere Lab itself said not to send yet (shouldn't happen much when
+// pipelined).
+let loopTicks = 0;
+let backpressureBlockedTicks = 0;
+let readinessBlockedTicks = 0;
+let sendsAttempted = 0;
+
+// Flushes whatever's accumulated every couple seconds -- see server.js's
+// frameStats broadcast and devBridge/client.ts's handler for where this
+// ends up (readable via dev-bridge eval as camera.lastFrameStats).
+setInterval(() => {
+  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  const stats: any = { type: 'frameStats', nominalFrameRate, loopTicks, backpressureBlockedTicks, readinessBlockedTicks, sendsAttempted };
+  if (frameIntervalsMs.length > 0) {
+    stats.avgIntervalMs = frameIntervalsMs.reduce((a, b) => a + b, 0) / frameIntervalsMs.length;
+    stats.maxIntervalMs = Math.max(...frameIntervalsMs);
+    stats.sampleCount = frameIntervalsMs.length;
+  }
+  frameIntervalsMs = [];
+  loopTicks = 0; backpressureBlockedTicks = 0; readinessBlockedTicks = 0; sendsAttempted = 0;
+  ws.send(JSON.stringify(stats));
+}, 2000);
+
 async function startCamera(desiredFacing: string) {
   // width/height `ideal` far above any real sensor -- getUserMedia treats
   // `ideal` as "get as close as you can", so an unreachably high target
@@ -151,6 +263,12 @@ async function startCamera(desiredFacing: string) {
   setupZoomControl();
   setupResolutionControl();
   camStatus.textContent = `${currentFacing} camera, ${settings.width}x${settings.height}`;
+  // The camera hardware's OWN nominal capture rate -- distinct from how
+  // often WE encode/send (see the frameStats reporting below), and a real
+  // alternative explanation raised for video mode's idle gap: auto-exposure
+  // in low light can drop a phone's actually-delivered frame rate well
+  // below its nominal one, independent of anything the round-trip does.
+  nominalFrameRate = settings.frameRate ?? null;
 }
 
 switchCamBtn.addEventListener('click', async () => {
@@ -201,15 +319,41 @@ function scheduleReconnect() {
 let captureMode: 'single' | 'video' = 'single';
 let sphereLabReady = true;
 let readyTimeoutTimer: number | undefined;
+// Mirrors Sphere Lab's globalState.useCapturePipelining, riding along on
+// every captureReady message (see server.js's relay). Conservative default
+// (false, i.e. old strict handshake) until the first real message arrives,
+// since we don't know the desktop's setting yet at connect time. When true,
+// sphereLabReady/the yellow "notReady" state is purely informational --
+// Sphere Lab's mailbox absorbs a send at any time, so it no longer blocks
+// captureAndSendFrame the way it still does when this is false.
+let sphereLabPipelined = false;
 
 function setCaptureMode(mode: 'single' | 'video') {
   captureMode = mode;
   modeSingleBtn.classList.toggle('active', mode === 'single');
   modeVideoBtn.classList.toggle('active', mode === 'video');
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'captureMode', mode }));
+  // Entering video mode while device-compute is already on (re)starts the
+  // self-paced compute loop -- see devicePoseLoop's own comment.
+  if (mode === 'video' && computeOnDevice) devicePoseLoop();
 }
 modeSingleBtn.addEventListener('click', () => setCaptureMode('single'));
 modeVideoBtn.addEventListener('click', () => setCaptureMode('video'));
+
+// ── Compute pose on this device -- orthogonal to the single/video axis
+// above (see this session's on-device-pose-recovery plan): when on, the
+// phone runs the same pose-recovery math locally (pipeline/poseCompute.ts's
+// computePoseFromCapture) and sends only the recovered pose, no image
+// bytes. Still respects captureMode: single taps one compute+send cycle,
+// video runs devicePoseLoop continuously.
+let computeOnDevice = false;
+function setComputeMode(onDevice: boolean) {
+  computeOnDevice = onDevice;
+  poseReadoutEl.classList.toggle('visible', onDevice);
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'computeMode', mode: onDevice ? 'device' : 'desktop' }));
+  if (onDevice && captureMode === 'video') devicePoseLoop();
+}
+computeOnDeviceCheckbox.addEventListener('change', () => setComputeMode(computeOnDeviceCheckbox.checked));
 
 // If nothing ever answers (no Sphere Lab tab open, or one that closed mid-
 // crunch) don't stay stuck yellow/stalled forever -- fall back to assuming
@@ -234,6 +378,7 @@ function connectRelay() {
     // mode was already selected, and drop any stale not-ready state from
     // before the drop, since it belonged to the OLD captureId.
     ws!.send(JSON.stringify({ type: 'captureMode', mode: captureMode }));
+    ws!.send(JSON.stringify({ type: 'computeMode', mode: computeOnDevice ? 'device' : 'desktop' }));
     setReady(true);
     setRelayStatus('connected', false);
   });
@@ -242,7 +387,12 @@ function connectRelay() {
   ws.addEventListener('message', (ev) => {
     let msg: any;
     try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg.type === 'captureReady') setReady(!!msg.ready);
+    if (msg.type === 'captureReady') {
+      sphereLabPipelined = !!msg.pipelined;
+      setReady(!!msg.ready);
+    } else if (msg.type === 'settingsSync') {
+      applySettingsSync(msg);
+    }
   });
 }
 connectRelay();
@@ -256,19 +406,44 @@ connectRelay();
 // downsample step after this), so targetLongEdge IS the real analysis
 // resolution, not merely a cap on top of one.
 
-// Grabs the current video frame and sends it, if there's anywhere to send
-// it to. Shared by the single-tap shutter and the video-mode loop below --
-// callers are responsible for checking sphereLabReady first (video mode
-// checks every tick; the shutter click handler checks once per tap).
-function captureAndSendFrame() {
-  if (!currentStream || video.videoWidth === 0) return;
+// Returns WHY, not just whether, so the video loop can count each reason
+// separately (see loopTicks and friends above) -- the whole point being to
+// tell "blocked because the network hasn't drained the last frame yet"
+// (bandwidth-bound) apart from "blocked for some other reason" instead of
+// collapsing both into one opaque boolean. Desktop-compute only -- see
+// captureComputeAndSendPose's own comment on why device-compute doesn't
+// need this gate at all.
+function sendGateStatus(): 'ok' | 'backpressure' | 'not-ready' {
+  // Transport-level backpressure, independent of whether Sphere Lab wants
+  // more data: bufferedAmount > 0 means the PREVIOUS frame hasn't actually
+  // left the device yet (queued by the browser/OS faster than the network
+  // can drain it). Without this, an unthrottled video loop (pipelined mode
+  // removed the old wait-for-ack gate, which used to cap the send rate as
+  // a side effect) will happily encode+queue a new multi-hundred-KB JPEG on
+  // every rAF tick regardless -- confirmed live: that produced a growing
+  // multi-SECOND queueing delay per frame, dwarfing every other stage in
+  // the pipeline. The mailbox on the desktop only helps once a message
+  // arrives; it can't do anything about a backlog stuck in transit.
+  if (ws && ws.bufferedAmount > 0) return 'backpressure';
+  if (!(sphereLabPipelined || sphereLabReady)) return 'not-ready';
+  return 'ok';
+}
+function canSend() {
+  return sendGateStatus() === 'ok';
+}
+
+// Draws the current video frame onto captureCanvas at the resolution
+// slider's own targetLongEdge, mirrored to match the on-screen preview when
+// using the front camera -- shared by BOTH compute modes (desktop-compute's
+// captureAndSendFrame below, and device-compute's captureComputeAndSendPose
+// further down), which then diverge on what to DO with the drawn canvas
+// (JPEG-encode and send the image vs. read pixels back and compute a pose
+// locally).
+function drawCurrentFrameToCanvas(): { cw: number; ch: number } {
   const vw = video.videoWidth, vh = video.videoHeight;
   const scale = Math.min(1, targetLongEdge / Math.max(vw, vh));
   const cw = Math.round(vw * scale), ch = Math.round(vh * scale);
   captureCanvas.width = cw; captureCanvas.height = ch;
-  // Mirror the draw too if the front camera's own preview is mirrored, so
-  // the SENT image matches what was actually framed on screen, not a
-  // left-right-flipped version of it.
   if (currentFacing === 'user') {
     captureCtx.save();
     captureCtx.translate(cw, 0);
@@ -278,34 +453,163 @@ function captureAndSendFrame() {
   } else {
     captureCtx.drawImage(video, 0, 0, cw, ch);
   }
+  return { cw, ch };
+}
+
+// Grabs the current video frame and sends it, if there's anywhere to send
+// it to. Shared by the single-tap shutter and the video-mode loop below --
+// callers are responsible for checking sendGateStatus()/canSend() first
+// (video mode checks every tick; the shutter click handler checks once per
+// tap).
+function captureAndSendFrame() {
+  if (!currentStream || video.videoWidth === 0) return;
+  // Stamped here, before anything below -- the earliest point once the
+  // send gate has already let this call through.
+  const sentAt = Date.now();
+  drawCurrentFrameToCanvas();
+  // Stamped right after the canvas draw, before toDataURL -- splits "pull
+  // the current video frame onto a canvas" (cheap compositing) from "JPEG
+  // encode" (the actual toDataURL cost below), instead of bundling both
+  // into one number the way an earlier version of this instrumentation did.
+  const pulledAt = Date.now();
   const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.85);
+  // Stamped between encode finishing and ws.send() starting, so the desktop
+  // can split "JPEG encode, phone-side CPU" from "actual network transit"
+  // instead of lumping both into one number and guessing which one a given
+  // slow sample was.
+  const encodedAt = Date.now();
 
   if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'realCapture', dataUrl }));
+    ws.send(JSON.stringify({ type: 'realCapture', dataUrl, sentAt, pulledAt, encodedAt }));
     shutterBtn.classList.add('sent');
     setTimeout(() => shutterBtn.classList.remove('sent'), 300);
     // Optimistic -- Sphere Lab will confirm the real state via captureReady
     // once it's actually looked at this frame; this just stops us (or the
-    // video loop) from firing off a second one in the meantime.
-    setReady(false);
+    // video loop) from firing off a second one in the meantime. Skipped
+    // when pipelined: Sphere Lab's mailbox can always take another frame,
+    // so forcing sphereLabReady false here would just make the yellow
+    // state lie about whether it's actually still crunching (and did,
+    // before this fix -- nothing ever cleared it back in pipelined mode
+    // since the desktop only reports genuine busy/idle transitions).
+    if (!sphereLabPipelined) setReady(false);
   } else {
     setRelayStatus('not connected -- capture NOT sent', true);
   }
 }
 
+// ── Device-compute: capture + run the pose pipeline locally + send just
+// the result ──────────────────────────────────────────────────────────────
+//
+// The bufferedAmount backpressure gate above is irrelevant here -- a
+// serialized pose is a few hundred bytes, never queues -- and there's no
+// "Sphere Lab busy" readiness gate either, since the desktop does no work
+// at all on this path (see ingestRemotePose, pipeline/capture.ts). The
+// natural pacing is "compute (now the actual bottleneck), then send, then
+// start the next capture" -- devicePoseLoop below just does that, no
+// rAF-tick gating, so the local timing readout shows the phone's true
+// compute speed with no artificial pacing.
+let devicePoseComputing = false;
+async function captureComputeAndSendPose() {
+  if (!currentStream || video.videoWidth === 0) return;
+  devicePoseComputing = true;
+  try {
+    const { cw, ch } = drawCurrentFrameToCanvas();
+    // Same call ingestRealCapture makes on the desktop side (getImageData ->
+    // toGrayscale), then the same top-down -> bottom-up row-flip orientation
+    // fix ingestRealCapture applies before handing off to the reconstruction
+    // pipeline (see pipeline/capture.ts).
+    const topDown = captureCtx.getImageData(0, 0, cw, ch).data;
+    const grayTopDown = toGrayscale(topDown, cw, ch);
+    const gray = flipRowsF64(grayTopDown, cw, ch);
+
+    const state: PoseComputeState = {
+      aspect: cw / ch,
+      settings: cameraSettings,
+      lastVoteComposites: null, lastVotes: null, lastQuadricPair: null, lastGridPeriodPhase: null,
+      lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
+      lastPositionDecode: null,
+    };
+    const t0 = performance.now();
+    const timing = await computePoseFromCapture(state, gray, cw, ch);
+    const totalMs = performance.now() - t0;
+
+    if (ws && ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({
+        type: 'poseResult', w: cw, h: ch,
+        recoveredAxes: state.lastRecoveredAxes ? {
+          Drow: state.lastRecoveredAxes.Drow.toArray(), Dcol: state.lastRecoveredAxes.Dcol.toArray(),
+          Dnormal: state.lastRecoveredAxes.Dnormal.toArray(), distance: state.lastRecoveredAxes.distance,
+        } : null,
+        positionDecode: state.lastPositionDecode ? {
+          row: state.lastPositionDecode.row, col: state.lastPositionDecode.col,
+          consistency: state.lastPositionDecode.consistency, votes: state.lastPositionDecode.votes,
+          totalWindows: state.lastPositionDecode.totalWindows,
+          camPos: state.lastPositionDecode.camPos.toArray(),
+          recoveredCamQuat: state.lastPositionDecode.recoveredCamQuat.toArray(),
+          orientation: state.lastPositionDecode.orientation,
+        } : null,
+      }));
+    }
+
+    // Local-only -- never sent over the network (the whole point of this
+    // toggle is seeing the phone's TRUE compute speed, and timing is
+    // deliberately excluded from the wire payload for now, see this
+    // session's on-device-pose-recovery plan).
+    const fps = totalMs > 0 ? 1000 / totalMs : 0;
+    poseReadoutEl.textContent = `pose ${totalMs.toFixed(0)}ms (${fps.toFixed(1)}fps)  votes ${timing.votesMs.toFixed(0)} fit ${timing.fitMs.toFixed(0)} pose ${timing.poseMs.toFixed(0)} dist ${timing.distanceMs.toFixed(0)} decode ${timing.decodeMs.toFixed(0)}`
+      + (state.lastPositionDecode ? '' : '  [no fix]');
+  } finally {
+    devicePoseComputing = false;
+  }
+}
+
+// Continuous self-paced loop for device-compute + video mode -- starts the
+// next capture+compute+send cycle as soon as the previous one resolves,
+// rather than checking a rAF tick like the desktop-compute videoLoop below
+// (compute time, not frame delivery or backpressure, is the bottleneck
+// here). Re-entrant-safe: stops on its own once computeOnDevice or
+// captureMode changes out from under it.
+async function devicePoseLoop() {
+  if (!computeOnDevice || captureMode !== 'video' || devicePoseComputing) return;
+  await captureComputeAndSendPose();
+  if (computeOnDevice && captureMode === 'video') devicePoseLoop();
+}
+
 shutterBtn.addEventListener('click', () => {
   // In video mode the button is a status indicator, not a trigger -- frames
   // already send themselves via the loop below.
-  if (captureMode !== 'single' || !sphereLabReady) return;
+  if (captureMode !== 'single') return;
+  if (computeOnDevice) {
+    if (devicePoseComputing) return;
+    captureComputeAndSendPose();
+    shutterBtn.classList.add('sent');
+    setTimeout(() => shutterBtn.classList.remove('sent'), 300);
+    return;
+  }
+  if (!canSend()) return;
   captureAndSendFrame();
 });
 
-// Ticks every frame; only actually sends in video mode, and only once
-// Sphere Lab has said it's ready for another one -- that's what turns a
-// slow reconstruction pass into a natural frame-rate cap instead of
-// flooding the relay with frames nothing's looked at yet.
+// Ticks every frame; only actually sends in video mode. When Sphere Lab
+// isn't pipelined, the gate is 'not-ready' whenever sphereLabReady is
+// false, turning a slow reconstruction pass into a natural frame-rate cap
+// instead of flooding the relay with frames nothing's looked at yet -- same
+// as before. When pipelined, Sphere Lab's own mailbox does that job instead
+// (always takes the freshest frame, drops stale ones), so the only gate
+// left in practice is 'backpressure'. loopTicks/etc. (see above) count
+// every outcome so a diagnostic script can tell which one actually explains
+// the idle gap, instead of guessing from timing alone.
 function videoLoop() {
   requestAnimationFrame(videoLoop);
-  if (captureMode === 'video' && sphereLabReady) captureAndSendFrame();
+  loopTicks++;
+  // Device-compute video mode is driven by its own self-paced devicePoseLoop
+  // (compute time, not rAF ticks/backpressure, is the pacing signal there) --
+  // see this session's on-device-pose-recovery plan.
+  if (captureMode !== 'video' || computeOnDevice) return;
+  const status = sendGateStatus();
+  if (status === 'backpressure') { backpressureBlockedTicks++; return; }
+  if (status === 'not-ready') { readinessBlockedTicks++; return; }
+  sendsAttempted++;
+  captureAndSendFrame();
 }
 videoLoop();

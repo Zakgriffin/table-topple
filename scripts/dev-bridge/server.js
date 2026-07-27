@@ -101,9 +101,14 @@ wss.on('connection', (ws) => {
     // Sphere Lab tab, not just the latest one -- this is the one message
     // type meant to fan out. captureId (this connection's own assigned id)
     // rides along so Sphere Lab can tell which phone a photo came from.
-    if (msg.type === 'realCapture' && msg.dataUrl) {
+    // poseResult (on-device-compute mode -- see this session's
+    // on-device-pose-recovery plan) rides the exact same broadcast: a phone
+    // that computed its own pose sends {w,h,recoveredAxes,positionDecode}
+    // instead of {dataUrl}, no image bytes at all, but routing is
+    // identical, so this is a condition change, not a new block.
+    if ((msg.type === 'realCapture' && msg.dataUrl) || msg.type === 'poseResult') {
       const captureId = captureSockets.get(ws);
-      console.log(`[bridge] real capture received from ${captureId}, broadcasting to ${browserSockets.size} browser tab(s)`);
+      console.log(`[bridge] ${msg.type} received from ${captureId}, broadcasting to ${browserSockets.size} browser tab(s)`);
       for (const bs of browserSockets) {
         if (bs.readyState === bs.OPEN) send(bs, { ...msg, captureId });
       }
@@ -134,12 +139,57 @@ wss.on('connection', (ws) => {
       return;
     }
 
+    // Capture source -> broadcast, same fan-out as realCapture/captureMode --
+    // announces a desktop-compute/device-compute toggle flip on the phone
+    // (see this session's on-device-pose-recovery plan), mirroring
+    // captureMode's own single/video toggle exactly -- sent on toggle
+    // change and on reconnect, auto-creates a tab the same way.
+    if (msg.type === 'computeMode' && msg.mode) {
+      const captureId = captureSockets.get(ws);
+      for (const bs of browserSockets) {
+        if (bs.readyState === bs.OPEN) send(bs, { ...msg, captureId });
+      }
+      return;
+    }
+
+    // Capture source -> broadcast, same fan-out as realCapture/captureMode --
+    // periodic self-reported stats on how often the phone's camera hardware
+    // is actually delivering new frames (see mobileCapture.ts's
+    // requestVideoFrameCallback loop), for telling "the round trip is slow"
+    // apart from "the phone's camera isn't producing frames any faster than
+    // this in the first place."
+    if (msg.type === 'frameStats') {
+      const captureId = captureSockets.get(ws);
+      for (const bs of browserSockets) {
+        if (bs.readyState === bs.OPEN) send(bs, { ...msg, captureId });
+      }
+      return;
+    }
+
     // Browser -> a specific phone: is Sphere Lab ready to receive/process
-    // another frame from it. Routed the same way kickCapture is (find the
-    // one capture socket matching captureId), just sent instead of closed.
+    // another frame from it, and whether useCapturePipelining is on (the
+    // phone uses that to decide if "not ready" should still block sending
+    // -- see mobileCapture.ts). Routed the same way kickCapture is (find
+    // the one capture socket matching captureId), just sent instead of
+    // closed.
     if (msg.type === 'captureReady' && msg.captureId) {
       for (const [capWs, id] of captureSockets) {
-        if (id === msg.captureId) { send(capWs, { type: 'captureReady', ready: msg.ready }); break; }
+        if (id === msg.captureId) { send(capWs, { type: 'captureReady', ready: msg.ready, pipelined: msg.pipelined }); break; }
+      }
+      return;
+    }
+
+    // Browser -> a specific phone: pushes the current pipeline-tunable
+    // settings (globalState.useGPU*/boardSize + the 16 PoseComputeState
+    // settings fields) so a phone computing its own pose stays in sync with
+    // whatever the desktop's sliders (the source of truth) currently say --
+    // see this session's on-device-pose-recovery plan. Routed the same way
+    // captureReady is (find the one capture socket matching captureId, send
+    // directly), not broadcast -- each physical camera's settings are its
+    // own.
+    if (msg.type === 'settingsSync' && msg.captureId) {
+      for (const [capWs, id] of captureSockets) {
+        if (id === msg.captureId) { send(capWs, msg); break; }
       }
       return;
     }

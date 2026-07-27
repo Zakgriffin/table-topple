@@ -2,16 +2,36 @@ import * as THREE from 'three';
 import { Camera } from '../camera/model.ts';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { binarize } from '../../decode.ts';
-import { cornerDir } from '../math/geometry.ts';
+import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { tallyPositionVotesGPU } from '../pipelineGPU/decodeTally.ts';
 import { projectSamplesGPU } from '../pipelineGPU/projectSamples.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
-import { C, ORDER, R, debruijnLookup, torus } from '../scene/floor.ts';
+import { C, ORDER, R, debruijnLookup, torus } from '../floorPattern.ts';
 import { globalState } from '../state.ts';
-import { DecodeCellDebug, DecodeSampleGrid, DecodeSamplePoint, GradientField, Marginals, ProjectedBins, ProjectedSamplesDense, VoteResult } from '../types.ts';
-import { getAnalysisVFovRad } from './capture.ts';
+import { DecodeCellDebug, DecodeSampleGrid, DecodeSamplePoint, GradientField, Marginals, PositionDecodeResult, ProjectedBins, ProjectedSamplesDense, RecoveredAxes, VoteResult } from '../types.ts';
 import { computeGradientField } from './gradientField.ts';
+import { GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { computeProjectedMarginals } from './positionLM.ts';
+
+// Minimal shape projectImageCornersToPlane/projectedUVScale/
+// buildDecodeSampleGrid/runPositionDecode actually need -- narrowed off the
+// full `Camera` (which also carries THREE objects/GPU textures no bare data
+// object has) so these stay callable from pipeline/poseCompute.ts's
+// PoseComputeState, a plain object literal with none of that -- see this
+// session's on-device-pose-recovery plan. Declared locally (not imported
+// from poseCompute.ts) since that file imports runPositionDecode FROM here;
+// PoseComputeState satisfies this structurally without either file needing
+// to import the other's type.
+interface PoseCameraLike {
+  aspect: number;
+  settings: { horizFovDeg: number; minGrazingCos: number };
+  lastRecoveredAxes: RecoveredAxes | null;
+  lastGridPeriodPhase: GridPeriodPhaseResult | null;
+  lastDecodeGrid: DecodeSampleGrid | null;
+  lastDecodeRotated: DecodeSampleGrid | null;
+  lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
+  lastPositionDecode: PositionDecodeResult | null;
+}
 
 // castAndBucketProjectedSamples reruns this same full-frame gradient field
 // EVERY call (computeGradientField(gray, w, h, 1)), but camera.lastNoisedPreviewGray
@@ -229,7 +249,7 @@ function projectSamplesCPU(camera: Camera): ProjectedSamplesDense | null {
 // both the camera height (distance) and the same grazing-angle normal-flip
 // projectSamplesCPU applies above, since that flip changes u/v's sign but
 // not gnomonic()'s (gnomonic always uses the raw, unflipped Dnormal).
-export function projectedUVScale(camera: Camera): number | null {
+export function projectedUVScale(camera: PoseCameraLike): number | null {
   if (!camera.lastRecoveredAxes) return null;
   const { Dnormal, distance } = camera.lastRecoveredAxes;
   const vFovRad = getAnalysisVFovRad(camera);
@@ -494,7 +514,7 @@ export function computeDecodeMarginals(camera: Camera): { bins: ProjectedBins; m
 // bounds check every surviving cell already does for its own pixel read is
 // the same containment test, computed a different way, under the same
 // grazing-cutoff assumption this function itself relies on).
-export function projectImageCornersToPlane(camera: Camera): { u: number; v: number }[] | null {
+export function projectImageCornersToPlane(camera: PoseCameraLike): { u: number; v: number }[] | null {
   if (!camera.lastRecoveredAxes) return null;
   const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
   const vFovRad = getAnalysisVFovRad(camera);
@@ -515,7 +535,7 @@ export function projectImageCornersToPlane(camera: Camera): { u: number; v: numb
 
 // Builds a sampling grid covering the FULL observed quadrilateral -- see
 // pre-Stage-A history for the full derivation.
-export function buildDecodeSampleGrid(camera: Camera, gray: Float64Array, w: number, h: number, vFovRad: number): DecodeSampleGrid | null {
+export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number): DecodeSampleGrid | null {
   if (!camera.lastRecoveredAxes || !camera.lastGridPeriodPhase) return null;
   const gpp = camera.lastGridPeriodPhase;
   const corners = projectImageCornersToPlane(camera);
@@ -585,7 +605,7 @@ export function buildDecodeSampleGrid(camera: Camera, gray: Float64Array, w: num
 
 // Decodes the camera's absolute world position -- see pre-Stage-A history
 // for the full derivation.
-export async function runPositionDecode(camera: Camera, gray: Float64Array, w: number, h: number, vFovRad: number) {
+export async function runPositionDecode(camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number) {
   const grid = buildDecodeSampleGrid(camera, gray, w, h, vFovRad);
   camera.lastDecodeGrid = grid;
   camera.lastDecodeRotated = null;

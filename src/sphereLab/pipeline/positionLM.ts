@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { cornerDir } from '../math/geometry.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
-import { C, R, torus } from '../scene/floor.ts';
+import { C, R, torus } from '../floorPattern.ts';
 import { Marginals, OrientationFit, PhotometricSample, PositionFit } from '../types.ts';
 import { hsvToRgb } from './distortion.ts';
 import { solveLinearSystem } from './orientationLM.ts';

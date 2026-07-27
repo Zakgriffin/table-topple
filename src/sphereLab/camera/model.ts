@@ -3,6 +3,7 @@ import { CompositeLine } from '../pipeline/bucketFillJoin.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
 import { LsdRectangle } from '../pipeline/lsdSegments.ts';
 import { DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
+import { ProfileSpan } from '../profiling/profiler.ts';
 import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
 
 // ── Camera model ─────────────────────────────────────────────────────────
@@ -31,6 +32,13 @@ export interface CameraBase {
   // "color composite lines by row/col family" debug overlay draws, so a
   // line's root is guaranteed to mean the same thing in all three places.
   lastVoteComposites: { root: number; line: CompositeLine }[] | null;
+  // Raw fit result (Drow/Dcol/Dnormal only, no distance) BEFORE period-search
+  // gating -- the pole markers render off this even when gridPeriodPhase
+  // fails and lastRecoveredAxes ends up null (see
+  // pipeline/poseCompute.ts/applyPoseVisualizations). Its own field, rather
+  // than reusing lastRecoveredAxes, specifically so that degenerate-period
+  // behavior survives the Step 2 refactor instead of silently regressing.
+  lastQuadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
   axesComputed: boolean;
   axesCapturing: boolean;
   lastAxesCapture: number;
@@ -94,6 +102,15 @@ export interface CameraBase {
   recoveredRowPoleA: THREE.Mesh; recoveredRowPoleB: THREE.Mesh;
   recoveredColPoleA: THREE.Mesh; recoveredColPoleB: THREE.Mesh;
   recoveredFloorOverlayMat: THREE.MeshBasicMaterial; recoveredFloorOverlay: THREE.Mesh;
+  // The World-view recovered-floor quad's OUTLINE -- a 4-point closed
+  // THREE.LineLoop, drawn unconditionally from pose+FOV alone whenever
+  // lastRecoveredAxes/lastPositionDecode exist, in EITHER compute mode (see
+  // overlays/recoveredOverlays.ts's updateRecoveredFloorOutline and this
+  // session's on-device-pose-recovery plan). Deliberately separate from
+  // recoveredFloorOverlay (the actual projected-image FILL, a textured
+  // Mesh) -- that one still requires lastProjectedBins (real pixel data),
+  // which device-compute mode never populates.
+  recoveredFloorOutline: THREE.LineLoop;
 
   // -- Great-sphere group: repositioned (not rotated) to the camera's own
   // origin each frame, since every direction it draws is expressed in WORLD
@@ -148,10 +165,118 @@ export interface PhysicalCamera extends CameraBase {
   // (see devBridge/client.ts's captureMode handler) -- Sphere Lab never
   // sets this itself, only displays it (see ui/cameraPanel.ts).
   captureMode: 'single' | 'video';
+  // Same idea, for the phone's "compute pose on this device" toggle (see
+  // this session's on-device-pose-recovery plan) -- purely a reflection of
+  // devBridge/client.ts's computeMode handler, never set by Sphere Lab
+  // itself. 'device' means the phone sends {type:'poseResult'} (already-
+  // computed pose, no image); 'desktop' (the default -- see
+  // camera/factory.ts) means it keeps sending {type:'realCapture'} like
+  // today.
+  computeMode: 'desktop' | 'device';
+  // Mirrors lastReportedPipelined's "force a mismatch on the first tick"
+  // trick (see its own comment) for pushing an initial settingsSync the
+  // moment a physical camera is seen in main.ts's animate loop, rather than
+  // waiting for a settings slider to actually change first -- see this
+  // session's on-device-pose-recovery plan. Cleared (set false) right after
+  // that first send.
+  neverSyncedSettings: boolean;
   // Mirrors axesCapturing, but tracks what was last actually SENT to the
   // phone as a captureReady signal (see main.ts's animate loop), so that
   // signal only goes out on a genuine true/false transition instead of
   // every frame.
   lastReportedReady: boolean;
+  // Same "only send on a real change" throttle as lastReportedReady, but
+  // for globalState.useCapturePipelining riding along on the same message
+  // (see main.ts's animate loop) -- deliberately initialized to the
+  // OPPOSITE of that setting's actual default (see factory.ts) so a
+  // freshly-connected phone gets synced immediately instead of waiting for
+  // the first real busy/idle transition, which might not happen for a
+  // while.
+  lastReportedPipelined: boolean;
+  // Mailbox slot for globalState.useCapturePipelining (see devBridge/
+  // client.ts's realCapture handler and main.ts's animate loop pump) --
+  // always overwritten with the newest arrived frame, never queued, so a
+  // desktop that falls behind naturally drops stale frames instead of
+  // working through a backlog. sentAt/pulledAt/encodedAt/receivedAt are all
+  // Date.now() (wall-clock, cross-device -- NOT performance.now(), which
+  // has an unrelated per-process epoch on the phone vs the desktop) so
+  // ingestRealCapture can split "pull the video frame onto a canvas" from
+  // "JPEG encode" from "actual network transit" on pop, instead of lumping
+  // them into one number and guessing which one dominated a given slow
+  // sample -- see lastPullMs/lastEncodeMs/lastTransitMs.
+  // bytes is dataUrl.length (UTF-16 code units of the base64 string, so
+  // ~1.33x the actual JPEG byte count -- close enough for a throughput
+  // estimate, not meant to be exact).
+  pendingCapture: {
+    dataUrl: string; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number;
+  } | null;
+  // True from the moment the pump pulls a frame out of the mailbox until
+  // ingestRealCapture's decode has handed off into runAxesReconstruction
+  // (which then owns axesCapturing itself). Needed as its own flag because
+  // ingestRealCapture's image decode is itself async and happens BEFORE
+  // axesCapturing flips true -- without this, a frame landing mid-decode
+  // could get popped a second time and race the first decode.
+  captureIngestBusy: boolean;
+  // Diagnostic-only, for tracking down video mode's idle round-trip gap
+  // (this session's chat). Opened the instant runAxesReconstruction's
+  // finally block flips axesCapturing back to false, closed the instant
+  // ingestRealCapture starts on the next mailbox frame -- so its duration
+  // IS the round trip (phone capture+encode, network there, mailbox pump
+  // delay, network back) with zero attribution to any single stage on its
+  // own. Null whenever profilerEnabled() is false, same as any other span.
+  idleSpan: ProfileSpan | null;
+  // Approximate phone-side "pull the current video frame onto a canvas"
+  // duration (canvas resize + drawImage, NOT the JPEG encode itself) for
+  // the most recently ingested frame -- pendingCapture.pulledAt -
+  // pendingCapture.sentAt.
+  lastPullMs: number | null;
+  // Approximate phone-side JPEG encode duration (toDataURL only, now that
+  // pullMs is split out separately) for the most recently ingested frame --
+  // pendingCapture.encodedAt - pendingCapture.pulledAt. Cross-device
+  // wall-clock diff (see pendingCapture's own comment on why that's
+  // "approximate" rather than nanosecond-precise).
+  lastEncodeMs: number | null;
+  // Approximate actual network transit duration (ws.send on the phone to
+  // this message handler on the desktop, including the relay hop) for the
+  // most recently ingested frame -- pendingCapture.receivedAt -
+  // pendingCapture.encodedAt.
+  lastTransitMs: number | null;
+  // Rolling histories (capped, oldest dropped) of lastPullMs/lastEncodeMs/
+  // lastTransitMs -- a single sample is noisy, this is what lets a
+  // diagnostic script report a real distribution and tell pull-bound/
+  // encode-bound/transit-bound samples apart instead of guessing.
+  pullMsHistory: number[];
+  encodeMsHistory: number[];
+  transitMsHistory: number[];
+  // pendingCapture.bytes for the same samples, same index alignment as
+  // transitMsHistory -- lets a diagnostic script compute actual throughput
+  // (bytes / transit ms) instead of guessing whether a given duration is
+  // bandwidth-bound from timing alone.
+  payloadBytesHistory: number[];
+  // Self-reported by mobile-capture.html every ~2s (its flush interval).
+  // Two distinct diagnostic purposes bundled in one message:
+  //   - nominalFrameRate/avgIntervalMs/maxIntervalMs/sampleCount (from
+  //     requestVideoFrameCallback) -- lets us tell "the round trip is slow"
+  //     apart from "the phone's camera hardware itself isn't producing new
+  //     frames any faster than this" (auto-exposure in low light can drop a
+  //     phone camera's actual delivered frame rate well below nominal).
+  //     avgIntervalMs/maxIntervalMs/sampleCount are null if
+  //     requestVideoFrameCallback never fired during that window (missing
+  //     browser support, or camera hardware not delivering frames at all).
+  //   - loopTicks/backpressureBlockedTicks/readinessBlockedTicks/
+  //     sendsAttempted (from the video loop itself) -- says WHY the loop
+  //     skipped a tick: backpressure means bufferedAmount > 0 (a previous
+  //     frame is still physically draining over the network, i.e.
+  //     bandwidth-bound), not-ready means Sphere Lab itself said to wait
+  //     (shouldn't happen much when pipelined), and if loopTicks over the
+  //     ~2s window is well under what 60Hz would predict, the phone's own
+  //     requestAnimationFrame is being starved (backgrounded tab, thermal
+  //     throttling) independently of network entirely.
+  // null until the phone's sent at least one frameStats message.
+  lastFrameStats: {
+    nominalFrameRate: number | null;
+    avgIntervalMs: number | null; maxIntervalMs: number | null; sampleCount: number | null;
+    loopTicks: number; backpressureBlockedTicks: number; readinessBlockedTicks: number; sendsAttempted: number;
+  } | null;
 }
 export type Camera = SimulatedCamera | PhysicalCamera;

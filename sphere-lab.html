@@ -224,12 +224,13 @@
     <label class="chk"><input type="checkbox" id="showFloor" checked> floor</label>
     <div class="row"><span class="label">cell outline</span><input type="range" id="floorCellOutlineSubdiv" min="0" max="20" step="1" value="0"><span class="val" id="floorCellOutlineSubdivVal"></span></div>
     <div class="row"><span class="label">De Bruijn board size</span><input type="range" id="boardSize" min="0" max="512" step="1" value="256"><span class="val" id="boardSizeVal"></span></div>
-    <label class="chk"><input type="checkbox" id="useGPUFit"> GPU plane fit (WebGPU)</label>
-    <label class="chk"><input type="checkbox" id="useGPUDecode"> GPU decode tally (WebGPU)</label>
-    <label class="chk"><input type="checkbox" id="useGPUProject"> GPU projected-sample ray-cast (WebGPU)</label>
-    <label class="chk"><input type="checkbox" id="useGPUGradient"> GPU 2x2 gradient field (WebGPU)</label>
-    <label class="chk"><input type="checkbox" id="useGPULsdFit"> GPU LSD fit + NFA test (WebGPU)</label>
+    <label class="chk"><input type="checkbox" id="useGPUFit" checked> GPU plane fit (WebGPU)</label>
+    <label class="chk"><input type="checkbox" id="useGPUDecode" checked> GPU decode tally (WebGPU)</label>
+    <label class="chk"><input type="checkbox" id="useGPUProject" checked> GPU projected-sample ray-cast (WebGPU)</label>
+    <label class="chk"><input type="checkbox" id="useGPUGradient" checked> GPU 2x2 gradient field (WebGPU)</label>
+    <label class="chk"><input type="checkbox" id="useGPULsdFit" checked> GPU LSD fit + NFA test (WebGPU)</label>
     <div class="hint" id="gpuVotesStatus" style="margin-bottom:0;"></div>
+    <label class="chk"><input type="checkbox" id="useCapturePipelining" checked> Pipelined video capture (mailbox, drop stale frames)</label>
     <div class="hint" style="margin-bottom:0;">Applies to the shared floor/pattern, regardless of which camera (or none) is selected.</div>
   </div>
 

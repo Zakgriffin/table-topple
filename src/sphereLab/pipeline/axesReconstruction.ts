@@ -1,191 +1,38 @@
 import * as THREE from 'three';
 import { Camera } from '../camera/model.ts';
 import { activeCamera, isPhysical, isSimulated } from '../camera/store.ts';
-import { COL_DIR, GRID_STEP, MATH_QUAT, ROW_DIR, SPHERE_RADIUS } from '../constants.ts';
-import { angleBetweenDegV, cornerDir } from '../math/geometry.ts';
+import { COL_DIR, ROW_DIR, SPHERE_RADIUS } from '../constants.ts';
+import { angleBetweenDegV } from '../math/geometry.ts';
 import { updatePositionReadoutText } from '../overlays/projectedCamOverlays.ts';
-import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo } from '../overlays/recoveredOverlays.ts';
+import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo, updateRecoveredFloorOutline } from '../overlays/recoveredOverlays.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { globalState } from '../state.ts';
 import { axesReadout, captureAxesBtn } from '../ui/dom.ts';
-import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
-import { computeProjectedBinsAndMarginalsAuto, paintProjectedTexture, ProjectedSampleResult, runPositionDecode } from './decodeGrid.ts';
+import { captureDistortedGrayscale } from './capture.ts';
+import { computeProjectedBinsAndMarginalsAuto, paintProjectedTexture, ProjectedSampleResult } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
-import { computeGradient2x2Field } from './gradientField.ts';
-import { computeGridPeriodPhase } from './gridPeriodPhase.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
-import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes } from './votes.ts';
-import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
-import { computeGradient2x2FieldGPU } from '../pipelineGPU/gradient2x2.ts';
+import { computePoseFromCapture } from './poseCompute.ts';
 import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
-import { GradientField } from '../types.ts';
 
-// Same pattern, for the 2x2 gradient field that feeds computeGradient2x2Composites
-// below (see pipelineGPU/gradient2x2.ts).
-async function gradient2x2Field(gray: Float64Array, w: number, h: number): Promise<GradientField> {
-  const s = spanStart(globalState.useGPUGradient ? 'gradient2x2 (GPU)' : 'gradient2x2 (CPU)');
-  const field = globalState.useGPUGradient
-    ? (await computeGradient2x2FieldGPU(gray, w, h)) ?? computeGradient2x2Field(gray, w, h)
-    : computeGradient2x2Field(gray, w, h);
-  spanEnd(s);
-  return field;
-}
-
-// ── Axes/position reconstruction (the big orchestrator) ──────────────────
-//
-// Split into two entry points so every settings slider -- not just "capture
-// now" -- can recompute everything downstream of it (see this session's
-// chat): runAxesReconstruction does the expensive capture (stage 1: a real
-// GPU render+readback for simulated, or picking up whatever the phone last
-// sent for physical) and stores it into camera.lastAxesCaptureGray;
-// recomputeFromLastCapture does everything downstream of that (gradient
-// field through pole markers/overlays), reading the cached capture instead
-// of taking a fresh one. Both share recomputeStages for that downstream
-// work so the guard/busy-UI/span bookkeeping isn't duplicated in a way that
-// could drift out of sync.
-
-// Assumes camera.lastAxesCaptureGray is already populated and
-// camera.axesCapturing is already true -- callers (runAxesReconstruction,
-// recomputeFromLastCapture) own the guard/busy-UI/RAF wrapper and the
-// capture step itself.
-async function recomputeStages(camera: Camera, isActive: boolean) {
-  const { gray, w, h } = camera.lastAxesCaptureGray!;
-  const vFovRad = getAnalysisVFovRad(camera);
-  const t0 = performance.now();
-
-  // Painting projectedPreviewTex is a real GPU texture upload -- worth
-  // skipping unless this camera's Projected-Cam view is what's actually
-  // on screen right now. The numeric half (bins) stays unconditional --
-  // camera.lastProjectedBins feeds the World-view floor overlay's decal
-  // map for every camera, not just the displayed one. The RGBA half
-  // also has to run whenever the World-view floor overlay is on, though
-  // -- that overlay (see overlays/recoveredOverlays.ts) reuses
-  // projectedPreviewTex as its decal map, so skipping the paint here
-  // left it sitting at its all-zero (alpha 0, invisible) initial
-  // contents for any camera that never happened to be viewed in
-  // Projected-Cam mode first.
-  const showProjected = (isActive && globalState.mode === 'projected')
-    || (globalState.mode === 'world' && camera.settings.showRecoveredFloor);
-
-  // Composite lines (bucket-fill -> join walk -> merge groups -> one
-  // line per group, over the 2x2 gradient field -- see pipeline/votes.ts's
-  // computeGradient2x2Composites for why not the old radius-driven
-  // gradient x local-agreement "effective" field) are computed exactly
-  // once here and shared by every downstream consumer that needs them:
-  // vote casting below, row/col family classification in
-  // computeGridPeriodPhase further down, and the "color composite lines
-  // by row/col family" debug overlay (see overlays/hoverDebugOverlays.ts).
-  // Previously each of those either redid this same computation
-  // independently (harmless when the inputs matched, since it's
-  // deterministic) or -- the debug overlay -- redid it over a DIFFERENT
-  // field, producing composites whose root numbering had no relation to
-  // gridPeriodPhase's, so most lines silently fell back to an
-  // unclassified color. Sharing one array of {root, line} makes that
-  // mismatch structurally impossible now.
-  const compositesSpan = spanStart('composites (2x2 gradient field)');
-  const field2x2 = await gradient2x2Field(gray, w, h);
-  const voteComposites = await computeGradient2x2Composites(camera.settings, field2x2, w, h);
-  spanEnd(compositesSpan);
-  camera.lastVoteComposites = voteComposites;
-
-  // computeSegmentVotes is always the vote source now (see this
-  // session's chat) -- one vote per bucket-fill line segment instead
-  // of one per pixel. computeWorldVotes/computeWorldVotesGPU (the old
-  // per-pixel CPU/GPU path this used to fall back to) are left defined
-  // in pipeline/votes.ts / pipelineGPU/voteGeneration.ts, unreferenced
-  // here, in case that comparison is wanted again later.
-  const votesSpan = spanStart('votes (segments)');
-  const votes = computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, camera.aspect);
-  spanEnd(votesSpan);
-  camera.lastVotes = votes;
-  updateGradientCirclesDebug(camera);
-  const t1 = performance.now();
-
-  const fitSpan = spanStart('fit (fitPairOfPlanes)');
-  // No band-select step anymore -- fitPairOfPlanes runs on every vote
-  // (see this session's chat: the old top-N%-by-magnitude cutoff,
-  // circleSamplePercentMin/Max, is gone entirely, not just defaulted).
-  // votesInMagnitudeBand/votesInMagnitudeBandGPU are left defined in
-  // pipeline/votes.ts / pipelineGPU/voteBandSelect.ts, unreferenced
-  // here, in case a cutoff is wanted again later.
-  const fitVotes = votes;
-  // Same fallback pattern as the other GPU sub-pipelines: fitPairOfPlanes
-  // stays the source of truth, the GPU version is verified against it.
-  const fitOnlySpan = spanStart(globalState.useGPUFit ? 'fitPairOfPlanes (GPU)' : 'fitPairOfPlanes (CPU)');
-  const quadricPair = globalState.useGPUFit
-    ? (await fitPairOfPlanesGPU(fitVotes, camera.settings.weightSharpenPower))
-      ?? fitPairOfPlanes(fitVotes, camera.settings.weightSharpenPower)
-    : fitPairOfPlanes(fitVotes, camera.settings.weightSharpenPower);
-  spanEnd(fitOnlySpan);
-  spanEnd(fitSpan);
-  const t2 = performance.now();
-
-  camera.axesComputed = !!quadricPair;
-
-  const poseAssemblySpan = spanStart('poseAssembly');
-  let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
-  if (quadricPair) {
-    const normalForHandedness = quadricPair.Dnormal.clone();
-    if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normalForHandedness) > 0) normalForHandedness.negate();
-    rowDirRecovered = quadricPair.Drow.clone();
-    colDirRecovered = quadricPair.Dcol.clone();
-    const handedness = rowDirRecovered.clone().cross(colDirRecovered).dot(normalForHandedness);
-    if (handedness > 0) colDirRecovered.negate();
-  }
-  spanEnd(poseAssemblySpan);
-  const t3 = performance.now();
-
-  // Grid period/phase (pipeline/gridPeriodPhase.ts) is now the SOLE
-  // source of camera.lastRecoveredAxes.distance -- see this session's
-  // chat for why the old marginals/autocorrelation-based spacing
-  // estimate (computeProjectedBinsAndMarginals's colPeriod/rowPeriod,
-  // further refined via measurePeriodDistance's own re-bucket-and-
-  // remeasure pass) was disconnected: composite-line-derived period
-  // and height come out of a single narrowly-bracketed search, need no
-  // placeholder-then-rescale dance, and don't need a second refine
-  // pass. computeProjectedBinsAndMarginals/measurePeriodDistance are
-  // left defined in pipeline/decodeGrid.ts, unreferenced here, in case
-  // this needs revisiting. This always runs unconditionally (real
-  // distance depends on it); the debug PLOT/overlay draws are likewise
-  // unconditional now too -- see this session's chat for why the old
-  // showGridPeriodPhaseDebug toggle (which by the end only gated the
-  // debug drawing, not the computation) was removed outright.
-  const gppSpan = spanStart('gridPeriodPhase (distance source)');
-  const gpp = rowDirRecovered && colDirRecovered && quadricPair
-    ? computeGridPeriodPhase(
-        voteComposites, w, h, MATH_QUAT, vFovRad, camera.aspect,
-        rowDirRecovered, colDirRecovered, quadricPair.Dnormal, GRID_STEP,
-        camera.settings.gridPeriodPhaseGapLowerBound,
-      )
-    : null;
-  camera.lastGridPeriodPhase = gpp;
-  spanEnd(gppSpan);
-  const t4 = performance.now();
-
-  camera.lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair && gpp
-    ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: gpp.height ?? 1 }
-    : null;
-
-  const projectSpan = spanStart('projectBins (display + decode-marginals bins)');
-  // Captured outside the `if` (stays null when there's no recovered axes to
-  // project) so it can be handed to refreshModeVisualizations below instead
-  // of that call recomputing the exact same (possibly GPU) result a second
-  // time -- see modeRefresh.ts's own comment on precomputedProjection.
-  let projResult: ProjectedSampleResult = null;
-  if (camera.lastRecoveredAxes) {
-    projResult = await computeProjectedBinsAndMarginalsAuto(camera);
-    if (showProjected) paintProjectedTexture(camera, projResult);
-  }
-  spanEnd(projectSpan);
-  const t5 = performance.now();
-
-  const decodeSpan = spanStart('positionDecode');
-  await runPositionDecode(camera, gray, w, h, vFovRad);
-  spanEnd(decodeSpan);
-  const t6 = performance.now();
-
-  const overlaySpan = spanStart('poleMarkers+overlays');
+// Shared pole-marker/gizmo/floor-overlay/readout tail -- called after EITHER
+// a real local reconstruction (recomputeStages below) or an already-computed
+// pose arriving from a device-compute phone (pipeline/capture.ts's
+// ingestRemotePose), so both paths render identically off the same
+// lastQuadricPair/lastRecoveredAxes/lastPositionDecode fields instead of
+// duplicating this logic -- see this session's on-device-pose-recovery
+// plan. `extraReadoutLine`, if given, is appended as the readout's last
+// line (recomputeStages passes its per-stage timing breakdown; a
+// device-compute pose has no local timing to report, so ingestRemotePose
+// passes nothing).
+export function applyPoseVisualizations(camera: Camera, isActive: boolean, extraReadoutLine?: string) {
   let orientationErrorLine: string | null = null;
+  // Pole markers read camera.lastQuadricPair (added specifically so this
+  // survives even when gridPeriodPhase fails and lastRecoveredAxes ends up
+  // null -- see camera/model.ts's own comment on the field) instead of
+  // locally recomputing rowDirRecovered/colDirRecovered.
+  const rowDirRecovered = camera.lastQuadricPair?.Drow ?? null;
+  const colDirRecovered = camera.lastQuadricPair?.Dcol ?? null;
   if (camera.lastPositionDecode && rowDirRecovered && colDirRecovered) {
     const { recoveredCamQuat } = camera.lastPositionDecode;
     const rowDirWorld = rowDirRecovered.clone().applyQuaternion(recoveredCamQuat);
@@ -229,16 +76,21 @@ async function recomputeStages(camera: Camera, isActive: boolean) {
   }
   updateRecoveredCamGizmo(camera);
   applyRecoveredFloorOverlay(camera);
-  spanEnd(overlaySpan);
+  // Drawn unconditionally alongside the fill above -- guards on
+  // lastRecoveredAxes/lastPositionDecode only (both present in EITHER
+  // compute mode), unlike applyRecoveredFloorOverlay which still requires
+  // real pixel data (lastProjectedBins).
+  updateRecoveredFloorOutline(camera);
 
   if (isActive) {
     const haveGroundTruth = isSimulated(camera);
-    const lines = [`${votes.length} votes  (${fitVotes.length} fed to fit)`];
+    const lines = [`${camera.lastVotes.length} votes  (${camera.lastVotes.length} fed to fit)`];
     if (rowDirRecovered && colDirRecovered) {
       if (orientationErrorLine) lines.push(orientationErrorLine);
     } else {
       lines.push(`degenerate fit`);
     }
+    const gpp = camera.lastGridPeriodPhase;
     if (camera.lastRecoveredAxes && gpp) {
       const trueDist = isSimulated(camera) ? camera.camPos.y : NaN;
       const dist = camera.lastRecoveredAxes.distance;
@@ -248,22 +100,102 @@ async function recomputeStages(camera: Camera, isActive: boolean) {
       } else {
         lines.push(`distance ${dist.toFixed(2)}  period ${gpp.period.toFixed(4)}  [gridPeriodPhase]`);
       }
-    } else if (quadricPair) {
+    } else if (camera.lastQuadricPair) {
       lines.push(`distance: no period found (gridPeriodPhase)`);
     }
     if (camera.lastPositionDecode) {
       lines.push(`decoded torus (row,col): (${camera.lastPositionDecode.row}, ${camera.lastPositionDecode.col})  consistency ${(camera.lastPositionDecode.consistency * 100).toFixed(1)}%  camPos (${camera.lastPositionDecode.camPos.x.toFixed(2)}, ${camera.lastPositionDecode.camPos.y.toFixed(2)}, ${camera.lastPositionDecode.camPos.z.toFixed(2)})`);
     }
-    lines.push(`votes ${(t1 - t0).toFixed(0)}ms  fit ${(t2 - t1).toFixed(0)}ms  pose ${(t3 - t2).toFixed(0)}ms  distance ${(t4 - t3).toFixed(0)}ms  project ${(t5 - t4).toFixed(0)}ms  decode ${(t6 - t5).toFixed(0)}ms`);
+    if (extraReadoutLine) lines.push(extraReadoutLine);
     axesReadout.textContent = lines.join('\n');
     updatePositionReadoutText(camera);
+  }
+}
+
+// ── Axes/position reconstruction (the big orchestrator) ──────────────────
+//
+// Split into two entry points so every settings slider -- not just "capture
+// now" -- can recompute everything downstream of it (see this session's
+// chat): runAxesReconstruction does the expensive capture (stage 1: a real
+// GPU render+readback for simulated, or picking up whatever the phone last
+// sent for physical) and stores it into camera.lastAxesCaptureGray;
+// recomputeFromLastCapture does everything downstream of that (gradient
+// field through pole markers/overlays), reading the cached capture instead
+// of taking a fresh one. Both share recomputeStages for that downstream
+// work so the guard/busy-UI/span bookkeeping isn't duplicated in a way that
+// could drift out of sync.
+
+// Assumes camera.lastAxesCaptureGray is already populated and
+// camera.axesCapturing is already true -- callers (runAxesReconstruction,
+// recomputeFromLastCapture) own the guard/busy-UI/RAF wrapper and the
+// capture step itself.
+async function recomputeStages(camera: Camera, isActive: boolean) {
+  const { gray, w, h } = camera.lastAxesCaptureGray!;
+
+  // Painting projectedPreviewTex is a real GPU texture upload -- worth
+  // skipping unless this camera's Projected-Cam view is what's actually
+  // on screen right now. The numeric half (bins) stays unconditional --
+  // camera.lastProjectedBins feeds the World-view floor overlay's decal
+  // map for every camera, not just the displayed one. The RGBA half
+  // also has to run whenever the World-view floor overlay is on, though
+  // -- that overlay (see overlays/recoveredOverlays.ts) reuses
+  // projectedPreviewTex as its decal map, so skipping the paint here
+  // left it sitting at its all-zero (alpha 0, invisible) initial
+  // contents for any camera that never happened to be viewed in
+  // Projected-Cam mode first.
+  const showProjected = (isActive && globalState.mode === 'projected')
+    || (globalState.mode === 'world' && camera.settings.showRecoveredFloor);
+
+  // Every stage from the 2x2-gradient composite lines through
+  // runPositionDecode now lives in pipeline/poseCompute.ts's
+  // computePoseFromCapture -- a pure function operating on the same field
+  // names (a real Camera structurally satisfies its PoseComputeState), so
+  // it can also run standalone on the phone (see this session's
+  // on-device-pose-recovery plan). Mutates camera.lastVoteComposites/
+  // lastVotes/lastQuadricPair/lastGridPeriodPhase/lastRecoveredAxes/
+  // lastDecodeGrid/lastDecodeRotated/lastDecodeCorrectness/lastPositionDecode
+  // in place, exactly like this function's own inline stages used to.
+  // computeProjectedBinsAndMarginalsAuto/paintProjectedTexture (below) are
+  // deliberately NOT part of that shared prefix -- confirmed not on the
+  // critical path to a pose (distance is already finalized by
+  // gridPeriodPhase before that stage would run); they exist only to feed
+  // Projected-Cam/World-floor-decal DISPLAY, so this keeps calling them
+  // separately, right here, only for desktop display purposes.
+  const timing = await computePoseFromCapture(camera, gray, w, h);
+  camera.axesComputed = !!camera.lastQuadricPair;
+  updateGradientCirclesDebug(camera);
+
+  const projectSpan = spanStart('projectBins (display + decode-marginals bins)');
+  const projectStart = performance.now();
+  // Captured outside the `if` (stays null when there's no recovered axes to
+  // project) so it can be handed to refreshModeVisualizations below instead
+  // of that call recomputing the exact same (possibly GPU) result a second
+  // time -- see modeRefresh.ts's own comment on precomputedProjection.
+  let projResult: ProjectedSampleResult = null;
+  if (camera.lastRecoveredAxes) {
+    projResult = await computeProjectedBinsAndMarginalsAuto(camera);
+    if (showProjected) paintProjectedTexture(camera, projResult);
+  }
+  const projectMs = performance.now() - projectStart;
+  spanEnd(projectSpan);
+
+  const overlaySpan = spanStart('poleMarkers+overlays');
+  const timingLine = `votes ${timing.votesMs.toFixed(0)}ms  fit ${timing.fitMs.toFixed(0)}ms  pose ${timing.poseMs.toFixed(0)}ms  distance ${timing.distanceMs.toFixed(0)}ms  project ${projectMs.toFixed(0)}ms  decode ${timing.decodeMs.toFixed(0)}ms`;
+  applyPoseVisualizations(camera, isActive, timingLine);
+  spanEnd(overlaySpan);
+
+  if (isActive) {
     // Everything mode-specific (Through-Cam's contamination/top-gradient/
     // bucket-fill/join/hover overlays and its grid-period/phase plot,
     // Projected-Cam's texture, World's recovered-floor decal) -- see
     // pipeline/modeRefresh.ts. Only meaningful for whichever camera is
     // actually on screen. projResult (computed above, possibly null) is
     // handed over so this doesn't pay for a second (possibly GPU)
-    // re-projection of data it already has in hand.
+    // re-projection of data it already has in hand. NOT part of
+    // applyPoseVisualizations -- device-compute mode (ingestRemotePose)
+    // deliberately never calls this, since it would re-derive
+    // lastProjectedBins from zero real pixel data and undo the "no image ->
+    // no fill" guard applyRecoveredFloorOverlay just applied.
     await refreshModeVisualizations(camera, globalState.mode, { value: projResult });
   }
 }
@@ -303,6 +235,9 @@ export function runAxesReconstruction(camera: Camera) {
         captureAxesBtn.textContent = prevLabel;
       }
       camera.axesCapturing = false;
+      // See PhysicalCamera.idleSpan's own comment -- this brackets exactly
+      // the round trip ingestRealCapture is on the other end of closing.
+      if (isPhysical(camera)) camera.idleSpan = spanStart('idle (waiting for next frame)');
     }
   });
 }

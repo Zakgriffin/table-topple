@@ -3,28 +3,25 @@ import { Camera, PhysicalCamera, SimulatedCamera } from '../camera/model.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer, scene } from '../scene/renderer.ts';
+import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
-import { runAxesReconstruction } from './axesReconstruction.ts';
+import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
 import { buildProjectedTexture } from './decodeGrid.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
 import { updateDistortedPreview } from './preview.ts';
 
 // ── Per-camera capture/analysis pipeline ─────────────────────────────────
 
-// Central place for "what FOV should ray-casting assume" -- settings.
-// horizFovDeg is HORIZONTAL (shared by both camera types now, see
-// CameraSettingsCommon's own comment on why); this function always returns
-// VERTICAL (THREE.js's camera.fov convention), via the camera's own current
-// aspect ratio. updateGizmo sets a SimulatedCamera's actual gizmoCam.fov via
-// this exact same formula, so reading it back here (rather than
-// recomputing) would give the identical answer either way -- recomputing
-// directly from settings just means this function works uniformly for both
-// types without needing a per-type branch at all.
-export function getAnalysisVFovRad(camera: Camera): number {
-  const hFovRad = THREE.MathUtils.degToRad(camera.settings.horizFovDeg);
-  return 2 * Math.atan(Math.tan(hFovRad / 2) / camera.aspect);
-}
+// Relocated to math/geometry.ts (see this session's on-device-pose-recovery
+// plan) so decodeGrid.ts/pipelineGPU/projectSamples.ts -- both on the
+// critical path to a pose, needed to stay importable without a #gl canvas --
+// don't have to import THIS file (which pulls in the scene/renderer.ts
+// singleton) just for this one function. Re-exported here unchanged so
+// every existing desktop import (main.ts, axesReconstruction.ts,
+// overlays/recoveredOverlays.ts, overlays/contaminationOverlays.ts) keeps
+// working without modification.
+export { getAnalysisVFovRad } from '../math/geometry.ts';
 
 export function markCaptureDirty(camera: Camera) {
   camera.captureDirty = true;
@@ -143,18 +140,48 @@ export function captureDistortedGrayscale(camera: SimulatedCamera): { gray: Floa
   return { gray, w: camera.rtSize.w, h: camera.rtSize.h };
 }
 
-// Decodes an incoming data URL, resamples it to the current analysis
-// resolution, converts to grayscale, and flips it to bottom-up.
-export async function ingestRealCapture(camera: PhysicalCamera, dataUrl: string): Promise<void> {
+// Decodes an incoming data URL at whatever resolution it actually arrived
+// at -- no resampling of the image itself; resizeCaptureBuffers instead
+// reallocates the analysis buffers to MATCH it when it differs from what's
+// currently allocated, so the phone's own resolution slider (targetLongEdge
+// in mobileCapture.ts) is the real analysis resolution end-to-end, not a
+// cap on top of a further downsample. Converts to grayscale and flips it to
+// bottom-up. `pending` is whatever main.ts's mailbox pump just popped -- see
+// PhysicalCamera's own comments on idleSpan/lastPullMs/lastEncodeMs/
+// lastTransitMs for what the timing fields here are for (tracking down
+// video mode's round-trip idle gap, and specifically telling "pull the
+// video frame" apart from "JPEG encode" apart from "actual network
+// transit" instead of lumping them all together).
+export async function ingestRealCapture(
+  camera: PhysicalCamera,
+  pending: { dataUrl: string; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number },
+): Promise<void> {
+  if (camera.idleSpan) { spanEnd(camera.idleSpan); camera.idleSpan = null; }
+  camera.lastPullMs = pending.pulledAt - pending.sentAt;
+  camera.lastEncodeMs = pending.encodedAt - pending.pulledAt;
+  camera.lastTransitMs = pending.receivedAt - pending.encodedAt;
+  camera.pullMsHistory.push(camera.lastPullMs);
+  camera.encodeMsHistory.push(camera.lastEncodeMs);
+  camera.transitMsHistory.push(camera.lastTransitMs);
+  camera.payloadBytesHistory.push(pending.bytes);
+  if (camera.pullMsHistory.length > 50) camera.pullMsHistory.shift();
+  if (camera.encodeMsHistory.length > 50) camera.encodeMsHistory.shift();
+  if (camera.transitMsHistory.length > 50) camera.transitMsHistory.shift();
+  if (camera.payloadBytesHistory.length > 50) camera.payloadBytesHistory.shift();
+  const rootSpan = spanStart('ingest (decode+preprocess)');
+
+  const decodeSpan = spanStart('image decode');
   const img = new Image();
   await new Promise<void>((resolve, reject) => {
     img.onload = () => resolve();
     img.onerror = () => reject(new Error('failed to decode incoming capture image'));
-    img.src = dataUrl;
+    img.src = pending.dataUrl;
   });
+  spanEnd(decodeSpan);
   const w = img.naturalWidth, h = img.naturalHeight;
   if (w !== camera.rtSize.w || h !== camera.rtSize.h) resizeCaptureBuffers(camera, { w, h });
 
+  const readbackSpan = spanStart('pixel readback + grayscale');
   const tmpCanvas = document.createElement('canvas');
   tmpCanvas.width = w; tmpCanvas.height = h;
   const tctx = tmpCanvas.getContext('2d')!;
@@ -163,8 +190,86 @@ export async function ingestRealCapture(camera: PhysicalCamera, dataUrl: string)
   const grayTopDown = toGrayscale(topDown, w, h);
   camera.lastRealCaptureGray = flipRowsF64(grayTopDown, w, h);
   camera.lastRealCaptureW = w; camera.lastRealCaptureH = h;
+  spanEnd(readbackSpan);
+  spanEnd(rootSpan);
 
   updateDistortedPreview(camera);
   if (globalState.mode === 'projected' && camera === activeCamera()) buildProjectedTexture(camera);
   runAxesReconstruction(camera);
+}
+
+// Ingests an already-computed pose from a phone in device-compute mode (see
+// this session's on-device-pose-recovery plan and mobileCapture.ts's
+// computePoseFromCapture call) -- deserializes the plain-array-serialized
+// Vector3/Quaternion fields back into THREE objects and assigns directly
+// onto camera.lastRecoveredAxes/lastPositionDecode, no pipeline call at all
+// (the phone already did that work).
+export function ingestRemotePose(
+  camera: PhysicalCamera,
+  msg: {
+    w: number; h: number;
+    recoveredAxes: { Drow: number[]; Dcol: number[]; Dnormal: number[]; distance: number } | null;
+    positionDecode: {
+      row: number; col: number; consistency: number; votes: number; totalWindows: number;
+      camPos: number[]; recoveredCamQuat: number[]; orientation: number;
+    } | null;
+  },
+): void {
+  // Guard the resize like a capture, not a plain assignment -- resizeCaptureBuffers
+  // disposes and reallocates every GPU texture on the camera, which would race
+  // an in-flight recomputeStages/recomputeFromLastCapture on the same camera
+  // exactly the way ingestRealCapture is already protected against. Cheap
+  // enough (no async decode work) that dropping this one update outright --
+  // matching the mailbox's own "freshest wins, stale drops silently"
+  // semantics elsewhere -- is simpler than deferring it.
+  if (camera.axesCapturing || camera.captureIngestBusy) return;
+
+  if (msg.w !== camera.rtSize.w || msg.h !== camera.rtSize.h) resizeCaptureBuffers(camera, { w: msg.w, h: msg.h });
+
+  camera.lastRecoveredAxes = msg.recoveredAxes ? {
+    Drow: new THREE.Vector3().fromArray(msg.recoveredAxes.Drow),
+    Dcol: new THREE.Vector3().fromArray(msg.recoveredAxes.Dcol),
+    Dnormal: new THREE.Vector3().fromArray(msg.recoveredAxes.Dnormal),
+    distance: msg.recoveredAxes.distance,
+  } : null;
+  camera.lastPositionDecode = msg.positionDecode ? {
+    row: msg.positionDecode.row, col: msg.positionDecode.col, consistency: msg.positionDecode.consistency,
+    votes: msg.positionDecode.votes, totalWindows: msg.positionDecode.totalWindows,
+    camPos: new THREE.Vector3().fromArray(msg.positionDecode.camPos),
+    recoveredCamQuat: new THREE.Quaternion().fromArray(msg.positionDecode.recoveredCamQuat),
+    orientation: msg.positionDecode.orientation,
+  } : null;
+  // lastQuadricPair (Drow/Dcol/Dnormal BEFORE gridPeriodPhase gating, see
+  // camera/model.ts's own comment) is never transmitted over the wire --
+  // whenever lastRecoveredAxes is non-null, gridPeriodPhase already
+  // succeeded on the phone, so its Drow/Dcol/Dnormal are EXACTLY
+  // lastQuadricPair's own (see pipeline/poseCompute.ts's assembly of both
+  // fields from the same rowDirRecovered/colDirRecovered/quadricPair.Dnormal)
+  // -- reconstructing it here needs no extra wire data.
+  camera.lastQuadricPair = camera.lastRecoveredAxes ? {
+    Drow: camera.lastRecoveredAxes.Drow.clone(),
+    Dcol: camera.lastRecoveredAxes.Dcol.clone(),
+    Dnormal: camera.lastRecoveredAxes.Dnormal.clone(),
+  } : null;
+  camera.axesComputed = !!camera.lastQuadricPair;
+
+  // No real image ever reaches the desktop in device-compute mode -- clear
+  // every real-pixel-derived buffer this cycle's pose data can't refresh,
+  // rather than leaving stale content from a PRIOR desktop-compute capture
+  // on this same camera visible (World-view fill, Through-Cam raw preview,
+  // a recomputeFromLastCapture slider drag -- see overlays/recoveredOverlays.ts's
+  // applyRecoveredFloorOverlay, pipeline/preview.ts's updateDistortedPreview,
+  // and axesReconstruction.ts's own comment on this being an accepted
+  // consequence of the architecture). Does NOT set lastRealCaptureGray,
+  // lastProjectedBins, or call paintProjectedTexture/buildProjectedTexture --
+  // there is no real image, so these simply never get (re)populated for this
+  // cycle; explicitly nulling them (rather than leaving a stale prior value)
+  // is what actually makes a mode switch on the same camera show blank
+  // instead of a frozen old frame.
+  camera.lastRealCaptureGray = null;
+  camera.lastProjectedBins = null;
+  camera.lastAxesCaptureGray = null;
+  updateDistortedPreview(camera);
+
+  applyPoseVisualizations(camera, camera === activeCamera());
 }

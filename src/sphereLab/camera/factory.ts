@@ -151,6 +151,16 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
   scene.add(recoveredFloorOverlay);
   recoveredFloorOverlay.layers.set(DEBUG_LAYER);
 
+  // The quad's OUTLINE, drawn unconditionally from pose+FOV alone (no
+  // pixels needed) -- see model.ts's own comment on recoveredFloorOutline.
+  // 4-vertex closed loop, repositioned in place (not rebuilt) every update.
+  const recoveredFloorOutlineGeo = new THREE.BufferGeometry();
+  recoveredFloorOutlineGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(4 * 3), 3));
+  const recoveredFloorOutline = new THREE.LineLoop(recoveredFloorOutlineGeo, new THREE.LineBasicMaterial({ color }));
+  recoveredFloorOutline.visible = false;
+  scene.add(recoveredFloorOutline);
+  recoveredFloorOutline.layers.set(DEBUG_LAYER);
+
   function makeRecoveredPoleMarker(color: number): THREE.Mesh {
     const m = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 8), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.6 }));
     m.layers.set(DEBUG_LAYER);
@@ -183,6 +193,7 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
   const base: Omit<CameraBase, 'id' | 'name' | 'color'> = {
     lastRecoveredAxes: null, lastPositionDecode: null, lastDecodeGrid: null, lastDecodeRotated: null,
     lastDecodeCorrectness: null, lastProjectedBins: null, lastVotes: [], lastVoteComposites: null,
+    lastQuadricPair: null,
     axesComputed: false, axesCapturing: false, lastAxesCapture: 0, lastAxesCaptureGray: null,
     rtSize: { ...rtSize }, aspect, pipRect: { x: 0, y: 0, w: 0, h: 0 }, captureDirty: true, lastPreviewUpdate: 0,
     lastNoisedPreviewGray: null, lastDisplayedVectorField: null,
@@ -195,7 +206,7 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
     lsdRawRegionsData, lsdRawRegionsTex, lsdRejectedData, lsdRejectedTex,
     recoveredCamGizmo, recoveredCamAxes,
     recoveredRowPoleA, recoveredRowPoleB, recoveredColPoleA, recoveredColPoleB,
-    recoveredFloorOverlayMat, recoveredFloorOverlay,
+    recoveredFloorOverlayMat, recoveredFloorOverlay, recoveredFloorOutline,
     sphereAnchor, sphereShell, circlesGroup, rowCirclePool, colCirclePool, frustumLine,
     patchGeo, patchMat, patchMesh, gradientCirclesGeo, gradientCirclesMat, gradientCirclesLines,
     axisVectorsGeo, axisVectorsMat, axisVectorsLines,
@@ -269,7 +280,15 @@ export function createPhysicalCamera(color: THREE.Color, connectionId: string): 
     id: `phys-${nextCameraSerial}`, name: `Physical ${nextCameraSerial}`, color,
     type: 'physical', settings,
     lastRealCaptureGray: null, lastRealCaptureW: 0, lastRealCaptureH: 0,
-    connectionId, captureMode: 'single', lastReportedReady: true,
+    connectionId, captureMode: 'single', computeMode: 'desktop', neverSyncedSettings: true, lastReportedReady: true,
+    // false regardless of globalState.useCapturePipelining's own default --
+    // see its comment on PhysicalCamera for why the mismatch is deliberate.
+    lastReportedPipelined: false,
+    pendingCapture: null, captureIngestBusy: false,
+    idleSpan: null,
+    lastPullMs: null, lastEncodeMs: null, lastTransitMs: null,
+    pullMsHistory: [], encodeMsHistory: [], transitMsHistory: [], payloadBytesHistory: [],
+    lastFrameStats: null,
   };
   bumpCameraSerial();
   return camera;
@@ -294,6 +313,7 @@ export function destroyCamera(camera: Camera) {
   disposeObj(camera.recoveredCamGizmo);
   disposeObj(camera.sphereAnchor); // takes sphereShell/circlesGroup/pools/frustumLine/patchMesh/pole markers/gradientCircles/axisVectors with it
   disposeObj(camera.recoveredFloorOverlay);
+  disposeObj(camera.recoveredFloorOutline);
   camera.distortedPreviewTex.dispose();
   camera.projectedPreviewTex.dispose();
   camera.trueContamTex.dispose();

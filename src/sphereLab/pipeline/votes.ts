@@ -52,6 +52,21 @@ export function computeWorldVotes(
   return votes;
 }
 
+// Just the LSD/join-walk tuning knobs computeGradient2x2Composites/
+// compositesFromLsdRectangles actually read off `settings` -- narrowed off
+// the full CameraSettingsCommon (which also carries dozens of display-only
+// toggles a real Camera has but a bare phone-side PoseComputeState never
+// will) so both functions stay callable with either a real camera's
+// settings OR pipeline/poseCompute.ts's PoseComputeState.settings, which
+// only carries this subset. A real CameraSettingsCommon still satisfies
+// this structurally (extra fields are fine), so every existing desktop call
+// site is unaffected.
+export interface LsdCompositeSettings {
+  lsdToleranceDeg: number; lsdRhoNoiseThreshold: number; lsdMagnitudeBuckets: number; lsdNfaEpsilon: number;
+  lsdNfaTestExponent: number; lsdMaxRetries: number; lsdRetryToleranceFactor: number; lsdRetryShrinkFraction: number;
+  lsdMergeMinSimilarity: number; lsdJoinSteps: number; lsdMinLengthPx: number; lsdMaxTravelFactor: number;
+}
+
 // One composite LINE per LSD-rectangle-and-JOIN-WALK merge group (see
 // pipeline/lsdSegments.ts and pipeline/bucketFillJoin.ts), tagged with that
 // group's root -- the shared first stage behind computeSegmentVotes below
@@ -77,7 +92,7 @@ export function computeWorldVotes(
 // or any of its downstream consumers -- needing to know or care which one
 // produced it.
 export async function computeGradient2x2Composites(
-  settings: CameraSettingsCommon,
+  settings: LsdCompositeSettings,
   field: GradientField, w: number, h: number,
 ): Promise<{ root: number; line: CompositeLine }[]> {
   const rects = await computeLsdRectanglesAuto(field, {
@@ -99,7 +114,7 @@ export async function computeGradient2x2Composites(
 // views) can produce composite lines from that SAME array instead of
 // re-running stages 2-5 a second time just to get here.
 export function compositesFromLsdRectangles(
-  rects: ReturnType<typeof computeLsdRectangles>, w: number, h: number, settings: CameraSettingsCommon,
+  rects: ReturnType<typeof computeLsdRectangles>, w: number, h: number, settings: LsdCompositeSettings,
 ): { root: number; line: CompositeLine }[] {
   const { regionId, segments } = lsdRectanglesToBucketFillShape(rects, w, h);
 

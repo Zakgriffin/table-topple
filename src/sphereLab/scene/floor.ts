@@ -1,39 +1,18 @@
 import * as THREE from 'three';
 import { DEBUG_LAYER, GRID_STEP, VIS_HALF_EXTENT } from '../constants.ts';
-import { ORDER5_CANDIDATE, buildLookupTableSparse, buildTorusFromCandidate, generateTorus } from '../../debruijn.ts';
+import { C, HALF_C, HALF_R, ORDER, R, rebuildFloorPatternData, torus } from '../floorPattern.ts';
 import { globalState } from '../state.ts';
 import { scene } from './renderer.ts';
 
 // -- Floor: the actual De Bruijn torus, tiled seamlessly (it IS a torus, so
 // repeat-wrapping the texture reproduces the true infinite pattern with no
 // seam — the same fact the real tracker relies on to work from any crop).
-export const ORDER = parseInt(new URLSearchParams(location.search).get('order') ?? '5', 10);
-// Order 5's full R x C torus (~33.5M cells) has no known efficient
-// construction free of D4 rotation/reflection collisions, so it isn't used
-// directly -- ORDER5_CANDIDATE is a searched 256x256 sub-region with a low
-// (1.027%) residual collision rate instead (see buildTorusFromCandidate's
-// header comment in debruijn.ts). cropSize itself is now just the STARTING
-// board size -- see globalState.boardSize / rebuildFloorPattern below, which
-// is what actually drives it from here on (the "board size" slider in the
-// global settings section). Only cropSize is runtime-adjustable; the taps/
-// r0/c0 search that found this particular low-collision crop was NOT
-// re-verified at every possible size, so collision rate at sizes other than
-// 256 is unmeasured (not expected to be dramatically worse, just untested).
-export let debruijn = ORDER === 5 ? buildTorusFromCandidate(5, ORDER5_CANDIDATE) : generateTorus(ORDER);
-export let R = debruijn.R, C = debruijn.C, torus = debruijn.torus;
-// For decoding an ORDER x ORDER sampled bit window back into an absolute
-// torus (row,col) position -- see runPositionDecode.
-export let debruijnLookup = buildLookupTableSparse(debruijn);
-// One instance of the torus, sized in world units at GRID_STEP per cell —
-// NOT tiled. Half-extents, since grid lines/great circles below are indexed
-// out from the origin at the pattern's center.
-export let HALF_C = (C * GRID_STEP) / 2;
-export let HALF_R = (R * GRID_STEP) / 2;
-// Floor below this many cells starts hitting degenerate cases (an empty
-// canvas for rebuildFloorTexture, a zero-size GPU tally buffer, etc) --
-// clamps the board-size slider's low end without needing to special-case
-// every consumer for a board nobody would actually want to decode against.
-const MIN_BOARD_SIZE = 8;
+// The pure DATA half (ORDER/debruijn/R/C/torus/debruijnLookup/HALF_C/
+// HALF_R/rebuildFloorPatternData) now lives in ../floorPattern.ts (no THREE/
+// DOM imports there) so it can be imported on a page with no #gl canvas --
+// this file re-exports them for every existing consumer and owns only the
+// THREE-side construction (texture/mesh/grid-line geometry) on top.
+export { ORDER, R, C, torus, debruijnLookup, HALF_C, HALF_R } from '../floorPattern.ts';
 
 export const patternCanvas = document.createElement('canvas');
 export const pctx = patternCanvas.getContext('2d')!;
@@ -129,12 +108,7 @@ for (const o of [rowGridLines, colGridLines]) o.layers.set(DEBUG_LAYER);
 // circular-import cycle back into itself.
 export function rebuildFloorPattern(size: number) {
   if (ORDER !== 5) return;
-  const cropSize = Math.max(MIN_BOARD_SIZE, Math.round(size));
-  debruijn = buildTorusFromCandidate(5, { ...ORDER5_CANDIDATE, cropSize });
-  R = debruijn.R; C = debruijn.C; torus = debruijn.torus;
-  debruijnLookup = buildLookupTableSparse(debruijn);
-  HALF_C = (C * GRID_STEP) / 2;
-  HALF_R = (R * GRID_STEP) / 2;
+  rebuildFloorPatternData(size);
 
   rebuildFloorTexture();
 

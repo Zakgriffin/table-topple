@@ -1,4 +1,4 @@
-import { ORDER, R, C, debruijnLookup } from '../scene/floor.ts';
+import { ORDER, R, C, debruijnLookup } from '../floorPattern.ts';
 import { rotatedDims } from '../pipeline/decodeGrid.ts';
 import { DecodeSampleGrid, VoteResult } from '../types.ts';
 import { attachGPUKernelBreakdown, profilerEnabled, spanEnd, spanStart } from '../profiling/profiler.ts';

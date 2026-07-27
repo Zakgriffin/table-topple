@@ -1,8 +1,7 @@
 import * as THREE from 'three';
 import { Camera } from '../camera/model.ts';
 import { MATH_QUAT } from '../constants.ts';
-import { cornerDir } from '../math/geometry.ts';
-import { getAnalysisVFovRad } from '../pipeline/capture.ts';
+import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { ProjectedSamplesDense } from '../types.ts';
 import { createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, readUint32, uploadFloat32, uploadUniform } from './device.ts';

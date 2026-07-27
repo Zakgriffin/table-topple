@@ -45,7 +45,21 @@ export function updateDistortedPreview(camera: Camera) {
   if (settings.hideField && !needGrayForOverlay) return;
 
   if (isPhysical(camera)) {
-    if (!camera.lastRealCaptureGray) return;
+    if (!camera.lastRealCaptureGray) {
+      // No real image ever reached the desktop for this cycle -- e.g. this
+      // camera is in device-compute mode (see this session's
+      // on-device-pose-recovery plan and pipeline/capture.ts's
+      // ingestRemotePose, which never populates lastRealCaptureGray) --
+      // blank the buffer rather than leaving whatever pixels a PRIOR
+      // desktop-compute capture on this same camera last painted here
+      // visible after a mode switch. There's no persistent "visible" flag
+      // to toggle for this raw quad-blit view (see scene/quadRenderers.ts's
+      // renderPreviewViewport, called fresh every frame from main.ts), so
+      // blanking the source data is the equivalent fix.
+      camera.distortedPreviewData.fill(0);
+      camera.distortedPreviewTex.needsUpdate = true;
+      return;
+    }
     if (!settings.hideField) {
       if (settings.fieldView === 'raw' || settings.fieldView === 'antialiased' || settings.fieldView === 'downsampled' || settings.fieldView === 'noised') {
         fillGrayscalePreview(camera.lastRealCaptureGray, camera.distortedPreviewData);

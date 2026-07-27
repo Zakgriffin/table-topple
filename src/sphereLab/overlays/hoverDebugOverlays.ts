@@ -260,8 +260,15 @@ function drawCompositeLines(camera: Camera) {
       const [hr, hg, hb] = hsvToRgb(hashSeedIndexToHueDeg(root), 0.85, 1);
       strokeColor = `rgb(${hr},${hg},${hb})`;
     }
-    lsdCompositeGroup.appendChild(svgEl('line', { x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: 'rgba(0,0,0,0.85)', 'stroke-width': 5 }));
-    lsdCompositeGroup.appendChild(svgEl('line', { x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: strokeColor, 'stroke-width': 2.5 }));
+    // Grouped (not two independently-alpha'd strokes) so the halo+color
+    // pair composites as one opaque unit first, THEN that unit is 50%
+    // see-through against whatever's underneath -- two separately-alpha'd
+    // strokes would instead let the color line partially show the halo
+    // through itself, muddying the line's own color.
+    const lineGroup = svgEl('g', { opacity: 0.5 });
+    lineGroup.appendChild(svgEl('line', { x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: 'rgba(0,0,0,0.85)', 'stroke-width': 5 }));
+    lineGroup.appendChild(svgEl('line', { x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: strokeColor, 'stroke-width': 2.5 }));
+    lsdCompositeGroup.appendChild(lineGroup);
   }
 }
 

@@ -6,3 +6,4 @@ stuffs/
 .claude/settings.local.json
 renders/
 scripts/dev-bridge/latest-frame.png
+print-tiles/

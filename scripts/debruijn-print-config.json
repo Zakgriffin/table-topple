@@ -1,0 +1,17 @@
+{
+  "debruijn": {
+    "order": 5,
+    "taps": [25, 1, 4, 6, 7, 10, 11, 15, 16, 19, 21, 22],
+    "cropOrigin": { "row": 17719, "col": 1435 }
+  },
+  "boardSize": { "value": 72, "unit": "cm" },
+  "cellSize": { "value": 0.5, "unit": "cm" },
+  "tileOverlap": { "value": 1, "unit": "cm" },
+  "paper": {
+    "width": { "value": 8.5, "unit": "in" },
+    "height": { "value": 11, "unit": "in" },
+    "margin": { "value": 0.125, "unit": "in" }
+  },
+  "dpi": 72,
+  "outputDir": "print-tiles"
+}

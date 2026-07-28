@@ -5,7 +5,8 @@
     "scripts": {
         "dev": "vite --host",
         "dev:bridge": "node scripts/dev-bridge/server.js",
-        "generate:torus": "node scripts/generate-debruijn-torus.ts"
+        "generate:torus": "node scripts/generate-debruijn-torus.ts",
+        "print:board": "node scripts/print-debruijn-board.ts"
     },
     "devDependencies": {
         "@types/node": "^26.0.1",

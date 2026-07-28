@@ -147,12 +147,21 @@ export function pushSettingsSync(cam: PhysicalCamera) {
         // instead of it when the phone is in device-compute mode -- the
         // phone already ran the full pose-recovery pipeline itself and is
         // handing over just {w,h,recoveredAxes,positionDecode}, no image
-        // bytes at all. No mailbox needed (see this session's
-        // on-device-pose-recovery plan): ingestRemotePose is cheap (no
-        // async decode work), so it's called directly here rather than
-        // queued for main.ts's animate loop to pump.
+        // bytes at all, UNLESS the phone's own sendDebugInfo/
+        // sendCapturedImage toggles are on (both default off), in which
+        // case msg.debug/msg.dataUrl ride along too -- see
+        // mobileCapture.ts's own comments. No mailbox needed for the
+        // no-image case (ingestRemotePose is cheap, no async decode work)
+        // -- but decoding an optional debug dataUrl IS async, so
+        // ingestRemotePose itself is now async and called fire-and-forget
+        // here, same pattern as ingestRealCapture's own call site.
         const cam = findOrCreatePhysicalCamera(msg.captureId);
-        if (cam) ingestRemotePose(cam, { w: msg.w, h: msg.h, recoveredAxes: msg.recoveredAxes ?? null, positionDecode: msg.positionDecode ?? null });
+        if (cam) {
+          ingestRemotePose(cam, {
+            w: msg.w, h: msg.h, recoveredAxes: msg.recoveredAxes ?? null, positionDecode: msg.positionDecode ?? null,
+            debug: msg.debug, dataUrl: msg.dataUrl,
+          }).catch((e) => console.error('[poseResult] ingest failed:', e));
+        }
       } else if (msg.type === 'captureMode' && msg.mode) {
         // The phone's video/single toggle flipped -- purely a UI reflection
         // (see PhysicalCamera.captureMode's own comment), no pipeline effect

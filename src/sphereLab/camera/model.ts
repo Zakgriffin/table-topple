@@ -180,6 +180,22 @@ export interface PhysicalCamera extends CameraBase {
   // session's on-device-pose-recovery plan. Cleared (set false) right after
   // that first send.
   neverSyncedSettings: boolean;
+  // Diagnostic-only summary of the phone's own pipeline intermediates for
+  // its most recent device-compute pose (composite/vote counts, decode
+  // grid valid-sample ratio, gridPeriodPhase's period/phase/height) -- only
+  // populated when the phone's sendDebugInfo toggle is on (default off),
+  // see pipeline/capture.ts's ingestRemotePose. null otherwise, INCLUDING
+  // right after that toggle gets switched off (never left showing a stale
+  // frame's debug data).
+  lastRemoteDebug: {
+    compositeLineCount: number; voteCount: number;
+    gridPeriodPhase: {
+      period: number; phiRow: number; phiCol: number; height: number | null;
+      seedPeriod: number; bracket: [number, number]; rowLineCount: number; colLineCount: number;
+    } | null;
+    decodeGrid: { rows: number; cols: number; validCount: number; totalCount: number } | null;
+    decodeCorrectness: { correctCount: number; wrongCount: number } | null;
+  } | null;
   // Mirrors axesCapturing, but tracks what was last actually SENT to the
   // phone as a captureReady signal (see main.ts's animate loop), so that
   // signal only goes out on a genuine true/false transition instead of

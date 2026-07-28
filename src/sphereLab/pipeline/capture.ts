@@ -7,7 +7,9 @@ import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
-import { buildProjectedTexture } from './decodeGrid.ts';
+import { CompositeLine } from './bucketFillJoin.ts';
+import { buildProjectedTexture, computeProjectedBinsAndMarginalsAuto, paintProjectedTexture } from './decodeGrid.ts';
+import { GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
 import { updateDistortedPreview } from './preview.ts';
 
@@ -203,8 +205,14 @@ export async function ingestRealCapture(
 // computePoseFromCapture call) -- deserializes the plain-array-serialized
 // Vector3/Quaternion fields back into THREE objects and assigns directly
 // onto camera.lastRecoveredAxes/lastPositionDecode, no pipeline call at all
-// (the phone already did that work).
-export function ingestRemotePose(
+// (the phone already did that work). `debug`/`dataUrl` are both optional,
+// riding along only when the phone's own sendDebugInfo/sendCapturedImage
+// toggles are on (both default off) -- see mobileCapture.ts's own comments;
+// this is the "richer optional payload" extensibility point the original
+// plan called out (debug intermediates/the actual capture for projection),
+// added on request for live diagnosis of a suspect on-device decode rather
+// than left for a hypothetical future need.
+export async function ingestRemotePose(
   camera: PhysicalCamera,
   msg: {
     w: number; h: number;
@@ -213,8 +221,32 @@ export function ingestRemotePose(
       row: number; col: number; consistency: number; votes: number; totalWindows: number;
       camPos: number[]; recoveredCamQuat: number[]; orientation: number;
     } | null;
+    debug?: {
+      compositeLineCount: number; voteCount: number;
+      gridPeriodPhase: {
+        period: number; phiRow: number; phiCol: number; height: number | null;
+        seedPeriod: number; bracket: [number, number]; rowLineCount: number; colLineCount: number;
+      } | null;
+      decodeGrid: { rows: number; cols: number; validCount: number; totalCount: number } | null;
+      decodeCorrectness: { correctCount: number; wrongCount: number } | null;
+      // The phone's own pipeline intermediates, verbatim -- see
+      // mobileCapture.ts's buildDebugPayload and this session's "Ship
+      // auxiliary pipeline intermediates" plan. Assigned directly onto
+      // camera.lastGridPeriodPhase/lastVoteComposites/lastLsdRectangles
+      // below, the same fields a desktop-compute capture already
+      // populates.
+      pipeline?: {
+        gridPeriodPhase: GridPeriodPhaseResult | null;
+        voteComposites: { root: number; line: CompositeLine }[] | null;
+        lsdRectangles: {
+          cx: number; cy: number; theta: number; length: number; width: number;
+          accepted: boolean; retries: number; nfaLog10: number;
+        }[];
+      };
+    };
+    dataUrl?: string;
   },
-): void {
+): Promise<void> {
   // Guard the resize like a capture, not a plain assignment -- resizeCaptureBuffers
   // disposes and reallocates every GPU texture on the camera, which would race
   // an in-flight recomputeStages/recomputeFromLastCapture on the same camera
@@ -253,21 +285,84 @@ export function ingestRemotePose(
   } : null;
   camera.axesComputed = !!camera.lastQuadricPair;
 
-  // No real image ever reaches the desktop in device-compute mode -- clear
-  // every real-pixel-derived buffer this cycle's pose data can't refresh,
-  // rather than leaving stale content from a PRIOR desktop-compute capture
-  // on this same camera visible (World-view fill, Through-Cam raw preview,
-  // a recomputeFromLastCapture slider drag -- see overlays/recoveredOverlays.ts's
+  // Diagnostic-only debug summary (see mobileCapture.ts's buildDebugPayload)
+  // -- null whenever sendDebugInfo is off, INCLUDING clearing a prior
+  // frame's leftover value if the toggle just got switched off, same
+  // "don't show stale data" principle as everything else in this function.
+  camera.lastRemoteDebug = msg.debug ?? null;
+
+  // Tier 1 of this session's "Ship auxiliary pipeline intermediates" plan:
+  // the phone's own pipeline intermediates, assigned verbatim onto the
+  // exact same camera fields a desktop-compute capture already populates --
+  // overlays/gridPeriodPhaseOverlays.ts and the composite-line-family
+  // hover-debug overlay read lastGridPeriodPhase/lastVoteComposites
+  // directly and need no changes to work from device-compute data.
+  // lastLsdRectangles is assigned for the same field-level parity, though
+  // note overlays/lsdOverlay.ts's SVG/raster views don't actually read this
+  // field for rendering (they always recompute locally from
+  // lastNoisedPreviewGray, i.e. Tier 0) -- rawMembers wasn't sent (see
+  // buildDebugPayload's comment), so it's backfilled empty here; nothing
+  // reads it off this field today. Nulled out whenever msg.debug.pipeline
+  // is absent (sendDebugInfo off, or an older phone build still connected)
+  // -- same "don't show a stale frame" principle as lastRemoteDebug above.
+  const pipelineDebug = msg.debug?.pipeline;
+  camera.lastGridPeriodPhase = pipelineDebug ? pipelineDebug.gridPeriodPhase : null;
+  camera.lastVoteComposites = pipelineDebug ? pipelineDebug.voteComposites : null;
+  camera.lastLsdRectangles = pipelineDebug
+    ? pipelineDebug.lsdRectangles.map((r) => ({ ...r, rawMembers: new Int32Array(0) }))
+    : null;
+
+  // No real image reaches the desktop in device-compute mode UNLESS the
+  // phone's sendCapturedImage toggle is on (see mobileCapture.ts) -- without
+  // it, clear every real-pixel-derived buffer this cycle's pose data can't
+  // refresh, rather than leaving stale content from a PRIOR capture on this
+  // same camera visible (World-view fill, Through-Cam raw preview, a
+  // recomputeFromLastCapture slider drag -- see overlays/recoveredOverlays.ts's
   // applyRecoveredFloorOverlay, pipeline/preview.ts's updateDistortedPreview,
   // and axesReconstruction.ts's own comment on this being an accepted
-  // consequence of the architecture). Does NOT set lastRealCaptureGray,
-  // lastProjectedBins, or call paintProjectedTexture/buildProjectedTexture --
-  // there is no real image, so these simply never get (re)populated for this
-  // cycle; explicitly nulling them (rather than leaving a stale prior value)
-  // is what actually makes a mode switch on the same camera show blank
-  // instead of a frozen old frame.
-  camera.lastRealCaptureGray = null;
-  camera.lastProjectedBins = null;
+  // consequence of the architecture otherwise). With it: decode exactly like
+  // ingestRealCapture does, so Through-Cam's raw preview becomes inspectable
+  // -- purely for visual debugging, the phone already computed the pose
+  // itself, this does NOT re-run the reconstruction pipeline.
+  if (msg.dataUrl) {
+    const img = new Image();
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('failed to decode incoming debug image'));
+      img.src = msg.dataUrl!;
+    });
+    const w = img.naturalWidth, h = img.naturalHeight;
+    const tmpCanvas = document.createElement('canvas');
+    tmpCanvas.width = w; tmpCanvas.height = h;
+    const tctx = tmpCanvas.getContext('2d')!;
+    tctx.drawImage(img, 0, 0);
+    const topDown = tctx.getImageData(0, 0, w, h).data;
+    const grayTopDown = toGrayscale(topDown, w, h);
+    camera.lastRealCaptureGray = flipRowsF64(grayTopDown, w, h);
+    camera.lastRealCaptureW = w; camera.lastRealCaptureH = h;
+
+    // Unlocks Projected-Cam view and the recovered-floor image fill for a
+    // device-compute camera -- same two calls recomputeStages
+    // (axesReconstruction.ts) makes for a desktop-compute capture, run here
+    // against the phone's own sent image + its own already-recovered axes.
+    // Strictly inside this `if (msg.dataUrl)` branch (see this session's
+    // "Ship auxiliary pipeline intermediates" plan): with sendCapturedImage
+    // off, msg.dataUrl is undefined and none of this runs at all.
+    if (camera.lastRecoveredAxes) {
+      const projResult = await computeProjectedBinsAndMarginalsAuto(camera);
+      // Painting the texture is a real GPU upload -- same showProjected
+      // gating recomputeStages uses, so it's skipped for a camera that
+      // isn't actually being viewed in Projected-Cam/World-with-floor mode.
+      const showProjected = (camera === activeCamera() && globalState.mode === 'projected')
+        || (globalState.mode === 'world' && camera.settings.showRecoveredFloor);
+      if (showProjected) paintProjectedTexture(camera, projResult);
+    } else {
+      camera.lastProjectedBins = null;
+    }
+  } else {
+    camera.lastRealCaptureGray = null;
+    camera.lastProjectedBins = null;
+  }
   camera.lastAxesCaptureGray = null;
   updateDistortedPreview(camera);
 

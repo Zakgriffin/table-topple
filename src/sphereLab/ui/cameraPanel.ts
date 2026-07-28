@@ -204,7 +204,16 @@ export function refreshCameraPanel() {
 
 export function rerunOnRealCaptureSettingChange() {
   const cam = activeCamera();
-  if (cam && isPhysical(cam) && cam.lastRealCaptureGray) runAxesReconstruction(cam);
+  // computeMode === 'desktop' guard: this trigger's whole purpose is "redo
+  // the DESKTOP's own reconstruction" -- never correct to fire automatically
+  // in device-compute mode, regardless of why lastRealCaptureGray happens to
+  // be populated there (e.g. the phone's sendCapturedImage debug toggle).
+  // Confirmed live this session: without this, a tab switch while that
+  // toggle was on silently clobbered the phone's own on-device pose with a
+  // desktop recompute, which of course looked "correct" since desktop-
+  // compute is the known-good path -- there was no bug in the on-device
+  // result being displayed, just never a clean look at it.
+  if (cam && isPhysical(cam) && cam.computeMode === 'desktop' && cam.lastRealCaptureGray) runAxesReconstruction(cam);
 }
 // Per-camera-settings sliders (the 16 fields making up PoseComputeState.settings,
 // see pipeline/poseCompute.ts) push a fresh settingsSync to THAT camera's own
@@ -219,9 +228,16 @@ export let realCaptureFovRerunTimer: number | undefined;
 bindSlider('realCaptureFovDeg', (v) => {
   const cam = activeCamera();
   if (!cam || !isPhysical(cam)) return;
+  // refreshCameraPanel's own setNum re-syncs this exact slider to whatever
+  // the camera's CURRENT horizFovDeg already is every time the panel
+  // redraws (e.g. a plain tab switch) -- that dispatches this same 'input'
+  // event even though nothing changed, which used to unconditionally
+  // re-schedule a recompute below. Only worth doing on a genuine change.
+  const changed = v !== cam.settings.horizFovDeg;
   cam.settings.horizFovDeg = v;
   markCaptureDirty(cam);
   pushSettingsSync(cam);
+  if (!changed) return;
   clearTimeout(realCaptureFovRerunTimer);
   realCaptureFovRerunTimer = window.setTimeout(rerunOnRealCaptureSettingChange, 200);
 }, (v) => `${v.toFixed(0)}°`);

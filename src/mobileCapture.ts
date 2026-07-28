@@ -16,10 +16,15 @@
 // the shutter button's yellow "working" state -- Sphere Lab's mailbox can
 // always take a fresher frame, busy or not, so sending is never blocked.
 
+import * as THREE from 'three';
 import { toGrayscale } from './decode.ts';
 import { globalState } from './sphereLab/state.ts';
-import { rebuildFloorPatternData } from './sphereLab/floorPattern.ts';
+import { GRID_STEP } from './sphereLab/constants.ts';
+import { C, R, rebuildFloorPatternData } from './sphereLab/floorPattern.ts';
+import { getAnalysisVFovRad } from './sphereLab/math/geometry.ts';
 import { flipRowsF64 } from './sphereLab/pipeline/distortion.ts';
+import { computeGradient2x2Field } from './sphereLab/pipeline/gradientField.ts';
+import { computeLsdRectanglesAuto, LsdRectangle } from './sphereLab/pipeline/lsdSegments.ts';
 import { computePoseFromCapture, PoseComputeState } from './sphereLab/pipeline/poseCompute.ts';
 
 const video = document.getElementById('v') as HTMLVideoElement;
@@ -35,7 +40,151 @@ const shutterBtn = document.getElementById('shutter') as HTMLButtonElement;
 const modeSingleBtn = document.getElementById('modeSingleBtn') as HTMLButtonElement;
 const modeVideoBtn = document.getElementById('modeVideoBtn') as HTMLButtonElement;
 const computeOnDeviceCheckbox = document.getElementById('computeOnDevice') as HTMLInputElement;
+const sendDebugInfoCheckbox = document.getElementById('sendDebugInfo') as HTMLInputElement;
+const sendCapturedImageCheckbox = document.getElementById('sendCapturedImage') as HTMLInputElement;
 const poseReadoutEl = document.getElementById('poseReadout')!;
+const arCanvas = document.getElementById('arCanvas') as HTMLCanvasElement;
+const arOverlayCheckbox = document.getElementById('arOverlayEnabled') as HTMLInputElement;
+
+// ── AR overlay: the known board sits FIXED in world space, only the camera
+// moves ──────────────────────────────────────────────────────────────────
+//
+// The whole point of pose recovery is an ABSOLUTE camera position/
+// orientation relative to the known, fixed De Bruijn board -- see this
+// session's chat. The board itself never moves: it's the exact same static
+// C*GRID_STEP x R*GRID_STEP rectangle at world ORIGIN that scene/floor.ts's
+// floorMesh already is on the desktop (PlaneGeometry(C*GRID_STEP,
+// R*GRID_STEP), rotation.x = -PI/2, no position offset). So this scene's
+// plane/cube are built ONCE (and rebuilt only when boardSize itself changes,
+// see applySettingsSync) and never repositioned; the only thing that updates
+// per-capture is the AR CAMERA -- placed at the recovered camPos/
+// recoveredCamQuat, with the SAME vertical FOV/aspect the pose pipeline
+// itself used for ray-casting (getAnalysisVFovRad). That directly
+// reproduces "standard AR": look straight through the phone into the
+// reconstructed scene, from wherever the recovered pose says the phone
+// actually is.
+//
+// Independent of computeOnDevice (its own checkbox, per an explicit ask --
+// see this session's chat): a camera pose can arrive from EITHER of two
+// sources -- this device's own computePoseFromCapture
+// (captureComputeAndSendPose below), or a 'poseSync' message (see
+// connectRelay's message handler) mirroring one BACK down from the desktop
+// after IT finishes a desktop-compute capture (see devBridge/client.ts's
+// pushPoseSync, sent exactly symmetric to this page's own poseResult send
+// upward). Both normalize to the same ARCameraPose shape before reaching
+// updateARCamera, which doesn't care which source produced it.
+interface ARCameraPose {
+  camPos: THREE.Vector3; recoveredCamQuat: THREE.Quaternion; aspect: number; fovDeg: number;
+}
+
+let arOverlayEnabled = false;
+function setAROverlayEnabled(enabled: boolean) {
+  arOverlayEnabled = enabled;
+  arCanvas.classList.toggle('visible', enabled);
+}
+arOverlayCheckbox.addEventListener('change', () => setAROverlayEnabled(arOverlayCheckbox.checked));
+
+const arScene = new THREE.Scene();
+const arCamera = new THREE.PerspectiveCamera(50, 1, 0.05, 500);
+arScene.add(arCamera);
+
+// Same lighting rig as the desktop's own scene/renderer.ts -- only the cube
+// actually needs it (a lit material, MeshStandardMaterial below, so its
+// faces shade by angle instead of reading as a flat unlit silhouette); the
+// plane stays MeshBasicMaterial (unlit) since it's a translucent floor
+// decal, not a 3D object anyone needs to read shape from.
+arScene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1.2));
+const arSun = new THREE.DirectionalLight(0xffffff, 0.8);
+arSun.position.set(1, 2, 1);
+arScene.add(arSun);
+
+const arPlaneMat = new THREE.MeshBasicMaterial({ color: 0x33aaff, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false });
+const arPlane = new THREE.Mesh(new THREE.PlaneGeometry(C * GRID_STEP, R * GRID_STEP), arPlaneMat);
+arPlane.rotation.x = -Math.PI / 2; // flat in world XZ, same convention as scene/floor.ts's floorMesh
+arPlane.visible = false; // no fix yet -- see updateARCamera
+arScene.add(arPlane);
+
+// 10 board cells per side -- a landmark big enough to spot from across the
+// board. At the board's own center (world origin), resting on top of the
+// plane.
+const AR_CUBE_SIZE = GRID_STEP * 10;
+const arCubeMat = new THREE.MeshStandardMaterial({ color: 0xff2222, roughness: 0.6 });
+const arCube = new THREE.Mesh(new THREE.BoxGeometry(AR_CUBE_SIZE, AR_CUBE_SIZE, AR_CUBE_SIZE), arCubeMat);
+arCube.position.set(0, AR_CUBE_SIZE / 2, 0);
+arCube.visible = false; // no fix yet -- see updateARCamera
+arScene.add(arCube);
+
+// Rebuilds the board plane at a new size -- mirrors scene/floor.ts's own
+// rebuildFloorPattern (position/rotation never change, only C/R do) --
+// called from applySettingsSync whenever boardSize actually changes.
+function rebuildARBoardGeometry() {
+  arPlane.geometry.dispose();
+  arPlane.geometry = new THREE.PlaneGeometry(C * GRID_STEP, R * GRID_STEP);
+}
+
+const arRenderer = new THREE.WebGLRenderer({ canvas: arCanvas, alpha: true, antialias: true });
+arRenderer.setClearColor(0x000000, 0);
+arRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+
+// Keeps the canvas's on-screen box pixel-matched to the video's own
+// rendered box (video's `max-width/max-height: 100vw/100vh` can letterbox
+// it below the full viewport) -- an AR overlay that's the wrong size or
+// off-center would defeat the whole point of lining up with the live image.
+function resizeARCanvas() {
+  const w = video.clientWidth, h = video.clientHeight;
+  if (w === 0 || h === 0) return;
+  arRenderer.setSize(w, h);
+}
+new ResizeObserver(resizeARCanvas).observe(video);
+
+// Only ever moves the CAMERA -- see this section's header comment on why
+// the board itself (arPlane/arCube) is static. No fix (pose === null) hides
+// the render output rather than leaving a stale camera pose on screen from
+// a previous fix.
+function updateARCamera(pose: ARCameraPose | null) {
+  arPlane.visible = !!pose;
+  arCube.visible = !!pose;
+  if (!pose) return;
+  arCamera.position.copy(pose.camPos);
+  arCamera.quaternion.copy(pose.recoveredCamQuat);
+  arCamera.fov = pose.fovDeg;
+  arCamera.aspect = pose.aspect;
+  arCamera.updateProjectionMatrix();
+}
+
+// Resolves a local computePoseFromCapture result (device-compute mode) into
+// the same ARCameraPose shape a poseSync message already arrives in -- see
+// updateARCamera's own comment on why it stays agnostic to the source.
+function buildLocalARCameraPose(state: PoseComputeState): ARCameraPose | null {
+  const decode = state.lastPositionDecode;
+  if (!decode) return null;
+  return {
+    camPos: decode.camPos, recoveredCamQuat: decode.recoveredCamQuat,
+    aspect: state.aspect, fovDeg: THREE.MathUtils.radToDeg(getAnalysisVFovRad(state)),
+  };
+}
+
+// Deserializes a poseSync message's `fix` payload (see devBridge/client.ts's
+// pushPoseSync) -- pure array->THREE-object reconstruction, no math.
+function parseRemoteARCameraPose(fix: {
+  camPos: number[]; recoveredCamQuat: number[]; aspect: number; vFovDeg: number;
+} | null): ARCameraPose | null {
+  if (!fix) return null;
+  return {
+    camPos: new THREE.Vector3().fromArray(fix.camPos),
+    recoveredCamQuat: new THREE.Quaternion().fromArray(fix.recoveredCamQuat),
+    aspect: fix.aspect, fovDeg: fix.vFovDeg,
+  };
+}
+
+function arRenderLoop() {
+  requestAnimationFrame(arRenderLoop);
+  // Skips the render entirely while hidden -- this page is already CPU/GPU
+  // constrained by continuous pose recovery in video mode, no reason to also
+  // pay for a WebGL draw call nobody can see.
+  if (arOverlayEnabled) arRenderer.render(arScene, arCamera);
+}
+arRenderLoop();
 
 // ── Camera + zoom (ported from src/main.ts:33-99, same reasoning) ─────────
 
@@ -178,6 +327,7 @@ function applySettingsSync(msg: any) {
     if (typeof boardSize === 'number' && boardSize !== knownBoardSize) {
       knownBoardSize = boardSize;
       rebuildFloorPatternData(boardSize);
+      rebuildARBoardGeometry();
     }
   }
   if (msg.cameraSettings) cameraSettings = { ...cameraSettings, ...msg.cameraSettings };
@@ -260,8 +410,10 @@ async function startCamera(desiredFacing: string) {
   const settings = currentStream.getVideoTracks()[0].getSettings();
   currentFacing = settings.facingMode || 'environment';
   video.classList.toggle('mirror', currentFacing === 'user');
+  arCanvas.classList.toggle('mirror', currentFacing === 'user');
   setupZoomControl();
   setupResolutionControl();
+  resizeARCanvas();
   camStatus.textContent = `${currentFacing} camera, ${settings.width}x${settings.height}`;
   // The camera hardware's OWN nominal capture rate -- distinct from how
   // often WE encode/send (see the frameStats reporting below), and a real
@@ -350,10 +502,31 @@ let computeOnDevice = false;
 function setComputeMode(onDevice: boolean) {
   computeOnDevice = onDevice;
   poseReadoutEl.classList.toggle('visible', onDevice);
+  // AR overlay visibility is its OWN checkbox now (arOverlayEnabled) --
+  // independent of computeOnDevice, since a poseSync message (see
+  // connectRelay's message handler) can feed it from the desktop instead
+  // when this is off. Switching modes doesn't clear the currently-shown
+  // pose either -- whichever source (local or synced) last updated it stays
+  // on screen until the OTHER source's next update, exactly like switching
+  // captureMode doesn't blank the video feed.
   if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'computeMode', mode: onDevice ? 'device' : 'desktop' }));
   if (onDevice && captureMode === 'video') devicePoseLoop();
 }
 computeOnDeviceCheckbox.addEventListener('change', () => setComputeMode(computeOnDeviceCheckbox.checked));
+
+// Debug-only extras riding on top of a device-compute poseResult message --
+// both OFF by default and independently toggleable (see this session's chat:
+// explicitly asked for as their OWN pair of switches, not bundled into
+// computeOnDevice, specifically so they can stay off to avoid any perf
+// impact on the actual compute-speed measurement computeOnDevice exists to
+// show). sendCapturedImage pays for a JPEG encode (the same toDataURL cost
+// the desktop-compute streaming path always pays); sendDebugInfo pays for
+// extra serialization of pipeline intermediates -- neither happens at all
+// unless explicitly turned on.
+let sendDebugInfo = false;
+let sendCapturedImage = false;
+sendDebugInfoCheckbox.addEventListener('change', () => { sendDebugInfo = sendDebugInfoCheckbox.checked; });
+sendCapturedImageCheckbox.addEventListener('change', () => { sendCapturedImage = sendCapturedImageCheckbox.checked; });
 
 // If nothing ever answers (no Sphere Lab tab open, or one that closed mid-
 // crunch) don't stay stuck yellow/stalled forever -- fall back to assuming
@@ -392,6 +565,15 @@ function connectRelay() {
       setReady(!!msg.ready);
     } else if (msg.type === 'settingsSync') {
       applySettingsSync(msg);
+    } else if (msg.type === 'poseSync') {
+      // The desktop's mirror-image send of this page's own poseResult (see
+      // devBridge/client.ts's pushPoseSync) -- lets the AR overlay work with
+      // computeOnDevice OFF, feeding updateARCamera from a desktop-compute
+      // capture's pose instead of a local one. Only ever arrives for a
+      // camera the desktop currently has in desktop-compute mode (see
+      // main.ts's own guard), so this can't race/fight with a concurrent
+      // local devicePoseLoop update.
+      updateARCamera(parseRemoteARCameraPose(msg.fix ?? null));
     }
   });
 }
@@ -497,6 +679,68 @@ function captureAndSendFrame() {
   }
 }
 
+// Diagnostic-only summary of state's intermediates, built when sendDebugInfo
+// is on -- NOT a full serialization of every field (composite lines/decode
+// grids carry THREE.Vector3-laden or large per-pixel data not worth wire
+// cost for a debug toggle whose whole point is staying cheap when off, and
+// affordable when on). Picked for "why is consistency/votes low" diagnosis:
+// composite/vote counts (LSD/join-walk health), the decode grid's actual
+// valid-sample ratio (directly explains few/no window agreement), and
+// gridPeriodPhase's own period/phase/height (sanity-checks the distance
+// estimate). All plain numbers -- JSON-safe with no reconstruction needed
+// on the desktop side.
+//
+// `pipeline` (see this session's "Ship auxiliary pipeline intermediates"
+// plan) is a SEPARATE, additional payload: the phone's own pipeline
+// intermediates verbatim, assigned back onto the exact same camera.last*
+// fields a desktop-compute capture already populates (pipeline/capture.ts's
+// ingestRemotePose), rather than re-derived into a summary shape like the
+// fields above. gridPeriodPhase/voteComposites are already sitting on
+// `state` at zero marginal cost; lsdRectangles is the one genuinely NEW
+// computation here (LSD rectangle data isn't retained anywhere in the
+// production pose pipeline -- see computeGradient2x2Composites in
+// pipeline/votes.ts, which discards them after reducing to composite
+// lines) -- a second, explicit LSD pass, mirroring the same
+// recompute-for-debug-display pattern overlays/lsdOverlay.ts's own
+// updateLsdOverlay already uses desktop-side. rawMembers (the per-pixel
+// flood-fill membership list) is deliberately excluded from the wire
+// shape -- it scales with image resolution, not region count, and nothing
+// on the desktop actually reads camera.lastLsdRectangles.rawMembers today.
+function buildDebugPayload(state: PoseComputeState, lsdRects: LsdRectangle[]) {
+  const grid = state.lastDecodeGrid;
+  let validCount = 0, totalCount = 0;
+  if (grid) {
+    for (const row of grid.points) for (const pt of row) { totalCount++; if (pt.valid) validCount++; }
+  }
+  let correctCount = 0, wrongCount = 0;
+  if (state.lastDecodeCorrectness) {
+    for (const row of state.lastDecodeCorrectness) for (const cell of row) {
+      if (!cell) continue;
+      if (cell.correct) correctCount++; else wrongCount++;
+    }
+  }
+  const gpp = state.lastGridPeriodPhase;
+  return {
+    compositeLineCount: state.lastVoteComposites?.length ?? 0,
+    voteCount: state.lastVotes?.length ?? 0,
+    gridPeriodPhase: gpp ? {
+      period: gpp.period, phiRow: gpp.phiRow, phiCol: gpp.phiCol, height: gpp.height,
+      seedPeriod: gpp.debug.seedPeriod, bracket: gpp.debug.bracket,
+      rowLineCount: gpp.rowLines.length, colLineCount: gpp.colLines.length,
+    } : null,
+    decodeGrid: grid ? { rows: grid.rows, cols: grid.cols, validCount, totalCount } : null,
+    decodeCorrectness: state.lastDecodeCorrectness ? { correctCount, wrongCount } : null,
+    pipeline: {
+      gridPeriodPhase: state.lastGridPeriodPhase,
+      voteComposites: state.lastVoteComposites,
+      lsdRectangles: lsdRects.map((r) => ({
+        cx: r.cx, cy: r.cy, theta: r.theta, length: r.length, width: r.width,
+        accepted: r.accepted, retries: r.retries, nfaLog10: r.nfaLog10,
+      })),
+    },
+  };
+}
+
 // ── Device-compute: capture + run the pose pipeline locally + send just
 // the result ──────────────────────────────────────────────────────────────
 //
@@ -532,9 +776,10 @@ async function captureComputeAndSendPose() {
     const t0 = performance.now();
     const timing = await computePoseFromCapture(state, gray, cw, ch);
     const totalMs = performance.now() - t0;
+    updateARCamera(buildLocalARCameraPose(state));
 
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
+      const msg: any = {
         type: 'poseResult', w: cw, h: ch,
         recoveredAxes: state.lastRecoveredAxes ? {
           Drow: state.lastRecoveredAxes.Drow.toArray(), Dcol: state.lastRecoveredAxes.Dcol.toArray(),
@@ -548,7 +793,30 @@ async function captureComputeAndSendPose() {
           recoveredCamQuat: state.lastPositionDecode.recoveredCamQuat.toArray(),
           orientation: state.lastPositionDecode.orientation,
         } : null,
-      }));
+      };
+      // Both off by default, independently toggled -- see their own
+      // checkbox comments above. Neither is computed at all unless its
+      // toggle is on, so leaving both off costs nothing beyond the
+      // checkbox reads themselves. The second LSD pass below (see
+      // buildDebugPayload's own comment on `pipeline.lsdRectangles`) is
+      // the one genuinely NEW computation sendDebugInfo pays for -- never
+      // runs unless this branch is taken.
+      if (sendDebugInfo) {
+        const field = computeGradient2x2Field(gray, cw, ch);
+        const lsdRects = await computeLsdRectanglesAuto(field, {
+          toleranceDeg: cameraSettings.lsdToleranceDeg,
+          rhoNoiseThreshold: cameraSettings.lsdRhoNoiseThreshold,
+          magnitudeBuckets: cameraSettings.lsdMagnitudeBuckets,
+          nfaEpsilon: cameraSettings.lsdNfaEpsilon,
+          nfaTestExponent: cameraSettings.lsdNfaTestExponent,
+          maxRetries: cameraSettings.lsdMaxRetries,
+          retryToleranceFactor: cameraSettings.lsdRetryToleranceFactor,
+          retryShrinkFraction: cameraSettings.lsdRetryShrinkFraction,
+        });
+        msg.debug = buildDebugPayload(state, lsdRects);
+      }
+      if (sendCapturedImage) msg.dataUrl = captureCanvas.toDataURL('image/jpeg', 0.85);
+      ws.send(JSON.stringify(msg));
     }
 
     // Local-only -- never sent over the network (the whole point of this

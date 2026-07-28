@@ -13,6 +13,20 @@
     max-width: 100vw; max-height: 100vh;
   }
   video#v.mirror { transform: translate(-50%, -50%) scaleX(-1); }
+  /* AR overlay -- a transparent THREE.js canvas placed exactly over the
+     video element (see mobileCapture.ts's resizeARCanvas), rendering the
+     recovered floor plane + a marker cube from a camera at the recovered
+     pose (same FOV/aspect the pose pipeline itself used) -- so when
+     computeOnDevice's decode is good, the rendered plane visually lands on
+     the real pattern in the live video underneath it. */
+  canvas#arCanvas {
+    position: fixed; top: 50%; left: 50%;
+    transform: translate(-50%, -50%);
+    pointer-events: none; z-index: 5;
+    display: none;
+  }
+  canvas#arCanvas.mirror { transform: translate(-50%, -50%) scaleX(-1); }
+  canvas#arCanvas.visible { display: block; }
   #status {
     position: fixed; top: max(12px, env(safe-area-inset-top)); left: 12px; right: 12px;
     display: flex; justify-content: space-between; z-index: 10;
@@ -85,6 +99,34 @@
   }
   #computeToggle label { color: #ccc; font-family: monospace; font-size: 12px; display: flex; align-items: center; gap: 8px; }
   #computeToggle input { accent-color: #0f0; }
+  /* Independent of computeToggle above -- an AR overlay showing the
+     recovered floor plane + a marker cube works whether the pose came from
+     THIS device (computeOnDevice on) or was synced back down from the
+     desktop after IT computed one (poseSync, see mobileCapture.ts). */
+  #arToggle {
+    position: fixed; bottom: max(330px, calc(env(safe-area-inset-bottom) + 318px)); left: 50%;
+    transform: translateX(-50%); z-index: 10;
+    display: flex; gap: 8px; align-items: center;
+    background: rgba(255,255,255,0.15); backdrop-filter: blur(4px);
+    border-radius: 999px; padding: 6px 16px;
+  }
+  #arToggle label { color: #ccc; font-family: monospace; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+  #arToggle input { accent-color: #33aaff; }
+  /* Debug-only, OFF by default -- extra payload on top of the poseResult
+     message (raw image bytes and/or intermediate pipeline data), both a
+     real per-frame cost (JPEG encode, extra serialization), so each is its
+     own toggle rather than riding along with computeOnDevice automatically.
+     See this session's on-device-pose-recovery plan's "extensibility"
+     design goal. */
+  #debugToggles {
+    position: fixed; bottom: max(372px, calc(env(safe-area-inset-bottom) + 360px)); left: 50%;
+    transform: translateX(-50%); z-index: 10;
+    display: flex; flex-direction: column; gap: 4px; align-items: flex-start;
+    background: rgba(255,255,255,0.15); backdrop-filter: blur(4px);
+    border-radius: 12px; padding: 6px 16px;
+  }
+  #debugToggles label { color: #ccc; font-family: monospace; font-size: 12px; display: flex; align-items: center; gap: 8px; }
+  #debugToggles input { accent-color: #f80; }
   /* Local-only timing/fps readout -- see mobileCapture.ts's own comment on
      why this is never sent over the network. */
   #poseReadout {
@@ -104,12 +146,18 @@
 <body>
 <a id="homeLink" href="/">&larr; home</a>
 <video id="v" autoplay playsinline muted></video>
+<canvas id="arCanvas"></canvas>
 <canvas id="captureCanvas" style="display:none;"></canvas>
 <div id="status"><span id="camStatus">starting camera…</span><span id="relayStatus">relay: connecting…</span></div>
 <div id="poseReadout"></div>
 <div id="zoomBox"><span>zoom</span><input type="range" id="zoom" min="0" max="1" step="0.01" value="0" disabled></div>
 <div id="resBox"><span>res</span><input type="range" id="res" min="0" max="1" step="0.001" value="1" disabled><span id="resValue">—</span></div>
 <div id="computeToggle"><label><input type="checkbox" id="computeOnDevice"> compute pose on this device</label></div>
+<div id="arToggle"><label><input type="checkbox" id="arOverlayEnabled"> AR overlay</label></div>
+<div id="debugToggles">
+  <label><input type="checkbox" id="sendDebugInfo"> send debug info (perf impact)</label>
+  <label><input type="checkbox" id="sendCapturedImage"> send captured image (perf impact)</label>
+</div>
 <div id="modeToggle">
   <button id="modeSingleBtn" class="active" data-mode="single">photo</button>
   <button id="modeVideoBtn" data-mode="video">video</button>

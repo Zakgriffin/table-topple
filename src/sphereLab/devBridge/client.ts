@@ -1,7 +1,9 @@
+import * as THREE from 'three';
 import { PhysicalCamera } from '../camera/model.ts';
 import { createPhysicalCamera } from '../camera/factory.ts';
 import { findPhysicalCameraByConnection, removeCameraTab } from '../camera/lifecycle.ts';
 import { activeCamera, cameras, isPhysical, nextCameraColor } from '../camera/store.ts';
+import { getAnalysisVFovRad } from '../math/geometry.ts';
 import { ingestRemotePose } from '../pipeline/capture.ts';
 import { renderer } from '../scene/renderer.ts';
 import { globalState } from '../state.ts';
@@ -73,6 +75,33 @@ export function pushSettingsSync(cam: PhysicalCamera) {
       boardSize: globalState.boardSize,
     },
     cameraSettings: buildCameraSettingsPayload(cam),
+  });
+}
+
+// Mirror image of a phone's own poseResult send (mobileCapture.ts) -- that's
+// "phone computed a pose, ship it to the desktop"; this is "desktop computed
+// a pose (from a desktop-compute capture), ship it back down to the phone",
+// so a phone's own AR overlay (mobile-capture.html's arCanvas) can work even
+// with "compute pose on this device" OFF, per an explicit ask (see this
+// session's chat) that a phone should be able to get its pose FROM the
+// server when it isn't computing one itself, symmetric with settingsSync's
+// own desktop-source-of-truth-pushed-to-phone pattern. Only the CAMERA's
+// pose travels over the wire -- the AR board itself is static, known, fixed
+// geometry on both ends (mobileCapture.ts's arPlane/arCube mirror
+// scene/floor.ts's own floorMesh, C*GRID_STEP x R*GRID_STEP at world
+// origin), so there's nothing per-capture about it worth sending.
+export function pushPoseSync(cam: PhysicalCamera) {
+  const decode = cam.lastPositionDecode;
+  if (!decode) {
+    sendToDevBridge({ type: 'poseSync', captureId: cam.connectionId, fix: null });
+    return;
+  }
+  sendToDevBridge({
+    type: 'poseSync', captureId: cam.connectionId,
+    fix: {
+      camPos: decode.camPos.toArray(), recoveredCamQuat: decode.recoveredCamQuat.toArray(),
+      aspect: cam.aspect, vFovDeg: THREE.MathUtils.radToDeg(getAnalysisVFovRad(cam)),
+    },
   });
 }
 

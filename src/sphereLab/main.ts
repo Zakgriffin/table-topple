@@ -88,7 +88,7 @@ import { updateGizmo, updateSphereOverlays } from './overlays/sphereOverlays.ts'
 import { updateRecoveredCamGizmo } from './overlays/recoveredOverlays.ts';
 import { drawSampleLattice } from './overlays/projectedCamOverlays.ts';
 import { drawGridPeriodPhaseProjected } from './overlays/gridPeriodPhaseOverlays.ts';
-import { pushSettingsSync, sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
+import { pushPoseSync, pushSettingsSync, sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
 
 // Every module's exports, purely so devBridge/client.ts's `eval(msg.code)`
 // can still see the whole app as one flat scope -- back when this was a
@@ -230,9 +230,17 @@ function animate() {
       const ready = !camera.axesCapturing;
       const pipelined = globalState.useCapturePipelining;
       if (ready !== camera.lastReportedReady || pipelined !== camera.lastReportedPipelined) {
+        const justFinished = ready && !camera.lastReportedReady;
         camera.lastReportedReady = ready;
         camera.lastReportedPipelined = pipelined;
         sendToDevBridge({ type: 'captureReady', captureId: camera.connectionId, ready, pipelined });
+        // Ships the freshly recovered pose back down to the phone (see
+        // devBridge/client.ts's pushPoseSync) right as a desktop-compute
+        // capture finishes -- same busy->ready edge captureReady itself
+        // watches. Skipped in device-compute mode: the phone already has
+        // this pose locally, and axesCapturing never toggles for that path
+        // anyway (ingestRemotePose assigns pose data directly).
+        if (justFinished && camera.computeMode === 'desktop') pushPoseSync(camera);
       }
     }
   }

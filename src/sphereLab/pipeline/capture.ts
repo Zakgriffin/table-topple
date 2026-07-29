@@ -142,7 +142,7 @@ export function captureDistortedGrayscale(camera: SimulatedCamera): { gray: Floa
   return { gray, w: camera.rtSize.w, h: camera.rtSize.h };
 }
 
-// Decodes an incoming data URL at whatever resolution it actually arrived
+// Decodes an incoming JPEG blob at whatever resolution it actually arrived
 // at -- no resampling of the image itself; resizeCaptureBuffers instead
 // reallocates the analysis buffers to MATCH it when it differs from what's
 // currently allocated, so the phone's own resolution slider (targetLongEdge
@@ -154,9 +154,18 @@ export function captureDistortedGrayscale(camera: SimulatedCamera): { gray: Floa
 // video mode's round-trip idle gap, and specifically telling "pull the
 // video frame" apart from "JPEG encode" apart from "actual network
 // transit" instead of lumping them all together).
+//
+// pending.blob arrives as a genuine binary WebSocket frame now (devBridge/
+// client.ts), not a base64 data: URL -- decoded via a blob: object URL
+// instead, but through the exact same img.src -> drawImage -> getImageData
+// -> toGrayscale -> flipRowsF64 pipeline as before. Both URL schemes decode
+// through the browser's own native JPEG decoder identically; only the WIRE
+// encoding changed, not the pixel data or its orientation, so the
+// downstream bottom-up row convention (flipRowsF64 below) needs no changes
+// -- confirmed deliberately, see this session's chat.
 export async function ingestRealCapture(
   camera: PhysicalCamera,
-  pending: { dataUrl: string; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number },
+  pending: { blob: Blob; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number },
 ): Promise<void> {
   if (camera.idleSpan) { spanEnd(camera.idleSpan); camera.idleSpan = null; }
   camera.lastPullMs = pending.pulledAt - pending.sentAt;
@@ -174,11 +183,16 @@ export async function ingestRealCapture(
 
   const decodeSpan = spanStart('image decode');
   const img = new Image();
-  await new Promise<void>((resolve, reject) => {
-    img.onload = () => resolve();
-    img.onerror = () => reject(new Error('failed to decode incoming capture image'));
-    img.src = pending.dataUrl;
-  });
+  const objectUrl = URL.createObjectURL(pending.blob);
+  try {
+    await new Promise<void>((resolve, reject) => {
+      img.onload = () => resolve();
+      img.onerror = () => reject(new Error('failed to decode incoming capture image'));
+      img.src = objectUrl;
+    });
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
   spanEnd(decodeSpan);
   const w = img.naturalWidth, h = img.naturalHeight;
   if (w !== camera.rtSize.w || h !== camera.rtSize.h) resizeCaptureBuffers(camera, { w, h });

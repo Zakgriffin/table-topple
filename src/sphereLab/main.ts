@@ -74,10 +74,11 @@ import './ui/cameraPanel.ts'; // side effect: wires every slider/checkbox to the
 import { renderer } from './scene/renderer.ts';
 import { floorMesh } from './scene/floor.ts';
 import { viewerCam, worldOrbit, insideCam, insideYaw, insidePitch } from './scene/viewerControls.ts';
+import { renderPreviewViewport, renderProjectedViewport } from './scene/quadRenderers.ts';
 import {
-  renderPreviewViewport, renderProjectedViewport, renderTrueContamOverlay, renderReconContamOverlay, renderTopGradientOverlay,
-  renderLsdRawRegionsOverlay, renderLsdRejectedOverlay,
-} from './scene/quadRenderers.ts';
+  resizeThroughCamCanvas, drawThroughCamPreview, drawThroughCamTrueContam, drawThroughCamReconContam,
+  drawThroughCamTopGradient, drawThroughCamLsdRawRegions, drawThroughCamLsdRejected,
+} from './scene/throughCam2D.ts';
 import { getAnalysisVFovRad, ingestRealCapture, markCaptureDirty, resizeCaptureBuffers, renderCamRT } from './pipeline/capture.ts';
 import { updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS } from './pipeline/preview.ts';
 import { buildProjectedTexture } from './pipeline/decodeGrid.ts';
@@ -147,14 +148,15 @@ import * as NS48 from './overlays/gridPeriodPhaseOverlays.ts';
 import * as NS49 from './pipeline/gridPeriodPhase.ts';
 import * as NS50 from './overlays/lsdOverlay.ts';
 import * as NS51 from './pipeline/lsdSegments.ts';
+import * as NS52 from './scene/throughCam2D.ts';
 Object.assign(
   globalThis,
   NS0, NS1, NS2, NS3, NS4, NS5, NS6, NS7, NS8, NS9, NS10, NS11, NS12, NS13, NS14, NS15, NS16, NS17,
-  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS45, NS47, NS48, NS49, NS50, NS51,
+  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS45, NS47, NS48, NS49, NS50, NS51, NS52,
   { THREE, activeCamera, cameras, isSimulated, isPhysical, globalState, euler, canvas, readout, savedControls,
     setMode, setPanelCollapsed, renderCameraTabs, refreshCameraPanel, renderViewport, layoutPip, resize,
     renderer, floorMesh, viewerCam, worldOrbit, insideCam, renderPreviewViewport, renderProjectedViewport,
-    renderTrueContamOverlay, renderReconContamOverlay, getAnalysisVFovRad, markCaptureDirty, resizeCaptureBuffers,
+    getAnalysisVFovRad, markCaptureDirty, resizeCaptureBuffers,
     renderCamRT, updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS, buildProjectedTexture, runAxesReconstruction,
     updateContaminationOverlays, updateGizmo, updateSphereOverlays, updateRecoveredCamGizmo,
     drawSampleLattice, computeThroughRect, drawGridPeriodPhaseProjected },
@@ -276,13 +278,13 @@ function animate() {
     if (active) renderPreviewViewport(active, active.pipRect.x, innerHeight - active.pipRect.y - active.pipRect.h, active.pipRect.w, active.pipRect.h);
   } else if (globalState.mode === 'through') {
     if (active) {
-      const { x, y, w, h } = computeThroughRect(active);
-      renderPreviewViewport(active, x, y, w, h);
-      if (active.settings.showTrueContamination) renderTrueContamOverlay(active, x, y, w, h);
-      if (active.settings.showReconstructedContamination) renderReconContamOverlay(active, x, y, w, h);
-      if (active.settings.showTopGradient) renderTopGradientOverlay(active, x, y, w, h);
-      if (active.settings.showLsdRawRegions) renderLsdRawRegionsOverlay(active, x, y, w, h);
-      if (active.settings.showLsdRejected) renderLsdRejectedOverlay(active, x, y, w, h);
+      resizeThroughCamCanvas(active);
+      drawThroughCamPreview(active);
+      if (active.settings.showTrueContamination) drawThroughCamTrueContam(active);
+      if (active.settings.showReconstructedContamination) drawThroughCamReconContam(active);
+      if (active.settings.showTopGradient) drawThroughCamTopGradient(active);
+      if (active.settings.showLsdRawRegions) drawThroughCamLsdRawRegions(active);
+      if (active.settings.showLsdRejected) drawThroughCamLsdRejected(active);
     }
   } else if (globalState.mode === 'projected') {
     if (active) {

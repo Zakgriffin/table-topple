@@ -33,8 +33,15 @@ const captureCtx = captureCanvas.getContext('2d')!;
 const camStatus = document.getElementById('camStatus')!;
 const relayStatus = document.getElementById('relayStatus')!;
 const zoomSlider = document.getElementById('zoom') as HTMLInputElement;
-const resSlider = document.getElementById('res') as HTMLInputElement;
-const resValue = document.getElementById('resValue')!;
+const resSelect = document.getElementById('resSelect') as HTMLSelectElement;
+const detectResBtn = document.getElementById('detectResBtn') as HTMLButtonElement;
+const probeLogToggleBtn = document.getElementById('probeLogToggleBtn') as HTMLButtonElement;
+const probeLogCloseBtn = document.getElementById('probeLogCloseBtn') as HTMLButtonElement;
+const probeLogPanel = document.getElementById('probeLogPanel') as HTMLDivElement;
+const probeLogTbody = document.getElementById('probeLogTbody') as HTMLTableSectionElement;
+const probeLogMatchHeader = document.getElementById('probeLogMatchHeader') as HTMLTableCellElement;
+const fpsSlider = document.getElementById('fps') as HTMLInputElement;
+const fpsValue = document.getElementById('fpsValue')!;
 const switchCamBtn = document.getElementById('switchCam') as HTMLButtonElement;
 const shutterBtn = document.getElementById('shutter') as HTMLButtonElement;
 const modeSingleBtn = document.getElementById('modeSingleBtn') as HTMLButtonElement;
@@ -126,16 +133,23 @@ const arRenderer = new THREE.WebGLRenderer({ canvas: arCanvas, alpha: true, anti
 arRenderer.setClearColor(0x000000, 0);
 arRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 
-// Keeps the canvas's on-screen box pixel-matched to the video's own
-// rendered box (video's `max-width/max-height: 100vw/100vh` can letterbox
-// it below the full viewport) -- an AR overlay that's the wrong size or
-// off-center would defeat the whole point of lining up with the live image.
-function resizeARCanvas() {
-  const w = video.clientWidth, h = video.clientHeight;
-  if (w === 0 || h === 0) return;
-  arRenderer.setSize(w, h);
+// Mirrors captureCanvas's own INTRINSIC (cw,ch) directly, not its rendered
+// CSS box -- both canvases share the exact same CSS (max-width/max-height
+// letterbox fit, see mobile-capture.html), so matching intrinsic dimensions
+// is what keeps arCanvas scaled/positioned identically to captureCanvas
+// (the browser's own replaced-element sizing does the rest, since both
+// elements then have the same aspect ratio driving that letterbox). `false`
+// (skip three.js's own inline-style sizing) since the stylesheet already
+// owns display sizing for both canvases identically -- letting setSize
+// ALSO write inline width/height here would just fight that. Only actually
+// resizes the GL backing store when (cw,ch) genuinely changed, since this
+// gets called every drawCurrentFrameToCanvas (i.e. every rAF tick).
+let arSizedCw = 0, arSizedCh = 0;
+function syncARRendererSize(cw: number, ch: number) {
+  if (cw === arSizedCw && ch === arSizedCh) return;
+  arSizedCw = cw; arSizedCh = ch;
+  if (cw > 0 && ch > 0) arRenderer.setSize(cw, ch, false);
 }
-new ResizeObserver(resizeARCanvas).observe(video);
 
 // Only ever moves the CAMERA -- see this section's header comment on why
 // the board itself (arPlane/arCube) is static. No fix (pose === null) hides
@@ -224,72 +238,467 @@ zoomSlider.addEventListener('input', () => {
 
 // ── Sent-image resolution ───────────────────────────────────────────────
 //
-// Controls the SENT frame's long-edge pixel size (captureAndSendFrame's own
-// canvas downscale, replacing what used to be the fixed MAX_DIM=1600
-// constant) -- not a camera hardware constraint, so this is a plain canvas
-// resize with the short edge always scaled by the same factor to preserve
-// the native aspect ratio, same as the old fixed-MAX_DIM math already did.
+// There's no standard API to enumerate a camera's true discrete capture
+// modes (MediaTrackCapabilities.width/height only report independent
+// {min,max} RANGES, no paired combinations, no aspect-ratio pairing) -- see
+// this session's chat. So instead of guessing at a continuous slider, this
+// SWEEPS a heuristic candidate list of common real camera resolutions
+// against the actual device, one at a time, as a basic (top-level, not
+// `advanced`) EXACT constraint -- unlike a bare/advanced constraint (which
+// spec'd to silently drop if unsatisfiable, see applyExactResolution's own
+// comment), an `{exact: ...}` BASIC constraint genuinely rejects
+// (OverconstrainedError) when the camera can't do it, giving a real
+// per-candidate yes/no signal. Includes both (w,h) and (h,w) for every
+// entry -- also genuinely ambiguous, device to device, whether
+// width/height constraints operate in the camera's true sensor-native
+// (always landscape) space or a device-orientation-corrected space, so
+// probing both resolves that empirically instead of guessing.
 //
-// The two ends of the slider aren't equally well-defined:
-//  - HIGH end has a real technical ceiling: the stream's own native
-//    resolution (video.videoWidth/Height once getUserMedia has negotiated
-//    it, via the same "request an unreachably high `ideal`" trick
-//    startCamera already uses) -- upscaling past that wouldn't add any
-//    actual detail, so it's a genuine max, not a guess.
-//  - LOW end has no such floor -- a canvas resize could go arbitrarily low
-//    (down to 1x1). RES_MIN_DIM_FLOOR below is a judgment call, not a
-//    hardware limit: 512px picks up the SAME number this app's own
-//    simulated-camera default analysis resolution already uses
-//    (camera/settings.ts's viewportW default) -- since a physical camera's
-//    whatever arrives becomes ITS analysis resolution directly (see
-//    pipeline/capture.ts's ingestRealCapture -- no further downsample the
-//    way simulated captures get), that's the same "how few pixels does
-//    this reconstruction pipeline actually need" question the app already
-//    answered once, reused here rather than picking a fresh arbitrary
-//    number.
-const RES_MIN_DIM_FLOOR = 512;
-const RES_DEFAULT_DIM = 1600; // matches the old fixed MAX_DIM, kept as the default so behavior doesn't silently change until the slider is touched
-let resMinDim = RES_MIN_DIM_FLOOR, resMaxDim = RES_MIN_DIM_FLOOR;
-let targetLongEdge = RES_DEFAULT_DIM;
-let nativeShortOverLong = 1; // aspect ratio of the current stream, short edge / long edge
-
-function sliderToDim(t: number): number {
-  return resMinDim * Math.pow(resMaxDim / resMinDim, t);
-}
-function dimToSlider(dim: number): number {
-  if (resMaxDim <= resMinDim) return 0;
-  return Math.min(1, Math.max(0, Math.log(dim / resMinDim) / Math.log(resMaxDim / resMinDim)));
-}
-function updateResLabel() {
-  const shortEdge = Math.round(targetLongEdge * nativeShortOverLong);
-  resValue.textContent = `${targetLongEdge}×${shortEdge}`;
+// MANUALLY triggered (see #detectResBtn below), NOT run automatically on
+// every camera start -- a real phone crashed during this sweep earlier this
+// session. RES_PROBE_DELAY_MS pacing was originally added on the theory
+// that back-to-back stream reconfigurations themselves were the problem;
+// that turned out NOT to be the fix (confirmed: pacing alone didn't stop
+// the crash) -- the actual cause was the continuous, unthrottled,
+// full-native-resolution redraw of the now-VISIBLE captureCanvas on every
+// rAF tick (see drawCurrentFrameToCanvas/previewLongEdgeCap and
+// drawFullResFrameToSendCanvas), which this sweep's larger candidates made
+// worse but didn't require to trigger. Kept manual-only regardless (still a
+// heavier, more visible operation than users want running automatically),
+// and the delay stays too (still reasonable pacing for a UI that's visibly
+// flashing through candidates), but neither should be credited with fixing
+// the crash itself.
+const RES_PROBE_DELAY_MS = 300;
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function setupResolutionControl() {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh) { resSlider.disabled = true; return; }
-  const nativeLongEdge = Math.max(vw, vh);
-  nativeShortOverLong = Math.min(vw, vh) / nativeLongEdge;
-  resMaxDim = nativeLongEdge;
-  // A device/webcam whose native resolution is already below the floor --
-  // just pin the slider to that single value instead of presenting a
-  // (min > max) range.
-  resMinDim = Math.min(RES_MIN_DIM_FLOOR, resMaxDim);
-  if (resMaxDim <= resMinDim) {
-    resSlider.disabled = true;
-    targetLongEdge = resMaxDim;
-    updateResLabel();
+const RES_CANDIDATES_BASE: { w: number; h: number }[] = [
+  { w: 640, h: 480 }, { w: 1024, h: 768 }, { w: 1280, h: 960 }, { w: 1600, h: 1200 },
+  { w: 2048, h: 1536 }, { w: 3264, h: 2448 }, { w: 4032, h: 3024 },
+  { w: 640, h: 360 }, { w: 1280, h: 720 }, { w: 1920, h: 1080 }, { w: 2560, h: 1440 }, { w: 3840, h: 2160 },
+];
+// 'untested': never probed. 'supported': verified live -- a fresh stream
+// requested at exactly (w,h) (see requestStreamAt) came back reporting
+// EXACTLY (w,h). 'rejected': either the request threw, or it resolved but
+// came back at some OTHER resolution than requested (the swapped-
+// orientation case this whole verification step exists to catch).
+type ResCandidateStatus = 'untested' | 'supported' | 'rejected';
+interface ResCandidate { w: number; h: number; status: ResCandidateStatus }
+let resCandidates: ResCandidate[] = [];
+
+function buildResCandidateList(): ResCandidate[] {
+  const seen = new Set<string>();
+  const list: ResCandidate[] = [];
+  for (const { w, h } of RES_CANDIDATES_BASE) {
+    for (const [cw, ch] of [[w, h], [h, w]] as const) {
+      const key = `${cw}x${ch}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      list.push({ w: cw, h: ch, status: 'untested' });
+    }
+  }
+  list.sort((a, b) => a.w * a.h - b.w * b.h);
+  return list;
+}
+
+// Rebuilds the <option> list from the current resCandidates -- called
+// after every probe (not just once at the end) so the dropdown fills in
+// live as the sweep progresses, rather than sitting inert/unexplained for
+// however long the whole sweep takes. 'rejected' candidates are left OUT
+// entirely now, not just disabled/grayed -- with everything shown genuinely
+// confirmed-good, there's no reason to also show a pile of known-bad
+// options (the full detail of WHY each one failed lives in the probe log
+// instead, see probeResolution/renderProbeLog).
+function renderResOptions() {
+  const currentValue = resSelect.value;
+  resSelect.innerHTML = '';
+  const shown = resCandidates.filter((c) => c.status !== 'rejected');
+  // Only reachable if setupDefaultResOption itself couldn't populate
+  // anything (video dimensions not ready yet), or every candidate probed
+  // so far has failed -- an empty <select> would just look broken rather
+  // than explaining what to do.
+  if (shown.length === 0) {
+    const opt = document.createElement('option');
+    opt.textContent = 'tap "detect" →';
+    resSelect.appendChild(opt);
     return;
   }
-  resSlider.disabled = false;
-  targetLongEdge = Math.min(Math.max(targetLongEdge, resMinDim), resMaxDim);
-  resSlider.value = String(dimToSlider(targetLongEdge));
-  updateResLabel();
+  for (const c of shown) {
+    const opt = document.createElement('option');
+    opt.value = `${c.w}x${c.h}`;
+    opt.textContent = c.status === 'untested' ? `${c.w} × ${c.h} (untested)` : `${c.w} × ${c.h}`;
+    resSelect.appendChild(opt);
+  }
+  if (Array.from(resSelect.options).some((o) => o.value === currentValue)) resSelect.value = currentValue;
 }
 
-resSlider.addEventListener('input', () => {
-  targetLongEdge = Math.round(sliderToDim(parseFloat(resSlider.value)));
-  updateResLabel();
+// Requests a genuinely FRESH stream at exactly (w,h), pinned to the SAME
+// physical camera via deviceId -- deliberately NOT
+// track.applyConstraints() on an already-running track. Confirmed against
+// a reference tool built for exactly this problem (addpipe/
+// webcam-resolution-tester): applyConstraints() has uneven real-world
+// support for actually renegotiating a running camera's resolution,
+// especially across orientations, on mobile -- it can silently clamp to
+// the nearest resolution along whatever orientation the camera already
+// happens to be running, rather than a genuine renegotiation. A brand-new
+// getUserMedia() call forces the SAME full negotiation a fresh page load
+// would get.
+//
+// width/height are `ideal`, NOT `exact` -- confirmed live this session:
+// `exact` made literally every candidate fail, not just the swapped-
+// orientation ones. Real camera hardware (Android in particular) only
+// exposes a small, FIXED list of actual stream configurations;
+// MediaTrackCapabilities' width/height are independent min/max RANGES that
+// make arbitrary in-between pairs look achievable when they mostly aren't
+// -- `exact` rejects outright the instant a requested pair isn't one of
+// the camera's own literal supported modes, even when something very
+// close genuinely is available. `ideal` never fails that way: the browser
+// always negotiates to its nearest actual supported config and hands back
+// a real stream, which the caller then checks against what it actually got
+// (video.videoWidth/videoHeight) -- same "verify, don't trust" principle
+// as everywhere else in this section, just against a constraint type that
+// doesn't spuriously reject in the first place. deviceId stays `exact`
+// deliberately -- pinning the SAME physical camera across a teardown/
+// rebuild is a real hard requirement, unlike the resolution itself.
+// Returns null on any failure (camera busy, permission revoked, etc.) --
+// never throws.
+async function requestStreamAt(deviceId: string | undefined, w: number, h: number): Promise<MediaStream | null> {
+  try {
+    return await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: w }, height: { ideal: h } },
+    });
+  } catch {
+    return null;
+  }
+}
+
+// Reconnects to a plain, unconstrained stream on the SAME physical camera
+// (deviceId if known, else falls back to facingMode) -- used to bring the
+// viewfinder back after a failed/rejected resolution request or after the
+// sweep finishes, WITHOUT going through startCamera itself: that also
+// calls setupDefaultResOption, which would blow away whatever candidates
+// list is currently populated (the very thing the caller usually still
+// wants showing in the dropdown).
+async function reconnectPlainStream(deviceId: string | undefined) {
+  try {
+    const newStream = await navigator.mediaDevices.getUserMedia({
+      video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: currentFacing } },
+    });
+    await adoptStream(newStream);
+    refreshCamStatusResolution();
+  } catch (e: any) {
+    camStatus.textContent = 'camera error: ' + e.message;
+  }
+}
+
+// Applies a candidate already CONFIRMED supported (either by the sweep, or
+// just whatever the camera is already streaming at by default) by
+// swapping the live feed to a fresh stream at exactly (w,h) -- see
+// requestStreamAt's own comment on why a fresh stream, not
+// applyConstraints(). Returns whether the camera actually ended up at
+// exactly (w,h), not just whether the request succeeded at all: a real
+// device can resolve successfully while still landing on a DIFFERENT
+// resolution than requested. Always refreshes camStatus with whatever the
+// camera ACTUALLY ends up at either way (see refreshCamStatusResolution),
+// so a mismatch or an outright rejection is visibly reported instead of
+// silently assumed to have worked. On rejection, reconnects to SOME
+// working stream rather than leaving the camera dead, since the old stream
+// already had to be stopped before requesting the new one (real camera
+// hardware generally can't have two opens on the same device at once).
+//
+// If resolutionAxesSwapped was detected by a prior sweep (see its own
+// comment), the REQUEST sent here is swapped to compensate -- w,h below
+// always mean the TRUE target (what video.videoWidth/videoHeight should
+// end up as), never the raw request.
+async function applyExactResolution(w: number, h: number): Promise<boolean> {
+  if (video.videoWidth === w && video.videoHeight === h) { refreshCamStatusResolution(); return true; } // already exactly there
+  const deviceId = currentStream?.getVideoTracks()[0]?.getSettings().deviceId;
+  if (currentStream) currentStream.getTracks().forEach((t) => t.stop());
+  const stream = resolutionAxesSwapped ? await requestStreamAt(deviceId, h, w) : await requestStreamAt(deviceId, w, h);
+  if (!stream) {
+    camStatus.textContent = `resolution ${w}x${h} REJECTED by camera`;
+    await reconnectPlainStream(deviceId);
+    return false;
+  }
+  await adoptStream(stream);
+  const ok = video.videoWidth === w && video.videoHeight === h;
+  if (!ok) camStatus.textContent = `resolution ${w}x${h} requested but camera gave ${video.videoWidth}x${video.videoHeight} instead`;
+  refreshCamStatusResolution();
+  return ok;
+}
+
+// Single source of truth for "what resolution is the camera actually at
+// right now" -- reads video.videoWidth/videoHeight (what real captures
+// actually use, see drawFullResFrameToSendCanvas) so camStatus and the
+// resolution dropdown can never drift from reality the way camStatus used
+// to (it was previously set ONCE in startCamera and never touched again,
+// so it kept showing the pre-selection resolution forever after). Also
+// re-syncs resSelect's displayed value, since a rejected/overridden
+// request means the dropdown's own selection can no longer be trusted to
+// reflect what's live either.
+function refreshCamStatusResolution() {
+  const w = video.videoWidth, h = video.videoHeight;
+  if (!w || !h) return;
+  camStatus.textContent = `${currentFacing} camera, ${w}x${h}`;
+  const value = `${w}x${h}`;
+  if (Array.from(resSelect.options).some((o) => o.value === value)) resSelect.value = value;
+}
+
+resSelect.addEventListener('change', () => {
+  const [w, h] = resSelect.value.split('x').map(Number);
+  applyExactResolution(w, h);
+});
+
+// Populates the dropdown with just whatever the camera is ALREADY
+// streaming at by default (from startCamera's own unconstrained
+// negotiation) -- a single, always-safe, zero-extra-requests option, so
+// the viewfinder/shutter are usable immediately without ever running the
+// (much more invasive) sweep below. Called from startCamera, same as
+// setupZoomControl/setupFramerateControl.
+function setupDefaultResOption() {
+  const vw = video.videoWidth, vh = video.videoHeight;
+  if (!vw || !vh) { resSelect.disabled = true; return; }
+  resCandidates = [{ w: vw, h: vh, status: 'supported' }];
+  renderResOptions();
+  resSelect.disabled = false;
+}
+
+// One row per probe attempt -- see the probeLogPanel toggle in
+// mobile-capture.html. Answers, per candidate: what did we ask for, did
+// getUserMedia even resolve, what did the camera actually settle on (via
+// `ideal`, so this is meaningful even on failure -- see requestStreamAt's
+// own comment), and did that match what was requested. Kept around for the
+// whole session (not just the latest sweep) so a user can compare multiple
+// sweep runs if they want; cleared only by an explicit "clear" action --
+// there isn't one yet, so in practice this just grows across sweeps, which
+// is fine for a debug tool nobody leaves running unattended.
+interface ProbeLogEntry {
+  requestedW: number; requestedH: number;
+  resolved: boolean; error: string;
+  actualW: number | null; actualH: number | null;
+  matched: boolean;
+}
+let probeLog: ProbeLogEntry[] = [];
+
+// e.matched (on the entry itself) is always the RAW, direct requested-vs-
+// actual comparison -- never mutated once a probe finishes, so it stays a
+// simple fact. Once resolutionAxesSwapped is known (see its own comment),
+// the MEANINGFUL match check is the flipped one instead, so this recomputes
+// it fresh at render time (never overwriting entry.matched) and relabels
+// the column header to say so -- otherwise the table would keep showing
+// "no" for rows the sweep has already reclassified as supported, which
+// would look like a contradiction rather than the correct, reinterpreted
+// answer.
+function renderProbeLog() {
+  probeLogMatchHeader.textContent = resolutionAxesSwapped ? 'match (flipped)?' : 'match?';
+  probeLogTbody.innerHTML = '';
+  for (const e of probeLog) {
+    const tr = document.createElement('tr');
+    const resolvedText = e.resolved ? 'yes' : `no${e.error ? ` — ${e.error}` : ''}`;
+    const actualText = e.actualW != null ? `${e.actualW}×${e.actualH}` : '—';
+    const effectiveMatch = resolutionAxesSwapped
+      ? (e.actualW === e.requestedH && e.actualH === e.requestedW)
+      : e.matched;
+    tr.innerHTML = `<td>${e.requestedW}×${e.requestedH}</td><td>${resolvedText}</td><td>${actualText}</td><td>${effectiveMatch ? 'yes' : 'no'}</td>`;
+    tr.className = effectiveMatch ? 'pass' : 'fail';
+    probeLogTbody.appendChild(tr);
+  }
+}
+probeLogToggleBtn.addEventListener('click', () => probeLogPanel.classList.toggle('visible'));
+probeLogCloseBtn.addEventListener('click', () => probeLogPanel.classList.remove('visible'));
+
+// Some platforms consistently report video.videoWidth/videoHeight SWAPPED
+// relative to whatever width/height was actually requested -- confirmed
+// live this session on Chrome for iOS, which (like every browser on iOS,
+// by Apple's own App Store rules) is required to use WebKit as its actual
+// engine regardless of branding. WebKit negotiates the camera in its own
+// fixed sensor-native space, then rotates the delivered frame to match the
+// phone's physical orientation WITHOUT also flipping which axis the
+// original request numbers meant -- so on a phone held in portrait, asking
+// for landscape dimensions comes back reporting portrait dimensions, and
+// vice versa, every single time. Detected empirically per sweep (see
+// sweepResolutionCandidates' own post-hoc majority-vote pass below), not
+// via user-agent sniffing -- same "verify, don't assume" principle as
+// everything else in this section. Once known, requestStreamAt/
+// applyExactResolution swap the REQUEST to compensate, while still
+// verifying against the TRUE target in video.videoWidth/videoHeight.
+let resolutionAxesSwapped = false;
+
+// One throwaway probe for the sweep below: opens a fresh, ISOLATED stream
+// on a hidden <video> at exactly (w,h) via requestStreamAt, reads what
+// actually came back, then tears it down -- never touches the main
+// video/currentStream (sweepResolutionCandidates already stopped that for
+// the sweep's duration). Mirrors the reference tool's own approach
+// (addpipe/webcam-resolution-tester): a disposable probe per candidate,
+// rather than repeatedly reconfiguring one live track. Always requests the
+// RAW, un-swap-compensated (w,h) -- resolutionAxesSwapped isn't known yet
+// during a sweep's own probing (that's what this data is FOR determining),
+// see sweepResolutionCandidates' post-hoc pass for where compensation
+// actually gets applied. Returns the full ProbeLogEntry (not just a
+// pass/fail verdict) so the sweep loop can do that later reinterpretation
+// without re-probing anything.
+async function probeResolution(deviceId: string | undefined, w: number, h: number): Promise<ProbeLogEntry> {
+  const entry: ProbeLogEntry = { requestedW: w, requestedH: h, resolved: false, error: '', actualW: null, actualH: null, matched: false };
+  probeLog.push(entry);
+  let stream: MediaStream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: w }, height: { ideal: h } },
+    });
+  } catch (e: any) {
+    entry.error = e?.message || String(e);
+    renderProbeLog();
+    return entry;
+  }
+  entry.resolved = true;
+  const probeVideo = document.createElement('video');
+  probeVideo.muted = true;
+  probeVideo.playsInline = true;
+  probeVideo.srcObject = stream;
+  try {
+    await probeVideo.play();
+    entry.actualW = probeVideo.videoWidth;
+    entry.actualH = probeVideo.videoHeight;
+    entry.matched = probeVideo.videoWidth === w && probeVideo.videoHeight === h;
+  } catch (e: any) {
+    entry.error = e?.message || String(e);
+  } finally {
+    stream.getTracks().forEach((t) => t.stop());
+    renderProbeLog();
+  }
+  return entry;
+}
+
+// Manually triggered ONLY (see detectResBtn's click handler) -- each probe
+// is a REAL, isolated stream open+close (see probeResolution), paced by
+// RES_PROBE_DELAY_MS between every attempt. The main viewfinder goes dark
+// for the sweep's duration (the live stream is stopped up front, below --
+// most camera hardware can't have two opens on one device at once) and
+// comes back once it's done; that's an accepted cost of getting a genuine
+// empirical answer instead of a guess.
+//
+// Applies nothing on its own once done, INCLUDING not restoring whatever
+// resolution was active before the sweep started -- the user picks what
+// they actually want from the now-populated dropdown afterward, same as
+// every other control in this file, rather than the sweep silently
+// deciding for them. Just reconnects to a plain unconstrained stream
+// (reconnectPlainStream, NOT startCamera -- that also calls
+// setupDefaultResOption, which would wipe out the candidate list this
+// sweep just spent time building) so the viewfinder isn't left dead.
+async function sweepResolutionCandidates() {
+  if (!currentStream) return;
+  resSelect.disabled = true;
+  detectResBtn.disabled = true;
+  probeLog = [];
+  renderProbeLog();
+  const deviceId = currentStream.getVideoTracks()[0]?.getSettings().deviceId;
+  const nativeW = video.videoWidth, nativeH = video.videoHeight;
+  resCandidates = buildResCandidateList();
+  if (nativeW && nativeH && !resCandidates.some((c) => c.w === nativeW && c.h === nativeH)) {
+    resCandidates.push({ w: nativeW, h: nativeH, status: 'supported' }); // this IS the video element's current live size, no probe needed
+    resCandidates.sort((a, b) => a.w * a.h - b.w * b.h);
+  }
+  renderResOptions();
+  currentStream.getTracks().forEach((t) => t.stop());
+
+  let i = 0;
+  const attempts: { cand: ResCandidate; entry: ProbeLogEntry }[] = [];
+  for (const cand of resCandidates) {
+    if (cand.status !== 'untested') continue; // the injected native pair above is already known-good
+    i++;
+    detectResBtn.textContent = `detecting… ${i}/${resCandidates.length}`;
+    const entry = await probeResolution(deviceId, cand.w, cand.h);
+    cand.status = entry.matched ? 'supported' : 'rejected';
+    attempts.push({ cand, entry });
+    renderResOptions();
+    await sleep(RES_PROBE_DELAY_MS);
+  }
+
+  // Post-hoc majority vote, reusing the raw data every probe above already
+  // collected -- NOT a second sweep under the opposite assumption (see
+  // resolutionAxesSwapped's own comment on why that's unnecessary). If most
+  // resolved probes came back with actual dimensions swapped relative to
+  // what was requested, this platform swaps axes -- so every candidate
+  // that LOOKED rejected only because of that swap gets reclassified as
+  // supported, using data already in hand.
+  let straight = 0, swapped = 0;
+  for (const { entry } of attempts) {
+    if (entry.actualW == null) continue;
+    if (entry.actualW === entry.requestedW && entry.actualH === entry.requestedH) straight++;
+    else if (entry.actualW === entry.requestedH && entry.actualH === entry.requestedW) swapped++;
+  }
+  resolutionAxesSwapped = swapped > straight;
+  // Refreshes the table's header/rows for the (possibly new) verdict even
+  // when it comes back false -- a PRIOR sweep could have left the header
+  // reading "match (flipped)?" and this run needs to be able to correct
+  // that back, not just flip it on.
+  renderProbeLog();
+  if (resolutionAxesSwapped) {
+    for (const { cand, entry } of attempts) {
+      if (entry.actualW === cand.h && entry.actualH === cand.w) cand.status = 'supported';
+    }
+    renderResOptions();
+  }
+
+  detectResBtn.textContent = 'detect';
+  detectResBtn.disabled = false;
+  resSelect.disabled = false;
+  await reconnectPlainStream(deviceId);
+}
+detectResBtn.addEventListener('click', () => sweepResolutionCandidates());
+
+// ── Frame rate ───────────────────────────────────────────────────────────
+//
+// A lever against motion blur (see this session's chat): requesting a
+// higher frame rate caps how long auto-exposure is allowed to leave the
+// shutter open, since a frame's exposure can't exceed its own interval --
+// works even where manual exposureTime control (a separate, far less
+// widely supported constraint, notably absent on iOS Safari) isn't. Bounds
+// are 1fps (a full second between frames, the slowest anyone would want) up
+// to getCapabilities().frameRate.max -- "as fast as we can go" per an
+// explicit ask -- with fallbacks (the currently-negotiated rate, then a
+// flat 30) for a track that doesn't report frameRate capabilities at all
+// (frameRate.max is part of the base Media Capture spec, unlike zoom/
+// exposure, so this is expected to work broadly, but nothing guarantees it
+// on every device).
+const FPS_MIN = 1;
+let fpsMax = FPS_MIN;
+
+function setupFramerateControl() {
+  const track = currentStream?.getVideoTracks()[0];
+  let caps: any = null;
+  try { caps = track && 'getCapabilities' in track ? (track as any).getCapabilities() : null; }
+  catch { caps = null; }
+  const current = track?.getSettings().frameRate;
+  fpsMax = Math.max(FPS_MIN, Math.round(caps?.frameRate?.max ?? current ?? 30));
+
+  if (fpsMax <= FPS_MIN) {
+    fpsSlider.disabled = true;
+    return;
+  }
+  fpsSlider.disabled = false;
+  fpsSlider.min = String(FPS_MIN);
+  fpsSlider.max = String(fpsMax);
+  // No longer auto-applies fpsMax on load -- confirmed live this session
+  // (see the resolution dropdown's own comment on sweepResolutionCandidates)
+  // that an automatic, unprompted hardware reconfiguration on camera start
+  // can crash a real phone; frameRate is exactly that kind of call
+  // (applyConstraints -> real stream reconfiguration), so this now only
+  // REFLECTS whatever the browser already negotiated on its own, matching
+  // zoom/res's own "don't touch it automatically" posture -- the slider
+  // still visually defaults toward the fast end, but nothing actually
+  // fires until the user drags it themselves.
+  const initial = Math.min(fpsMax, Math.max(FPS_MIN, Math.round(current ?? fpsMax)));
+  fpsSlider.value = String(initial);
+  fpsValue.textContent = `${initial}`;
+}
+
+fpsSlider.addEventListener('input', () => {
+  const fps = parseInt(fpsSlider.value, 10);
+  fpsValue.textContent = `${fps}`;
+  const track = currentStream?.getVideoTracks()[0];
+  track?.applyConstraints({ advanced: [{ frameRate: fps } as any] }).catch(() => {});
 });
 
 // ── On-device compute: settings mirror ──────────────────────────────────
@@ -394,33 +803,58 @@ setInterval(() => {
   ws.send(JSON.stringify(stats));
 }, 2000);
 
-async function startCamera(desiredFacing: string) {
-  // width/height `ideal` far above any real sensor -- getUserMedia treats
-  // `ideal` as "get as close as you can", so an unreachably high target
-  // just resolves to whatever the device's actual max is, without needing
-  // to query getCapabilities() (unavailable pre-stream anyway) or hardcode
-  // a specific resolution that undershoots newer/higher-res phones.
-  const newStream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: desiredFacing }, width: { ideal: 7680 }, height: { ideal: 4320 } },
-  });
-  if (currentStream) currentStream.getTracks().forEach((t) => t.stop());
-  currentStream = newStream;
-  video.srcObject = currentStream;
+// Makes `stream` the live camera feed -- swaps currentStream/video.srcObject
+// to it and re-binds everything tied to the SPECIFIC MediaStreamTrack
+// object (zoom, framerate), since a fresh getUserMedia() stream is a
+// genuinely NEW track even when it's the same physical camera as before;
+// controls left bound to the OLD (now-stopped) track would silently stop
+// working otherwise. Shared by startCamera and applyExactResolution/
+// sweepResolutionCandidates below, all of which now request a genuinely
+// fresh stream per resolution rather than reconfiguring one track in place
+// -- see this session's chat on why (a real-world reference tool aimed at
+// the exact same problem, addpipe/webcam-resolution-tester, does the same
+// -- MediaStreamTrack.applyConstraints() has uneven real-world support for
+// actually renegotiating a running camera's resolution, especially across
+// orientations, on mobile).
+async function adoptStream(stream: MediaStream) {
+  if (currentStream && currentStream !== stream) currentStream.getTracks().forEach((t) => t.stop());
+  currentStream = stream;
+  video.srcObject = stream;
   await video.play();
-  const settings = currentStream.getVideoTracks()[0].getSettings();
-  currentFacing = settings.facingMode || 'environment';
-  video.classList.toggle('mirror', currentFacing === 'user');
-  arCanvas.classList.toggle('mirror', currentFacing === 'user');
+  const settings = stream.getVideoTracks()[0].getSettings();
+  currentFacing = settings.facingMode || currentFacing;
+  // No CSS mirror class anymore -- video itself is hidden (captureCanvas is
+  // now the visible viewfinder, see this session's chat), and
+  // drawCurrentFrameToCanvas already bakes the front-camera flip directly
+  // into captureCanvas's own pixels; a CSS transform on top of that would
+  // double-flip it.
   setupZoomControl();
-  setupResolutionControl();
-  resizeARCanvas();
-  camStatus.textContent = `${currentFacing} camera, ${settings.width}x${settings.height}`;
+  setupFramerateControl();
   // The camera hardware's OWN nominal capture rate -- distinct from how
   // often WE encode/send (see the frameStats reporting below), and a real
   // alternative explanation raised for video mode's idle gap: auto-exposure
   // in low light can drop a phone's actually-delivered frame rate well
   // below its nominal one, independent of anything the round-trip does.
   nominalFrameRate = settings.frameRate ?? null;
+}
+
+async function startCamera(desiredFacing: string) {
+  // No width/height constraint at all here, ideal or exact -- whatever
+  // resolution the browser's own default negotiation lands on is exactly
+  // as arbitrary as any other guess, so there's no reason to bias it
+  // toward "as high as possible" (the old `ideal: 7680x4320` trick) before
+  // the user's actually picked anything. setupDefaultResOption just
+  // reflects whatever this happens to be; sweepResolutionCandidates/the
+  // dropdown are the real way to choose a resolution deliberately.
+  const newStream = await navigator.mediaDevices.getUserMedia({
+    video: { facingMode: { ideal: desiredFacing } },
+  });
+  await adoptStream(newStream);
+  setupDefaultResOption(); // sweepResolutionCandidates is manual-only -- see its own comment on why
+  // No explicit AR-canvas resize call needed -- videoLoop's continuous
+  // drawCurrentFrameToCanvas (see its own comment) syncs captureCanvas AND
+  // the AR renderer together every rAF tick, starting from the very next one.
+  refreshCamStatusResolution();
 }
 
 switchCamBtn.addEventListener('click', async () => {
@@ -581,11 +1015,11 @@ connectRelay();
 
 // ── Shutter / video streaming ────────────────────────────────────────────
 //
-// Downscaled to the resolution slider's own targetLongEdge before encoding
-// -- NOT just a transfer-speed knob: Sphere Lab's ingestRealCapture resizes
-// a physical camera's analysis buffers to match whatever resolution
-// actually arrives (unlike a simulated capture, there's no further
-// downsample step after this), so targetLongEdge IS the real analysis
+// Sent at the stream's own actual negotiated resolution (see
+// drawCurrentFrameToCanvas) -- NOT just a transfer-speed knob: Sphere Lab's
+// ingestRealCapture resizes a physical camera's analysis buffers to match
+// whatever resolution actually arrives (unlike a simulated capture, there's
+// no further downsample step after this), so this IS the real analysis
 // resolution, not merely a cap on top of one.
 
 // Returns WHY, not just whether, so the video loop can count each reason
@@ -614,18 +1048,34 @@ function canSend() {
   return sendGateStatus() === 'ok';
 }
 
-// Draws the current video frame onto captureCanvas at the resolution
-// slider's own targetLongEdge, mirrored to match the on-screen preview when
-// using the front camera -- shared by BOTH compute modes (desktop-compute's
-// captureAndSendFrame below, and device-compute's captureComputeAndSendPose
-// further down), which then diverge on what to DO with the drawn canvas
-// (JPEG-encode and send the image vs. read pixels back and compute a pose
-// locally).
+// Draws the current video frame onto the VISIBLE captureCanvas -- but
+// downscaled to fit the screen's own physical pixel dimensions (aspect
+// preserved), not the camera's full negotiated resolution. This runs
+// unconditionally every rAF tick (see videoLoop), and drawing/compositing a
+// full-native-resolution (potentially 12+MP) on-screen canvas at 60fps is
+// what was crashing Chrome on a real phone -- CSS max-width/max-height
+// (mobile-capture.html) only scales the DISPLAYED box, it doesn't shrink
+// the actual pixel buffer drawImage has to fill and the compositor has to
+// upload, so a cap has to happen here instead. previewLongEdgeCap() is the
+// screen's own long edge in physical pixels -- rendering any larger than
+// that buys zero visible detail. The actual full-resolution frame sent to
+// the server is drawn separately, on demand, by drawFullResFrameToSendCanvas
+// below -- this function only ever feeds the live preview.
+function previewLongEdgeCap(): number {
+  const dpr = Math.min(window.devicePixelRatio || 1, 2);
+  return Math.max(window.innerWidth, window.innerHeight) * dpr;
+}
+
 function drawCurrentFrameToCanvas(): { cw: number; ch: number } {
   const vw = video.videoWidth, vh = video.videoHeight;
-  const scale = Math.min(1, targetLongEdge / Math.max(vw, vh));
-  const cw = Math.round(vw * scale), ch = Math.round(vh * scale);
-  captureCanvas.width = cw; captureCanvas.height = ch;
+  if (!vw || !vh) { captureCanvas.width = 0; captureCanvas.height = 0; return { cw: 0, ch: 0 }; }
+  const scale = Math.min(1, previewLongEdgeCap() / Math.max(vw, vh));
+  const cw = Math.max(1, Math.round(vw * scale)), ch = Math.max(1, Math.round(vh * scale));
+  // Guards the resize -- reassigning canvas.width/height clears the
+  // backing bitmap even when set to the same value, so skipping it when
+  // unchanged avoids a pointless reallocation on every one of these ticks.
+  if (captureCanvas.width !== cw || captureCanvas.height !== ch) { captureCanvas.width = cw; captureCanvas.height = ch; }
+  syncARRendererSize(cw, ch);
   if (currentFacing === 'user') {
     captureCtx.save();
     captureCtx.translate(cw, 0);
@@ -638,31 +1088,88 @@ function drawCurrentFrameToCanvas(): { cw: number; ch: number } {
   return { cw, ch };
 }
 
+// Off-DOM canvas dedicated to full-resolution capture -- kept separate from
+// the (now downscaled) preview captureCanvas above so the image actually
+// sent to the server still carries the full resolution the user picked via
+// the resolution dropdown. Never displayed, so no CSS/letterbox concerns;
+// only ever drawn into on demand, by captureAndSendFrame/
+// captureComputeAndSendPose below, which already only run when a capture is
+// actually happening (shutter tap, a canSend()-gated video-mode tick, or a
+// devicePoseLoop iteration) -- so no extra throttling logic is needed here,
+// unlike the continuous preview draw above.
+const sendCanvas = document.createElement('canvas');
+const sendCtx = sendCanvas.getContext('2d')!;
+
+function drawFullResFrameToSendCanvas(): { cw: number; ch: number } {
+  const cw = video.videoWidth, ch = video.videoHeight;
+  if (!cw || !ch) return { cw: 0, ch: 0 };
+  sendCanvas.width = cw; sendCanvas.height = ch;
+  if (currentFacing === 'user') {
+    sendCtx.save();
+    sendCtx.translate(cw, 0);
+    sendCtx.scale(-1, 1);
+    sendCtx.drawImage(video, 0, 0, cw, ch);
+    sendCtx.restore();
+  } else {
+    sendCtx.drawImage(video, 0, 0, cw, ch);
+  }
+  return { cw, ch };
+}
+
 // Grabs the current video frame and sends it, if there's anywhere to send
 // it to. Shared by the single-tap shutter and the video-mode loop below --
 // callers are responsible for checking sendGateStatus()/canSend() first
 // (video mode checks every tick; the shutter click handler checks once per
 // tap).
+// True from the moment a toBlob encode is kicked off until its callback
+// fires -- toDataURL (the old encode call) was synchronous, so two
+// overlapping captureAndSendFrame calls were never actually possible;
+// toBlob's callback breaks that guarantee (a second video-mode tick could
+// start a second encode before the first one's callback runs, and encode
+// completion order isn't guaranteed to match start order). Without this
+// guard, two out-of-order callbacks could send their JSON metadata
+// messages in the OPPOSITE order from their binary frames, and
+// devBridge/client.ts's captureId-keyed pairing (not a strict-adjacency
+// assumption, see its own comment) would then match a frame's image bytes
+// to the WRONG frame's timestamps. Cheap to just serialize instead: skip a
+// tick outright if the previous encode hasn't finished yet, exactly the
+// spirit of captureIngestBusy's own guard on the desktop decode side.
+let sendEncodeInFlight = false;
 function captureAndSendFrame() {
-  if (!currentStream || video.videoWidth === 0) return;
+  if (!currentStream || video.videoWidth === 0 || video.videoHeight === 0 || sendEncodeInFlight) return;
   // Stamped here, before anything below -- the earliest point once the
   // send gate has already let this call through.
   const sentAt = Date.now();
-  drawCurrentFrameToCanvas();
-  // Stamped right after the canvas draw, before toDataURL -- splits "pull
-  // the current video frame onto a canvas" (cheap compositing) from "JPEG
-  // encode" (the actual toDataURL cost below), instead of bundling both
-  // into one number the way an earlier version of this instrumentation did.
+  // Full-resolution draw happens HERE, on demand -- unlike the visible
+  // captureCanvas (kept cheap/screen-capped by videoLoop's continuous
+  // redraw), sendCanvas only gets drawn into when an actual capture is
+  // happening, so paying the full-native-resolution drawImage cost here is
+  // fine: it runs at most once per send, not every rAF tick.
+  drawFullResFrameToSendCanvas();
   const pulledAt = Date.now();
-  const dataUrl = captureCanvas.toDataURL('image/jpeg', 0.85);
-  // Stamped between encode finishing and ws.send() starting, so the desktop
-  // can split "JPEG encode, phone-side CPU" from "actual network transit"
-  // instead of lumping both into one number and guessing which one a given
-  // slow sample was.
-  const encodedAt = Date.now();
-
-  if (ws && ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify({ type: 'realCapture', dataUrl, sentAt, pulledAt, encodedAt }));
+  // toBlob, not toDataURL -- gives the JPEG's actual encoded bytes directly
+  // (a Blob), sent as a real WebSocket BINARY frame below instead of
+  // base64-text-encoded inside a JSON message. Base64 inflates payload size
+  // by ~33% for zero benefit here -- see this session's chat -- and
+  // WebSocket has supported binary frames natively the whole time.
+  // Async (a callback, not a return value), so the metadata JSON message
+  // and the binary frame that follows it are both sent from inside this
+  // callback, back to back, keeping them adjacent on the wire.
+  sendEncodeInFlight = true;
+  sendCanvas.toBlob((blob) => {
+    sendEncodeInFlight = false;
+    if (!blob) return;
+    // Stamped once the encode actually finishes, so the desktop can still
+    // split "JPEG encode, phone-side CPU" from "actual network transit"
+    // instead of lumping both into one number and guessing which one a
+    // given slow sample was.
+    const encodedAt = Date.now();
+    if (!ws || ws.readyState !== WebSocket.OPEN) { setRelayStatus('not connected -- capture NOT sent', true); return; }
+    // Metadata first, image bytes second -- devBridge/client.ts pairs a
+    // realCapture JSON message with whichever binary frame arrives next
+    // for that same captureId, so send order here matters.
+    ws.send(JSON.stringify({ type: 'realCapture', sentAt, pulledAt, encodedAt }));
+    ws.send(blob);
     shutterBtn.classList.add('sent');
     setTimeout(() => shutterBtn.classList.remove('sent'), 300);
     // Optimistic -- Sphere Lab will confirm the real state via captureReady
@@ -674,9 +1181,7 @@ function captureAndSendFrame() {
     // before this fix -- nothing ever cleared it back in pipelined mode
     // since the desktop only reports genuine busy/idle transitions).
     if (!sphereLabPipelined) setReady(false);
-  } else {
-    setRelayStatus('not connected -- capture NOT sent', true);
-  }
+  }, 'image/jpeg', 0.85);
 }
 
 // Diagnostic-only summary of state's intermediates, built when sendDebugInfo
@@ -752,17 +1257,23 @@ function buildDebugPayload(state: PoseComputeState, lsdRects: LsdRectangle[]) {
 // start the next capture" -- devicePoseLoop below just does that, no
 // rAF-tick gating, so the local timing readout shows the phone's true
 // compute speed with no artificial pacing.
+//
+// Draws its own full-resolution frame into sendCanvas (see
+// drawFullResFrameToSendCanvas's own comment) rather than reading off the
+// visible captureCanvas, which is now downscaled to screen resolution for
+// the live preview -- pose recovery needs the actual full-resolution
+// capture, same as the desktop-compute send path.
 let devicePoseComputing = false;
 async function captureComputeAndSendPose() {
-  if (!currentStream || video.videoWidth === 0) return;
+  if (!currentStream || video.videoWidth === 0 || video.videoHeight === 0) return;
   devicePoseComputing = true;
   try {
-    const { cw, ch } = drawCurrentFrameToCanvas();
+    const { cw, ch } = drawFullResFrameToSendCanvas();
     // Same call ingestRealCapture makes on the desktop side (getImageData ->
     // toGrayscale), then the same top-down -> bottom-up row-flip orientation
     // fix ingestRealCapture applies before handing off to the reconstruction
     // pipeline (see pipeline/capture.ts).
-    const topDown = captureCtx.getImageData(0, 0, cw, ch).data;
+    const topDown = sendCtx.getImageData(0, 0, cw, ch).data;
     const grayTopDown = toGrayscale(topDown, cw, ch);
     const gray = flipRowsF64(grayTopDown, cw, ch);
 
@@ -815,7 +1326,7 @@ async function captureComputeAndSendPose() {
         });
         msg.debug = buildDebugPayload(state, lsdRects);
       }
-      if (sendCapturedImage) msg.dataUrl = captureCanvas.toDataURL('image/jpeg', 0.85);
+      if (sendCapturedImage) msg.dataUrl = sendCanvas.toDataURL('image/jpeg', 0.85);
       ws.send(JSON.stringify(msg));
     }
 
@@ -869,6 +1380,14 @@ shutterBtn.addEventListener('click', () => {
 // the idle gap, instead of guessing from timing alone.
 function videoLoop() {
   requestAnimationFrame(videoLoop);
+  // Keeps captureCanvas (the VISIBLE viewfinder) live regardless of
+  // capture/compute mode, at the same cadence videoLoop itself already
+  // ticks -- but only draws the screen-capped preview resolution
+  // (previewLongEdgeCap), not the camera's full negotiated resolution. The
+  // capture functions below draw their OWN full-resolution frame into
+  // sendCanvas on demand instead of reading off this one, so what actually
+  // gets analyzed/sent is unaffected by this downscale.
+  drawCurrentFrameToCanvas();
   loopTicks++;
   // Device-compute video mode is driven by its own self-paced devicePoseLoop
   // (compute time, not rAF ticks/backpressure, is the pacing signal there) --

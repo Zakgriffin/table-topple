@@ -5,7 +5,7 @@ import { refreshModeVisualizations } from '../pipeline/modeRefresh.ts';
 import { worldOrbit } from '../scene/viewerControls.ts';
 import { globalState } from '../state.ts';
 import { Mode } from '../types.ts';
-import { arrowToggles, clearLsdSvgOverlay, contamToggles, insideHint, modeBtns, overlayPanel, overlayPanelToggle, panel, panelToggle, persistControl, pipFrame, pipLabel, projectedToggles, savedControls, setSectionHidden } from './dom.ts';
+import { arrowToggles, clearLsdSvgOverlay, contamToggles, insideHint, modeBtns, overlayPanel, overlayPanelToggle, panel, panelToggle, persistControl, pipFrame, pipLabel, projectedToggles, savedControls, setSectionHidden, throughCamCanvas } from './dom.ts';
 
 // ── Mode switching ───────────────────────────────────────────────────────
 
@@ -15,6 +15,12 @@ export function setMode(m: Mode) {
   for (const k of Object.keys(modeBtns) as Mode[]) modeBtns[k].classList.toggle('active', k === m);
   worldOrbit.enabled = m === 'world';
   insideHint.style.display = m === 'inside' ? 'block' : 'none';
+  // Through-Cam's own dedicated 2D canvas (see scene/throughCam2D.ts) --
+  // only actually drawn into inside animate()'s 'through' branch, but
+  // still needs hiding on every OTHER mode switch, same as the WebGL quads
+  // it replaced used to stop drawing automatically just by that branch not
+  // running.
+  throughCamCanvas.style.display = m === 'through' ? 'block' : 'none';
   pipFrame.style.display = m === 'through' || m === 'projected' ? 'none' : 'block';
   pipLabel.style.display = m === 'through' || m === 'projected' ? 'none' : 'block';
   const cam = activeCamera();

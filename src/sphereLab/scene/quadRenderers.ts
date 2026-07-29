@@ -5,11 +5,15 @@ import { renderer } from './renderer.ts';
 // ── Reusable full-screen quad renderers (shared infra, NOT per-camera) ───
 //
 // A plain full-screen textured quad, rendered instead of a live gizmoCam
-// scene pass for the PIP box / Through-Cam / Projected-Cam / contamination
-// overlays -- each camera owns its OWN texture (distortedPreviewTex etc,
-// see CameraBase above), but the Scene/Material/Mesh doing the actual blit
-// is shared, reusable machinery: swap `.map` to whichever camera's texture
-// needs drawing right before each render call.
+// scene pass for the PIP box / Projected-Cam -- each camera owns its OWN
+// texture (distortedPreviewTex etc, see CameraBase above), but the Scene/
+// Material/Mesh doing the actual blit is shared, reusable machinery: swap
+// `.map` to whichever camera's texture needs drawing right before each
+// render call. Through-Cam's own full-screen content moved to a dedicated
+// 2D canvas (scene/throughCam2D.ts) -- see its own header comment for why
+// -- the PIP preview box below is the one remaining Through-Cam-adjacent
+// use of this machinery, since it's a small overlay INSIDE an already-3D-
+// view-mode frame, not a mode of its own.
 export const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
 export function makeQuadRenderer(matOpts: THREE.MeshBasicMaterialParameters) {
   const mat = new THREE.MeshBasicMaterial(matOpts);
@@ -32,12 +36,7 @@ function rotatedQuadUVs(steps: number): [number, number][] {
 }
 export const previewQuad = makeQuadRenderer({});
 export const projectedQuad = makeQuadRenderer({});
-export const trueContamQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
-export const reconContamQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
-export const topGradientQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
 export const tangentWalkPathQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
-export const lsdRawRegionsQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
-export const lsdRejectedQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
 export function renderQuad(q: { mat: THREE.MeshBasicMaterial; scene: THREE.Scene }, tex: THREE.Texture, x: number, y: number, w: number, h: number) {
   q.mat.map = tex;
   renderer.setViewport(x, y, w, h);
@@ -45,6 +44,11 @@ export function renderQuad(q: { mat: THREE.MeshBasicMaterial; scene: THREE.Scene
   renderer.setScissorTest(true);
   renderer.render(q.scene, quadCam);
 }
+// Also the source for World/Inside-Sphere's small PIP preview box -- unlike
+// the rest of Through-Cam's own content (now scene/throughCam2D.ts, a
+// dedicated 2D canvas), the PIP is a small overlay INSIDE an already-3D-
+// view-mode frame, not a mode of its own, so it legitimately stays on the
+// shared WebGL canvas.
 export function renderPreviewViewport(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(previewQuad, camera.distortedPreviewTex, x, y, w, h); }
 // rotationSteps: multiples of 90 degrees (0-3), purely a display-time
 // rotation for the "use true cardinal orientation" toggle -- see settings.ts's
@@ -60,9 +64,4 @@ export function renderProjectedViewport(camera: Camera, x: number, y: number, w:
   uvAttr.needsUpdate = true;
   renderQuad(projectedQuad, camera.projectedPreviewTex, x, y, w, h);
 }
-export function renderTrueContamOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(trueContamQuad, camera.trueContamTex, x, y, w, h); }
-export function renderReconContamOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(reconContamQuad, camera.reconContamTex, x, y, w, h); }
-export function renderTopGradientOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(topGradientQuad, camera.topGradientTex, x, y, w, h); }
 export function renderTangentWalkPathOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(tangentWalkPathQuad, camera.tangentWalkPathTex, x, y, w, h); }
-export function renderLsdRawRegionsOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(lsdRawRegionsQuad, camera.lsdRawRegionsTex, x, y, w, h); }
-export function renderLsdRejectedOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(lsdRejectedQuad, camera.lsdRejectedTex, x, y, w, h); }

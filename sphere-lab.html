@@ -8,6 +8,39 @@
   body { background: #111; overflow: hidden; font-family: monospace; }
   canvas#gl { display: block; }
 
+  /* Through-Cam's own dedicated 2D canvas -- NOT the shared WebGL #gl
+     canvas World/Inside-Sphere use (see scene/throughCam2D.ts). Intrinsic
+     width/height are set to the camera's own true captured resolution
+     (camera.rtSize), not the window -- object-fit:contain is what scales
+     that for on-screen display (both up AND down, whichever the analysis
+     resolution needs relative to the actual window) while leaving the
+     underlying pixel buffer untouched, so a screenshot/download of this
+     canvas always returns the camera's real resolution regardless of
+     window size. object-fit, not max-width/max-height -- max-width/
+     max-height only ever SHRINK a replaced element to fit, never grow it
+     past its own intrinsic size, so with the analysis resolution often
+     well below the window's own pixel size, the canvas was rendering at
+     native size, just centered, instead of filling the page (confirmed
+     live this session). z-index 4: above #gl (letterbox bars show its dark
+     clear color through), below pipFrame(5)/the overlay canvases(6) so
+     hover arrows and LSD vector overlays keep drawing on top of it exactly
+     as before.
+     Deliberately NOT pointer-events:none, unlike its overlay siblings --
+     this canvas needs to be the actual right-click target for the
+     browser's native "Save Image As" to grab the real captured image
+     instead of falling through to #gl underneath (confirmed live this
+     session: with pointer-events:none here, a right-click download was
+     silently grabbing the black WebGL canvas instead). hoverDebugOverlays.ts
+     attaches its own pointermove/pointerleave listeners directly to this
+     canvas to compensate, rather than relying on events passing through to
+     canvas#gl the way they used to. */
+  #throughCamCanvas {
+    position: fixed; top: 0; left: 0;
+    width: 100vw; height: 100vh;
+    object-fit: contain;
+    z-index: 4; display: none;
+  }
+
   #pipFrame {
     position: fixed; z-index: 5; pointer-events: none;
     border: 2px solid rgba(255,255,255,0.5); border-radius: 4px;
@@ -148,6 +181,7 @@
 <body>
 <a id="homeLink" href="/">&larr; home</a>
 <canvas id="gl"></canvas>
+<canvas id="throughCamCanvas"></canvas>
 <div id="pipFrame"></div>
 <div id="pipLabel">through camera</div>
 <canvas id="sampleLattice"></canvas>

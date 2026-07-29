@@ -5,7 +5,7 @@ import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
-import { canvas, gradientArrowCanvas, gradientArrowCtx, lsdCompositeGroup, persistControl, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowCanvas, gradientArrowCtx, lsdCompositeGroup, persistControl, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
 import { updateTopGradientOverlay } from './gradientHighlightOverlays.ts';
@@ -326,14 +326,24 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
   }
 }
 export let lastHoverClientX = -1, lastHoverClientY = -1;
-canvas.addEventListener('pointermove', (e) => {
+function onHoverPointerMove(e: PointerEvent) {
   lastHoverClientX = e.clientX; lastHoverClientY = e.clientY;
   updateHoverOverlays(e.clientX, e.clientY);
-});
-canvas.addEventListener('pointerleave', () => {
+}
+function onHoverPointerLeave() {
   lastHoverClientX = -1; lastHoverClientY = -1;
   clearGradientArrowOverlay();
-});
+}
+canvas.addEventListener('pointermove', onHoverPointerMove);
+canvas.addEventListener('pointerleave', onHoverPointerLeave);
+// throughCamCanvas is NOT pointer-events:none (see sphere-lab.html's own
+// comment -- it needs to be the real right-click target for "Save Image
+// As"), so while it's on top in Through-Cam mode, events land on it
+// instead of passing through to canvas#gl -- needs its own copy of the
+// same listeners, or hover arrows/composite-line redraws would silently
+// stop working the instant it's visible.
+throughCamCanvas.addEventListener('pointermove', onHoverPointerMove);
+throughCamCanvas.addEventListener('pointerleave', onHoverPointerLeave);
 
 toggleHideFieldBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;

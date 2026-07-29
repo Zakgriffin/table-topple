@@ -58,6 +58,19 @@ export function updateDistortedPreview(camera: Camera) {
       // blanking the source data is the equivalent fix.
       camera.distortedPreviewData.fill(0);
       camera.distortedPreviewTex.needsUpdate = true;
+      // lastNoisedPreviewGray must go stale-free the SAME cycle -- every
+      // reader (gradientHighlightOverlays.ts, contaminationOverlays.ts,
+      // lsdOverlay.ts, decodeGrid.ts's projectSamplesCPU,
+      // pipelineGPU/projectSamples.ts) already null-guards it, but leaving
+      // a PRIOR real capture's gray buffer sitting here would let any of
+      // them read it against the CURRENT camera.rtSize/aspect -- which can
+      // legitimately differ now (a device-compute phone's own resolution
+      // slider moved, or sendCapturedImage got toggled off, between one
+      // real capture and the next) -- a resolution mismatch that silently
+      // reads garbage/out-of-bounds instead of erroring. See this
+      // session's chat: an explicit ask to guarantee capture resolution
+      // matches every downstream computation exactly.
+      camera.lastNoisedPreviewGray = null;
       return;
     }
     if (!settings.hideField) {

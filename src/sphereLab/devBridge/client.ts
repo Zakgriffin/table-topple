@@ -8,6 +8,7 @@ import { ingestRemotePose } from '../pipeline/capture.ts';
 import { renderer } from '../scene/renderer.ts';
 import { globalState } from '../state.ts';
 import { renderCameraTabs, refreshCameraPanel } from '../ui/cameraPanel.ts';
+import { throughCamCanvas } from '../ui/dom.ts';
 
 // Shared by both the realCapture and captureMode handlers below -- either
 // one can be the first message ever received from a given phone (toggling
@@ -116,6 +117,21 @@ export function pushPoseSync(cam: PhysicalCamera) {
 (function initDevBridge() {
   const BRIDGE_PORT = 8787;
   let reconnectTimer: number | undefined;
+  // randomUUID()'s canonical string form is always exactly this many ASCII
+  // chars -- must match server.js's own CAPTURE_ID_BYTES exactly, since
+  // that's what fixes the prefix width on a binary realCapture frame.
+  const CAPTURE_ID_BYTES = 36;
+  // realCapture's JSON metadata (sentAt/pulledAt/encodedAt) and its image
+  // bytes now arrive as two separate messages (see this session's chat) --
+  // held here, keyed by captureId, from whichever arrives first until the
+  // OTHER one shows up and they can be combined into a PhysicalCamera's
+  // pendingCapture. In practice the JSON always arrives first (see
+  // mobileCapture.ts's captureAndSendFrame, which sends both from the same
+  // callback in that order), but keying by captureId rather than relying on
+  // strict adjacency also keeps this correct if more than one phone is
+  // sending at once and their broadcasts interleave in this tab's own
+  // message stream.
+  const pendingRealCaptureMeta = new Map<string, { sentAt: number; pulledAt: number; encodedAt: number }>();
 
   function scheduleReconnect() {
     devBridgeSocket = null;
@@ -128,11 +144,38 @@ export function pushPoseSync(cam: PhysicalCamera) {
     try { ws = new WebSocket(`ws://localhost:${BRIDGE_PORT}`); }
     catch { scheduleReconnect(); return; }
     devBridgeSocket = ws;
+    // Default binaryType is 'blob' -- realCapture's image bytes now arrive
+    // as a genuine binary frame (see mobileCapture.ts/server.js), and
+    // ArrayBuffer is the more convenient shape to slice the leading
+    // captureId prefix off of below.
+    ws.binaryType = 'arraybuffer';
 
     ws.addEventListener('open', () => ws.send(JSON.stringify({ role: 'browser' })));
     ws.addEventListener('close', scheduleReconnect);
     ws.addEventListener('error', () => {});
     ws.addEventListener('message', (ev) => {
+      // server.js's binary realCapture frame -- a fixed CAPTURE_ID_BYTES-
+      // byte ASCII captureId prefix (its own comment) followed by the raw
+      // JPEG bytes. Checked BEFORE the JSON.parse below, not after it
+      // fails: ev.data is only ever text (JSON) or this one binary shape,
+      // never something that happens to parse as JSON by accident.
+      if (ev.data instanceof ArrayBuffer) {
+        const bytes = new Uint8Array(ev.data);
+        const captureId = new TextDecoder().decode(bytes.subarray(0, CAPTURE_ID_BYTES));
+        const meta = pendingRealCaptureMeta.get(captureId);
+        pendingRealCaptureMeta.delete(captureId);
+        const cam = findOrCreatePhysicalCamera(captureId);
+        if (cam && meta) {
+          const now = Date.now();
+          const blob = new Blob([bytes.subarray(CAPTURE_ID_BYTES)], { type: 'image/jpeg' });
+          // Mailbox, not a queue -- see the (former) realCapture JSON
+          // handler's own comment on why: always overwrite with the
+          // freshest frame, main.ts's animate loop pumps it once the
+          // camera is actually free.
+          cam.pendingCapture = { blob, sentAt: meta.sentAt, pulledAt: meta.pulledAt, encodedAt: meta.encodedAt, receivedAt: now, bytes: blob.size };
+        }
+        return;
+      }
       let msg: any;
       try { msg = JSON.parse(ev.data); } catch { return; }
 
@@ -144,32 +187,33 @@ export function pushPoseSync(cam: PhysicalCamera) {
         catch { value = String(value); }
         ws.send(JSON.stringify({ type: 'evalResult', id: msg.id, ok, value, error }));
       } else if (msg.type === 'screenshot') {
-        const dataUrl = renderer.domElement.toDataURL('image/png');
+        // Through-Cam's own content lives on a separate canvas now (see
+        // scene/throughCam2D.ts) -- renderer.domElement shows nothing
+        // useful while in that mode (its own clear color only), so a
+        // screenshot has to follow whichever canvas is actually visible.
+        // throughCamCanvas is also sized to the camera's TRUE captured
+        // resolution rather than the window (unlike renderer.domElement),
+        // so a Through-Cam screenshot now correctly returns that
+        // resolution too, not the desktop window's.
+        const source = globalState.mode === 'through' ? throughCamCanvas : renderer.domElement;
+        const dataUrl = source.toDataURL('image/png');
         ws.send(JSON.stringify({ type: 'screenshotResult', id: msg.id, ok: true, dataUrl }));
-      } else if (msg.type === 'realCapture' && msg.dataUrl) {
+      } else if (msg.type === 'realCapture') {
         // Broadcast from mobile-capture.html via the dev-bridge relay,
         // tagged with the sending phone's own connectionId (server.js
         // assigns one per 'capture' connection). See findOrCreatePhysicalCamera
-        // above for the auto-create-but-don't-activate reasoning.
-        const cam = findOrCreatePhysicalCamera(msg.captureId);
-        // Mailbox, not a queue -- always overwrite with the freshest frame.
-        // main.ts's animate loop pumps this once the camera is actually
-        // free. Unconditional (not gated on useCapturePipelining): a direct
-        // ingestRealCapture call here could race a second one arriving
-        // before the first's async image decode finishes, whereas the
-        // mailbox+captureIngestBusy guard in main.ts can't overlap two
-        // decodes of the same camera regardless of the toggle -- the
-        // toggle only controls what the phone is told about whether it's
-        // safe to send while busy, not how the desktop schedules ingest.
-        // msg.sentAt/pulledAt/encodedAt (Date.now() on the phone, see
-        // mobileCapture.ts) fall back to "now" for an old/unpatched phone
-        // client so the derived durations degrade to ~0 instead of NaN.
-        if (cam) {
+        // above for the auto-create-but-don't-activate reasoning. No image
+        // bytes in THIS message anymore (see the ArrayBuffer branch above)
+        // -- just holds the timing fields until the binary frame carrying
+        // this same captureId arrives right behind it, which is what
+        // actually builds cam.pendingCapture. msg.sentAt/pulledAt/encodedAt
+        // (Date.now() on the phone, see mobileCapture.ts) fall back to
+        // "now" for an old/unpatched phone client so the derived durations
+        // degrade to ~0 instead of NaN.
+        if (msg.captureId) {
+          findOrCreatePhysicalCamera(msg.captureId); // auto-create the tab even if the binary frame never arrives
           const now = Date.now();
-          cam.pendingCapture = {
-            dataUrl: msg.dataUrl, sentAt: msg.sentAt ?? now, pulledAt: msg.pulledAt ?? now, encodedAt: msg.encodedAt ?? now,
-            receivedAt: now, bytes: msg.dataUrl.length,
-          };
+          pendingRealCaptureMeta.set(msg.captureId, { sentAt: msg.sentAt ?? now, pulledAt: msg.pulledAt ?? now, encodedAt: msg.encodedAt ?? now });
         }
       } else if (msg.type === 'poseResult') {
         // Same broadcast/routing as realCapture (see server.js), sent

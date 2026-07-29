@@ -1,6 +1,8 @@
 import { Mode } from '../types.ts';
 
 export const canvas = document.getElementById('gl') as HTMLCanvasElement;
+export const throughCamCanvas = document.getElementById('throughCamCanvas') as HTMLCanvasElement;
+export const throughCamCtx = throughCamCanvas.getContext('2d')!;
 export const panel = document.getElementById('panel') as HTMLDivElement;
 export const panelToggle = document.getElementById('panelToggle') as HTMLButtonElement;
 export const pipFrame = document.getElementById('pipFrame') as HTMLDivElement;

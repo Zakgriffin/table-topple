@@ -220,11 +220,12 @@ export interface PhysicalCamera extends CameraBase {
   // "JPEG encode" from "actual network transit" on pop, instead of lumping
   // them into one number and guessing which one dominated a given slow
   // sample -- see lastPullMs/lastEncodeMs/lastTransitMs.
-  // bytes is dataUrl.length (UTF-16 code units of the base64 string, so
-  // ~1.33x the actual JPEG byte count -- close enough for a throughput
-  // estimate, not meant to be exact).
+  // bytes is blob.size -- the real JPEG byte count now that the image
+  // travels as a genuine binary WebSocket frame (devBridge/client.ts)
+  // rather than base64 text inside JSON, so this is exact rather than the
+  // ~1.33x-inflated string-length approximation it used to be.
   pendingCapture: {
-    dataUrl: string; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number;
+    blob: Blob; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number;
   } | null;
   // True from the moment the pump pulls a frame out of the mailbox until
   // ingestRealCapture's decode has handed off into runAxesReconstruction

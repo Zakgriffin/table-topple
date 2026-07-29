@@ -30,6 +30,11 @@ import { randomUUID } from 'crypto';
 
 const PORT = 8787;
 const FRAME_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'latest-frame.png');
+// randomUUID()'s canonical string form is always exactly this many ASCII
+// chars (8-4-4-4-12 hex digits + 4 hyphens) -- a fixed-width prefix means a
+// receiving browser tab (devBridge/client.ts) can slice a binary
+// realCapture frame apart with no length byte of its own needed.
+const CAPTURE_ID_BYTES = 36;
 
 const wss = new WebSocketServer({ port: PORT });
 const browserSockets = new Set();
@@ -48,7 +53,28 @@ function saveFrame(dataUrl) {
 }
 
 wss.on('connection', (ws) => {
-  ws.on('message', (raw) => {
+  ws.on('message', (raw, isBinary) => {
+    // A capture source's realCapture image bytes now arrive as a genuine
+    // binary WebSocket frame (mobileCapture.ts), not base64-encoded inside
+    // a JSON message -- see this session's chat. Only a KNOWN capture
+    // connection is trusted to send one (browser/controller connections
+    // never do); everything else is JSON, handled below as before. Relayed
+    // to every browser tab prefixed with this connection's own captureId
+    // (CAPTURE_ID_BYTES fixed-width ASCII, matching devBridge/client.ts's
+    // own slice) so a receiving tab can tell which phone a given binary
+    // frame came from even with more than one phone connected at once --
+    // simple adjacency to the preceding realCapture JSON message isn't
+    // enough once multiple capture connections' broadcasts can interleave
+    // in a single browser tab's own message stream.
+    if (isBinary) {
+      const captureId = captureSockets.get(ws);
+      if (captureId === undefined || captureId.length !== CAPTURE_ID_BYTES) return;
+      const framed = Buffer.concat([Buffer.from(captureId, 'ascii'), raw]);
+      for (const bs of browserSockets) {
+        if (bs.readyState === bs.OPEN) bs.send(framed);
+      }
+      return;
+    }
     let msg;
     try { msg = JSON.parse(raw.toString()); } catch { return; }
 
@@ -101,12 +127,16 @@ wss.on('connection', (ws) => {
     // Sphere Lab tab, not just the latest one -- this is the one message
     // type meant to fan out. captureId (this connection's own assigned id)
     // rides along so Sphere Lab can tell which phone a photo came from.
-    // poseResult (on-device-compute mode -- see this session's
-    // on-device-pose-recovery plan) rides the exact same broadcast: a phone
-    // that computed its own pose sends {w,h,recoveredAxes,positionDecode}
-    // instead of {dataUrl}, no image bytes at all, but routing is
-    // identical, so this is a condition change, not a new block.
-    if ((msg.type === 'realCapture' && msg.dataUrl) || msg.type === 'poseResult') {
+    // realCapture no longer carries the image itself (see the isBinary
+    // branch above) -- just sentAt/pulledAt/encodedAt, which the receiving
+    // tab holds onto until the binary frame carrying this same captureId
+    // arrives right behind it. poseResult (on-device-compute mode -- see
+    // this session's on-device-pose-recovery plan) rides the exact same
+    // broadcast: a phone that computed its own pose sends
+    // {w,h,recoveredAxes,positionDecode} instead, no image bytes at all
+    // either way, but routing is identical, so this is a condition change,
+    // not a new block.
+    if (msg.type === 'realCapture' || msg.type === 'poseResult') {
       const captureId = captureSockets.get(ws);
       console.log(`[bridge] ${msg.type} received from ${captureId}, broadcasting to ${browserSockets.size} browser tab(s)`);
       for (const bs of browserSockets) {

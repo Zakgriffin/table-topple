@@ -2,7 +2,7 @@ import { Camera } from '../camera/model.ts';
 import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';
-import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, separableBoxBlur } from './distortion.ts';
+import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
 import { computeGradient2x2Field, computeTriangleFold, fillGrayscalePreview, paintVectorFieldAsColor } from './gradientField.ts';
 
 // Shared tail for both capture sources: given a final analysis-resolution
@@ -73,15 +73,22 @@ export function updateDistortedPreview(camera: Camera) {
       camera.lastNoisedPreviewGray = null;
       return;
     }
+    // camera.lastRealCaptureGray is top-down now (this pipeline's one
+    // dominant convention, see pipeline/capture.ts's own comments) -- flip
+    // once here, the same reason runAxesReconstruction's own single flip
+    // exists: distortedPreviewData (flipY=false) and every other reader of
+    // lastNoisedPreviewGray (contaminationOverlays.ts, lsdOverlay.ts, etc.)
+    // still expect bottom-up.
+    const bottomUp = flipRowsF64(camera.lastRealCaptureGray, camera.lastRealCaptureW, camera.lastRealCaptureH);
     if (!settings.hideField) {
       if (settings.fieldView === 'raw' || settings.fieldView === 'antialiased' || settings.fieldView === 'downsampled' || settings.fieldView === 'noised') {
-        fillGrayscalePreview(camera.lastRealCaptureGray, camera.distortedPreviewData);
+        fillGrayscalePreview(bottomUp, camera.distortedPreviewData);
         camera.distortedPreviewTex.needsUpdate = true;
       } else {
-        paintFieldViewFromGray(camera, camera.lastRealCaptureGray);
+        paintFieldViewFromGray(camera, bottomUp);
       }
     }
-    camera.lastNoisedPreviewGray = camera.lastRealCaptureGray;
+    camera.lastNoisedPreviewGray = bottomUp;
     return;
   }
 

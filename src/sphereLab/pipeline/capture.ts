@@ -128,7 +128,16 @@ export function renderCamRT(camera: SimulatedCamera) {
 // Render+blur happen at captureSupersample x rtSize, THEN get box-downsampled
 // to rtSize -- see pre-Stage-A history for why (physical lens blur acts on a
 // near-continuous image; only the sensor's final discretization should
-// introduce the pixel grid). Returned in GL's native bottom-up row order.
+// introduce the pixel grid). GL's readback is natively bottom-up, but this
+// function's own contract is top-down -- the one dominant row convention the
+// reconstruction math (pipeline/votes.ts's toNDC) and every capture source
+// (this, ingestRealCapture, ingestRemotePose, mobileCapture.ts's on-device
+// pipeline) now share, so nothing downstream of a capture needs to know or
+// care which GPU/decode path produced it. flipRowsF64 (its own exact
+// inverse) is the one place that native bottom-up-ness gets converted, right
+// here at the source -- see runAxesReconstruction's own comment for where
+// the ONE remaining flip in this whole pipeline lives (restoring bottom-up
+// only for the flipY=false preview/overlay textures that actually need it).
 export function captureDistortedGrayscale(camera: SimulatedCamera): { gray: Float64Array; w: number; h: number } {
   renderCamRT(camera);
   const { w: cw, h: ch } = camera.captureRTSize;
@@ -137,8 +146,9 @@ export function captureDistortedGrayscale(camera: SimulatedCamera): { gray: Floa
   const hiResGray = toGrayscale(raw, cw, ch);
   const antialiased = applyAntialiasFilter(hiResGray, cw, ch, camera.settings.captureSupersample);
   const hiResBlurred = separableBoxBlur(antialiased, cw, ch, Math.round(camera.settings.simBlur * camera.settings.captureSupersample));
-  const gray = downsampleBoxAverage(hiResBlurred, cw, ch, camera.settings.captureSupersample, camera.rtSize.w, camera.rtSize.h);
-  addGaussianNoise(gray, camera.settings.simNoise);
+  const downsampled = downsampleBoxAverage(hiResBlurred, cw, ch, camera.settings.captureSupersample, camera.rtSize.w, camera.rtSize.h);
+  addGaussianNoise(downsampled, camera.settings.simNoise);
+  const gray = flipRowsF64(downsampled, camera.rtSize.w, camera.rtSize.h);
   return { gray, w: camera.rtSize.w, h: camera.rtSize.h };
 }
 
@@ -147,22 +157,23 @@ export function captureDistortedGrayscale(camera: SimulatedCamera): { gray: Floa
 // reallocates the analysis buffers to MATCH it when it differs from what's
 // currently allocated, so the phone's own resolution slider (targetLongEdge
 // in mobileCapture.ts) is the real analysis resolution end-to-end, not a
-// cap on top of a further downsample. Converts to grayscale and flips it to
-// bottom-up. `pending` is whatever main.ts's mailbox pump just popped -- see
-// PhysicalCamera's own comments on idleSpan/lastPullMs/lastEncodeMs/
-// lastTransitMs for what the timing fields here are for (tracking down
-// video mode's round-trip idle gap, and specifically telling "pull the
-// video frame" apart from "JPEG encode" apart from "actual network
-// transit" instead of lumping them all together).
+// cap on top of a further downsample. Converts to grayscale and stores it
+// top-down, matching canvas 2D getImageData's own native order -- no flip
+// needed here, since top-down is this whole pipeline's one dominant
+// convention now (see captureDistortedGrayscale's own comment). `pending` is
+// whatever main.ts's mailbox pump just popped -- see PhysicalCamera's own
+// comments on idleSpan/lastPullMs/lastEncodeMs/lastTransitMs for what the
+// timing fields here are for (tracking down video mode's round-trip idle
+// gap, and specifically telling "pull the video frame" apart from "JPEG
+// encode" apart from "actual network transit" instead of lumping them all
+// together).
 //
 // pending.blob arrives as a genuine binary WebSocket frame now (devBridge/
 // client.ts), not a base64 data: URL -- decoded via a blob: object URL
 // instead, but through the exact same img.src -> drawImage -> getImageData
-// -> toGrayscale -> flipRowsF64 pipeline as before. Both URL schemes decode
-// through the browser's own native JPEG decoder identically; only the WIRE
-// encoding changed, not the pixel data or its orientation, so the
-// downstream bottom-up row convention (flipRowsF64 below) needs no changes
-// -- confirmed deliberately, see this session's chat.
+// -> toGrayscale pipeline as before. Both URL schemes decode through the
+// browser's own native JPEG decoder identically; only the WIRE encoding
+// changed, not the pixel data or its orientation.
 export async function ingestRealCapture(
   camera: PhysicalCamera,
   pending: { blob: Blob; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number },
@@ -203,8 +214,7 @@ export async function ingestRealCapture(
   const tctx = tmpCanvas.getContext('2d')!;
   tctx.drawImage(img, 0, 0);
   const topDown = tctx.getImageData(0, 0, w, h).data;
-  const grayTopDown = toGrayscale(topDown, w, h);
-  camera.lastRealCaptureGray = flipRowsF64(grayTopDown, w, h);
+  camera.lastRealCaptureGray = toGrayscale(topDown, w, h);
   camera.lastRealCaptureW = w; camera.lastRealCaptureH = h;
   spanEnd(readbackSpan);
   spanEnd(rootSpan);
@@ -365,8 +375,7 @@ export async function ingestRemotePose(
     const tctx = tmpCanvas.getContext('2d')!;
     tctx.drawImage(img, 0, 0);
     const topDown = tctx.getImageData(0, 0, w, h).data;
-    const grayTopDown = toGrayscale(topDown, w, h);
-    camera.lastRealCaptureGray = flipRowsF64(grayTopDown, w, h);
+    camera.lastRealCaptureGray = toGrayscale(topDown, w, h);
     camera.lastRealCaptureW = w; camera.lastRealCaptureH = h;
 
     // Unlocks Projected-Cam view and the recovered-floor image fill for a

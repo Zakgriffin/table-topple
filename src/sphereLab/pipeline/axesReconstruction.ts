@@ -219,13 +219,23 @@ export function runAxesReconstruction(camera: Camera) {
         return;
       }
       const captureSpan = spanStart('capture+preprocess');
+      // rawGray is top-down now, from either source (pipeline/capture.ts's
+      // captureDistortedGrayscale/ingestRealCapture both flip once at their
+      // own source, see their own comments) -- top-down is this whole
+      // pipeline's one dominant convention, so it feeds lastAxesCaptureGray
+      // (-> computePoseFromCapture) directly, no flip needed. The ONE
+      // remaining flip in this whole pipeline lives right here instead:
+      // lastNoisedPreviewGray (and everything painted from it --
+      // distortedPreviewData and the other flipY=false preview/overlay
+      // textures in camera/factory.ts) is the one consumer that genuinely
+      // needs bottom-up, so it gets flipped on the way OUT of the dominant
+      // top-down convention, not the math on the way in.
       const { gray: rawGray, w, h } = isPhysical(camera)
         ? { gray: camera.lastRealCaptureGray!, w: camera.lastRealCaptureW, h: camera.lastRealCaptureH }
         : captureDistortedGrayscale(camera);
-      camera.lastNoisedPreviewGray = rawGray;
-      const gray = flipRowsF64(rawGray, w, h);
+      camera.lastNoisedPreviewGray = flipRowsF64(rawGray, w, h);
       spanEnd(captureSpan);
-      camera.lastAxesCaptureGray = { gray, w, h };
+      camera.lastAxesCaptureGray = { gray: rawGray, w, h };
 
       await recomputeStages(camera, isActive);
     } finally {

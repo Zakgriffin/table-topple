@@ -4,7 +4,8 @@ import { createPhysicalCamera } from '../camera/factory.ts';
 import { findPhysicalCameraByConnection, removeCameraTab } from '../camera/lifecycle.ts';
 import { activeCamera, cameras, isPhysical, nextCameraColor } from '../camera/store.ts';
 import { getAnalysisVFovRad } from '../math/geometry.ts';
-import { ingestRemotePose } from '../pipeline/capture.ts';
+import type { RemotePoseMessage } from '../pipeline/capture.ts';
+import { tryUnpackPoseResultWithImage } from './poseResultWire.ts';
 import { renderer } from '../scene/renderer.ts';
 import { globalState } from '../state.ts';
 import { renderCameraTabs, refreshCameraPanel } from '../ui/cameraPanel.ts';
@@ -162,12 +163,33 @@ export function pushPoseSync(cam: PhysicalCamera) {
       if (ev.data instanceof ArrayBuffer) {
         const bytes = new Uint8Array(ev.data);
         const captureId = new TextDecoder().decode(bytes.subarray(0, CAPTURE_ID_BYTES));
+        const rest = bytes.subarray(CAPTURE_ID_BYTES);
+        // A device-compute phone's poseResult-with-image (see
+        // poseResultWire.ts) shares this same "any binary WS message"
+        // channel with realCapture's raw-JPEG frames below -- its own tag
+        // byte (never 0xFF, JPEG's own SOI byte) disambiguates the two with
+        // no server.js involvement, since server.js's binary relay is
+        // already content-agnostic either way.
+        const poseImage = tryUnpackPoseResultWithImage(rest);
+        if (poseImage) {
+          const cam = findOrCreatePhysicalCamera(captureId);
+          if (cam) {
+            const header = poseImage.header as RemotePoseMessage;
+            // Same mailbox pattern as pendingCapture below -- always
+            // overwrite with the freshest message, drained by main.ts's
+            // animate loop once the camera is actually free, rather than
+            // calling ingestRemotePose directly here (which used to silently
+            // drop this message entirely if the camera happened to be busy).
+            cam.pendingPoseResult = { ...header, imageBytes: poseImage.jpeg };
+          }
+          return;
+        }
         const meta = pendingRealCaptureMeta.get(captureId);
         pendingRealCaptureMeta.delete(captureId);
         const cam = findOrCreatePhysicalCamera(captureId);
         if (cam && meta) {
           const now = Date.now();
-          const blob = new Blob([bytes.subarray(CAPTURE_ID_BYTES)], { type: 'image/jpeg' });
+          const blob = new Blob([rest], { type: 'image/jpeg' });
           // Mailbox, not a queue -- see the (former) realCapture JSON
           // handler's own comment on why: always overwrite with the
           // freshest frame, main.ts's animate loop pumps it once the
@@ -220,20 +242,21 @@ export function pushPoseSync(cam: PhysicalCamera) {
         // instead of it when the phone is in device-compute mode -- the
         // phone already ran the full pose-recovery pipeline itself and is
         // handing over just {w,h,recoveredAxes,positionDecode}, no image
-        // bytes at all, UNLESS the phone's own sendDebugInfo/
-        // sendCapturedImage toggles are on (both default off), in which
-        // case msg.debug/msg.dataUrl ride along too -- see
-        // mobileCapture.ts's own comments. No mailbox needed for the
-        // no-image case (ingestRemotePose is cheap, no async decode work)
-        // -- but decoding an optional debug dataUrl IS async, so
-        // ingestRemotePose itself is now async and called fire-and-forget
-        // here, same pattern as ingestRealCapture's own call site.
+        // bytes at all here (see the ArrayBuffer branch above for the
+        // sendCapturedImage-on case, which arrives as its own binary frame
+        // instead of this JSON message), UNLESS just sendDebugInfo is on, in
+        // which case msg.debug rides along too -- see mobileCapture.ts's own
+        // comments. Written into the SAME pendingPoseResult mailbox the
+        // binary branch above uses (never calls ingestRemotePose directly)
+        // so a message arriving while the camera is busy gets drained on the
+        // next free tick instead of being silently dropped forever -- see
+        // camera/model.ts's own comment on pendingPoseResult.
         const cam = findOrCreatePhysicalCamera(msg.captureId);
         if (cam) {
-          ingestRemotePose(cam, {
+          cam.pendingPoseResult = {
             w: msg.w, h: msg.h, recoveredAxes: msg.recoveredAxes ?? null, positionDecode: msg.positionDecode ?? null,
-            debug: msg.debug, dataUrl: msg.dataUrl,
-          }).catch((e) => console.error('[poseResult] ingest failed:', e));
+            debug: msg.debug,
+          };
         }
       } else if (msg.type === 'captureMode' && msg.mode) {
         // The phone's video/single toggle flipped -- purely a UI reflection

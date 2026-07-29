@@ -284,7 +284,7 @@ export function createPhysicalCamera(color: THREE.Color, connectionId: string): 
     // false regardless of globalState.useCapturePipelining's own default --
     // see its comment on PhysicalCamera for why the mismatch is deliberate.
     lastReportedPipelined: false,
-    pendingCapture: null, captureIngestBusy: false,
+    pendingCapture: null, pendingPoseResult: null, captureIngestBusy: false,
     idleSpan: null,
     lastPullMs: null, lastEncodeMs: null, lastTransitMs: null,
     pullMsHistory: [], encodeMsHistory: [], transitMsHistory: [], payloadBytesHistory: [],

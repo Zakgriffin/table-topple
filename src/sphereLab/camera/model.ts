@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { CompositeLine } from '../pipeline/bucketFillJoin.ts';
+import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
 import { LsdRectangle } from '../pipeline/lsdSegments.ts';
 import { DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
@@ -227,12 +228,24 @@ export interface PhysicalCamera extends CameraBase {
   pendingCapture: {
     blob: Blob; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number;
   } | null;
-  // True from the moment the pump pulls a frame out of the mailbox until
-  // ingestRealCapture's decode has handed off into runAxesReconstruction
-  // (which then owns axesCapturing itself). Needed as its own flag because
-  // ingestRealCapture's image decode is itself async and happens BEFORE
-  // axesCapturing flips true -- without this, a frame landing mid-decode
-  // could get popped a second time and race the first decode.
+  // Mailbox slot for a device-compute phone's poseResult, exactly mirroring
+  // pendingCapture's own "always overwrite with the newest arrived message,
+  // never queued" semantics -- see devBridge/client.ts's poseResult
+  // handling (both the plain-JSON no-image branch and the binary
+  // poseResultWire.ts branch write here, never call ingestRemotePose
+  // directly) and main.ts's animate loop, which drains it under the same
+  // captureIngestBusy guard as pendingCapture. A given phone only ever
+  // populates one of these two mailboxes (computeMode is stable per
+  // connection), so sharing captureIngestBusy between them is correct, not
+  // a hack.
+  pendingPoseResult: RemotePoseMessage | null;
+  // True from the moment the pump pulls a frame out of EITHER mailbox above
+  // until ingestRealCapture's/ingestRemotePose's own async work has finished
+  // (both then hand off into runAxesReconstruction/applyPoseVisualizations,
+  // which own axesCapturing itself from that point). Needed as its own flag
+  // because that async work happens BEFORE axesCapturing flips true --
+  // without this, a frame landing mid-decode could get popped a second time
+  // and race the first one.
   captureIngestBusy: boolean;
   // Diagnostic-only, for tracking down video mode's idle round-trip gap
   // (this session's chat). Opened the instant runAxesReconstruction's

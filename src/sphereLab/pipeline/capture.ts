@@ -219,57 +219,62 @@ export async function ingestRealCapture(
 // computePoseFromCapture call) -- deserializes the plain-array-serialized
 // Vector3/Quaternion fields back into THREE objects and assigns directly
 // onto camera.lastRecoveredAxes/lastPositionDecode, no pipeline call at all
-// (the phone already did that work). `debug`/`dataUrl` are both optional,
+// (the phone already did that work). `debug`/`imageBytes` are both optional,
 // riding along only when the phone's own sendDebugInfo/sendCapturedImage
 // toggles are on (both default off) -- see mobileCapture.ts's own comments;
 // this is the "richer optional payload" extensibility point the original
 // plan called out (debug intermediates/the actual capture for projection),
 // added on request for live diagnosis of a suspect on-device decode rather
-// than left for a hypothetical future need.
+// than left for a hypothetical future need. Called exclusively from
+// main.ts's animate-loop mailbox pump now (camera.pendingPoseResult), the
+// same way ingestRealCapture trusts its own pendingCapture pump -- no
+// internal busy-guard needed here, the pump already checked
+// axesCapturing/captureIngestBusy before calling in.
+// Wire shape for a device-compute pose result -- shared by devBridge/
+// client.ts (both the plain-JSON no-image branch and the binary
+// poseResultWire.ts branch build one of these) and camera/model.ts's
+// pendingPoseResult mailbox slot, so there's exactly one declaration of
+// this shape instead of three that could drift apart.
+export interface RemotePoseMessage {
+  w: number; h: number;
+  recoveredAxes: { Drow: number[]; Dcol: number[]; Dnormal: number[]; distance: number } | null;
+  positionDecode: {
+    row: number; col: number; consistency: number; votes: number; totalWindows: number;
+    camPos: number[]; recoveredCamQuat: number[]; orientation: number;
+  } | null;
+  debug?: {
+    compositeLineCount: number; voteCount: number;
+    gridPeriodPhase: {
+      period: number; phiRow: number; phiCol: number; height: number | null;
+      seedPeriod: number; bracket: [number, number]; rowLineCount: number; colLineCount: number;
+    } | null;
+    decodeGrid: { rows: number; cols: number; validCount: number; totalCount: number } | null;
+    decodeCorrectness: { correctCount: number; wrongCount: number } | null;
+    // The phone's own pipeline intermediates, verbatim -- see
+    // mobileCapture.ts's buildDebugPayload and this session's "Ship
+    // auxiliary pipeline intermediates" plan. Assigned directly onto
+    // camera.lastGridPeriodPhase/lastVoteComposites/lastLsdRectangles
+    // below, the same fields a desktop-compute capture already
+    // populates.
+    pipeline?: {
+      gridPeriodPhase: GridPeriodPhaseResult | null;
+      voteComposites: { root: number; line: CompositeLine }[] | null;
+      lsdRectangles: {
+        cx: number; cy: number; theta: number; length: number; width: number;
+        accepted: boolean; retries: number; nfaLog10: number;
+      }[];
+    };
+  };
+  // Raw JPEG bytes (mobileCapture.ts's sendCanvas.toBlob output, never
+  // base64) -- see poseResultWire.ts. Optional: only present when the
+  // phone's sendCapturedImage toggle was on for this capture.
+  imageBytes?: Uint8Array<ArrayBuffer>;
+}
+
 export async function ingestRemotePose(
   camera: PhysicalCamera,
-  msg: {
-    w: number; h: number;
-    recoveredAxes: { Drow: number[]; Dcol: number[]; Dnormal: number[]; distance: number } | null;
-    positionDecode: {
-      row: number; col: number; consistency: number; votes: number; totalWindows: number;
-      camPos: number[]; recoveredCamQuat: number[]; orientation: number;
-    } | null;
-    debug?: {
-      compositeLineCount: number; voteCount: number;
-      gridPeriodPhase: {
-        period: number; phiRow: number; phiCol: number; height: number | null;
-        seedPeriod: number; bracket: [number, number]; rowLineCount: number; colLineCount: number;
-      } | null;
-      decodeGrid: { rows: number; cols: number; validCount: number; totalCount: number } | null;
-      decodeCorrectness: { correctCount: number; wrongCount: number } | null;
-      // The phone's own pipeline intermediates, verbatim -- see
-      // mobileCapture.ts's buildDebugPayload and this session's "Ship
-      // auxiliary pipeline intermediates" plan. Assigned directly onto
-      // camera.lastGridPeriodPhase/lastVoteComposites/lastLsdRectangles
-      // below, the same fields a desktop-compute capture already
-      // populates.
-      pipeline?: {
-        gridPeriodPhase: GridPeriodPhaseResult | null;
-        voteComposites: { root: number; line: CompositeLine }[] | null;
-        lsdRectangles: {
-          cx: number; cy: number; theta: number; length: number; width: number;
-          accepted: boolean; retries: number; nfaLog10: number;
-        }[];
-      };
-    };
-    dataUrl?: string;
-  },
+  msg: RemotePoseMessage,
 ): Promise<void> {
-  // Guard the resize like a capture, not a plain assignment -- resizeCaptureBuffers
-  // disposes and reallocates every GPU texture on the camera, which would race
-  // an in-flight recomputeStages/recomputeFromLastCapture on the same camera
-  // exactly the way ingestRealCapture is already protected against. Cheap
-  // enough (no async decode work) that dropping this one update outright --
-  // matching the mailbox's own "freshest wins, stale drops silently"
-  // semantics elsewhere -- is simpler than deferring it.
-  if (camera.axesCapturing || camera.captureIngestBusy) return;
-
   if (msg.w !== camera.rtSize.w || msg.h !== camera.rtSize.h) resizeCaptureBuffers(camera, { w: msg.w, h: msg.h });
 
   camera.lastRecoveredAxes = msg.recoveredAxes ? {
@@ -338,13 +343,22 @@ export async function ingestRemotePose(
   // ingestRealCapture does, so Through-Cam's raw preview becomes inspectable
   // -- purely for visual debugging, the phone already computed the pose
   // itself, this does NOT re-run the reconstruction pipeline.
-  if (msg.dataUrl) {
+  if (msg.imageBytes) {
     const img = new Image();
-    await new Promise<void>((resolve, reject) => {
-      img.onload = () => resolve();
-      img.onerror = () => reject(new Error('failed to decode incoming debug image'));
-      img.src = msg.dataUrl!;
-    });
+    // Raw bytes now (poseResultWire.ts), not a base64 data: URL -- decoded
+    // via a blob: object URL instead, same pattern ingestRealCapture already
+    // uses for its own JPEG blob, so it needs the same revoke-when-done care
+    // (a data: URL never needed this).
+    const objectUrl = URL.createObjectURL(new Blob([msg.imageBytes], { type: 'image/jpeg' }));
+    try {
+      await new Promise<void>((resolve, reject) => {
+        img.onload = () => resolve();
+        img.onerror = () => reject(new Error('failed to decode incoming debug image'));
+        img.src = objectUrl;
+      });
+    } finally {
+      URL.revokeObjectURL(objectUrl);
+    }
     const w = img.naturalWidth, h = img.naturalHeight;
     const tmpCanvas = document.createElement('canvas');
     tmpCanvas.width = w; tmpCanvas.height = h;
@@ -359,9 +373,9 @@ export async function ingestRemotePose(
     // device-compute camera -- same two calls recomputeStages
     // (axesReconstruction.ts) makes for a desktop-compute capture, run here
     // against the phone's own sent image + its own already-recovered axes.
-    // Strictly inside this `if (msg.dataUrl)` branch (see this session's
+    // Strictly inside this `if (msg.imageBytes)` branch (see this session's
     // "Ship auxiliary pipeline intermediates" plan): with sendCapturedImage
-    // off, msg.dataUrl is undefined and none of this runs at all.
+    // off, msg.imageBytes is undefined and none of this runs at all.
     if (camera.lastRecoveredAxes) {
       const projResult = await computeProjectedBinsAndMarginalsAuto(camera);
       // Painting the texture is a real GPU upload -- same showProjected

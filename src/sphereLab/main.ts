@@ -79,7 +79,7 @@ import {
   resizeThroughCamCanvas, drawThroughCamPreview, drawThroughCamTrueContam, drawThroughCamReconContam,
   drawThroughCamTopGradient, drawThroughCamLsdRawRegions, drawThroughCamLsdRejected,
 } from './scene/throughCam2D.ts';
-import { getAnalysisVFovRad, ingestRealCapture, markCaptureDirty, resizeCaptureBuffers, renderCamRT } from './pipeline/capture.ts';
+import { getAnalysisVFovRad, ingestRealCapture, ingestRemotePose, markCaptureDirty, resizeCaptureBuffers, renderCamRT } from './pipeline/capture.ts';
 import { updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS } from './pipeline/preview.ts';
 import { buildProjectedTexture } from './pipeline/decodeGrid.ts';
 import { runAxesReconstruction } from './pipeline/axesReconstruction.ts';
@@ -218,6 +218,18 @@ function animate() {
         camera.captureIngestBusy = true;
         ingestRealCapture(camera, pending)
           .catch((e) => console.error('[realCapture] ingest failed:', e))
+          .finally(() => { camera.captureIngestBusy = false; });
+      }
+      // Symmetric drain for a device-compute phone's poseResult -- see
+      // camera/model.ts's own comment on pendingPoseResult. A camera never
+      // has both mailboxes populated (computeMode is stable per phone), so
+      // sharing captureIngestBusy to gate both drains is correct.
+      if (!camera.axesCapturing && !camera.captureIngestBusy && camera.pendingPoseResult) {
+        const pending = camera.pendingPoseResult;
+        camera.pendingPoseResult = null;
+        camera.captureIngestBusy = true;
+        ingestRemotePose(camera, pending)
+          .catch((e) => console.error('[poseResult] ingest failed:', e))
           .finally(() => { camera.captureIngestBusy = false; });
       }
       // Tell the phone behind a physical camera (a) whether Sphere Lab is

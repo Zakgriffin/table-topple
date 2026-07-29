@@ -22,10 +22,10 @@ import { globalState } from './sphereLab/state.ts';
 import { GRID_STEP } from './sphereLab/constants.ts';
 import { C, R, rebuildFloorPatternData } from './sphereLab/floorPattern.ts';
 import { getAnalysisVFovRad } from './sphereLab/math/geometry.ts';
-import { flipRowsF64 } from './sphereLab/pipeline/distortion.ts';
 import { computeGradient2x2Field } from './sphereLab/pipeline/gradientField.ts';
 import { computeLsdRectanglesAuto, LsdRectangle } from './sphereLab/pipeline/lsdSegments.ts';
 import { computePoseFromCapture, PoseComputeState } from './sphereLab/pipeline/poseCompute.ts';
+import { packPoseResultWithImage } from './sphereLab/devBridge/poseResultWire.ts';
 
 const video = document.getElementById('v') as HTMLVideoElement;
 const captureCanvas = document.getElementById('captureCanvas') as HTMLCanvasElement;
@@ -1270,12 +1270,20 @@ async function captureComputeAndSendPose() {
   try {
     const { cw, ch } = drawFullResFrameToSendCanvas();
     // Same call ingestRealCapture makes on the desktop side (getImageData ->
-    // toGrayscale), then the same top-down -> bottom-up row-flip orientation
-    // fix ingestRealCapture applies before handing off to the reconstruction
-    // pipeline (see pipeline/capture.ts).
+    // toGrayscale) -- but NOT the extra flipRowsF64 that used to follow it
+    // here. computePoseFromCapture's real, validated expected orientation is
+    // top-down: ingestRealCapture stores camera.lastRealCaptureGray bottom-up
+    // (one flip, purely for Through-Cam's own raw-preview convention), and
+    // runAxesReconstruction then flips it AGAIN before calling
+    // computePoseFromCapture -- flipRowsF64 is a pure involution (its own
+    // exact inverse), so those two flips cancel out exactly, net top-down.
+    // This function used to apply a single flip before calling
+    // computePoseFromCapture directly, feeding it bottom-up instead --
+    // confirmed live (this session's chat) to be the root cause of an
+    // on-device Drow/Dcol axis swap and positionDecode failures relative to
+    // the same image replayed through the desktop pipeline.
     const topDown = sendCtx.getImageData(0, 0, cw, ch).data;
     const grayTopDown = toGrayscale(topDown, cw, ch);
-    const gray = flipRowsF64(grayTopDown, cw, ch);
 
     const state: PoseComputeState = {
       aspect: cw / ch,
@@ -1285,7 +1293,7 @@ async function captureComputeAndSendPose() {
       lastPositionDecode: null,
     };
     const t0 = performance.now();
-    const timing = await computePoseFromCapture(state, gray, cw, ch);
+    const timing = await computePoseFromCapture(state, grayTopDown, cw, ch);
     const totalMs = performance.now() - t0;
     updateARCamera(buildLocalARCameraPose(state));
 
@@ -1313,7 +1321,7 @@ async function captureComputeAndSendPose() {
       // the one genuinely NEW computation sendDebugInfo pays for -- never
       // runs unless this branch is taken.
       if (sendDebugInfo) {
-        const field = computeGradient2x2Field(gray, cw, ch);
+        const field = computeGradient2x2Field(grayTopDown, cw, ch);
         const lsdRects = await computeLsdRectanglesAuto(field, {
           toleranceDeg: cameraSettings.lsdToleranceDeg,
           rhoNoiseThreshold: cameraSettings.lsdRhoNoiseThreshold,
@@ -1326,8 +1334,22 @@ async function captureComputeAndSendPose() {
         });
         msg.debug = buildDebugPayload(state, lsdRects);
       }
-      if (sendCapturedImage) msg.dataUrl = sendCanvas.toDataURL('image/jpeg', 0.85);
-      ws.send(JSON.stringify(msg));
+      // Raw bytes now (poseResultWire.ts), not a base64 dataUrl -- toBlob's
+      // callback is awaited HERE, inside captureComputeAndSendPose's own
+      // try block, so devicePoseComputing (which this function's own
+      // finally clears, see its own comment) stays true for the encode's
+      // full duration. Without that, devicePoseLoop's next iteration could
+      // start redrawing sendCanvas before this frame's bytes are actually
+      // read out -- the same hazard sendEncodeInFlight guards against for
+      // captureAndSendFrame's own toBlob call above, just already covered
+      // here by the guard this function already had.
+      if (sendCapturedImage) {
+        const blob = await new Promise<Blob | null>((resolve) => sendCanvas.toBlob(resolve, 'image/jpeg', 0.85));
+        if (blob) ws.send(packPoseResultWithImage(msg, blob));
+        else ws.send(JSON.stringify(msg));
+      } else {
+        ws.send(JSON.stringify(msg));
+      }
     }
 
     // Local-only -- never sent over the network (the whole point of this

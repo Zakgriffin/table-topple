@@ -259,6 +259,20 @@ function logBinomialTail(n: number, k: number, p: number): number {
   return maxLog + Math.log(sumExp);
 }
 
+// Squashes nfaLog10 (unbounded, more negative = more confident) into the
+// shared [0, 1] "how line-y is this" scale bucketFillJoin.ts's join walk
+// reads uniformly off every segment, regardless of which producer built it
+// (see BucketFillSegment's own lineScore comment). A logistic curve centered
+// exactly on the accept/reject threshold: a rectangle that JUST clears NFA
+// scores 0.5, one an order of magnitude past it scores ~0.91, and it
+// saturates smoothly toward 1 from there -- no separate span constant to
+// tune, since the threshold itself (already a real per-settings quantity) is
+// the only anchor this needs.
+function nfaLog10ToLineScore(nfaLog10: number, logEpsilon: number): number {
+  const thresholdLog10 = logEpsilon / Math.LN10;
+  return 1 / (1 + Math.pow(10, nfaLog10 - thresholdLog10));
+}
+
 // n = pixels whose center falls inside the rectangle's actual rotated
 // footprint (scanned via its axis-aligned bounding box, not just the
 // region's original flood-fill members -- the fitted rectangle's shape can
@@ -307,6 +321,7 @@ export interface LsdRectangle {
   accepted: boolean;
   retries: number; // how many tighten/shrink attempts were taken before the final accept/reject
   nfaLog10: number; // log10(NFA) -- more negative = more statistically confident
+  lineScore: number; // nfaLog10 squashed to [0, 1] via nfaLog10ToLineScore -- see that function's own comment
   // Stage 3's ORIGINAL grown-region membership (pixel indices into the
   // field), before any retry loop tightened/shrank it -- region.members
   // itself is never mutated by the retry loop below (only the local
@@ -395,7 +410,8 @@ function fitRegionWithRetries(
   }
 
   if (!rect) return null;
-  return { cx: rect.cx, cy: rect.cy, theta: rect.theta, length: rect.length, width: rect.width, accepted, retries, nfaLog10, rawMembers: region.members };
+  const lineScore = nfaLog10ToLineScore(nfaLog10, logEpsilon);
+  return { cx: rect.cx, cy: rect.cy, theta: rect.theta, length: rect.length, width: rect.width, accepted, retries, nfaLog10, lineScore, rawMembers: region.members };
 }
 
 export function computeLsdRectangles(field: GradientField, settings: LsdSettings): LsdRectangle[] {
@@ -447,7 +463,8 @@ export async function computeLsdRectanglesGPU(field: GradientField, settings: Ls
     if (g.accepted) {
       results.push({
         cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
-        accepted: true, retries: 0, nfaLog10: g.nfaLog10, rawMembers: region.members,
+        accepted: true, retries: 0, nfaLog10: g.nfaLog10, lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon),
+        rawMembers: region.members,
       });
     } else {
       const r = fitRegionWithRetries(region, mag, theta, w, h, settings, logNTests, logEpsilon);
@@ -469,10 +486,12 @@ export async function computeLsdRectanglesAuto(field: GradientField, settings: L
 //
 // pipeline/bucketFillJoin.ts's computeJoinWalk was built against
 // bucketFillSegments.ts's own BucketFillSegment[] + regionId output, but
-// only ever reads FOUR things off a segment: endAlongX/Y, endAgainstX/Y
-// (via segmentLength and spawnPair) -- count/cx/cy/avgFx/avgFy are present
-// in the type but unused by the join walk or computeCompositeLines. That
-// makes this a thin, honest adapter rather than a real behavioral bridge:
+// only reads FIVE things off a segment: endAlongX/Y, endAgainstX/Y (via
+// segmentLength and spawnPair) and lineScore (seeds each segment's merge
+// confidence, see computeJoinWalk's own header) -- count/cx/cy/avgFx/avgFy
+// are present in the type but unused by the join walk or
+// computeCompositeLines. That makes this a thin, honest adapter rather than
+// a real behavioral bridge:
 // only ACCEPTED rectangles become segments (a rejected candidate isn't a
 // real detection, shouldn't be treated as one to merge); a rectangle's own
 // two tangent-axis ends (its long axis, already what LSD fits the line
@@ -510,6 +529,7 @@ export function lsdRectanglesToBucketFillShape(
       avgFx: -ay * count, avgFy: ax * count,
       endAlongX: r.cx + hl * ax, endAlongY: r.cy + hl * ay,
       endAgainstX: r.cx - hl * ax, endAgainstY: r.cy - hl * ay,
+      lineScore: r.lineScore,
     });
   }
   return { regionId, segments };

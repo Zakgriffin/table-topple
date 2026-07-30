@@ -271,7 +271,7 @@ export interface RemotePoseMessage {
       voteComposites: { root: number; line: CompositeLine }[] | null;
       lsdRectangles: {
         cx: number; cy: number; theta: number; length: number; width: number;
-        accepted: boolean; retries: number; nfaLog10: number;
+        accepted: boolean; retries: number; nfaLog10: number; lineScore: number;
       }[];
     };
   };

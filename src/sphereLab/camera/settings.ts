@@ -60,6 +60,11 @@ export interface CameraSettingsCommon {
   // computeJoinWalk) -- unchanged in meaning from the old bucketFillJoinSteps/
   // MergeMinSimilarity/MaxTravelFactor/MinLengthPx names, just relocated
   // here since the join walk is now exclusively fed by this LSD pipeline.
+  // lsdMergeMinSimilarity is now a FLOOR, not a fixed gate: computeJoinWalk's
+  // own requiredSimilarityFor scales the real bar up from this value toward
+  // 1 as the two segments/groups' shared lineScore confidence drops, so this
+  // is exactly the old fixed threshold only when both sides are maximally
+  // confident.
   lsdJoinSteps: number; lsdMergeMinSimilarity: number; lsdMaxTravelFactor: number; lsdMinLengthPx: number;
   showGradientArrow: boolean; showGradientArrowPerpendicular: boolean; gradientArrowScale: number;
   coherenceRadius: number;

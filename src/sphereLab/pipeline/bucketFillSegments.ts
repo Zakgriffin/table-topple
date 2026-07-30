@@ -39,6 +39,18 @@ export interface BucketFillSegment {
   // region grew).
   endAlongX: number; endAlongY: number; // farthest pixel in the +tangent direction
   endAgainstX: number; endAgainstY: number; // farthest pixel in the -tangent direction
+
+  // "How line-y is this" confidence in [0, 1], the SAME scale and meaning
+  // lsdSegments.ts's own lineScore carries (see that file's
+  // nfaLog10ToLineScore) -- bucketFillJoin.ts's join walk reads this
+  // uniformly regardless of which producer built the segment, so a region's
+  // trust going INTO a merge decision reflects how well-formed it actually
+  // was, not just its raw geometry. This producer has no NFA statistic to
+  // draw on, so it uses the region's own circular-mean resultant length
+  // (sumCos/sumSin's magnitude, already tracked while growing) divided by
+  // member count -- 1.0 means every member pixel's direction agreed
+  // exactly, 0 means they averaged out to nothing.
+  lineScore: number;
 }
 
 export function computeBucketFillRegions(
@@ -160,6 +172,7 @@ export function computeBucketFillRegions(
     segments.push({
       count, cx: sumX / count, cy: sumY / count, avgFx: sumFx / count, avgFy: sumFy / count,
       endAlongX, endAlongY, endAgainstX, endAgainstY,
+      lineScore: Math.hypot(sumCos, sumSin) / count,
     });
   }
   return { regionId, segments };

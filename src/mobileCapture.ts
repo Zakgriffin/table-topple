@@ -1240,7 +1240,7 @@ function buildDebugPayload(state: PoseComputeState, lsdRects: LsdRectangle[]) {
       voteComposites: state.lastVoteComposites,
       lsdRectangles: lsdRects.map((r) => ({
         cx: r.cx, cy: r.cy, theta: r.theta, length: r.length, width: r.width,
-        accepted: r.accepted, retries: r.retries, nfaLog10: r.nfaLog10,
+        accepted: r.accepted, retries: r.retries, nfaLog10: r.nfaLog10, lineScore: r.lineScore,
       })),
     },
   };

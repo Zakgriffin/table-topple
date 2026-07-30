@@ -154,6 +154,32 @@ export function computeJoinWalk(
   const frontAtSlot1 = new Int32Array(segments.length).fill(-1);
   const frontAtSlot2 = new Int32Array(segments.length).fill(-1);
 
+  // Each root's current merge confidence -- the SAME [0, 1] lineScore scale
+  // every segment producer fills in (bucketFillSegments.ts's circular-mean
+  // tightness, lsdSegments.ts's NFA-derived score), carried forward through
+  // merges. A merge only ever LOWERS a group's confidence (min of the two
+  // sides, never blended or averaged) -- a chain is only as trustworthy as
+  // its weakest link, so a marginal segment that talks its way into a merge
+  // doesn't get to borrow its confident partner's full trust for its OWN
+  // next merge attempt down the line. See requiredSimilarityFor for how this
+  // feeds back into the similarity gate.
+  const confidence = new Float64Array(segments.length);
+  for (let i = 0; i < segments.length; i++) confidence[i] = segments[i].lineScore;
+
+  // The dot-product bar a candidate merge's orientation similarity must
+  // clear, scaled by how much the two GROUPS involved currently trust each
+  // other's geometry: at combinedConfidence === 1 this is exactly
+  // minSimilarity (unchanged from before lineScore existed); as confidence
+  // drops toward 0 it rises toward 1 (never quite reachable), so a pair of
+  // marginal/low-evidence segments needs a near-perfect collinear match to
+  // merge at all, while two well-formed ones merge exactly as permissively
+  // as the raw minSimilarity slider always allowed. Reuses minSimilarity as
+  // the sole anchor rather than adding a new tunable -- same shape of
+  // consolidation this whole change is for.
+  function requiredSimilarityFor(combinedConfidence: number): number {
+    return minSimilarity + (1 - combinedConfidence) * (1 - minSimilarity);
+  }
+
   const fronts: JoinFront[] = [];
 
   // Spawns a fresh pair of fronts representing `root`'s two current
@@ -252,11 +278,12 @@ export function computeJoinWalk(
     const winA = candidates[bestP], winB = candidates[bestQ];
     const nearA = candidates[nearP], nearB = candidates[nearQ];
 
+    const requiredSimilarity = requiredSimilarityFor(Math.min(confidence[ra], confidence[rb]));
     if (nearDistSq > 1e-9) {
       const cvx = (nearB.x - nearA.x) / Math.sqrt(nearDistSq), cvy = (nearB.y - nearA.y) / Math.sqrt(nearDistSq);
       const [gaX, gaY] = groupAxis(segA), [gbX, gbY] = groupAxis(segB);
       const cvDotA = Math.abs(cvx * gaX + cvy * gaY), cvDotB = Math.abs(cvx * gbX + cvy * gbY);
-      if (cvDotA < minSimilarity || cvDotB < minSimilarity) return false; // parallel but laterally offset -- not actually the same line
+      if (cvDotA < requiredSimilarity || cvDotB < requiredSimilarity) return false; // parallel but laterally offset -- not actually the same line
     }
     // nearDistSq ~ 0: the near points already coincide, nothing to check --
     // trivially collinear (can't be laterally offset from itself).
@@ -283,6 +310,7 @@ export function computeJoinWalk(
     }
 
     parent[ra] = rb; // standard union-by-arbitrary-root, matches computeMergeGroups' own convention
+    confidence[rb] = Math.min(confidence[ra], confidence[rb]); // weakest-link -- see the confidence array's own comment
     spawnPair(rb, winA.x, winA.y, winB.x, winB.y);
     return true;
   }
@@ -317,7 +345,8 @@ export function computeJoinWalk(
         const [gux, guy] = groupAxis(f.seg);
         const [oux, ouy] = groupAxis(occupant);
         const dot = gux * oux + guy * ouy;
-        if (Math.abs(dot) >= minSimilarity && mergeAt(f.seg, occupant, nx, ny)) {
+        const requiredSimilarity = requiredSimilarityFor(Math.min(confidence[find(f.seg)], confidence[find(occupant)]));
+        if (Math.abs(dot) >= requiredSimilarity && mergeAt(f.seg, occupant, nx, ny)) {
           merges.push({ a: f.seg, b: occupant });
         }
         // else: NOT a match (e.g. a crossing perpendicular segment, or a

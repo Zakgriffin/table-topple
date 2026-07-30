@@ -1,19 +1,24 @@
 // ── Top-gradient overlay paint (pure) ────────────────────────────────────
 //
-// Used to gate which pixels get painted via a [minPercent, maxPercent)
-// percentile-rank band over the field's own magnitude (computeTopGradientAlpha,
-// same band shape votesInMagnitudeBand in pipeline/votes.ts uses) -- every
-// call site always passed (0, 100), which is mathematically a no-op (the
-// resulting [min, max] magnitude band trivially contains every pixel's
-// magnitude, by definition of min/max), so that dead computation (a full
-// sort of the field on every repaint, for a guaranteed-uniform result) was
-// removed along with every no-op seedEligible band it fed elsewhere (see
-// pipeline/bucketFillSegments.ts's computeBucketFillRegions and its two
-// callers) -- see this session's chat.
+// Alpha scales linearly with each pixel's own gradient2x2 magnitude: 0 at
+// magnitude 0, fully opaque at MAX_GRADIENT_2X2_MAGNITUDE (the hard
+// theoretical ceiling for a gradient2x2 field, not a per-frame max -- see
+// computeGradient2x2Field, whose fx/fy are each an average of two grayscale
+// edge differences, so neither component can exceed a full black-to-white
+// swing).
 
-export function paintTopGradientOverlay(color: readonly [number, number, number], out: Uint8Array) {
-  for (let o = 0; o < out.length; o += 4) {
-    out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2]; out[o + 3] = 200;
+import { GradientField } from '../types.ts';
+
+const GRAYSCALE_MAX = 255;
+export const MAX_GRADIENT_2X2_MAGNITUDE = Math.hypot(GRAYSCALE_MAX, GRAYSCALE_MAX);
+
+export function paintTopGradientOverlay(color: readonly [number, number, number], field: GradientField, out: Uint8Array) {
+  const { fx, fy } = field;
+  for (let i = 0; i < fx.length; i++) {
+    const o = i * 4;
+    const mag = Math.hypot(fx[i], fy[i]);
+    const alpha = Math.min(1, mag / MAX_GRADIENT_2X2_MAGNITUDE);
+    out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2]; out[o + 3] = Math.round(alpha * 255);
   }
 }
 

@@ -1,5 +1,6 @@
 import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
+import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import { paintTopGradientOverlay, TOP_GRADIENT_COLOR } from '../pipeline/gradientHighlight.ts';
 import { toggleTopGradientBtn } from '../ui/dom.ts';
 
@@ -9,7 +10,9 @@ export function updateTopGradientOverlay(camera: Camera) {
   if (!settings.showTopGradient) return;
   if (settings.fieldView !== 'gradient2x2') return;
   if (!camera.lastNoisedPreviewGray) return;
-  paintTopGradientOverlay(TOP_GRADIENT_COLOR, camera.topGradientData);
+  const { w, h } = camera.rtSize;
+  const field = computeGradient2x2Field(camera.lastNoisedPreviewGray, w, h);
+  paintTopGradientOverlay(TOP_GRADIENT_COLOR, field, camera.topGradientData);
   camera.topGradientTex.needsUpdate = true;
 }
 

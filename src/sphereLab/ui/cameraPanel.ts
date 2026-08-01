@@ -173,6 +173,8 @@ export function refreshCameraPanel() {
   setBool('showTopCircles', cam.settings.showTopCircles);
   setNum('topCirclesLineWidth', cam.settings.topCirclesLineWidth);
   setNum('weightSharpenPower', cam.settings.weightSharpenPower);
+  setBool('useWorldVoteOrientation', cam.settings.useWorldVoteOrientation);
+  setNum('worldVoteRefineSteps', cam.settings.worldVoteRefineSteps);
   setNum('minGrazingCos', cam.settings.minGrazingCos);
   setBool('axesAutoCapture', cam.settings.axesAutoCapture);
   setNum('axesCaptureInterval', cam.settings.axesCaptureIntervalMs);
@@ -407,6 +409,8 @@ bindCheckbox('showAxisVectors', (v) => { const cam = activeCamera(); if (cam) { 
 bindCheckbox('showTopCircles', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showTopCircles = v; if (v) updateGradientCirclesDebug(cam); } });
 bindSlider('topCirclesLineWidth', (v) => { const cam = activeCamera(); if (cam) { cam.settings.topCirclesLineWidth = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
 bindSlider('weightSharpenPower', (v) => { const cam = activeCamera(); if (cam) { cam.settings.weightSharpenPower = v; updateGradientCirclesDebug(cam); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(1));
+bindCheckbox('useWorldVoteOrientation', (v) => { const cam = activeCamera(); if (cam) { cam.settings.useWorldVoteOrientation = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); });
+bindSlider('worldVoteRefineSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.worldVoteRefineSteps = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
 // Feeds projectSamplesCPU/buildDecodeSampleGrid (stages 9+10) -- recompute
 // from the last capture rather than waiting for the next unrelated one.
 bindSlider('minGrazingCos', (v) => { const cam = activeCamera(); if (cam) { cam.settings.minGrazingCos = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));

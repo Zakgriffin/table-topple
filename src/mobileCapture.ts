@@ -714,6 +714,7 @@ fpsSlider.addEventListener('input', () => {
 // before the desktop's on-connect push lands) still produces a sane result.
 let cameraSettings: PoseComputeState['settings'] = {
   horizFovDeg: 65, weightSharpenPower: 4, gridPeriodPhaseGapLowerBound: 0.005, minGrazingCos: 0.15,
+  useWorldVoteOrientation: false, worldVoteRefineSteps: 4,
   lsdToleranceDeg: 22.5, lsdRhoNoiseThreshold: 4, lsdMagnitudeBuckets: 1024, lsdNfaEpsilon: 1,
   lsdNfaTestExponent: 5, lsdMaxRetries: 2, lsdRetryToleranceFactor: 0.5, lsdRetryShrinkFraction: 0.2,
   lsdMergeMinSimilarity: 0.9, lsdJoinSteps: 0, lsdMinLengthPx: 3, lsdMaxTravelFactor: 1,
@@ -1230,7 +1231,7 @@ function buildDebugPayload(state: PoseComputeState, lsdRects: LsdRectangle[]) {
     voteCount: state.lastVotes?.length ?? 0,
     gridPeriodPhase: gpp ? {
       period: gpp.period, phiRow: gpp.phiRow, phiCol: gpp.phiCol, height: gpp.height,
-      seedPeriod: gpp.debug.seedPeriod, bracket: gpp.debug.bracket,
+      chosenPeriod: gpp.debug.chosenPeriod, bracket: gpp.debug.bracket,
       rowLineCount: gpp.rowLines.length, colLineCount: gpp.colLines.length,
     } : null,
     decodeGrid: grid ? { rows: grid.rows, cols: grid.cols, validCount, totalCount } : null,

@@ -10,7 +10,11 @@ import { CompositeLine } from './bucketFillJoin.ts';
 import { runPositionDecode } from './decodeGrid.ts';
 import { computeGradient2x2Field } from './gradientField.ts';
 import { computeGridPeriodPhase, GridPeriodPhaseResult } from './gridPeriodPhase.ts';
-import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes, LsdCompositeSettings } from './votes.ts';
+import { fourFoldResidual } from './orientationLM.ts';
+import {
+  computeGradient2x2Composites, computePixelVotes2x2, computeSegmentVotes, fitPairOfPlanes, refineOrientationIRLS,
+  LsdCompositeSettings,
+} from './votes.ts';
 
 // ── Shared pure pose-recovery orchestrator ────────────────────────────────
 //
@@ -31,6 +35,7 @@ export interface PoseComputeState {
   aspect: number;
   settings: LsdCompositeSettings & {
     horizFovDeg: number; weightSharpenPower: number; gridPeriodPhaseGapLowerBound: number; minGrazingCos: number;
+    useWorldVoteOrientation: boolean; worldVoteRefineSteps: number;
   };
   lastVoteComposites: { root: number; line: CompositeLine }[] | null;
   lastVotes: Vote[] | null;
@@ -49,7 +54,13 @@ export interface PoseComputeState {
   lastPositionDecode: PositionDecodeResult | null;
 }
 
-export interface PoseComputeTiming { votesMs: number; fitMs: number; poseMs: number; distanceMs: number; decodeMs: number }
+export interface PoseComputeTiming {
+  votesMs: number; fitMs: number; poseMs: number; distanceMs: number; decodeMs: number;
+  // How many refineOrientationIRLS iterations actually ran before converging
+  // (or hitting worldVoteRefineSteps) -- null when useWorldVoteOrientation is
+  // off, since fitPairOfPlanes has no iteration concept to report.
+  worldVoteIterations: number | null;
+}
 
 // Same pattern as axesReconstruction.ts's old local gradient2x2Field helper
 // (moved here since it's pure, GPU/CPU dispatch driven purely by the shared
@@ -93,20 +104,53 @@ export async function computePoseFromCapture(
   state.lastVoteComposites = voteComposites;
 
   const votesSpan = spanStart('votes (segments)');
-  const votes = computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, state.aspect);
+  // useWorldVoteOrientation swaps the vote SOURCE (one per pixel, straight
+  // off the same field2x2 composites/gridPeriodPhase already computed above,
+  // instead of one per composite line) -- voteComposites/gridPeriodPhase
+  // downstream are untouched either way, see this session's chat.
+  const votes = state.settings.useWorldVoteOrientation
+    ? computePixelVotes2x2(field2x2, w, h, MATH_QUAT, vFovRad, state.aspect)
+    : computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, state.aspect);
   spanEnd(votesSpan);
   state.lastVotes = votes;
   const t1 = performance.now();
 
   const fitSpan = spanStart('fit (fitPairOfPlanes)');
-  // Same fallback pattern as every other GPU sub-pipeline: fitPairOfPlanes
-  // stays the source of truth, the GPU version is verified against it.
-  const fitOnlySpan = spanStart(globalState.useGPUFit ? 'fitPairOfPlanes (GPU)' : 'fitPairOfPlanes (CPU)');
-  const quadricPair = globalState.useGPUFit
-    ? (await fitPairOfPlanesGPU(votes, state.settings.weightSharpenPower))
-      ?? fitPairOfPlanes(votes, state.settings.weightSharpenPower)
-    : fitPairOfPlanes(votes, state.settings.weightSharpenPower);
-  spanEnd(fitOnlySpan);
+  let quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
+  let worldVoteIterations: number | null = null;
+  if (state.settings.useWorldVoteOrientation) {
+    // CPU-only for now, no GPU port yet -- see this session's chat.
+    const irlsSpan = spanStart('fitPairOfPlanes (IRLS, CPU)');
+    const refined = refineOrientationIRLS(votes, state.settings.weightSharpenPower, state.settings.worldVoteRefineSteps);
+    quadricPair = refined;
+    worldVoteIterations = refined?.iterations ?? null;
+    if (refined) {
+      // Rewrite each vote's OWN weight to its final combined (magnitude x
+      // residual-agreement, against the converged poles) trust -- so the
+      // rings overlay (updateGradientCirclesDebug, keyed off
+      // camera.lastVotes) visibly shows corner/noise votes faded out by
+      // however many iterations actually ran, not just their raw input
+      // gradient magnitude. Purely a display rewrite: the fit itself is
+      // already finished, nothing re-reads these weights for math.
+      let maxW = 0;
+      for (const v of votes) if (v.weight > maxW) maxW = v.weight;
+      for (const v of votes) {
+        const magnitudeWeight = maxW > 0 ? Math.pow(v.weight / maxW, state.settings.weightSharpenPower) : 0;
+        const residual = Math.abs(fourFoldResidual(v.n, refined.Drow, refined.Dcol));
+        v.weight = magnitudeWeight * THREE.MathUtils.clamp(1 - residual, 0, 1);
+      }
+    }
+    spanEnd(irlsSpan);
+  } else {
+    // Same fallback pattern as every other GPU sub-pipeline: fitPairOfPlanes
+    // stays the source of truth, the GPU version is verified against it.
+    const fitOnlySpan = spanStart(globalState.useGPUFit ? 'fitPairOfPlanes (GPU)' : 'fitPairOfPlanes (CPU)');
+    quadricPair = globalState.useGPUFit
+      ? (await fitPairOfPlanesGPU(votes, state.settings.weightSharpenPower))
+        ?? fitPairOfPlanes(votes, state.settings.weightSharpenPower)
+      : fitPairOfPlanes(votes, state.settings.weightSharpenPower);
+    spanEnd(fitOnlySpan);
+  }
   spanEnd(fitSpan);
   const t2 = performance.now();
 
@@ -138,9 +182,9 @@ export async function computePoseFromCapture(
   const gppSpan = spanStart('gridPeriodPhase (distance source)');
   const gpp = rowDirRecovered && colDirRecovered && quadricPair
     ? computeGridPeriodPhase(
-        voteComposites, w, h, MATH_QUAT, vFovRad, state.aspect,
+        voteComposites, gray, w, h, MATH_QUAT, vFovRad, state.aspect,
         rowDirRecovered, colDirRecovered, quadricPair.Dnormal, GRID_STEP,
-        state.settings.gridPeriodPhaseGapLowerBound,
+        state.settings.minGrazingCos,
       )
     : null;
   state.lastGridPeriodPhase = gpp;
@@ -156,5 +200,5 @@ export async function computePoseFromCapture(
   spanEnd(decodeSpan);
   const t5 = performance.now();
 
-  return { votesMs: t1 - t0, fitMs: t2 - t1, poseMs: t3 - t2, distanceMs: t4 - t3, decodeMs: t5 - t4 };
+  return { votesMs: t1 - t0, fitMs: t2 - t1, poseMs: t3 - t2, distanceMs: t4 - t3, decodeMs: t5 - t4, worldVoteIterations };
 }

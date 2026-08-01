@@ -533,13 +533,57 @@ export function projectImageCornersToPlane(camera: PoseCameraLike): { u: number;
   return corners;
 }
 
+// The (u,v) bounding rectangle of the RESOLVABLE visible floor region, for
+// sizing buildDecodeSampleGrid's sample lattice. Unlike
+// projectImageCornersToPlane above -- which needs ALL 4 image corners to
+// clear the grazing cutoff and returns null the instant one grazes past the
+// horizon -- this samples a grid of image points and bounds only those that
+// DO clear the same strict per-cell cutoff. That all-or-nothing corner bail
+// was silently killing decode outright at any oblique/grazing view whose top
+// edge points past the horizon, discarding an 80-94%-usable frame along with
+// the two grazing corners (see this session's decode-failure investigation:
+// orientation/period/distance were all fine at those poses, decode just never
+// built a grid). The per-lattice-point grazing check inside
+// buildDecodeSampleGrid already drops individual far cells, so bounding the
+// resolvable region here and letting that per-cell check exclude the rest is
+// both correct and strictly more permissive. For a non-grazing view every
+// sample clears the cutoff and the floor projects to a straight-edged
+// quadrilateral, so this reduces to the same min/max the 4 corners gave --
+// no behavior change there. Returns null only when almost nothing projects
+// (a genuinely degenerate, near-horizon-only view).
+export function projectedUVBounds(camera: PoseCameraLike): { minU: number; maxU: number; minV: number; maxV: number } | null {
+  if (!camera.lastRecoveredAxes) return null;
+  const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
+  const vFovRad = getAnalysisVFovRad(camera);
+  const normal = Dnormal.clone();
+  if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
+  const minGrazingCos = camera.settings.minGrazingCos;
+  const N = 48; // image sampling resolution; extremes lie on the boundary, so this over-covers slightly, which is safe (per-cell cutoff still drops far cells)
+  let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity, count = 0;
+  for (let iy = 0; iy <= N; iy++) {
+    for (let ix = 0; ix <= N; ix++) {
+      const ndcU = (ix / N) * 2 - 1, ndcV = (iy / N) * 2 - 1;
+      const rayDir = cornerDir(ndcU, ndcV, MATH_QUAT, vFovRad, camera.aspect);
+      const denom = rayDir.dot(normal);
+      if (denom >= -minGrazingCos) continue;
+      const t = -distance / denom;
+      const u = rayDir.dot(Drow) * t, v = rayDir.dot(Dcol) * t;
+      if (u < minU) minU = u; if (u > maxU) maxU = u;
+      if (v < minV) minV = v; if (v > maxV) maxV = v;
+      count++;
+    }
+  }
+  if (count < 4 || !isFinite(minU)) return null;
+  return { minU, maxU, minV, maxV };
+}
+
 // Builds a sampling grid covering the FULL observed quadrilateral -- see
 // pre-Stage-A history for the full derivation.
 export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number): DecodeSampleGrid | null {
   if (!camera.lastRecoveredAxes || !camera.lastGridPeriodPhase) return null;
   const gpp = camera.lastGridPeriodPhase;
-  const corners = projectImageCornersToPlane(camera);
-  if (!corners) return null;
+  const bounds = projectedUVBounds(camera);
+  if (!bounds) return null;
   const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
   const normal = Dnormal.clone();
   if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
@@ -558,9 +602,7 @@ export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array
   const uPhase = (uBoundaryRaw - Math.round(uBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
   const vPhase = (vBoundaryRaw - Math.round(vBoundaryRaw / GRID_STEP) * GRID_STEP) + GRID_STEP / 2;
 
-  const cornerUs = corners.map((c) => c.u), cornerVs = corners.map((c) => c.v);
-  const minU = Math.min(...cornerUs), maxU = Math.max(...cornerUs);
-  const minV = Math.min(...cornerVs), maxV = Math.max(...cornerVs);
+  const { minU, maxU, minV, maxV } = bounds;
   const kMinU = Math.floor((minU - uPhase) / GRID_STEP), kMaxU = Math.ceil((maxU - uPhase) / GRID_STEP);
   const kMinV = Math.floor((minV - vPhase) / GRID_STEP), kMaxV = Math.ceil((maxV - vPhase) / GRID_STEP);
   const cols = kMaxU - kMinU + 1, rows = kMaxV - kMinV + 1;

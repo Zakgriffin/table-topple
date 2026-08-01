@@ -48,6 +48,7 @@ function buildCameraSettingsPayload(cam: PhysicalCamera) {
   const s = cam.settings;
   return {
     horizFovDeg: s.horizFovDeg, weightSharpenPower: s.weightSharpenPower,
+    useWorldVoteOrientation: s.useWorldVoteOrientation, worldVoteRefineSteps: s.worldVoteRefineSteps,
     gridPeriodPhaseGapLowerBound: s.gridPeriodPhaseGapLowerBound, minGrazingCos: s.minGrazingCos,
     lsdToleranceDeg: s.lsdToleranceDeg, lsdRhoNoiseThreshold: s.lsdRhoNoiseThreshold,
     lsdMagnitudeBuckets: s.lsdMagnitudeBuckets, lsdNfaEpsilon: s.lsdNfaEpsilon,

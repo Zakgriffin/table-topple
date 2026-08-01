@@ -7,6 +7,7 @@ import { GradientField, Vote } from '../types.ts';
 import { CompositeLine, compositeLineLength, computeCompositeLines, computeJoinWalk, computeMergeGroups } from './bucketFillJoin.ts';
 import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from './gradientField.ts';
 import { computeLsdRectangles, computeLsdRectanglesAuto, lsdRectanglesToBucketFillShape } from './lsdSegments.ts';
+import { fourFoldResidual } from './orientationLM.ts';
 import { guidedTangentDirectionForWalk } from './tangentWalk.ts';
 
 // gray is expected to already be captureDistortedGrayscale's output.
@@ -49,6 +50,45 @@ export function computeWorldVotes(
     }
   }
   spanEnd(walkSpan);
+  return votes;
+}
+
+// Alternative to computeWorldVotes above: one vote per pixel, cast straight
+// off computeGradient2x2Field's own per-pixel direction -- no tangent walk,
+// no agreement/effective-field pass. Those existed to fight two problems
+// (per-pixel noise, and corners contributing a spurious ~45-degree-off-pole
+// direction) that refineOrientationIRLS's residual-based reweighting below
+// is meant to handle instead, directly against the emerging fit rather than
+// via a separately-tuned local-neighborhood field -- see this session's
+// chat. Takes the field pre-computed (same reasoning as
+// computeGradient2x2Composites above) so the caller picks CPU/GPU without
+// this needing to know which.
+export function computePixelVotes2x2(
+  field: GradientField, w: number, h: number,
+  quat: THREE.Quaternion, vFovRad: number, aspect: number,
+): Vote[] {
+  const { fx, fy, r } = field;
+  const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, 1 - (py / h) * 2];
+  const votes: Vote[] = [];
+  for (let y = r; y < h - r; y++) {
+    for (let x = r; x < w - r; x++) {
+      const i = y * w + x;
+      const gx = fx[i], gy = fy[i];
+      if (gx === 0 && gy === 0) continue;
+      let theta = Math.atan2(gy, gx);
+      if (theta < 0) theta += Math.PI;
+      if (theta >= Math.PI) theta -= Math.PI;
+      const tdx = -Math.sin(theta), tdy = Math.cos(theta);
+      const [u1, v1] = toNDC(x, y);
+      const [u2, v2] = toNDC(x + tdx, y + tdy);
+      const ray1 = cornerDir(u1, v1, quat, vFovRad, aspect);
+      const ray2 = cornerDir(u2, v2, quat, vFovRad, aspect);
+      const n = ray1.clone().cross(ray2);
+      if (n.lengthSq() < 1e-12) continue;
+      n.normalize();
+      votes.push({ n, weight: Math.hypot(gx, gy) });
+    }
+  }
   return votes;
 }
 
@@ -176,22 +216,29 @@ export function votesInMagnitudeBand(votes: Vote[], minPercent: number, maxPerce
   return sorted.slice(lo, hi);
 }
 
-// Fits the degenerate quadric ("pair of planes through the origin") that
-// best explains "every vote lies on one plane or the other" -- see
-// pre-Stage-A history for the full derivation. `power` is the caller's
-// current weightSharpenPower setting.
-export function fitPairOfPlanes(votes: Vote[], power: number): { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null {
-  let maxW = 0;
-  for (const { weight } of votes) if (weight > maxW) maxW = weight;
+// Shared by fitPairOfPlanes and refineOrientationIRLS below: accumulates
+// the weighted 6x6 ATA scatter matrix ("pair of planes through the origin")
+// from a set of votes, given an arbitrary per-vote weight function -- a
+// plain magnitude-based sharpen for a one-shot fit, or a residual-against-
+// the-current-fit reweight for an IRLS refinement pass.
+function accumulateATA(votes: Vote[], weightOf: (v: Vote) => number): number[][] {
   const ATA: number[][] = Array.from({ length: 6 }, () => new Array(6).fill(0));
-  for (const { n, weight } of votes) {
-    const sharpened = maxW > 0 ? Math.pow(weight / maxW, power) : 0;
+  for (const v of votes) {
+    const w = weightOf(v);
+    if (w <= 0) continue;
+    const { n } = v;
     const row = [n.x * n.x, n.y * n.y, n.z * n.z, n.x * n.y, n.x * n.z, n.y * n.z];
     for (let a = 0; a < 6; a++) {
-      const wra = sharpened * row[a];
+      const wra = w * row[a];
       for (let b = 0; b < 6; b++) ATA[a][b] += wra * row[b];
     }
   }
+  return ATA;
+}
+
+// The eigendecomposition half of fitPairOfPlanes -- fixed-size (6x6 -> 3x3),
+// independent of vote count, shared by every caller of accumulateATA above.
+function solveQuadricFromATA(ATA: number[][]): { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null {
   const m = smallestEigenvector(ATA);
   const M = [
     [m[0], m[3] / 2, m[4] / 2],
@@ -209,5 +256,57 @@ export function fitPairOfPlanes(votes: Vote[], power: number): { Drow: THREE.Vec
   const Dcol = b1.clone().sub(b2);
   if (Drow.lengthSq() < 1e-9 || Dcol.lengthSq() < 1e-9) return null;
   return { Drow: Drow.normalize(), Dcol: Dcol.normalize(), Dnormal };
+}
+
+// Fits the degenerate quadric ("pair of planes through the origin") that
+// best explains "every vote lies on one plane or the other" -- see
+// pre-Stage-A history for the full derivation. `power` is the caller's
+// current weightSharpenPower setting.
+export function fitPairOfPlanes(votes: Vote[], power: number): { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null {
+  let maxW = 0;
+  for (const { weight } of votes) if (weight > maxW) maxW = weight;
+  return solveQuadricFromATA(accumulateATA(votes, (v) => (maxW > 0 ? Math.pow(v.weight / maxW, power) : 0)));
+}
+
+// Iteratively reweighted least squares on top of fitPairOfPlanes: after the
+// same single-shot fit above, every vote's angular residual against the
+// CURRENT poles (fourFoldResidual, from orientationLM.ts -- exactly 0 when
+// a vote's normal sits on either pole, +-1 at the worst 45-degree-off
+// corner case) folds multiplicatively into its weight for the next refit.
+// A vote that's genuinely row/col-aligned has its residual shrink toward 0
+// as the fit sharpens across iterations and keeps its full weight; a corner
+// vote's residual stays large and roughly constant, so it gets suppressed
+// on its own -- no separately-tuned agreement/effective-field muting step
+// needed. Stops early once Drow stops rotating by more than
+// IRLS_CONVERGE_EPS between iterations (same convergence pattern
+// orientationLM.ts's own LM loop uses), so `maxIterations` is a worst-case
+// cap, not a fixed cost -- 0 skips refinement entirely, returning exactly
+// fitPairOfPlanes' own result, for direct A/B comparison.
+const IRLS_CONVERGE_EPS = 1e-5;
+export function refineOrientationIRLS(
+  votes: Vote[], power: number, maxIterations: number,
+): { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3; iterations: number } | null {
+  let maxW = 0;
+  for (const { weight } of votes) if (weight > maxW) maxW = weight;
+  const magnitudeWeight = (v: Vote) => (maxW > 0 ? Math.pow(v.weight / maxW, power) : 0);
+
+  let fit = solveQuadricFromATA(accumulateATA(votes, magnitudeWeight));
+  if (!fit) return null;
+
+  let iterations = 0;
+  for (; iterations < maxIterations; iterations++) {
+    const { Drow, Dcol } = fit;
+    const residualWeight = (v: Vote) =>
+      magnitudeWeight(v) * THREE.MathUtils.clamp(1 - Math.abs(fourFoldResidual(v.n, Drow, Dcol)), 0, 1);
+    const next = solveQuadricFromATA(accumulateATA(votes, residualWeight));
+    if (!next) break; // degenerate refit (e.g. reweighting zeroed out too much) -- keep the last good fit
+    // Undirected angle (min against the negated axis too) -- a sign flip
+    // between iterations is the same physical axis, not real movement, same
+    // reasoning as axesReconstruction.ts's own axisErr helper.
+    const angleChange = Math.min(next.Drow.angleTo(fit.Drow), next.Drow.angleTo(fit.Drow.clone().negate()));
+    fit = next;
+    if (angleChange < IRLS_CONVERGE_EPS) { iterations++; break; }
+  }
+  return { ...fit, iterations };
 }
 

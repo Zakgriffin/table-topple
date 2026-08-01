@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { cornerDir } from '../math/geometry.ts';
+import { C, R } from '../floorPattern.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { CompositeLine } from './bucketFillJoin.ts';
 
@@ -72,23 +73,19 @@ export interface GridPeriodPhaseResult {
   height: number | null; // cellPitch / period, null if cellPitch wasn't supplied
   rowLines: GridLineSample[];
   colLines: GridLineSample[];
-  // Everything a debug visualization needs to show its work -- the seed
-  // period, the search bracket, and every coarse sample's own (period,
-  // score) pair (for plotting the search curve and marking where it
-  // landed). Does NOT include the pooled all-pairs gap histogram -- that's
-  // an O(n^2) computation that fed ONLY a debug plot and nothing about the
-  // actual period/distance result, yet used to run unconditionally on
-  // every single capture regardless of whether anyone was even looking at
-  // that plot (measured 47% of total reconstruction time at n=983 lines --
-  // see this session's chat). computePooledGaps below recomputes it
-  // on-demand instead, from rowLines/colLines, only when
-  // overlays/gridPeriodPhaseOverlays.ts's plot is actually being drawn.
+  // Everything the debug plot (overlays/gridPeriodPhaseOverlays.ts) needs to
+  // show the search's work: the [Pmin, Pmax] bracket, the full integer-count
+  // resultant curve, the period finally chosen, and each image-tested
+  // candidate's (period, resultant, distinctness) so the plot can mark the
+  // rejected sub-multiples and why the winner won. The pooled all-pairs gap
+  // histogram is NOT here -- it's an O(n^2) computation that fed only that
+  // plot, so computePooledGaps below recomputes it on-demand from rowLines/
+  // colLines, only when the plot is actually drawn.
   debug: {
-    rowNeighborGaps: NeighborGapSample[]; // adjacent-value gaps within rowSamples ONLY (sorted, consecutive differences) -- the actual n-1 genuinely-adjacent gaps this file's period seed relies on existing, as opposed to computePooledGaps' O(n^2) all-pairs mix of both families
-    colNeighborGaps: NeighborGapSample[]; // same, for colSamples
-    seedPeriod: number;
     bracket: [number, number];
     coarseSamples: PeriodSearchSample[];
+    chosenPeriod: number;
+    candidates: { period: number; resultant: number; distinctness: number | null }[];
   };
 }
 
@@ -163,11 +160,12 @@ export function computePooledGaps(rowLines: readonly GridLineSample[], colLines:
 
 export function computeGridPeriodPhase(
   composites: { root: number; line: CompositeLine }[],
+  gray: Float64Array,
   w: number, h: number,
   quat: THREE.Quaternion, vFovRad: number, aspect: number,
   Drow: THREE.Vector3, Dcol: THREE.Vector3, Dnormal: THREE.Vector3,
   cellPitch: number | null,
-  gapLowerBound: number,
+  minGrazingCos: number,
 ): GridPeriodPhaseResult | null {
   // `composites` comes from pipeline/votes.ts's computeGradient2x2Composites
   // -- the SAME composite lines (same root numbering) computeSegmentVotes
@@ -216,107 +214,177 @@ export function computeGridPeriodPhase(
   spanEnd(classifySpan);
   if (rowSamples.length === 0 && colSamples.length === 0) return null;
 
-  // Within EACH family alone (not pooled), sort by value and diff
-  // consecutive entries -- the actual n-1 genuinely-adjacent gaps, rather
-  // than every pairwise combination across both axes. Each gap's `rank` is
-  // the midpoint of its two lines' own i/(n-1) rank (matching
-  // drawVoteFamilyLines' convention), so a caller can color it as those
-  // two lines' averaged color -- see NeighborGapSample's own comment.
-  const seedSpan = spanStart('neighbor gaps + median seed');
-  const neighborGaps = (samples: { value: number }[]): NeighborGapSample[] => {
-    const sorted = samples.map((s) => s.value).sort((a, b) => a - b);
-    const n = sorted.length;
-    const gaps: NeighborGapSample[] = [];
-    for (let i = 1; i < n; i++) {
-      const g = sorted[i] - sorted[i - 1];
-      if (g > 1e-9) gaps.push({ gap: g, rank: (i - 0.5) / (n - 1) });
-    }
-    return gaps;
-  };
-  const rowNeighborGaps = neighborGaps(rowSamples);
-  const colNeighborGaps = neighborGaps(colSamples);
-
-  // Step 3: seed the period from each family's own MEDIAN neighbor gap,
-  // not the pooled all-pairs histogram mode this used to use. A family's
-  // neighbor gaps ARE the n-1 genuinely-adjacent spacings the period is
-  // trying to measure, whereas pooledGaps mixes both axes together and
-  // includes every pairwise combination, most of which are multi-period
-  // outliers (row-1-to-row-3, etc) that the old mode search had to filter
-  // out via a whole histogram. `gapLowerBound` prunes near-duplicate-line
-  // noise gaps (an imperfectly-merged join producing two composite lines
-  // that are really the same physical line -- see this file's original
-  // dev-bridge history, where one such gap corrupted the old seed by
-  // ~500x) before the median, the same protection via a much simpler
-  // mechanism. Center the search between the two families' own medians
-  // (square cells force the same true period on both axes, so they SHOULD
-  // agree; centering hedges against either one being individually biased)
-  // and set the bracket's half-width to the distance BETWEEN them, so a
-  // bigger row/col disagreement widens the search instead of silently
-  // trusting whichever one happened to come out first. Bails out (rather
-  // than falling back to the old mode estimate) if either family has fewer
-  // than 2 lines, or every one of its gaps is below gapLowerBound --
-  // there's no reliable seed to center a narrow search on in that case.
-  const rowGapMedian = median(rowNeighborGaps.map((s) => s.gap).filter((g) => g >= gapLowerBound));
-  const colGapMedian = median(colNeighborGaps.map((s) => s.gap).filter((g) => g >= gapLowerBound));
-  spanEnd(seedSpan);
-  if (rowGapMedian === null || colGapMedian === null) return null;
-  const seedPeriod = (rowGapMedian + colGapMedian) / 2;
-  if (seedPeriod < 1e-9) return null;
-
-  // Step 4: bracketed coarse-to-fine search for the period, scored by the
-  // COMBINED (row + column) circular resultant -- centered on the seed,
-  // total width = 50x |rowGapMedian - colGapMedian| (half-width = 25x).
-  // Originally kept much narrower (2x) so the search structurally could
-  // never reach the sub-multiple periods (P0/2, P0/3, ...) that alias as
-  // false peaks -- every true lattice point trivially also sits on any
-  // finer sub-lattice, so a wide search risks locking onto one of those
-  // instead of the true, fundamental period. Widened to 50x on request;
-  // if false-peak locks start showing up, that tradeoff is why.
-  const halfWidth = Math.abs(rowGapMedian - colGapMedian) * 25;
-  // Clamped rather than bailing out when the row/col median disagreement is
-  // large enough to push the lower bound past zero -- a period can't be
-  // negative anyway, so the search is still perfectly usable over
-  // [0, seedPeriod + halfWidth], just asymmetric around the seed.
-  const bracket: [number, number] = [Math.max(0, seedPeriod - halfWidth), seedPeriod + halfWidth];
-  const searchSpan = spanStart('coarse search (40 samples) + parabolic polish');
-  const COARSE_SAMPLES = 40;
+  // ── Seed-free period search: integer-count candidates -> image-content ────
+  // ── harmonic disambiguation -> golden-section polish ──────────────────────
+  //
+  // Replaces the old median-neighbor-gap seed + 25x-disagreement bracket (and
+  // the brief "largest-period peak wins" + 0.6 heuristic that first replaced
+  // them) -- see this session's decode-robustness work and the A/B bake-off.
+  //
+  //  (1) NO SEED, BOARD-BOUNDED, INTEGER-COUNT CANDIDATES. A detected line IS a
+  //      grid line, and the two extreme detected lines sit an INTEGER number of
+  //      periods apart, so the only physically-possible periods are P_n =
+  //      spread/n for integer n (= number of periods spanning the data). n runs
+  //      from 3 (fewer isn't credibly periodic; decode needs ORDER=5 cells
+  //      anyway) up to max(R,C) (you can't observe more lines of a family than
+  //      the board has cells across -- tracks the board-size slider live). The
+  //      candidate set falls straight out of the board: no seed, no tunable
+  //      width, no arbitrary sample count.
+  //
+  //  (2) HARMONIC DISAMBIGUATION BY IMAGE CONTENT (replaces "largest peak" +
+  //      its 0.6 fudge). The circular resultant is high at the true period P0
+  //      AND at every sub-multiple P0/2, P0/3 (a lattice at spacing P0 trivially
+  //      lies on any finer sub-lattice), so the resultant alone can't separate
+  //      them. But a sub-multiple OVERSAMPLES -- each real cell becomes a kxk
+  //      block of IDENTICAL samples. The De Bruijn pattern is locally unique, so
+  //      at the TRUE period adjacent cell CENTRES differ while at a sub-multiple
+  //      they repeat. So for the top few resultant peaks we sample grayscale at
+  //      cell centres (phase + HALF a period -- the same +cell/2 offset decode
+  //      uses to hit solid interiors, NOT the gray edges the phase sits on) and
+  //      pick the period whose neighbours are most DISTINCT. Bonus: this earns
+  //      compute back downstream -- it keeps decode fed with the coarsest
+  //      correct period, not a sub-multiple that would balloon its grid 4-9x.
+  //
+  //  (3) GOLDEN-SECTION polish on the resultant within the winner's one-count
+  //      neighbourhood -- no parabola-shape assumption.
+  //
+  // KNOWN LIMIT / ALTERNATIVE (Option B): all of this still runs on the SPARSE
+  // detected lines. Under heavy line dropout at extreme grazing (measured ~70
+  // lines vs ~400, at 40-80 cells up / -18..-25deg) the sparse set can grow a
+  // genuine longer-period spurious structure -- which also has HIGH distinctness
+  // (it UNDER-samples, so neighbours still differ), so (2) won't catch it. That
+  // regime needs a DENSE per-pixel gnomonic histogram + autocorrelation, which
+  // degrades gracefully (~25-35% error) instead of exploding; measured to beat
+  // this only at those extremes, deferred as the fallback if an elevated/raked
+  // camera regime ever matters. See the A/B bake-off.
+  const searchSpan = spanStart('period search (integer-count + distinctness + golden)');
   const rowValues = rowSamples.map((s) => s.value), rowWeights = rowSamples.map((s) => s.weight);
   const colValues = colSamples.map((s) => s.value), colWeights = colSamples.map((s) => s.weight);
-  const coarseSamples: PeriodSearchSample[] = [];
-  let bestP = seedPeriod, bestScore = -1;
-  for (let i = 0; i < COARSE_SAMPLES; i++) {
-    const P = bracket[0] + ((bracket[1] - bracket[0]) * i) / (COARSE_SAMPLES - 1);
-    // circularFit divides by P -- since bracket[0] is now clamped to (not
-    // bailed out below) 0, the FIRST sample can land exactly on 0. Skipping
-    // it (rather than letting it produce a NaN score) matches the same
-    // guard overlays/gridPeriodPhaseOverlays.ts's translucent extension
-    // curve already uses, and keeps every coarseSamples entry a valid
-    // number -- a single NaN score used to break that plot's entire
-    // polyline (SVG rejects the whole `points` attribute if any one point
-    // is malformed), not just the one bad point.
-    if (P <= 1e-9) continue;
-    const rowFit = circularFit(rowValues, rowWeights, P);
-    const colFit = circularFit(colValues, colWeights, P);
-    const score = rowFit.resultant + colFit.resultant;
-    coarseSamples.push({ period: P, score });
-    if (score > bestScore) { bestScore = score; bestP = P; }
-  }
-  // Parabolic polish around the winning coarse sample using its two
-  // neighbors -- cheap precision refinement, no extra full search needed.
-  const bestIdx = coarseSamples.findIndex((s) => s.period === bestP);
-  if (bestIdx > 0 && bestIdx < coarseSamples.length - 1) {
-    const p0 = coarseSamples[bestIdx - 1], p1 = coarseSamples[bestIdx], p2 = coarseSamples[bestIdx + 1];
-    const denom = p0.score - 2 * p1.score + p2.score;
-    if (Math.abs(denom) > 1e-12) {
-      const offset = (0.5 * (p0.score - p2.score)) / denom;
-      const refinedP = p1.period + offset * (p1.period - p0.period);
-      if (refinedP > bracket[0] && refinedP < bracket[1]) {
-        const rowFit = circularFit(rowValues, rowWeights, refinedP);
-        const colFit = circularFit(colValues, colWeights, refinedP);
-        const refinedScore = rowFit.resultant + colFit.resultant;
-        if (refinedScore > bestScore) { bestScore = refinedScore; bestP = refinedP; }
-      }
+  const allValues = rowValues.concat(colValues);
+  const spread = Math.max(...allValues) - Math.min(...allValues);
+  if (!(spread > 1e-9)) return null; // no extent to search over (all lines coincident)
+  const resultantAt = (P: number) => circularFit(rowValues, rowWeights, P).resultant + circularFit(colValues, colWeights, P).resultant;
+
+  // Golden-section maximizer -- unimodal near the resultant peak, no parabola
+  // assumption. Returns the argmax within [a0, b0].
+  const goldenSectionMax = (f: (x: number) => number, a0: number, b0: number, iters = 14): number => {
+    const gr = (Math.sqrt(5) - 1) / 2;
+    let a = a0, b = b0, c = b0 - gr * (b0 - a0), d = a0 + gr * (b0 - a0);
+    let fc = f(c), fd = f(d);
+    for (let i = 0; i < iters; i++) {
+      if (fc > fd) { b = d; d = c; fd = fc; c = b - gr * (b - a); fc = f(c); }
+      else { a = c; c = d; fc = fd; d = a + gr * (b - a); fd = f(d); }
     }
+    return (a + b) / 2;
+  };
+
+  // ── Cell-centre distinctness for one candidate period (idea 2) ────────────
+  // Reverse-projects a small patch of CELL CENTRES (phase + cellPitch/2) at the
+  // candidate period back to image pixels -- exactly buildDecodeSampleGrid's
+  // per-cell construction, with distance = cellPitch/P for THIS candidate -- and
+  // returns the mean absolute adjacent grayscale difference. High at the true
+  // period (neighbours are distinct De Bruijn cells), low at a sub-multiple
+  // (neighbours are the same cell, repeated). null if there's no cell pitch to
+  // turn a period into a distance, or too little of the patch lands on-image.
+  const flipped = cornerDir(0, 0, quat, vFovRad, aspect).dot(Dnormal) > 0;
+  const normalToFloor = flipped ? Dnormal.clone().negate() : Dnormal.clone();
+  const invQuat = quat.clone().invert();
+  const halfV = vFovRad / 2;
+  const med = (arr: number[]) => (arr.length ? [...arr].sort((a, b) => a - b)[arr.length >> 1] : 0);
+  const centreXRow = med(colValues), centreXCol = med(rowValues); // col family value = xRow, row family value = xCol
+  const cellCentreDistinctness = (P: number): number | null => {
+    if (cellPitch === null) return null;
+    const distance = cellPitch / P;
+    const uvScale = flipped ? -distance : distance;
+    const phiXCol = circularFit(rowValues, rowWeights, P).phase; // row family value = xCol
+    const phiXRow = circularFit(colValues, colWeights, P).phase; // col family value = xRow
+    // (u,v) = uvScale*(xRow, xCol); boundaries at uvScale*phi, centres +cellPitch/2 (matches buildDecodeSampleGrid).
+    const uBoundaryRaw = uvScale * phiXRow, vBoundaryRaw = uvScale * phiXCol;
+    const uPhase = (uBoundaryRaw - Math.round(uBoundaryRaw / cellPitch) * cellPitch) + cellPitch / 2;
+    const vPhase = (vBoundaryRaw - Math.round(vBoundaryRaw / cellPitch) * cellPitch) + cellPitch / 2;
+    const jC = Math.round((uvScale * centreXRow - uPhase) / cellPitch), iC = Math.round((uvScale * centreXCol - vPhase) / cellPitch);
+    const M = 6; // (2M+1)^2 cell patch, centred on the visible region's median cell
+    const p = new THREE.Vector3();
+    const patch: (number | null)[][] = [];
+    for (let di = -M; di <= M; di++) {
+      const rowArr: (number | null)[] = [];
+      const v = vPhase + (iC + di) * cellPitch;
+      for (let dj = -M; dj <= M; dj++) {
+        const u = uPhase + (jC + dj) * cellPitch;
+        p.copy(Drow).multiplyScalar(u).addScaledVector(Dcol, v).addScaledVector(normalToFloor, -distance);
+        if (!(p.dot(normalToFloor) / p.length() < -minGrazingCos)) { rowArr.push(null); continue; }
+        const local = p.clone().applyQuaternion(invQuat);
+        const ndcU = -local.x / (local.z * Math.tan(halfV) * aspect), ndcV = -local.y / (local.z * Math.tan(halfV));
+        const xx = Math.round(((ndcU + 1) / 2) * w), yy = Math.round(((1 - ndcV) / 2) * h);
+        rowArr.push((xx >= 0 && xx < w && yy >= 0 && yy < h) ? gray[yy * w + xx] : null);
+      }
+      patch.push(rowArr);
+    }
+    let sum = 0, count = 0;
+    for (let i = 0; i < patch.length; i++) for (let j = 0; j < patch[i].length; j++) {
+      const a = patch[i][j]; if (a === null) continue;
+      const right = patch[i][j + 1], down = i + 1 < patch.length ? patch[i + 1][j] : undefined;
+      if (right != null) { sum += Math.abs(a - right); count++; }
+      if (down != null) { sum += Math.abs(a - down); count++; }
+    }
+    return count < 8 ? null : sum / count; // too little on-image to judge
+  };
+
+  // (1) integer-count candidate curve, ASCENDING period order (n descending).
+  const nMin = 3, nMax = Math.max(R, C);
+  const bracket: [number, number] = [spread / nMax, spread / nMin];
+  const coarseSamples: PeriodSearchSample[] = [];
+  for (let n = nMax; n >= nMin; n--) coarseSamples.push({ period: spread / n, score: resultantAt(spread / n) });
+
+  // interior local-maxima of the resultant, restricted to REAL periodicity
+  // peaks. Two signals are needed and neither suffices alone:
+  //   - distinctness (below) only demotes SUB-multiples (short periods, whose
+  //     cell centres repeat). It does NOT demote spurious LONG periods -- those
+  //     under-sample, so their neighbours still differ and they look "distinct"
+  //     too. Nor does it demote pure noise bumps.
+  //   - the resultant demotes exactly those (a spurious-long or noise period
+  //     has LOW resultant -- the lines don't fold coherently there), but can't
+  //     tell the true period from its sub-multiples (both fold perfectly).
+  // So: keep only peaks whose resultant clears SIGNIFICANCE x the best (this is
+  // a real-vs-noise cut with a ~10x margin -- true/sub-multiple peaks sit at
+  // ~0.7-1.0 of max, noise/spurious-long at <0.2 -- NOT a fiddly decision
+  // boundary; distinctness makes the actual decision among the survivors).
+  const SIGNIFICANCE = 0.5;
+  const MAX_CANDIDATES = 6; // compute budget for the (cheap) distinctness test
+  let gMax = 0; for (const s of coarseSamples) if (s.score > gMax) gMax = s.score;
+  const peaks: { period: number; idx: number; score: number }[] = [];
+  for (let i = 1; i < coarseSamples.length - 1; i++) {
+    const s = coarseSamples[i];
+    if (s.score > coarseSamples[i - 1].score && s.score >= coarseSamples[i + 1].score && s.score >= SIGNIFICANCE * gMax) {
+      peaks.push({ period: s.period, idx: i, score: s.score });
+    }
+  }
+  peaks.sort((a, b) => b.score - a.score);
+  const candidatePeaks = peaks.slice(0, MAX_CANDIDATES);
+
+  // (2) among the real periodicity peaks, pick the MOST DISTINCT (the
+  // fundamental; its sub-multiples repeat and score lower). Falls back to the
+  // largest-period significant peak when distinctness can't be sampled (no
+  // cell pitch, or too little on-image), or the plain global best if the
+  // significance cut left nothing.
+  const candidates: { period: number; resultant: number; distinctness: number | null }[] = [];
+  let chosenIdx = -1, bestDistinct = -Infinity;
+  for (const cand of candidatePeaks) {
+    const d = cellCentreDistinctness(cand.period);
+    candidates.push({ period: cand.period, resultant: cand.score, distinctness: d });
+    if (d !== null && d > bestDistinct) { bestDistinct = d; chosenIdx = cand.idx; }
+  }
+  if (chosenIdx < 0) {
+    if (candidatePeaks.length > 0) { let largestP = -1; for (const cand of candidatePeaks) if (cand.period > largestP) { largestP = cand.period; chosenIdx = cand.idx; } }
+    else { let gBest = -1; for (let i = 0; i < coarseSamples.length; i++) if (coarseSamples[i].score > gBest) { gBest = coarseSamples[i].score; chosenIdx = i; } }
+  }
+  const chosenCandidatePeriod = coarseSamples[chosenIdx].period; // pre-refine -- what the debug plot marks as "chosen"
+  let bestP = chosenCandidatePeriod;
+
+  // (3) golden-section refine on the resultant within the chosen count's
+  // immediate neighbourhood [P(n+1), P(n-1)].
+  if (chosenIdx > 0 && chosenIdx < coarseSamples.length - 1) {
+    bestP = goldenSectionMax(resultantAt, coarseSamples[chosenIdx - 1].period, coarseSamples[chosenIdx + 1].period);
   }
   spanEnd(searchSpan);
 
@@ -338,6 +406,6 @@ export function computeGridPeriodPhase(
     period: bestP, phiRow: finalRow.phase, phiCol: finalCol.phase,
     height: cellPitch !== null ? cellPitch / bestP : null,
     rowLines, colLines,
-    debug: { rowNeighborGaps, colNeighborGaps, seedPeriod, bracket, coarseSamples },
+    debug: { bracket, coarseSamples, chosenPeriod: chosenCandidatePeriod, candidates },
   };
 }

@@ -180,7 +180,8 @@ async function recomputeStages(camera: Camera, isActive: boolean) {
   spanEnd(projectSpan);
 
   const overlaySpan = spanStart('poleMarkers+overlays');
-  const timingLine = `votes ${timing.votesMs.toFixed(0)}ms  fit ${timing.fitMs.toFixed(0)}ms  pose ${timing.poseMs.toFixed(0)}ms  distance ${timing.distanceMs.toFixed(0)}ms  project ${projectMs.toFixed(0)}ms  decode ${timing.decodeMs.toFixed(0)}ms`;
+  const irlsSuffix = timing.worldVoteIterations !== null ? `  irls ${timing.worldVoteIterations} iter` : '';
+  const timingLine = `votes ${timing.votesMs.toFixed(0)}ms  fit ${timing.fitMs.toFixed(0)}ms  pose ${timing.poseMs.toFixed(0)}ms  distance ${timing.distanceMs.toFixed(0)}ms  project ${projectMs.toFixed(0)}ms  decode ${timing.decodeMs.toFixed(0)}ms${irlsSuffix}`;
   applyPoseVisualizations(camera, isActive, timingLine);
   spanEnd(overlaySpan);
 

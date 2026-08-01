@@ -75,6 +75,20 @@ export interface CameraSettingsCommon {
   showTopCircles: boolean;
   topCirclesLineWidth: number;
   weightSharpenPower: number;
+  // Orientation-fit source: false (default) is today's composite-line path
+  // (computeSegmentVotes -> fitPairOfPlanes), true swaps in
+  // pipeline/votes.ts's computePixelVotes2x2 -> refineOrientationIRLS --
+  // one vote per pixel straight off the 2x2 gradient field, iteratively
+  // reweighted instead of segmented. Orthogonal to gridPeriodPhase, which
+  // keeps reading composite lines (see computePoseFromCapture) either way --
+  // this only changes which Drow/Dcol/Dnormal it's handed.
+  useWorldVoteOrientation: boolean;
+  // Cap on refineOrientationIRLS's reweight-and-refit loop -- 0 disables
+  // refinement (the loop's own single-shot initial fit only), for direct
+  // A/B against fitPairOfPlanes. The loop itself stops early on convergence
+  // well before this in the typical case, so this is a worst-case bound,
+  // not a fixed per-frame cost -- see refineOrientationIRLS's own comment.
+  worldVoteRefineSteps: number;
   // Grazing-angle cutoff (cosine) shared by projectSamplesCPU (forward:
   // screen pixel -> floor point) and buildDecodeSampleGrid (reverse: floor
   // point -> screen pixel) -- see pipeline/decodeGrid.ts's own comment.
@@ -152,6 +166,8 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showTopCircles: true,
     topCirclesLineWidth: savedNum('topCirclesLineWidth', 1),
     weightSharpenPower: 4,
+    useWorldVoteOrientation: savedBool('useWorldVoteOrientation', false),
+    worldVoteRefineSteps: savedNum('worldVoteRefineSteps', 4),
     minGrazingCos: savedNum('minGrazingCos', 0.15),
     gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
     gridPeriodPhaseGapLowerBound: savedNum('gridPeriodPhaseGapLowerBound', 0.005),

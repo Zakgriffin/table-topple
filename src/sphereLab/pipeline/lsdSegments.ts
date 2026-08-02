@@ -279,6 +279,53 @@ export function computeEdgeNeighbors(
 // the round count so an overlay can watch components coalesce. Unlike the
 // growSteps it replaces, changing it cannot change the converged answer --
 // only how much of the way there you are looking at.
+// Hysteresis survival + the collect/relabel pass, shared by growRegionsCCL and
+// its GPU counterpart (pipelineGPU/growRegions.ts) so the two can never drift
+// in how a finished labeling turns into regions. Both are inherently serial and
+// both run exactly ONCE after the last round rather than per round, so neither
+// is part of what needs to parallelize -- and the label buffer has to come back
+// to CPU for them regardless.
+export function collectRegionsFromLabels(
+  label: Int32Array, mag: Float64Array, theta: Float64Array, rhoHigh: number, n: number,
+): { regionId: Int32Array; regions: GrownRegion[] } {
+  // Which components contain a pixel above rhoHigh. Indexed by label value (a
+  // pixel index, so bounded by n), the same convention the round loop uses.
+  const labelSurvives = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const lab = label[i];
+    if (lab !== -1 && mag[i] > rhoHigh) labelSurvives[lab] = 1;
+  }
+
+  const membersByLabel = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
+    const lab = label[i];
+    if (lab === -1 || !labelSurvives[lab]) continue;
+    let list = membersByLabel.get(lab);
+    if (!list) { list = []; membersByLabel.set(lab, list); }
+    list.push(i);
+  }
+  const sortedLabels = Array.from(membersByLabel.keys()).sort((a, b) => a - b); // deterministic order
+
+  const regionId = new Int32Array(n).fill(-1);
+  const regions: GrownRegion[] = [];
+  for (const lab of sortedLabels) {
+    const members = membersByLabel.get(lab)!;
+    const id = regions.length;
+    for (const p of members) regionId[p] = id;
+    // A plain raw sum -- no sign resolution against a reference member. With
+    // directed growth every member is within tau of every other member it is
+    // connected THROUGH, so there is no polarity flip inside a region for the
+    // sum to cancel against. (Chaining can still walk the angle a long way
+    // around a curve, which is a real effect, but it walks CONTINUOUSLY and
+    // never jumps by pi.) meanAngle stays a genuine directed value, which is
+    // what fitRectangle's PCA-sign resolution needs.
+    let sc = 0, ss = 0;
+    for (const p of members) { sc += Math.cos(theta[p]); ss += Math.sin(theta[p]); }
+    regions.push({ members: Int32Array.from(members), meanAngle: Math.atan2(ss, sc) });
+  }
+  return { regionId, regions };
+}
+
 export function growRegionsCCL(
   mag: Float64Array, theta: Float64Array, w: number, h: number,
   toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number,
@@ -340,45 +387,7 @@ export function growRegionsCCL(
     if (!changed) { converged = true; break; }
   }
 
-  // ── Hysteresis: which components contain a pixel above rhoHigh ──────────
-  // Indexed by label value (a pixel index, so bounded by n), same convention
-  // the round loop uses.
-  const labelSurvives = new Uint8Array(n);
-  for (let i = 0; i < n; i++) {
-    const lab = label[i];
-    if (lab !== -1 && mag[i] > rhoHigh) labelSurvives[lab] = 1;
-  }
-
-  // ── Collect: group by final label, remap to dense ids ───────────────────
-  // Inherently serial, and runs once after the last round rather than once
-  // per round, so it isn't part of what needs to parallelize.
-  const membersByLabel = new Map<number, number[]>();
-  for (let i = 0; i < n; i++) {
-    const lab = label[i];
-    if (lab === -1 || !labelSurvives[lab]) continue;
-    let list = membersByLabel.get(lab);
-    if (!list) { list = []; membersByLabel.set(lab, list); }
-    list.push(i);
-  }
-  const sortedLabels = Array.from(membersByLabel.keys()).sort((a, b) => a - b); // deterministic order
-
-  const regionId = new Int32Array(n).fill(-1);
-  const regions: GrownRegion[] = [];
-  for (const lab of sortedLabels) {
-    const members = membersByLabel.get(lab)!;
-    const id = regions.length;
-    for (const p of members) regionId[p] = id;
-    // A plain raw sum -- no sign resolution against a reference member. With
-    // directed growth every member is within τ of every other member it is
-    // connected THROUGH, so there is no polarity flip inside a region for the
-    // sum to cancel against. (Chaining can still walk the angle a long way
-    // around a curve, which is a real effect, but it walks CONTINUOUSLY and
-    // never jumps by π.) meanAngle stays a genuine directed value, which is
-    // what fitRectangle's PCA-sign resolution needs.
-    let sc = 0, ss = 0;
-    for (const p of members) { sc += cosT[p]; ss += sinT[p]; }
-    regions.push({ members: Int32Array.from(members), meanAngle: Math.atan2(ss, sc) });
-  }
+  const { regionId, regions } = collectRegionsFromLabels(label, mag, theta, rhoHigh, n);
   return { regionId, regions, roundsRun, converged };
 }
 

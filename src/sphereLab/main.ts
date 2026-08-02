@@ -154,10 +154,12 @@ import * as NS54 from './pipelineGPU/growRegions.ts';
 import * as NS55 from './pipelineGPU/growRegionsVerify.ts';
 import * as NS56 from './pipelineGPU/periodSweep.ts';
 import * as NS57 from './pipelineGPU/periodSweepVerify.ts';
+import * as NS58 from './pipelineGPU/decodeGridBuild.ts';
+import * as NS59 from './pipelineGPU/decodeGridBuildVerify.ts';
 Object.assign(
   globalThis,
   NS0, NS1, NS2, NS3, NS4, NS5, NS6, NS7, NS8, NS9, NS10, NS11, NS12, NS13, NS14, NS15, NS16, NS17,
-  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS45, NS47, NS48, NS49, NS50, NS51, NS52, NS53, NS54, NS55, NS56, NS57,
+  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS45, NS47, NS48, NS49, NS50, NS51, NS52, NS53, NS54, NS55, NS56, NS57, NS58, NS59,
   { THREE, activeCamera, cameras, isSimulated, isPhysical, globalState, euler, canvas, readout, savedControls,
     setMode, setPanelCollapsed, renderCameraTabs, refreshCameraPanel, renderViewport, layoutPip, resize,
     renderer, floorMesh, viewerCam, worldOrbit, insideCam, renderPreviewViewport, renderProjectedViewport,

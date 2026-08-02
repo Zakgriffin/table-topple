@@ -352,6 +352,15 @@ bindCheckbox('useGPULsdFit', (v) => {
 // a perf one (see state.ts): this is the one stage that cannot be bit-identical
 // to CPU. The debug round scrubber in overlays/lsdOverlay.ts stays on the CPU
 // grower regardless, since it needs the intermediate rounds this path skips.
+// Supersedes useGPUDecode's grid upload when on -- the packed grid is built on
+// device and the tally reads it in place, so it never crosses the bus. Output is
+// observably identical to the CPU route (verified: 0 bit diffs, matching winner
+// and consistency), so this is a pure perf toggle, not a behavioural one.
+bindCheckbox('useGPUDecodeFused', (v) => {
+  globalState.useGPUDecodeFused = v;
+  const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
+  pushSettingsSyncToAllPhysical();
+});
 // An ISLAND -- gridPeriodPhase.ts's coarse sweep shares no buffers with the LSD
 // chain, so this composes with nothing and can be flipped in isolation.
 bindCheckbox('useGPUPeriodSweep', (v) => {

@@ -91,27 +91,25 @@ function buildUniforms(gr: number, gc: number, orient: number, tableSize: number
 // null if WebGPU isn't available; caller falls back to the CPU version,
 // which stays the source of truth.
 //
-// KNOWN TRADEOFF, measured via scripts/dev-bridge/profile-comparison.mjs on
-// saved-capture.json (a decode grid of ~22x29 cells, i.e. a camera not
-// especially close to the floor): this path is currently SLOWER than the
-// CPU version -- ~40-70ms here vs ~0.4-1ms on CPU. The 4 kernel dispatches
-// themselves cost near-nothing (each ~0-0.1ms), but 4x
-// encoder/bindGroup/pass/submit plus the tally-buffer readback (fixed
-// mapAsync latency, not size-proportional -- the 4-byte totalWindows
-// readback alone has been observed anywhere from ~5ms to ~55ms run-to-run)
-// dwarfs a workload this small. This should flip in the GPU's favor once
-// the decode grid is large -- a camera close to the floor (or otherwise
-// covering more torus periods) produces a much bigger grid and
-// proportionally many more candidate windows across the 4 orientations,
-// while the per-dispatch fixed overhead stays constant. Left as a manual
-// toggle rather than an automatic grid-size fallback for now -- untested at
-// what grid size the crossover actually happens.
+// The crossover this used to speculate about has now been MEASURED (live, over
+// the dev bridge, simulated camera, 2026-08-02) and the prediction held:
+//
+//        grid          this path   tallyPositionVotes (CPU)
+//        60x59           1.60ms      0.85ms
+//        270x276         1.86ms     18.20ms
+//
+// i.e. this is essentially FLAT in grid size while the CPU version is linear,
+// so it wins ~10x as soon as the grid is large and costs under a millisecond
+// when it isn't. Winners agreed exactly at both sizes. That is why
+// globalState.useGPUDecode defaults on.
+//
+// An older version of this comment claimed ~40-70ms here vs ~0.4-1ms on CPU,
+// off a much smaller (~22x29) saved capture. Those numbers do not reproduce --
+// the readback latency it blamed (a "4-byte readback observed anywhere from
+// ~5ms to ~55ms") is not visible at all now. Treat that note as superseded.
 export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<VoteResult | null> {
   const device = await getGPUDevice();
   if (!device) return null;
-  const pipeline = getPipeline(device);
-  const { keysBuf, valuesBuf, size: tableSize } = getHashTable(device);
-
   const gr = grid.rows, gc = grid.cols;
   const gridData = new Uint32Array(gr * gc);
   for (let i = 0; i < gr; i++) {
@@ -121,6 +119,22 @@ export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<Vot
     }
   }
   const gridBuf = uploadUint32(device, gridData);
+  try {
+    return await tallyFromDeviceGrid(device, gridBuf, gr, gc);
+  } finally {
+    gridBuf.destroy(); // owned here, unlike the fused path's caller-owned buffer
+  }
+}
+
+// The tally proper, over a grid buffer this function does NOT own. Split out so
+// pipelineGPU/decodeGridBuild.ts can hand it a grid the GPU just BUILT, instead
+// of one packed and uploaded from CPU -- at a 270x276 grid that upload is 298KB
+// per call, and it is the single biggest reason to fuse the two stages.
+export async function tallyFromDeviceGrid(
+  device: GPUDevice, gridBuf: GPUBuffer, gr: number, gc: number,
+): Promise<VoteResult | null> {
+  const pipeline = getPipeline(device);
+  const { keysBuf, valuesBuf, size: tableSize } = getHashTable(device);
 
   const tallyBuf = createStorageBuffer(device, 4 * R * C * 4); // zero-initialized per WebGPU spec
   const totalWindowsBuf = createStorageBuffer(device, 4);
@@ -164,7 +178,7 @@ export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<Vot
     readUint32(device, tallyBuf, 4 * R * C * 4),
     readUint32(device, totalWindowsBuf, 4),
   ]);
-  for (const b of [gridBuf, tallyBuf, totalWindowsBuf, ...uniformBufs]) b.destroy();
+  for (const b of [tallyBuf, totalWindowsBuf, ...uniformBufs]) b.destroy(); // gridBuf is the caller's
 
   let bestIdx = -1, bestVotes = 0;
   for (let i = 0; i < tallyRaw.length; i++) {

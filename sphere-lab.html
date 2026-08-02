@@ -278,6 +278,7 @@
     <label class="chk"><input type="checkbox" id="useGPULsdFit"> GPU LSD fit + NFA test (WebGPU) -- verified identical to CPU, but currently SLOWER (upload-bound); see pipelineGPU/lsdFit.ts</label>
     <label class="chk"><input type="checkbox" id="useGPUGrowRegions"> GPU LSD region growing (WebGPU) -- NOT bit-identical to CPU by construction; run verifyGrowRegions() first, see pipelineGPU/growRegions.ts</label>
     <label class="chk"><input type="checkbox" id="useGPUPeriodSweep" checked> GPU period sweep (WebGPU) -- island, no shared buffers; f32 fold, run verifyPeriodSweep()</label>
+    <label class="chk"><input type="checkbox" id="useGPUDecodeFused" checked> GPU fused decode (build grid + tally on device) -- supersedes the grid upload above</label>
     <div class="hint" id="gpuVotesStatus" style="margin-bottom:0;"></div>
     <label class="chk"><input type="checkbox" id="useCapturePipelining" checked> Pipelined video capture (mailbox, drop stale frames)</label>
   </div>

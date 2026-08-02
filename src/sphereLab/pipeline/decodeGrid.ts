@@ -3,6 +3,7 @@ import { Camera } from '../camera/model.ts';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { tallyPositionVotesGPU } from '../pipelineGPU/decodeTally.ts';
+import { buildAndTallyDecodeGPU } from '../pipelineGPU/decodeGridBuild.ts';
 import { projectSamplesGPU } from '../pipelineGPU/projectSamples.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { C, ORDER, R, debruijnLookup, torus } from '../floorPattern.ts';
@@ -78,9 +79,24 @@ export function rotateGrid(grid: DecodeSampleGrid, o: number): DecodeSampleGrid 
   // row/col it maps to are defined for every index either way), so simply
   // preserving the SAME physical point buildDecodeSampleGrid already chose
   // (nearest the true world origin) is both simpler and just as correct.
-  const { rows: gr, cols: gc, zeroI: i, zeroJ: j } = grid;
-  const [zeroI, zeroJ] = o === 1 ? [j, gr - 1 - i] : o === 2 ? [gr - 1 - i, gc - 1 - j] : [gc - 1 - j, i];
+  const [zeroI, zeroJ] = rotatedZeroIndex(grid.rows, grid.cols, grid.zeroI, grid.zeroJ, o);
   return { rows: rr, cols: cc, zeroI, zeroJ, points };
+}
+
+// Where the grid's zero-reference cell ENDS UP after rotating by `o`. Split out
+// of rotateGrid because the GPU decode path needs it without materializing a
+// rotated grid at all -- it has no CPU-side points array to permute, but still
+// needs the rotated (zeroI, zeroJ) to index the torus with.
+//
+// Note this maps the reference cell's INDEX; the cell itself is unchanged, so
+// its u/v are still the original grid's (zeroI, zeroJ) -- see decodeGridCellUV.
+export function rotatedZeroIndex(
+  rows: number, cols: number, zeroI: number, zeroJ: number, o: number,
+): [number, number] {
+  if (o === 0) return [zeroI, zeroJ];
+  if (o === 1) return [zeroJ, rows - 1 - zeroI];
+  if (o === 2) return [rows - 1 - zeroI, cols - 1 - zeroJ];
+  return [cols - 1 - zeroJ, zeroI];
 }
 
 // Every valid order x order window, in EACH of the 4 whole-grid rotations,
@@ -578,7 +594,24 @@ export function projectedUVBounds(camera: PoseCameraLike): { minU: number; maxU:
 
 // Builds a sampling grid covering the FULL observed quadrilateral -- see
 // pre-Stage-A history for the full derivation.
-export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number): DecodeSampleGrid | null {
+// Everything about the sample lattice EXCEPT the per-cell ray-casting: the
+// axes, the phase/extent derivation, the grid dimensions, and the binarization
+// threshold. Extracted so buildDecodeSampleGrid and its GPU twin
+// (pipelineGPU/decodeGridBuild.ts) derive the lattice from ONE piece of code
+// rather than two copies that could drift -- a half-cell disagreement in
+// uPhase would put every sampled bit in the wrong place while still looking
+// like a plausible grid.
+export interface DecodeGridLayout {
+  Drow: THREE.Vector3; Dcol: THREE.Vector3; normal: THREE.Vector3;
+  invQuat: THREE.Quaternion;
+  distance: number; halfV: number; aspect: number; binThreshold: number; minGrazingCos: number;
+  uPhase: number; vPhase: number; kMinU: number; kMinV: number;
+  rows: number; cols: number; zeroI: number; zeroJ: number;
+}
+
+export function decodeGridLayout(
+  camera: PoseCameraLike, gray: Float64Array, vFovRad: number,
+): DecodeGridLayout | null {
   if (!camera.lastRecoveredAxes || !camera.lastGridPeriodPhase) return null;
   const gpp = camera.lastGridPeriodPhase;
   const bounds = projectedUVBounds(camera);
@@ -596,7 +629,6 @@ export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array
   let binThreshold = 0;
   for (let i = 0; i < gray.length; i++) binThreshold += gray[i];
   binThreshold /= gray.length;
-  const minGrazingCos = camera.settings.minGrazingCos;
 
   // phiCol/phiRow are gnomonic xRow/xCol-space phases (pipeline/gridPeriodPhase.ts);
   // u = uvScale*xRow, v = uvScale*xCol is the same conversion projectedUVScale's
@@ -614,6 +646,31 @@ export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array
   const cols = kMaxU - kMinU + 1, rows = kMaxV - kMinV + 1;
   const zeroI = Math.min(rows - 1, Math.max(0, Math.round(-vPhase / GRID_STEP) - kMinV));
   const zeroJ = Math.min(cols - 1, Math.max(0, Math.round(-uPhase / GRID_STEP) - kMinU));
+
+  return {
+    Drow, Dcol, normal, invQuat, distance, halfV, aspect: camera.aspect, binThreshold,
+    minGrazingCos: camera.settings.minGrazingCos,
+    uPhase, vPhase, kMinU, kMinV, rows, cols, zeroI, zeroJ,
+  };
+}
+
+// The u/v of one lattice cell -- pure arithmetic in (i, j), no image and no
+// ray-cast. This is what lets the GPU path recover its reference point's u/v
+// on the host in f64 instead of reading a vec4 back off the device.
+export function decodeGridCellUV(layout: DecodeGridLayout, i: number, j: number): { u: number; v: number } {
+  return {
+    u: layout.uPhase + (layout.kMinU + j) * GRID_STEP,
+    v: layout.vPhase + (layout.kMinV + i) * GRID_STEP,
+  };
+}
+
+export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number): DecodeSampleGrid | null {
+  const layout = decodeGridLayout(camera, gray, vFovRad);
+  if (!layout) return null;
+  const {
+    Drow, Dcol, normal, invQuat, distance, halfV, binThreshold, minGrazingCos,
+    uPhase, vPhase, kMinU, kMinV, rows, cols, zeroI, zeroJ,
+  } = layout;
 
   const p = new THREE.Vector3();
   const local = new THREE.Vector3();
@@ -663,6 +720,60 @@ export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array
 // Decodes the camera's absolute world position -- see pre-Stage-A history
 // for the full derivation.
 export async function runPositionDecode(camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number) {
+  // ── Fused GPU path: grid built on device, tally consumes it in place ────
+  //
+  // Distinct from useGPUDecode (which only moves the TALLY, and still packs and
+  // uploads a CPU-built grid -- 298KB per call at a 270x276 lattice). Here the
+  // packed grid never crosses the bus in either direction on the pose path:
+  // what comes back is the winner and two correctness counts, and the reference
+  // cell's u/v are recomputed on the host in f64 rather than read back.
+  //
+  // The grid IS still read back, UNCONDITIONALLY, and that is a deliberate
+  // reversal. The split-buffer design exists to make a view-conditional readback
+  // possible, and it works -- but measured, the geometry readback costs only
+  // ~1.3ms of the fused path's ~4.5ms (562KB at a 187x188 lattice), while
+  // skipping it would leave lastDecodeGrid/lastDecodeRotated/
+  // lastDecodeCorrectness null outside Projected-Cam mode. Consumers read those
+  // fields synchronously -- mobileCapture's AR readout among them -- so that
+  // trade buys ~1.3ms in exchange for a real behavioural difference between the
+  // CPU and GPU routes. Not worth it. The win here is that the PACKED grid never
+  // crosses the bus at all (298KB of upload per call at a 270x276 lattice, gone),
+  // and that stands either way.
+  //
+  // readGrid/release stay as the seam, so making this conditional later is a
+  // one-line change rather than a redesign. Falls back to the CPU pair on any
+  // failure.
+  if (globalState.useGPUDecodeFused) {
+    const fusedSpan = spanStart('decode (fused GPU build+tally)');
+    const layout = decodeGridLayout(camera, gray, vFovRad);
+    const fused = layout ? await buildAndTallyDecodeGPU(layout, gray, w, h) : null;
+    if (layout && fused) {
+      try {
+        const built = await fused.readGrid();
+        camera.lastDecodeGrid = built;
+        const rot = rotateGrid(built, fused.winner.orientation);
+        camera.lastDecodeRotated = rot;
+        camera.lastDecodeCorrectness =
+          buildCorrectnessArray(rot, fused.winner.anchorRow, fused.winner.anchorCol).correctness;
+        // The reference cell is unchanged by rotation -- only its INDEX moves --
+        // so its u/v are the original lattice's (zeroI, zeroJ), computed here in
+        // f64 instead of read back off the device.
+        const ref = decodeGridCellUV(layout, layout.zeroI, layout.zeroJ);
+        const [rzI, rzJ] = rotatedZeroIndex(layout.rows, layout.cols, layout.zeroI, layout.zeroJ, fused.winner.orientation);
+        finishPositionDecode(
+          camera, vFovRad, fused.winner, ref.u, ref.v, rzI, rzJ,
+          fused.correctCount, fused.wrongCount,
+        );
+      } finally {
+        fused.release();
+        spanEnd(fusedSpan);
+      }
+      return;
+    }
+    spanEnd(fusedSpan);
+    // fall through to CPU
+  }
+
   // Sub-spans so the decode stage's two halves are separable in the profiler.
   // They answer a specific question: buildDecodeSampleGrid is a candidate for a
   // GPU port, but only if it is actually expensive relative to a `gray` upload
@@ -687,9 +798,23 @@ export async function runPositionDecode(camera: PoseCameraLike, gray: Float64Arr
   spanEnd(tallySpan);
   if (!winner) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return; }
 
-  const { anchorRow, anchorCol } = winner;
   const rotated = rotateGrid(grid, winner.orientation);
   camera.lastDecodeRotated = rotated;
+  const { correctness, correctCount, wrongCount } = buildCorrectnessArray(rotated, winner.anchorRow, winner.anchorCol);
+  camera.lastDecodeCorrectness = correctness;
+  const refPt = rotated.points[rotated.zeroI][rotated.zeroJ];
+  finishPositionDecode(
+    camera, vFovRad, winner, refPt.u, refPt.v, rotated.zeroI, rotated.zeroJ, correctCount, wrongCount,
+  );
+}
+
+// Per-cell correctness for the projected-cam overlay, plus the two counts that
+// feed `consistency`. Only the counts matter off the display path, which is why
+// the fused GPU route computes THOSE on device (see decodeGridBuild.wgsl.ts's
+// correctness entry point) and calls this only when the array itself is wanted.
+export function buildCorrectnessArray(
+  rotated: DecodeSampleGrid, anchorRow: number, anchorCol: number,
+): { correctness: (DecodeCellDebug | null)[][]; correctCount: number; wrongCount: number } {
   const correctness: (DecodeCellDebug | null)[][] = Array.from({ length: rotated.rows }, () => new Array(rotated.cols).fill(null));
   let correctCount = 0, wrongCount = 0;
   for (let i = 0; i < rotated.rows; i++) {
@@ -703,23 +828,35 @@ export async function runPositionDecode(camera: PoseCameraLike, gray: Float64Arr
       correct ? correctCount++ : wrongCount++;
     }
   }
-  camera.lastDecodeCorrectness = correctness;
-  const consistency = correctCount + wrongCount > 0 ? correctCount / (correctCount + wrongCount) : 0;
+  return { correctness, correctCount, wrongCount };
+}
 
-  const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes!; // buildDecodeSampleGrid returning non-null guarantees this
+// Everything downstream of "we have a winner": torus registration, the closed-
+// form camera orientation, and the world position. Shared verbatim by the CPU
+// and fused-GPU routes so the two can't drift on the pose itself.
+//
+// Takes the reference cell's u/v and its ROTATED index as plain numbers rather
+// than a grid, because the fused route has no CPU-side grid to read them from --
+// it recomputes u/v arithmetically (decodeGridCellUV) and maps the index with
+// rotatedZeroIndex. That is precisely what lets it skip the grid readback.
+function finishPositionDecode(
+  camera: PoseCameraLike, vFovRad: number, winner: VoteResult,
+  refPtU: number, refPtV: number, rotZeroI: number, rotZeroJ: number,
+  correctCount: number, wrongCount: number,
+) {
+  const consistency = correctCount + wrongCount > 0 ? correctCount / (correctCount + wrongCount) : 0;
+  const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes!; // a non-null grid/layout guarantees this
   const normal = Dnormal.clone();
   if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
-  const refTorusRow = ((anchorRow + rotated.zeroI) % R + R) % R;
-  const refTorusCol = ((anchorCol + rotated.zeroJ) % C + C) % C;
+  const refTorusRow = ((winner.anchorRow + rotZeroI) % R + R) % R;
+  const refTorusCol = ((winner.anchorCol + rotZeroJ) % C + C) % C;
 
   const recoveredCamQuat = solveRecoveredCamQuat(Drow, Dcol, winner.orientation);
-
   const DrowWorld = Drow.clone().applyQuaternion(recoveredCamQuat);
   const DcolWorld = Dcol.clone().applyQuaternion(recoveredCamQuat);
   const normalWorld = normal.clone().applyQuaternion(recoveredCamQuat);
-  const refPt = rotated.points[rotated.zeroI][rotated.zeroJ];
   const hitRelWorld = new THREE.Vector3()
-    .addScaledVector(DrowWorld, refPt.u).addScaledVector(DcolWorld, refPt.v).addScaledVector(normalWorld, -distance);
+    .addScaledVector(DrowWorld, refPtU).addScaledVector(DcolWorld, refPtV).addScaledVector(normalWorld, -distance);
 
   const worldPosTrue = new THREE.Vector3((refTorusCol + 0.5 - C / 2) * GRID_STEP, 0, (refTorusRow + 0.5 - R / 2) * GRID_STEP);
   camera.lastPositionDecode = {

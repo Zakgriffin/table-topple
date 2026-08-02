@@ -86,6 +86,22 @@ export const globalState = {
   // near-zero scores, which are exactly the candidates the SIGNIFICANCE cut
   // throws away.
   useGPUPeriodSweep: true,
+  // Fused decode: buildDecodeSampleGrid AND the tally on GPU, with the packed
+  // grid staying device-resident between them (pipelineGPU/decodeGridBuild.ts).
+  // Distinct from useGPUDecode, which moves only the tally and still uploads a
+  // CPU-built grid -- 298KB per call at a 270x276 lattice.
+  //
+  // Defaults TRUE on measurement: verifyDecodeGridBuild() on a 187x188 lattice
+  // reported 0 valid-flag diffs, 0 bit diffs, an exactly matching winner and
+  // identical consistency, at 11-18ms CPU vs 4.2-4.6ms fused GPU (warm; the
+  // first call is ~88ms of shader compilation).
+  //
+  // Observably identical to the CPU route -- lastDecodeGrid/lastDecodeRotated/
+  // lastDecodeCorrectness are populated exactly as before. Skipping that grid
+  // readback outside Projected-Cam mode was tried and deliberately dropped: it
+  // saves only ~1.3ms of the ~4.5ms and would make those fields null for
+  // synchronous consumers like mobileCapture's AR readout.
+  useGPUDecodeFused: true,
   // Mailbox-style pipelining for a physical camera's video-mode capture
   // stream (see devBridge/client.ts's realCapture handler and main.ts's
   // animate loop): when on, the phone is told it's always ready and free-

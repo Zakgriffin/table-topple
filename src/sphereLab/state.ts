@@ -68,6 +68,24 @@ export const globalState = {
   // different lsdToleranceDeg could put pairs in it, which is what the harness
   // is for -- re-run it after changing tau if exactness matters.
   useGPUGrowRegions: true,
+  // Same idea, independent toggle, for gridPeriodPhase.ts's coarse period sweep
+  // (see pipelineGPU/periodSweep.ts). An ISLAND, not part of the LSD chain --
+  // it's fenced by CPU-only stages on both sides, so it shares no buffers with
+  // anything and its transfer cost is a few KB regardless of image size.
+  //
+  // Defaults TRUE on measurement, not argument: verifyPeriodSweep() on a real
+  // capture (286 candidates, 1258 lines) reported identical peak periods,
+  // identical argmax, and 14.9ms CPU -> 1.8ms GPU. The sweep is a bigger share
+  // of the distance stage than it looks.
+  //
+  // Not bit-identical -- the fold is evaluated in f32 -- but maxAbsDelta was
+  // 3.4e-6 against a 0..2 score scale. The host pre-scales values into [0,1] so
+  // the sin/cos argument never leaves [0,2pi) (see the shader's header), which
+  // is what keeps it there; ported naively the error would be ~100x worse. The
+  // relative delta looks larger (1.4e-4) only because it is dominated by
+  // near-zero scores, which are exactly the candidates the SIGNIFICANCE cut
+  // throws away.
+  useGPUPeriodSweep: true,
   // Mailbox-style pipelining for a physical camera's video-mode capture
   // stream (see devBridge/client.ts's realCapture handler and main.ts's
   // animate loop): when on, the phone is told it's always ready and free-

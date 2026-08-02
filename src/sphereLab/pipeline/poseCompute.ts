@@ -181,7 +181,7 @@ export async function computePoseFromCapture(
   // depends on it).
   const gppSpan = spanStart('gridPeriodPhase (distance source)');
   const gpp = rowDirRecovered && colDirRecovered && quadricPair
-    ? computeGridPeriodPhase(
+    ? await computeGridPeriodPhase(
         voteComposites, gray, w, h, MATH_QUAT, vFovRad, state.aspect,
         rowDirRecovered, colDirRecovered, quadricPair.Dnormal, GRID_STEP,
         state.settings.minGrazingCos,

@@ -2,6 +2,8 @@ import * as THREE from 'three';
 import { cornerDir } from '../math/geometry.ts';
 import { C, R } from '../floorPattern.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
+import { globalState } from '../state.ts';
+import { sweepResultantsGPU } from '../pipelineGPU/periodSweep.ts';
 import { CompositeLine } from './bucketFillJoin.ts';
 
 // ── Grid period/phase recovery from composite lines (pure) ────────────────
@@ -239,7 +241,10 @@ export function makeCellCentreDistinctness(
   };
 }
 
-export function computeGridPeriodPhase(
+// Async ONLY because of the coarse sweep's optional GPU dispatch (see
+// pipelineGPU/periodSweep.ts). Everything else in here is pure and synchronous,
+// and the CPU path never awaits anything real.
+export async function computeGridPeriodPhase(
   composites: { root: number; line: CompositeLine }[],
   gray: Float64Array,
   w: number, h: number,
@@ -247,7 +252,7 @@ export function computeGridPeriodPhase(
   Drow: THREE.Vector3, Dcol: THREE.Vector3, Dnormal: THREE.Vector3,
   cellPitch: number | null,
   minGrazingCos: number,
-): GridPeriodPhaseResult | null {
+): Promise<GridPeriodPhaseResult | null> {
   // `composites` comes from pipeline/votes.ts's computeGradient2x2Composites
   // -- the SAME composite lines (same root numbering) computeSegmentVotes
   // casts its own votes from, computed exactly once per reconstruction pass
@@ -425,8 +430,38 @@ export function computeGridPeriodPhase(
   const nMin = 3;
   const nMax = Math.min(HEADROOM_CAP * boardCells, Math.max(boardCells, nFromHeight));
   const bracket: [number, number] = [spread / nMax, spread / nMin];
+
+  // The sweep itself -- ~256-512 candidates x 2 families x every detected line,
+  // and the search's dominant cost. Optionally dispatched to GPU (one workgroup
+  // per candidate, see pipelineGPU/periodSweep.ts); the CPU loop below stays the
+  // source of truth and the fallback.
+  //
+  // The GPU gets values PRE-SCALED to [0,1] as (value - familyMin)/spread,
+  // divided in f64 here rather than in f32 there. That is a real precision
+  // requirement, not tidiness: period = spread/n shrinks as n grows, so
+  // value/period reaches ~nMax (~512), where f32 has only ~3-4 digits left after
+  // the point. Each family gets its OWN min because a constant shift rotates
+  // every one of that family's unit vectors equally and so cannot change its
+  // resultant -- it would move the PHASE, which is exactly why the GPU never
+  // computes phase and circularFit still runs on CPU for the chosen candidates.
+  const sweepSpan = spanStart(globalState.useGPUPeriodSweep ? 'period sweep (GPU)' : 'period sweep (CPU)');
+  let scores: Float32Array | null = null;
+  if (globalState.useGPUPeriodSweep) {
+    const total = rowValues.length + colValues.length;
+    const scaled = new Float32Array(total), weights = new Float32Array(total);
+    let at = 0;
+    for (const [vals, wts] of [[rowValues, rowWeights], [colValues, colWeights]] as const) {
+      let lo = Infinity;
+      for (const v of vals) if (v < lo) lo = v;
+      for (let i = 0; i < vals.length; i++) { scaled[at] = (vals[i] - lo) / spread; weights[at] = wts[i]; at++; }
+    }
+    scores = await sweepResultantsGPU(scaled, weights, rowValues.length, colValues.length, nMin, nMax);
+  }
   const coarseSamples: PeriodSearchSample[] = [];
-  for (let n = nMax; n >= nMin; n--) coarseSamples.push({ period: spread / n, score: resultantAt(spread / n) });
+  for (let n = nMax, i = 0; n >= nMin; n--, i++) {
+    coarseSamples.push({ period: spread / n, score: scores ? scores[i] : resultantAt(spread / n) });
+  }
+  spanEnd(sweepSpan);
 
   // interior local-maxima of the resultant, restricted to REAL periodicity
   // peaks. Two signals are needed and neither suffices alone:

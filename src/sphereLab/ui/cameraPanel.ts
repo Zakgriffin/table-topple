@@ -352,6 +352,13 @@ bindCheckbox('useGPULsdFit', (v) => {
 // a perf one (see state.ts): this is the one stage that cannot be bit-identical
 // to CPU. The debug round scrubber in overlays/lsdOverlay.ts stays on the CPU
 // grower regardless, since it needs the intermediate rounds this path skips.
+// An ISLAND -- gridPeriodPhase.ts's coarse sweep shares no buffers with the LSD
+// chain, so this composes with nothing and can be flipped in isolation.
+bindCheckbox('useGPUPeriodSweep', (v) => {
+  globalState.useGPUPeriodSweep = v;
+  const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
+  pushSettingsSyncToAllPhysical();
+});
 bindCheckbox('useGPUGrowRegions', (v) => {
   globalState.useGPUGrowRegions = v;
   const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);

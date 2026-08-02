@@ -293,17 +293,15 @@ export function computeEdgeNeighbors(
 // its GPU counterpart (pipelineGPU/growRegions.ts) so the two can never drift
 // in how a finished labeling turns into regions.
 //
-// CPU for now, but NOT because it's serial -- an earlier version of this
-// comment claimed that and it was simply wrong. Every step here is a known
-// parallel pattern: labelSurvives is a scatter of a constant (no atomic needed,
-// every writer writes 1), the grouping is a histogram + prefix sum + scatter
-// CSR build, ascending label order falls out of the scan for free because
-// labels ARE pixel indices, and meanAngle is a segmented reduction over the
-// resulting slices. The real reason it hasn't moved is that the CSR build needs
-// a prefix-sum primitive this pipeline doesn't have yet, and porting it only
-// PAYS alongside the buffer-residency work that would stop mag/theta being
-// uploaded twice -- on its own it would just add a round trip, exactly like
-// lsdFit currently does.
+// This is the CPU route AND the fallback; pipelineGPU/collectRegions.ts is the
+// GPU one. An earlier version of this comment called the step "inherently
+// serial", which was simply wrong: every stage is a standard parallel pattern
+// -- labelSurvives is a scatter of a constant (no atomic needed, every writer
+// writes 1), the grouping is a histogram + prefix sum + scatter CSR build,
+// ascending label order falls out of the scan for free because labels ARE pixel
+// indices, and meanAngle is a segmented reduction over the resulting slices.
+// What actually blocked it was the missing prefix-sum primitive, now
+// pipelineGPU/prefixSum.ts.
 export function collectRegionsFromLabels(
   label: Int32Array, mag: Float64Array, theta: Float64Array, rhoHigh: number, n: number,
   minRegionSize: number,

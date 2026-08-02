@@ -361,6 +361,15 @@ bindCheckbox('useGPUDecodeFused', (v) => {
   const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
   pushSettingsSyncToAllPhysical();
 });
+// Only meaningful with useGPUGrowRegions on -- it consumes that path's own
+// device buffers. Not expected to win on its own (it trades a label readback
+// for a CSR readback); its value is structural, as the step that lets stages
+// 1-4 close into one resident run.
+bindCheckbox('useGPUCollectRegions', (v) => {
+  globalState.useGPUCollectRegions = v;
+  const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
+  pushSettingsSyncToAllPhysical();
+});
 // An ISLAND -- gridPeriodPhase.ts's coarse sweep shares no buffers with the LSD
 // chain, so this composes with nothing and can be flipped in isolation.
 bindCheckbox('useGPUPeriodSweep', (v) => {

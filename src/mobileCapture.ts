@@ -734,6 +734,7 @@ function applySettingsSync(msg: any) {
     globalState.useGPULsdFit = !!msg.globalState.useGPULsdFit;
     globalState.useGPUGrowRegions = !!msg.globalState.useGPUGrowRegions;
     globalState.useGPUPeriodSweep = !!msg.globalState.useGPUPeriodSweep;
+    globalState.useGPUCollectRegions = !!msg.globalState.useGPUCollectRegions;
     globalState.useGPUDecodeFused = !!msg.globalState.useGPUDecodeFused;
     globalState.useGPUDecode = !!msg.globalState.useGPUDecode;
     const boardSize = msg.globalState.boardSize;

@@ -86,6 +86,22 @@ export const globalState = {
   // near-zero scores, which are exactly the candidates the SIGNIFICANCE cut
   // throws away.
   useGPUPeriodSweep: true,
+  // Hysteresis + CSR build on GPU (pipelineGPU/collectRegions.ts), consuming the
+  // label/mag/theta buffers the grower already has on device instead of reading
+  // the labeling back. Only meaningful with useGPUGrowRegions on.
+  //
+  // VERIFIED EXACT (verifyCollectRegions): 1782/1782 regions, 0 member-set, 0
+  // member-order and 0 regionId mismatches; maxMeanAngleDelta 3.6e-7, which is
+  // just the f32 cos/sin summation.
+  //
+  // Default OFF anyway, on measurement: 9.7ms CPU-collect vs 11.7ms GPU-collect
+  // for the whole grow call (warm). It trades a 786KB label readback for a CSR +
+  // regionId readback plus eight dispatches, so it is a small net LOSS on its
+  // own -- exactly as expected. Its value is structural: it is the step that
+  // makes closing stages 1-4 into one resident run possible at all, and it
+  // should flip once FieldResidency lets stage 4 consume the CSR in place
+  // instead of reading it back.
+  useGPUCollectRegions: false,
   // Fused decode: buildDecodeSampleGrid AND the tally on GPU, with the packed
   // grid staying device-resident between them (pipelineGPU/decodeGridBuild.ts).
   // Distinct from useGPUDecode, which moves only the tally and still uploads a

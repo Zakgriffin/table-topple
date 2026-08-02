@@ -3,6 +3,8 @@ import {
   createStorageBuffer, dispatchCount, getGPUDevice, readUint32, uploadFloat32, uploadUniform,
 } from './device.ts';
 import { GROW_REGIONS_WGSL } from './growRegions.wgsl.ts';
+import { collectRegionsGPU } from './collectRegions.ts';
+import { globalState } from '../state.ts';
 
 interface GrowPipelines {
   bindGroupLayout: GPUBindGroupLayout;
@@ -63,11 +65,10 @@ function getPipelines(device: GPUDevice): GrowPipelines {
 const ROUNDS_PER_BATCH = 8;
 
 // GPU-resident counterpart to pipeline/lsdSegments.ts's growRegionsCCL, for
-// the ROUND LOOP only (stage 2+3's fixpoint iteration). Hysteresis survival and
-// the collect/relabel pass stay on CPU -- see collectRegionsFromLabels's own
-// header for why, which is a "needs a prefix-sum primitive, and only pays
-// alongside buffer residency" argument and NOT the "inherently serial" one an
-// earlier version of this comment made.
+// the ROUND LOOP (stage 2+3's fixpoint iteration). Hysteresis survival and the
+// collect/relabel pass follow it, on GPU when globalState.useGPUCollectRegions
+// is set (pipelineGPU/collectRegions.ts, consuming label/mag/theta where they
+// already sit) and on CPU otherwise.
 //
 // NOT bit-identical to the CPU path, and can't be. The edge predicate is
 // `cos(theta_i - theta_j) >= cosTol`, evaluated here in f32 and there in f64 --
@@ -180,8 +181,25 @@ export async function growRegionsCCLGPU(
     if (flag[0] === 0) { converged = true; break; }
   }
 
-  const labels32 = await readUint32(device, labelBuf, n * 4);
-  const label = new Int32Array(labels32.buffer.slice(0));
+  // Hysteresis + collect. Two routes to the same result:
+  //
+  // GPU -- collectRegionsGPU consumes label/mag/theta WHERE THEY ALREADY ARE,
+  // so the labeling never crosses the bus. This is the step that makes stages
+  // 1-4 closable into one resident run; see collectRegions.wgsl.ts for why its
+  // region numbering and member ordering are exact rather than merely
+  // equivalent.
+  //
+  // CPU -- reads the labels back and runs collectRegionsFromLabels, shared
+  // verbatim with the pure-CPU path so the two can never drift.
+  let collected: { regionId: Int32Array; regions: GrownRegion[] } | null = null;
+  if (globalState.useGPUCollectRegions) {
+    collected = await collectRegionsGPU(device, labelBuf, magBuf, thetaBuf, n, rhoHigh, minRegionSize);
+  }
+  if (!collected) {
+    const labels32 = await readUint32(device, labelBuf, n * 4);
+    const label = new Int32Array(labels32.buffer.slice(0));
+    collected = collectRegionsFromLabels(label, mag, theta, rhoHigh, n, minRegionSize);
+  }
 
   for (const b of [magBuf, thetaBuf, cosBuf, sinBuf, labelBuf, nextBuf, changedBuf, uniBuf]) b.destroy();
 
@@ -191,8 +209,5 @@ export async function growRegionsCCLGPU(
     return null;
   }
 
-  // Hysteresis + collect, shared verbatim with the CPU path so the two can
-  // never drift in how a finished labeling becomes regions.
-  const { regionId, regions } = collectRegionsFromLabels(label, mag, theta, rhoHigh, n, minRegionSize);
-  return { regionId, regions, roundsRun, converged };
+  return { regionId: collected.regionId, regions: collected.regions, roundsRun, converged };
 }

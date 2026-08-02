@@ -79,6 +79,7 @@ export function pushSettingsSync(cam: PhysicalCamera) {
       useGPULsdFit: globalState.useGPULsdFit, useGPUDecode: globalState.useGPUDecode,
       useGPUGrowRegions: globalState.useGPUGrowRegions,
       useGPUPeriodSweep: globalState.useGPUPeriodSweep,
+      useGPUCollectRegions: globalState.useGPUCollectRegions,
       useGPUDecodeFused: globalState.useGPUDecodeFused,
       boardSize: globalState.boardSize,
     },

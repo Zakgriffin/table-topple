@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { Camera } from '../camera/model.ts';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
-import { binarize } from '../../decode.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { tallyPositionVotesGPU } from '../pipelineGPU/decodeTally.ts';
 import { projectSamplesGPU } from '../pipelineGPU/projectSamples.ts';
@@ -589,7 +588,14 @@ export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array
   if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
   const invQuat = MATH_QUAT.clone().invert();
   const halfV = vFovRad / 2;
-  const bin = binarize(gray);
+  // binarize() materializes a full-image Uint8Array, but this grid only ever
+  // READS rows*cols of those pixels -- on the order of a thousand out of ~200k.
+  // All it actually needs is binarize's global-mean threshold, so take the mean
+  // and compare at sample time: same decision per sampled pixel, without the
+  // 196KB allocation and the per-pixel write for the ~99.5% nothing looks at.
+  let binThreshold = 0;
+  for (let i = 0; i < gray.length; i++) binThreshold += gray[i];
+  binThreshold /= gray.length;
   const minGrazingCos = camera.settings.minGrazingCos;
 
   // phiCol/phiRow are gnomonic xRow/xCol-space phases (pipeline/gridPeriodPhase.ts);
@@ -637,8 +643,17 @@ export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array
       const px = ((ndcU + 1) / 2) * w, py = ((1 - ndcV) / 2) * h;
       const valid = grazingOk && Number.isFinite(px) && Number.isFinite(py) && px >= 0 && px < w && py >= 0 && py < h;
       if (!valid) { rowPoints.push({ u, v, px, py, valid: false, bit: 0 }); continue; }
-      const xx = Math.round(px), yy = Math.round(py);
-      rowPoints.push({ u, v, px, py, valid: true, bit: bin[yy * w + xx] });
+      // CLAMPED, because `valid` above tests px < w on the UNROUNDED value: a
+      // sample at px = w - 0.3 passes it and then rounds to w, one past the
+      // last column. Measured 2 such points in a 1635-sample grid, always at
+      // the bottom/right edge. The old binarize path indexed its Uint8Array
+      // out of bounds there and produced bit: undefined -- harmless in the
+      // tally by luck ((key << 1) | undefined === key << 1, i.e. it acted as
+      // 0), but a genuine undefined leaking into the per-cell correctness
+      // overlay. Clamping is what a nearest-pixel sample should do anyway.
+      const xx = Math.min(w - 1, Math.max(0, Math.round(px)));
+      const yy = Math.min(h - 1, Math.max(0, Math.round(py)));
+      rowPoints.push({ u, v, px, py, valid: true, bit: gray[yy * w + xx] < binThreshold ? 1 : 0 });
     }
     points.push(rowPoints);
   }
@@ -648,7 +663,14 @@ export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array
 // Decodes the camera's absolute world position -- see pre-Stage-A history
 // for the full derivation.
 export async function runPositionDecode(camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number) {
+  // Sub-spans so the decode stage's two halves are separable in the profiler.
+  // They answer a specific question: buildDecodeSampleGrid is a candidate for a
+  // GPU port, but only if it is actually expensive relative to a `gray` upload
+  // -- rows x cols is on the order of a thousand ray-casts, which may well be
+  // cheaper on CPU than moving the image across. Measure before porting.
+  const buildSpan = spanStart('buildDecodeSampleGrid');
   const grid = buildDecodeSampleGrid(camera, gray, w, h, vFovRad);
+  spanEnd(buildSpan);
   camera.lastDecodeGrid = grid;
   camera.lastDecodeRotated = null;
   if (!grid) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return; }
@@ -658,9 +680,11 @@ export async function runPositionDecode(camera: PoseCameraLike, gray: Float64Arr
   // one is currently a manual toggle rather than always-on (measured SLOWER
   // than CPU for typical grid sizes, expected to flip in the GPU's favor for
   // larger decode grids).
+  const tallySpan = spanStart(globalState.useGPUDecode ? 'tallyPositionVotes (GPU)' : 'tallyPositionVotes (CPU)');
   const winner = globalState.useGPUDecode
     ? (await tallyPositionVotesGPU(grid)) ?? tallyPositionVotes(grid)
     : tallyPositionVotes(grid);
+  spanEnd(tallySpan);
   if (!winner) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return; }
 
   const { anchorRow, anchorCol } = winner;

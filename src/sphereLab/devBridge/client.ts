@@ -52,6 +52,7 @@ function buildCameraSettingsPayload(cam: PhysicalCamera) {
     gridPeriodPhaseGapLowerBound: s.gridPeriodPhaseGapLowerBound, minGrazingCos: s.minGrazingCos,
     lsdToleranceDeg: s.lsdToleranceDeg, lsdRhoNoiseThreshold: s.lsdRhoNoiseThreshold,
     lsdRhoHighThreshold: s.lsdRhoHighThreshold, lsdCclSteps: s.lsdCclSteps,
+    lsdMinRegionSize: s.lsdMinRegionSize,
     lsdNfaEpsilon: s.lsdNfaEpsilon,
     lsdNfaTestExponent: s.lsdNfaTestExponent, lsdMaxRetries: s.lsdMaxRetries,
     lsdRetryToleranceFactor: s.lsdRetryToleranceFactor, lsdRetryShrinkFraction: s.lsdRetryShrinkFraction,
@@ -76,6 +77,7 @@ export function pushSettingsSync(cam: PhysicalCamera) {
     globalState: {
       useGPUFit: globalState.useGPUFit, useGPUGradient: globalState.useGPUGradient,
       useGPULsdFit: globalState.useGPULsdFit, useGPUDecode: globalState.useGPUDecode,
+      useGPUGrowRegions: globalState.useGPUGrowRegions,
       boardSize: globalState.boardSize,
     },
     cameraSettings: buildCameraSettingsPayload(cam),

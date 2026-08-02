@@ -1,7 +1,7 @@
 import { activeCamera } from '../camera/store.ts';
 import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import { computeMagTheta, countRectanglePixels, fitRegionWithRetries, growRegionsCCL, LsdRectangle } from '../pipeline/lsdSegments.ts';
+import { computeMagTheta, countRectanglePixels, fitRegionOnce, growRegionsCCL, LsdRectangle } from '../pipeline/lsdSegments.ts';
 import { fitAndTestRegionsGPU } from './lsdFit.ts';
 
 // ── Dev harness: is lsdFit.wgsl.ts's output still the CPU path's output? ──
@@ -17,16 +17,17 @@ import { fitAndTestRegionsGPU } from './lsdFit.ts';
 //
 //   await verifyLsdFit()
 //
-// Compares STAGE 4 + STAGE 5-ATTEMPT-0 ONLY, which is exactly the shader's
-// scope. Both sides are handed the SAME regions from a single growRegionsCCL
-// call, so any difference is the fit/NFA kernel and not the grower, and both
-// run with maxRetries forced to 0 so the CPU side stops where the GPU side
-// does (the retry loop is deliberately unported -- retry 2+ needs a per-region
-// partial sort). fitAndTestRegionsGPU is called DIRECTLY rather than through
-// computeLsdRectanglesGPU, because that wrapper silently re-runs every
-// GPU-rejected region on CPU -- which is the right production behavior and
-// exactly the wrong thing for a comparison, since it would mask disagreements
-// on rejection as agreement.
+// Compares STAGE 4 + STAGE 5, which is now the whole fitter on both sides --
+// the retry loop is retired and the CPU reference is fitRegionOnce, so the two
+// paths have identical scope by construction rather than by pinning a setting.
+// Both sides are handed the SAME regions from a single growRegionsCCL call, so
+// any difference is the fit/NFA kernel and not the grower.
+//
+// fitAndTestRegionsGPU is called DIRECTLY rather than through
+// computeLsdRectanglesGPU. That mattered more when the wrapper re-ran every
+// GPU-rejected region on CPU (which would have masked rejection disagreements
+// as agreement); it no longer does, but calling the kernel directly is still
+// what keeps this a test of the kernel rather than of the wrapper.
 export interface LsdFitVerifyReport {
   regions: number;
   regionSizes: { min: number; median: number; p95: number; max: number; singletons: number };
@@ -62,23 +63,27 @@ export async function verifyLsdFit(camera?: Camera | null): Promise<LsdFitVerify
   const field = computeGradient2x2Field(gray, w, h);
   const { mag, theta } = computeMagTheta(field);
   const { regions } = growRegionsCCL(
-    mag, theta, w, h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps,
+    mag, theta, w, h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
   );
   if (regions.length === 0) return 'grower produced no regions -- nothing to compare';
 
   const maxDim = Math.max(w, h);
   const logNTests = s.lsdNfaTestExponent * Math.log(maxDim);
   const logEpsilon = Math.log(s.lsdNfaEpsilon);
-  // maxRetries: 0 pins the CPU side to attempt 0, the shader's whole scope.
+  // The retry fields are inert now -- fitRegionOnce is attempt-0-only by
+  // construction, which is exactly the shader's scope, so there is no longer a
+  // maxRetries: 0 pin needed to make the comparison fair. They stay in the
+  // literal only because LsdSettings still declares them for the retired
+  // fitRegionWithRetries.
   const cpuSettings = {
     toleranceDeg: s.lsdToleranceDeg, rhoNoiseThreshold: s.lsdRhoNoiseThreshold,
-    rhoHighThreshold: s.lsdRhoHighThreshold, cclSteps: s.lsdCclSteps,
+    rhoHighThreshold: s.lsdRhoHighThreshold, cclSteps: s.lsdCclSteps, minRegionSize: s.lsdMinRegionSize,
     nfaEpsilon: s.lsdNfaEpsilon, nfaTestExponent: s.lsdNfaTestExponent,
     maxRetries: 0, retryToleranceFactor: s.lsdRetryToleranceFactor, retryShrinkFraction: s.lsdRetryShrinkFraction,
   };
 
   const cpuStart = performance.now();
-  const cpu: (LsdRectangle | null)[] = regions.map((r) => fitRegionWithRetries(r, mag, theta, w, h, cpuSettings, logNTests, logEpsilon));
+  const cpu: (LsdRectangle | null)[] = regions.map((r) => fitRegionOnce(r, mag, theta, w, h, cpuSettings, logNTests, logEpsilon));
   const cpuMs = performance.now() - cpuStart;
 
   const gpuStart = performance.now();
@@ -117,7 +122,7 @@ export async function verifyLsdFit(camera?: Camera | null): Promise<LsdFitVerify
     maxAbs.width = Math.max(maxAbs.width, Math.abs(c.width - g.width));
     // Both can be +-Infinity for a degenerate tail; only compare finite pairs.
     // Recount on CPU using the CPU's OWN fitted rectangle, mirroring exactly
-    // what fitRegionWithRetries did internally -- so this is the same n/k that
+    // what fitRegionOnce did internally -- so this is the same n/k that
     // produced c.nfaLog10, not an independent estimate.
     const { n: cpuN, k: cpuK } = countRectanglePixels(c, mag, theta, w, h, s.lsdRhoNoiseThreshold, toleranceRad);
     if (cpuN !== g.n) { countMismatches.n++; maxCountDelta.n = Math.max(maxCountDelta.n, Math.abs(cpuN - g.n)); }

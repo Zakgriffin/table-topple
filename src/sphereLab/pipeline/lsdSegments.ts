@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { BucketFillSegment } from './bucketFillSegments.ts';
 import { fitAndTestRegionsGPU } from '../pipelineGPU/lsdFit.ts';
+import { growRegionsCCLGPU } from '../pipelineGPU/growRegions.ts';
 import { globalState } from '../state.ts';
 import { GradientField } from '../types.ts';
 
@@ -42,22 +43,31 @@ import { GradientField } from '../types.ts';
 // mag/theta and the region CSR from CPU on every call, so it currently ADDS a
 // round trip and measures slower (3.5ms CPU vs 8ms GPU). That inverts once
 // stage 2+3 is GPU-resident and the labeling never lands on CPU.
-// Stage 2+3 is CPU-only for now (see growRegionsCCL's own header) -- like the
-// JFA version it replaces it's architecturally GPU-ready (each round is two
+// Stage 2+3 ALSO has a GPU port now (pipelineGPU/growRegions.ts, toggled by
+// globalState.useGPUGrowRegions, dispatched independently of the fit stage in
+// computeLsdRectanglesAuto). Like the JFA version it replaces, it was
+// architecturally GPU-ready by construction -- each round is two
 // frozen-buffer-in/fresh-buffer-out passes with no same-round cross-pixel
-// dependency), and it needs strictly LESS GPU machinery than that version did:
-// the per-round segmented reduction over region sums is gone entirely, leaving
-// only the propagate step itself.
+// dependency -- and it needed strictly LESS GPU machinery than that version
+// would have: the per-round segmented reduction over region sums is gone
+// entirely, leaving only the propagate step itself. It is the one stage that is
+// NOT bit-identical to its CPU counterpart and cannot be made so; see its own
+// header, and pipelineGPU/growRegionsVerify.ts for how to measure the exposure
+// on a given capture.
 //
-// Stage 5's retry loop (tighten-then-shrink on NFA rejection) also stayed
-// CPU-only -- retry 1 (angle refilter) would be easy, but retry 2+ needs a
-// per-region partial sort/selection (drop the farthest-from-center
-// fraction), a genuinely harder GPU problem than anything else here. Any
-// region the GPU's first pass rejects falls through to fitRegionWithRetries
-// below (the exact same CPU code the pure-CPU path uses for every region),
-// re-attempting from scratch rather than resuming GPU state -- simpler and
-// risk-free, at the minor cost of redoing that region's attempt 0 on CPU
-// too.
+// Stage 5's retry loop (tighten-then-shrink on NFA rejection) is RETIRED --
+// fitRegionOnce is the live fitter, fitRegionWithRetries stays below as
+// unreferenced reference code. It was never ported (retry 2+ needs a per-region
+// partial sort, the hardest GPU problem in this file), and keeping it CPU-side
+// meant every GPU-rejected region fell back to CPU and dragged mag/theta along
+// with it -- the last dependency preventing stages 1-4 from becoming one
+// GPU-resident run. Both fitters are now attempt-0-only, so the CPU and GPU
+// paths have identical scope by construction rather than by pinning a setting.
+//
+// Regions below settings.minRegionSize are dropped in
+// collectRegionsFromLabels, before either fitter sees them. At the default
+// floor of 2 that is free (a 1-member region has no axis to fit) and removes
+// ~40% of the fit stage's input on a real capture.
 
 // The level-line angle (LSD's own convention): the gradient rotated -90
 // degrees, a DIRECTED angle -- it encodes which side is darker. The two edges
@@ -281,12 +291,22 @@ export function computeEdgeNeighbors(
 // only how much of the way there you are looking at.
 // Hysteresis survival + the collect/relabel pass, shared by growRegionsCCL and
 // its GPU counterpart (pipelineGPU/growRegions.ts) so the two can never drift
-// in how a finished labeling turns into regions. Both are inherently serial and
-// both run exactly ONCE after the last round rather than per round, so neither
-// is part of what needs to parallelize -- and the label buffer has to come back
-// to CPU for them regardless.
+// in how a finished labeling turns into regions.
+//
+// CPU for now, but NOT because it's serial -- an earlier version of this
+// comment claimed that and it was simply wrong. Every step here is a known
+// parallel pattern: labelSurvives is a scatter of a constant (no atomic needed,
+// every writer writes 1), the grouping is a histogram + prefix sum + scatter
+// CSR build, ascending label order falls out of the scan for free because
+// labels ARE pixel indices, and meanAngle is a segmented reduction over the
+// resulting slices. The real reason it hasn't moved is that the CSR build needs
+// a prefix-sum primitive this pipeline doesn't have yet, and porting it only
+// PAYS alongside the buffer-residency work that would stop mag/theta being
+// uploaded twice -- on its own it would just add a round trip, exactly like
+// lsdFit currently does.
 export function collectRegionsFromLabels(
   label: Int32Array, mag: Float64Array, theta: Float64Array, rhoHigh: number, n: number,
+  minRegionSize: number,
 ): { regionId: Int32Array; regions: GrownRegion[] } {
   // Which components contain a pixel above rhoHigh. Indexed by label value (a
   // pixel index, so bounded by n), the same convention the round loop uses.
@@ -310,6 +330,14 @@ export function collectRegionsFromLabels(
   const regions: GrownRegion[] = [];
   for (const lab of sortedLabels) {
     const members = membersByLabel.get(lab)!;
+    // Prefilter, here rather than at the fitter, so an undersized component is
+    // never materialized as a region on EITHER path -- no GrownRegion object,
+    // no CSR row, no GPU thread. At the default floor of 2 this is purely work
+    // removed: a 1-member component has no axis to fit, so the fitter could
+    // only ever return null for it and the caller drop it. Its pixels are left
+    // at regionId -1, which is what the raw-region debug overlay paints as "no
+    // region" -- an isolated pixel stops showing as a region of one.
+    if (members.length < minRegionSize) continue;
     const id = regions.length;
     for (const p of members) regionId[p] = id;
     // A plain raw sum -- no sign resolution against a reference member. With
@@ -328,7 +356,7 @@ export function collectRegionsFromLabels(
 
 export function growRegionsCCL(
   mag: Float64Array, theta: Float64Array, w: number, h: number,
-  toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number,
+  toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
 ): { regionId: Int32Array; regions: GrownRegion[]; roundsRun: number; converged: boolean } {
   const n = w * h;
   const cosTol = Math.cos(THREE.MathUtils.degToRad(toleranceDeg));
@@ -387,7 +415,7 @@ export function growRegionsCCL(
     if (!changed) { converged = true; break; }
   }
 
-  const { regionId, regions } = collectRegionsFromLabels(label, mag, theta, rhoHigh, n);
+  const { regionId, regions } = collectRegionsFromLabels(label, mag, theta, rhoHigh, n, minRegionSize);
   return { regionId, regions, roundsRun, converged };
 }
 
@@ -595,7 +623,9 @@ export interface LsdSettings {
   // own comment for what the pair does.
   rhoNoiseThreshold: number; rhoHighThreshold: number;
   cclSteps: number; // debug round scrubber only -- 0 = run to fixpoint, see growRegionsCCL
+  minRegionSize: number; // components smaller than this never become regions -- see camera/settings.ts's lsdMinRegionSize
   nfaEpsilon: number; nfaTestExponent: number;
+  // Read only by the retired fitRegionWithRetries -- no live path touches them.
   maxRetries: number; retryToleranceFactor: number; retryShrinkFraction: number;
 }
 
@@ -607,16 +637,54 @@ export function computeMagTheta(field: GradientField): { mag: Float64Array; thet
   return { mag, theta };
 }
 
-// Stage 5's full accept/retry loop for ONE region -- shared by the pure-CPU
-// path (every region) and the GPU path (only regions lsdFit.wgsl.ts's first
-// pass rejected, re-attempted from scratch rather than resuming GPU state,
-// see this file's header). Returns null only for a degenerate region (< 2
-// members even before any retry).
-// Exported for pipelineGPU/lsdFitVerify.ts, which needs to compare the CPU
-// result REGION-BY-REGION against the GPU kernel's. computeLsdRectangles below
-// can't serve that purpose: it drops degenerate regions (`if (r) results.push`)
-// so its output indices no longer line up with the region array the GPU
-// dispatch was built from.
+// Stage 4 + stage 5 for ONE region, attempt 0 only -- the LIVE fitter, used by
+// the CPU path for every region and by pipelineGPU/lsdFitVerify.ts as the
+// per-region reference the GPU kernel is compared against. Exactly the scope
+// lsdFit.wgsl.ts implements, which is the point: with no retry concept on
+// either side there is nothing left for the two paths to disagree about
+// structurally.
+//
+// Returns null only for a region below the 2-member floor. In practice that
+// never happens now -- collectRegionsFromLabels' minRegionSize prefilter
+// already dropped those -- but the guard stays because fitRectangle genuinely
+// has no axis to fit with fewer than 2 points, and the floor is a slider.
+export function fitRegionOnce(
+  region: GrownRegion, mag: Float64Array, theta: Float64Array, w: number, h: number,
+  settings: LsdSettings, logNTests: number, logEpsilon: number,
+): LsdRectangle | null {
+  const members = region.members;
+  if (members.length < 2) return null;
+  const rect = fitRectangle(members, mag, w, region.meanAngle);
+  const toleranceRad = THREE.MathUtils.degToRad(settings.toleranceDeg);
+  const { n: rn, k: rk } = countRectanglePixels(rect, mag, theta, w, h, settings.rhoNoiseThreshold, toleranceRad);
+  const logNfa = logNTests + logBinomialTail(rn, rk, toleranceRad / Math.PI);
+  const nfaLog10 = logNfa / Math.LN10;
+  return {
+    cx: rect.cx, cy: rect.cy, theta: rect.theta, length: rect.length, width: rect.width,
+    accepted: logNfa < logEpsilon, retries: 0, nfaLog10,
+    lineScore: nfaLog10ToLineScore(nfaLog10, logEpsilon), rawMembers: region.members,
+  };
+}
+
+// ── RETIRED-NOTE: NOT CALLED FROM ANYWHERE ───────────────────────────────
+// Stage 5's original accept/RETRY loop (tighten tau, then shrink the region by
+// dropping its farthest-from-center members). fitRegionOnce above replaced it
+// as the live fitter; this is kept as reference, not deleted, alongside
+// growRegionsJFA at the bottom of this file.
+//
+// Retired deliberately rather than because it was wrong. It was the last thing
+// forcing mag/theta to stay available on CPU during the GPU path -- every
+// GPU-rejected region fell through to here for a CPU re-attempt -- which is
+// exactly the dependency that has to go for stages 1-4 to become one
+// GPU-resident run. Retry 1 (angle refilter) would have ported easily; retry 2+
+// needs a per-region partial sort (drop the farthest fraction), which is a
+// genuinely harder GPU problem than anything else in this file. With the live
+// path running attempt-0-only, the GPU's rejected candidates are simply used as
+// returned, and nothing re-derives them on CPU.
+//
+// Its three settings (lsdMaxRetries/lsdRetryToleranceFactor/
+// lsdRetryShrinkFraction) still exist and their sliders are disabled, not
+// removed -- see camera/settings.ts.
 export function fitRegionWithRetries(
   region: GrownRegion, mag: Float64Array, theta: Float64Array, w: number, h: number,
   settings: LsdSettings, logNTests: number, logEpsilon: number,
@@ -683,74 +751,114 @@ export function fitRegionWithRetries(
   return { cx: rect.cx, cy: rect.cy, theta: rect.theta, length: rect.length, width: rect.width, accepted, retries, nfaLog10, lineScore, rawMembers: region.members };
 }
 
-export function computeLsdRectangles(field: GradientField, settings: LsdSettings): LsdRectangle[] {
-  const { w, h } = field;
-  const { mag, theta } = computeMagTheta(field);
+// The two NFA log terms, derived once per call from the settings + image size
+// so the stage-4 helpers below can't drift in how they compute them.
+function nfaLogTerms(w: number, h: number, settings: LsdSettings): { logNTests: number; logEpsilon: number } {
+  return {
+    logNTests: settings.nfaTestExponent * Math.log(Math.max(w, h)),
+    logEpsilon: Math.log(settings.nfaEpsilon),
+  };
+}
 
-  const { regions } = growRegionsCCL(
-    mag, theta, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps,
-  );
-
-  const maxDim = Math.max(w, h);
-  const logNTests = settings.nfaTestExponent * Math.log(maxDim);
-  const logEpsilon = Math.log(settings.nfaEpsilon);
-
+// Stage 4+5 on CPU, for an ALREADY-GROWN region set. Split out from
+// computeLsdRectangles so the grower and the fitter can be dispatched to
+// CPU/GPU independently of each other (see computeLsdRectanglesAuto).
+function fitRegionsCPU(
+  regions: readonly GrownRegion[], mag: Float64Array, theta: Float64Array,
+  w: number, h: number, settings: LsdSettings,
+): LsdRectangle[] {
+  const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
   const results: LsdRectangle[] = [];
   for (const region of regions) {
-    const r = fitRegionWithRetries(region, mag, theta, w, h, settings, logNTests, logEpsilon);
+    const r = fitRegionOnce(region, mag, theta, w, h, settings, logNTests, logEpsilon);
     if (r) results.push(r);
   }
   return results;
 }
 
-// GPU-resident counterpart to computeLsdRectangles -- mag/theta + region
-// growing stay identical/CPU (see this file's own header for why), only
-// stage 4 + stage 5's first pass move to GPU (pipelineGPU/lsdFit.ts). Any
-// region that pass rejects falls through to fitRegionWithRetries on CPU,
-// same as the pure-CPU path. Returns null only if WebGPU itself is
-// unavailable -- computeLsdRectanglesAuto below is what callers actually
-// use, and handles that fallback.
-export async function computeLsdRectanglesGPU(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[] | null> {
-  const { w, h } = field;
-  const { mag, theta } = computeMagTheta(field);
-
-  const { regions } = growRegionsCCL(
-    mag, theta, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps,
-  );
-
-  const maxDim = Math.max(w, h);
-  const logNTests = settings.nfaTestExponent * Math.log(maxDim);
-  const logEpsilon = Math.log(settings.nfaEpsilon);
-
+// Stage 4 + stage 5 on GPU (pipelineGPU/lsdFit.ts). Null only if WebGPU itself
+// is unavailable.
+//
+// REJECTED candidates are taken straight from the GPU's own output rather than
+// re-fitted on CPU. That fallback existed only to run the retry loop on regions
+// the first pass rejected; with the fitter attempt-0-only and the two paths
+// verified to agree on n/k/accept, re-running a rejection on CPU would spend
+// real time reproducing the identical numbers. The shader already returns full
+// geometry for rejected regions, which is all the "show rejected candidates"
+// overlay wants. Dropping it is also what frees stages 1-4 from needing
+// mag/theta on CPU at all.
+async function fitRegionsGPU(
+  regions: readonly GrownRegion[], mag: Float64Array, theta: Float64Array,
+  w: number, h: number, settings: LsdSettings,
+): Promise<LsdRectangle[] | null> {
+  const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
   const gpuResults = await fitAndTestRegionsGPU(
-    mag, theta, w, h, regions, settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon,
+    mag, theta, w, h, regions as GrownRegion[], settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon,
   );
   if (!gpuResults) return null;
 
   const results: LsdRectangle[] = [];
   for (let i = 0; i < regions.length; i++) {
-    const region = regions[i];
     const g = gpuResults[i];
-    if (g.accepted) {
-      results.push({
-        cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
-        accepted: true, retries: 0, nfaLog10: g.nfaLog10, lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon),
-        rawMembers: region.members,
-      });
-    } else {
-      const r = fitRegionWithRetries(region, mag, theta, w, h, settings, logNTests, logEpsilon);
-      if (r) results.push(r);
-    }
+    results.push({
+      cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
+      accepted: g.accepted, retries: 0, nfaLog10: g.nfaLog10,
+      lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon), rawMembers: regions[i].members,
+    });
   }
   return results;
 }
 
+// Fully-CPU path, and the source of truth every GPU stage is verified against.
+export function computeLsdRectangles(field: GradientField, settings: LsdSettings): LsdRectangle[] {
+  const { w, h } = field;
+  const { mag, theta } = computeMagTheta(field);
+  const { regions } = growRegionsCCL(
+    mag, theta, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+  );
+  return fitRegionsCPU(regions, mag, theta, w, h, settings);
+}
+
+// CPU growing + GPU fitting, i.e. the useGPULsdFit half of the dispatch in
+// isolation. Kept as a named entry point because it is the exact pairing
+// pipelineGPU/lsdFitVerify.ts's numbers were measured against.
+export async function computeLsdRectanglesGPU(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[] | null> {
+  const { w, h } = field;
+  const { mag, theta } = computeMagTheta(field);
+  const { regions } = growRegionsCCL(
+    mag, theta, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+  );
+  return fitRegionsGPU(regions, mag, theta, w, h, settings);
+}
+
 // Single dispatch point both production callers (pipeline/votes.ts,
-// overlays/lsdOverlay.ts) use -- centralizes the globalState.useGPULsdFit
-// check once instead of duplicating it at each call site.
+// overlays/lsdOverlay.ts) use -- centralizes the globalState GPU checks once
+// instead of duplicating them at each call site.
+//
+// The two stages dispatch INDEPENDENTLY: useGPUGrowRegions picks stage 2+3,
+// useGPULsdFit picks stage 4+5's first pass, and either can fall back to CPU on
+// its own without disturbing the other. That independence is the point -- the
+// grower is the one stage whose GPU output is NOT bit-identical to its CPU
+// output (see pipelineGPU/growRegions.ts's header), so it has to stay
+// separately switchable from a stage that is.
+//
+// mag/theta is computed ONCE here and shared by whichever pair of stages runs,
+// rather than each stage recomputing it from the field.
 export async function computeLsdRectanglesAuto(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[]> {
-  if (!globalState.useGPULsdFit) return computeLsdRectangles(field, settings);
-  return (await computeLsdRectanglesGPU(field, settings)) ?? computeLsdRectangles(field, settings);
+  const { w, h } = field;
+  const { mag, theta } = computeMagTheta(field);
+
+  const growArgs = [
+    w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+  ] as const;
+  const grown = globalState.useGPUGrowRegions ? await growRegionsCCLGPU(mag, theta, ...growArgs) : null;
+  const { regions } = grown ?? growRegionsCCL(mag, theta, ...growArgs);
+
+  if (globalState.useGPULsdFit) {
+    const gpu = await fitRegionsGPU(regions, mag, theta, w, h, settings);
+    if (gpu) return gpu;
+  }
+  return fitRegionsCPU(regions, mag, theta, w, h, settings);
 }
 
 // ── Adapter: LSD rectangles -> bucketFillJoin.ts's expected input shape ──

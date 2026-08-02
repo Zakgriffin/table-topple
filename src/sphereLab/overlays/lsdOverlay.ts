@@ -259,7 +259,7 @@ export async function updateLsdOverlay(camera: Camera) {
     const { mag, theta } = computeMagTheta(field);
     const { regionId, regions, roundsRun, converged } = growRegionsCCL(
       mag, theta, w, h, settings.lsdToleranceDeg, settings.lsdRhoNoiseThreshold, settings.lsdRhoHighThreshold,
-      settings.lsdCclSteps,
+      settings.lsdCclSteps, settings.lsdMinRegionSize,
     );
     camera.lastLsdGrownRegions = { regionId, regions, mag, theta, roundsRun, converged };
     repaintLsdRawRegionsHighlight(camera); // respects whatever camera.lastHoverFieldIndex already is, not just a fresh "every region" paint
@@ -271,6 +271,7 @@ export async function updateLsdOverlay(camera: Camera) {
     rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
     rhoHighThreshold: settings.lsdRhoHighThreshold,
     cclSteps: settings.lsdCclSteps,
+    minRegionSize: settings.lsdMinRegionSize,
     nfaEpsilon: settings.lsdNfaEpsilon,
     nfaTestExponent: settings.lsdNfaTestExponent,
     maxRetries: settings.lsdMaxRetries,

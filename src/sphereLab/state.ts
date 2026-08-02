@@ -51,6 +51,23 @@ export const globalState = {
   // arrays from CPU every call. Toggleable for A/B; worth defaulting on once
   // growRegionsCCL is GPU-resident and that upload disappears.
   useGPULsdFit: false,
+  // Same idea, independent toggle, for the LSD pipeline's stage 2+3 (directed
+  // connected-component region growing, see pipelineGPU/growRegions.ts).
+  //
+  // Defaults TRUE like the rest, on measured evidence: verifyGrowRegions()
+  // reported 2931/2931 exactly-matching regions, identical size distribution,
+  // meanAngle delta 0, and 35.9ms CPU -> 15.3ms GPU on a real capture.
+  //
+  // Worth knowing WHY that was exact rather than merely close, because it is
+  // capture-dependent. This is the one GPU stage that cannot be bit-identical in
+  // principle -- the edge predicate is evaluated in f32 here and f64 on CPU, so
+  // a neighbour pair within ~1e-7 of exactly the tolerance can fall on opposite
+  // sides, and one flipped edge merges or splits a whole component rather than
+  // perturbing a number. The harness's `borderlinePairs` counts pairs actually
+  // sitting in that window; it measured 0, so there was nothing exposed. A
+  // different lsdToleranceDeg could put pairs in it, which is what the harness
+  // is for -- re-run it after changing tau if exactness matters.
+  useGPUGrowRegions: true,
   // Mailbox-style pipelining for a physical camera's video-mode capture
   // stream (see devBridge/client.ts's realCapture handler and main.ts's
   // animate loop): when on, the phone is told it's always ready and free-

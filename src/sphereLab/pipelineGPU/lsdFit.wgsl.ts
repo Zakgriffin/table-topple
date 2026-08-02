@@ -11,15 +11,14 @@
 // fundamentally different shape: many small independent per-region
 // reductions here vs. one big reduction there).
 //
-// The retry loop (tighten-then-shrink on NFA rejection) is deliberately
-// NOT ported -- retry 2+ needs a per-region partial sort/selection (drop
-// the farthest-from-center fraction), a genuinely harder GPU problem than
-// anything else in this stage. lsdFit.ts's caller instead falls back to
-// the existing CPU retry loop (pipeline/lsdSegments.ts's
-// fitRegionWithRetries) for any region this first pass rejects -- see this
-// file's own header in lsdSegments.ts for why re-running that region's
-// attempt 0 on CPU too (rather than resuming from this kernel's partial
-// state) is the safer, simpler handoff.
+// The retry loop (tighten-then-shrink on NFA rejection) was never ported --
+// retry 2+ needs a per-region partial sort/selection (drop the
+// farthest-from-center fraction), a genuinely harder GPU problem than
+// anything else in this stage. It is now RETIRED on the CPU side too
+// (pipeline/lsdSegments.ts's fitRegionWithRetries, kept unreferenced), so
+// this kernel is no longer a partial implementation of a larger CPU
+// algorithm: it is the whole fitter, and rejected candidates are used
+// exactly as this pass returns them instead of being re-derived on CPU.
 //
 // logBinomialTail's log-sum-exp is done as an ONLINE/streaming update
 // (rescale-on-new-max) rather than the CPU version's two-pass

@@ -151,6 +151,9 @@
   .cameraTab.globalTab::before { border-radius: 2px; } /* square dot, not a circle -- distinct from a camera's own color swatch */
   .section { margin-top: 10px; padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.15); }
   .section.disabled { opacity: 0.35; pointer-events: none; }
+  /* Row-level equivalent, for individual controls whose stage has been retired
+     from the live pipeline but whose code is kept as reference. */
+  .row.disabled { opacity: 0.35; pointer-events: none; }
   .hidden { display: none !important; }
   .section h2 { font-size: 11px; text-transform: uppercase; letter-spacing: 0.5px; color: #8ab; margin-bottom: 6px; }
   .row { display: flex; align-items: center; gap: 8px; margin-bottom: 6px; }
@@ -212,11 +215,14 @@
       <div class="row"><span class="label">rho high (survival)</span><input type="range" id="lsdRhoHighThreshold" min="0" max="0.4" step="0.002" value="0.047"><span class="val" id="lsdRhoHighThresholdVal"></span></div>
       <div class="row"><span class="label">CCL steps</span><input type="range" id="lsdCclSteps" min="0" max="60" step="1" value="0"><span class="val" id="lsdCclStepsVal"></span></div>
       <div class="hint">Hysteresis: any pixel above <em>rho low</em> can form growth edges, but a finished component is discarded unless one of its members clears <em>rho high</em>. <em>CCL steps</em> is a pure scrubber -- "auto" runs to the fixpoint (the real algorithm); 1+ caps the hook/compress rounds so components can be watched coalescing. It cannot change the converged result.</div>
+      <div class="row"><span class="label">min region size</span><input type="range" id="lsdMinRegionSize" min="1" max="20" step="1" value="2"><span class="val" id="lsdMinRegionSizeVal"></span></div>
+      <div class="hint"><em>Min region size</em> drops components below this many pixels before they ever become regions. 2 is free -- a 1-pixel component has no axis to fit, so it could only ever be fitted and discarded (measured: 1149 of 2931 regions). Above 2 it becomes a real evidence floor and does change output.</div>
       <div class="row"><span class="label">NFA epsilon</span><input type="range" id="lsdNfaEpsilon" min="0.01" max="10" step="0.01" value="1"><span class="val" id="lsdNfaEpsilonVal"></span></div>
       <div class="row"><span class="label">N_tests exponent</span><input type="range" id="lsdNfaTestExponent" min="1" max="8" step="1" value="5"><span class="val" id="lsdNfaTestExponentVal"></span></div>
-      <div class="row"><span class="label">max retries</span><input type="range" id="lsdMaxRetries" min="0" max="6" step="1" value="2"><span class="val" id="lsdMaxRetriesVal"></span></div>
-      <div class="row"><span class="label">retry tol. factor</span><input type="range" id="lsdRetryToleranceFactor" min="0.1" max="1" step="0.05" value="0.5"><span class="val" id="lsdRetryToleranceFactorVal"></span></div>
-      <div class="row"><span class="label">retry shrink frac.</span><input type="range" id="lsdRetryShrinkFraction" min="0.05" max="0.9" step="0.05" value="0.2"><span class="val" id="lsdRetryShrinkFractionVal"></span></div>
+      <div class="row disabled"><span class="label">max retries</span><input type="range" id="lsdMaxRetries" min="0" max="6" step="1" value="2" disabled><span class="val" id="lsdMaxRetriesVal"></span></div>
+      <div class="row disabled"><span class="label">retry tol. factor</span><input type="range" id="lsdRetryToleranceFactor" min="0.1" max="1" step="0.05" value="0.5" disabled><span class="val" id="lsdRetryToleranceFactorVal"></span></div>
+      <div class="row disabled"><span class="label">retry shrink frac.</span><input type="range" id="lsdRetryShrinkFraction" min="0.05" max="0.9" step="0.05" value="0.2" disabled><span class="val" id="lsdRetryShrinkFractionVal"></span></div>
+      <div class="hint">The stage-5 retry loop (tighten tau, then shrink the region) is RETIRED -- the fitter is attempt-0-only, so these three do nothing. Kept visible because <code>fitRegionWithRetries</code> is still in the source as reference, and because it was the last thing forcing mag/theta to stay on CPU during the GPU path.</div>
 
       <div class="hint">Join walk (pipeline/bucketFillJoin.ts) -- merges the accepted rectangles above into composite lines, also feeding production directly:</div>
       <div class="row"><span class="label">join steps</span><input type="range" id="lsdJoinSteps" min="0" max="600" step="1" value="0"><span class="val" id="lsdJoinStepsVal"></span></div>
@@ -270,6 +276,7 @@
     <label class="chk"><input type="checkbox" id="useGPUProject" checked> GPU projected-sample ray-cast (WebGPU)</label>
     <label class="chk"><input type="checkbox" id="useGPUGradient" checked> GPU 2x2 gradient field (WebGPU)</label>
     <label class="chk"><input type="checkbox" id="useGPULsdFit"> GPU LSD fit + NFA test (WebGPU) -- verified identical to CPU, but currently SLOWER (upload-bound); see pipelineGPU/lsdFit.ts</label>
+    <label class="chk"><input type="checkbox" id="useGPUGrowRegions"> GPU LSD region growing (WebGPU) -- NOT bit-identical to CPU by construction; run verifyGrowRegions() first, see pipelineGPU/growRegions.ts</label>
     <div class="hint" id="gpuVotesStatus" style="margin-bottom:0;"></div>
     <label class="chk"><input type="checkbox" id="useCapturePipelining" checked> Pipelined video capture (mailbox, drop stale frames)</label>
   </div>

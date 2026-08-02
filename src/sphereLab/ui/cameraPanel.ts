@@ -161,6 +161,7 @@ export function refreshCameraPanel() {
   setNum('lsdRhoNoiseThreshold', cam.settings.lsdRhoNoiseThreshold);
   setNum('lsdRhoHighThreshold', cam.settings.lsdRhoHighThreshold);
   setNum('lsdCclSteps', cam.settings.lsdCclSteps);
+  setNum('lsdMinRegionSize', cam.settings.lsdMinRegionSize);
   setNum('lsdNfaEpsilon', cam.settings.lsdNfaEpsilon);
   setNum('lsdNfaTestExponent', cam.settings.lsdNfaTestExponent);
   setNum('lsdMaxRetries', cam.settings.lsdMaxRetries);
@@ -346,6 +347,16 @@ bindCheckbox('useGPULsdFit', (v) => {
   const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
   pushSettingsSyncToAllPhysical();
 });
+// Dispatches independently of useGPULsdFit -- stage 2+3 vs stage 4+5, either
+// can be on GPU without the other. Defaults OFF for a correctness reason, not
+// a perf one (see state.ts): this is the one stage that cannot be bit-identical
+// to CPU. The debug round scrubber in overlays/lsdOverlay.ts stays on the CPU
+// grower regardless, since it needs the intermediate rounds this path skips.
+bindCheckbox('useGPUGrowRegions', (v) => {
+  globalState.useGPUGrowRegions = v;
+  const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
+  pushSettingsSyncToAllPhysical();
+});
 // Doesn't affect any already-computed camera state, just how the NEXT
 // physical-camera frame gets scheduled -- no recomputeFromLastCapture call
 // needed (unlike the useGPU* toggles above).
@@ -408,8 +419,14 @@ bindSlider('lsdRhoHighThreshold', (v) => { const cam = activeCamera(); if (cam) 
 // labelled "auto" rather than "0" so the slider's own left end doesn't read as
 // a disabled/no-growth state the way the grow-steps slider it replaces did.
 bindSlider('lsdCclSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdCclSteps = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => (v === 0 ? 'auto' : v.toFixed(0)));
+bindSlider('lsdMinRegionSize', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinRegionSize = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
 bindSlider('lsdNfaEpsilon', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaEpsilon = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
 bindSlider('lsdNfaTestExponent', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaTestExponent = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
+// Still BOUND, though their inputs carry `disabled` (see sphere-lab.html): the
+// stage-5 retry loop is retired and nothing reads these three, but keeping the
+// bindings means the readouts still render the persisted values instead of
+// showing blank, and un-disabling the inputs is all it takes to bring the
+// retired fitRegionWithRetries back for a comparison.
 bindSlider('lsdMaxRetries', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMaxRetries = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
 bindSlider('lsdRetryToleranceFactor', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRetryToleranceFactor = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
 bindSlider('lsdRetryShrinkFraction', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRetryShrinkFraction = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));

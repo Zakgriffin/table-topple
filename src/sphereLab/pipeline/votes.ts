@@ -103,6 +103,7 @@ export function computePixelVotes2x2(
 // site is unaffected.
 export interface LsdCompositeSettings {
   lsdToleranceDeg: number; lsdRhoNoiseThreshold: number; lsdRhoHighThreshold: number; lsdCclSteps: number;
+  lsdMinRegionSize: number;
   lsdNfaEpsilon: number;
   lsdNfaTestExponent: number; lsdMaxRetries: number; lsdRetryToleranceFactor: number; lsdRetryShrinkFraction: number;
   lsdMergeMinSimilarity: number; lsdJoinSteps: number; lsdMinLengthPx: number; lsdMaxTravelFactor: number;
@@ -141,6 +142,7 @@ export async function computeGradient2x2Composites(
     rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
     rhoHighThreshold: settings.lsdRhoHighThreshold,
     cclSteps: settings.lsdCclSteps,
+    minRegionSize: settings.lsdMinRegionSize,
     nfaEpsilon: settings.lsdNfaEpsilon,
     nfaTestExponent: settings.lsdNfaTestExponent,
     maxRetries: settings.lsdMaxRetries,

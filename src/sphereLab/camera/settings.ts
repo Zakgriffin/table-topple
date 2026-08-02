@@ -84,8 +84,22 @@ export interface CameraSettingsCommon {
   // cannot change the converged answer -- connected components are a
   // fixpoint, not an iteration budget -- only how far along you're looking.
   lsdCclSteps: number;
+  // Minimum member count for a grown component to become a region at all --
+  // applied in collectRegionsFromLabels, so BOTH the CPU and GPU growers get it
+  // and neither ever materializes the region. 2 is the behavior-preserving
+  // floor: the rectangle fit needs two members to have an axis at all, so a
+  // singleton could only ever be fitted and discarded. Measured on a real
+  // capture, that alone is 1149 of 2931 regions -- ~40% of the fit stage's work,
+  // for zero change in output. Above 2 it becomes a real (output-changing)
+  // tuning knob: a floor on how much evidence a line segment needs.
+  lsdMinRegionSize: number;
   lsdNfaEpsilon: number; // epsilon -- accept a candidate rectangle iff NFA < this (LSD default 1: expect <1 false detection per image)
   lsdNfaTestExponent: number; // N_tests = N^exponent, N = max(image w,h) -- LSD's own estimate of "how many rectangles could plausibly have been tested" (~5 degrees of freedom: 2 position, 1 angle, 2 size)
+  // ── RETIRED (see pipeline/lsdSegments.ts's fitRegionWithRetries) ─────────
+  // Stage 5's retry loop is no longer referenced by any live path -- the fitter
+  // is attempt-0-only now. These three stay defined so the retired function
+  // still typechecks and so persisted values survive, but nothing reads them
+  // and their sliders are disabled.
   lsdMaxRetries: number; // how many tighter-tolerance-then-shrink attempts before giving up on a candidate that fails NFA
   lsdRetryToleranceFactor: number; // tau is multiplied by this on the first retry (LSD: retighten before shrinking)
   lsdRetryShrinkFraction: number; // fraction of a region's own farthest-from-center pixels dropped on each shrink retry
@@ -198,6 +212,7 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     lsdCclSteps: savedNum('lsdCclSteps', 0), // 0 = run to fixpoint (the real algorithm); 1+ scrubs rounds
     lsdNfaEpsilon: savedNum('lsdNfaEpsilon', 1),
     lsdNfaTestExponent: savedNum('lsdNfaTestExponent', 5),
+    lsdMinRegionSize: savedNum('lsdMinRegionSize', 2),
     lsdMaxRetries: savedNum('lsdMaxRetries', 2),
     lsdRetryToleranceFactor: savedNum('lsdRetryToleranceFactor', 0.5),
     lsdRetryShrinkFraction: savedNum('lsdRetryShrinkFraction', 0.2),

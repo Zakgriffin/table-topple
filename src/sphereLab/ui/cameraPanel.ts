@@ -19,7 +19,7 @@ import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -192,6 +192,10 @@ export function refreshCameraPanel() {
   toggleLsdRawRegionsBtn.classList.toggle('active', cam.settings.showLsdRawRegions);
   toggleLsdCompositeBtn.classList.toggle('active', cam.settings.showLsdComposite);
   toggleCompositeLineFamiliesBtn.classList.toggle('active', cam.settings.showCompositeLineFamilies);
+  toggleGapHistogramBtn.classList.toggle('active', cam.settings.showGapHistogram);
+  toggleValueHistogramBtn.classList.toggle('active', cam.settings.showValueHistogram);
+  toggleDistinctnessCurveBtn.classList.toggle('active', cam.settings.showDistinctnessCurve);
+  toggleProductCurveBtn.classList.toggle('active', cam.settings.showProductCurve);
   updateContaminationAvailability();
   updateGradientArrowAvailability();
   updateTopGradientAvailability();
@@ -353,6 +357,7 @@ bindSlider('gridPeriodPhaseBinCount', (v) => {
   cam.settings.gridPeriodPhaseBinCount = v;
   drawGridPeriodPhasePlot(cam);
 }, (v) => v.toFixed(0));
+
 bindSlider('gridPeriodPhaseGapLowerBound', (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.gridPeriodPhaseGapLowerBound = v;

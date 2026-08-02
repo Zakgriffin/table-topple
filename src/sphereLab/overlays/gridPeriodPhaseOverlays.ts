@@ -1,10 +1,11 @@
 import { Camera } from '../camera/model.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
-import { GRID_STEP } from '../constants.ts';
+import { GRID_STEP, MATH_QUAT } from '../constants.ts';
+import { getAnalysisVFovRad } from '../pipeline/capture.ts';
 import { projectedUVScale } from '../pipeline/decodeGrid.ts';
-import { circularFit, computePooledGaps, GnomonicPoint, GridPeriodPhaseResult, PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
+import { circularFit, computePooledGaps, GnomonicPoint, GridPeriodPhaseResult, makeCellCentreDistinctness, PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
 import { DecodeCellDebug } from '../types.ts';
-import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx } from '../ui/dom.ts';
+import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx, persistControl, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleProductCurveBtn, toggleValueHistogramBtn } from '../ui/dom.ts';
 import { svgEl, svgText } from './svgUtil.ts';
 
 // ── Grid period/phase debug visualizations (pipeline/gridPeriodPhase.ts) ──
@@ -32,11 +33,26 @@ function getViewRange(camera: Camera, gpp: GridPeriodPhaseResult): [number, numb
   return defaultViewRange(gpp);
 }
 
-// Steps 3/4/5 (seed, bracketed search, final phase) all plotted on one
-// shared x-axis, since a pairwise gap and a candidate period are the exact
-// same kind of quantity (spacing, not position) -- see gridPeriodPhase.ts's
-// own header for why that's true and why it's NOT true of the raw
-// row/column `value`s themselves. SVG rather than a raster canvas -- crisp
+// Everything is plotted on one shared x-axis. For the gap histogram, the
+// resultant curve and the candidate/chosen markers that's unambiguous: a
+// pairwise gap and a candidate period are the exact same kind of quantity
+// (spacing, not position), see gridPeriodPhase.ts's own header.
+//
+// The white VALUE histogram is deliberately drawn on that same axis anyway,
+// and it is worth being explicit that this is a considered choice rather than
+// an oversight, because the raw `value`s are POSITIONS, not spacings. What
+// makes it defensible: values carry the same units and the same period (they
+// are `phi + k*P`, so consecutive teeth sit exactly P apart), so the white
+// comb's SPACING is directly comparable to the gray humps' spacing and to the
+// green chosen-period line. What it costs: the white bars' absolute
+// x-positions are anchored at the unknown phase phi and mean nothing on a
+// period axis, so x means two different things depending on which series you
+// read. Roughly a quarter of the comb's teeth land inside the default view
+// (the view spans ~0.28*spread and teeth sit P = spread/n apart, so ~0.28*n of
+// them), which is enough to read a spacing off. Both series are individually
+// toggleable, so the ambiguity only exists when someone opts into it.
+//
+// SVG rather than a raster canvas -- crisp
 // at any zoom/DPR, and elements are individually inspectable in devtools,
 // which matters more for a debug plot than raw draw-call throughput ever
 // would here (a few dozen shapes, redrawn once per capture, not per frame).
@@ -60,12 +76,6 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
     return;
   }
   const { bracket, coarseSamples, chosenPeriod, candidates } = gpp.debug;
-  // Pooled all-pairs gap histogram -- computed here on demand (O(n^2),
-  // debug-only). KEPT as the "eyeball the periodicity humps" backdrop; the
-  // old red/blue per-family neighbor-gap ticks + median lines + seed marker
-  // are gone (they visualized the old median-seed search, which no longer
-  // exists -- see gridPeriodPhase.ts).
-  const pooledGaps = computePooledGaps(gpp.rowLines, gpp.colLines);
   const marginBottom = 16, marginTop = 14;
   const plotH = H - marginBottom - marginTop;
 
@@ -79,25 +89,65 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
     fill: 'rgba(100,180,255,0.15)',
   }));
 
-  // Gray pooled-pairwise-gap histogram -- unchanged. SKIP (not clamp) gaps
-  // outside the plotted range (multi-period outliers routinely fall outside),
-  // so they don't pile a false bar into the edge bin.
+  // ── The two optional histograms ────────────────────────────────────────
+  //
+  // Both are drawing-only: the period search itself never reads either one
+  // (circularFit folds the O(n) line values directly). They share the
+  // bucket-count slider and the plot's x-axis, but the axis means something
+  // DIFFERENT for each, which is worth keeping straight when reading them
+  // together:
+  //   GRAY (pooled all-pairs gaps) is anchored at 0, so a bar's x-POSITION is
+  //   a period -- the first hump sits at P, the next at 2P, and so on. That's
+  //   what makes it directly comparable to the resultant curve and the green
+  //   chosen-period line.
+  //   WHITE (raw line values) is anchored at the grid's unknown phase, so a
+  //   bar's x-position is just where some grid line happened to land and means
+  //   nothing about periods. Only the SPACING between white bars carries P.
+  // Both are combs of the same period regardless, which is the point of
+  // showing them together -- white tooth spacing should match the gray hump
+  // spacing, and both should match the green line's distance from x=0.
+  //
+  // Each is normalized to its OWN max (one counts gaps, the other counts
+  // lines -- unrelated magnitudes), and each SKIPS rather than clamps
+  // out-of-range samples so multi-period gap outliers can't pile a false bar
+  // into the edge bin.
   const BINS = camera.settings.gridPeriodPhaseBinCount;
-  const counts = new Array(BINS).fill(0);
-  for (const g of pooledGaps) {
-    if (g < xMin || g > xMax) continue;
-    const bi = Math.min(BINS - 1, Math.max(0, Math.floor(((g - xMin) / span) * BINS)));
-    counts[bi]++;
+  const binOf = (v: number) => (v < xMin || v > xMax ? -1 : Math.min(BINS - 1, Math.max(0, Math.floor(((v - xMin) / span) * BINS))));
+  const binCounts = (samples: readonly number[]) => {
+    const counts = new Array<number>(BINS).fill(0);
+    for (const v of samples) { const bi = binOf(v); if (bi >= 0) counts[bi]++; }
+    return counts;
+  };
+  const showGaps = camera.settings.showGapHistogram, showValues = camera.settings.showValueHistogram;
+  // When both are on, bars are drawn side-by-side WITHIN each bucket rather
+  // than overlapping -- the white comb is sparse and the gray humps are broad,
+  // so an overlay would mostly read as one series occluding the other exactly
+  // where the comparison matters (does a white tooth line up with a gray
+  // hump). Each takes the full bucket width when it's the only one shown.
+  const drawHistogram = (samples: readonly number[], fill: string, slot: 0 | 1, slots: 1 | 2) => {
+    const counts = binCounts(samples);
+    const maxCount = Math.max(1, ...counts);
+    for (let i = 0; i < BINS; i++) {
+      if (counts[i] === 0) continue;
+      const barH = (counts[i] / maxCount) * plotH * 0.55;
+      const x0 = (i / BINS) * W, binW = W / BINS;
+      const slotW = (binW - 2) / slots;
+      svg.appendChild(svgEl('rect', {
+        x: x0 + 1 + slot * slotW, y: marginTop + plotH - barH, width: Math.max(1, slotW), height: barH, fill,
+      }));
+    }
+  };
+  const slots: 1 | 2 = showGaps && showValues ? 2 : 1;
+  if (showGaps) {
+    // computePooledGaps is O(n^2) in the detected line count and exists purely
+    // for this histogram, so it stays behind the toggle -- not computed at all
+    // when the series is hidden. This is the whole reason the toggle gates
+    // COMPUTATION and not just drawing.
+    drawHistogram(computePooledGaps(gpp.rowLines, gpp.colLines), 'rgba(200,200,200,0.5)', 0, slots);
   }
-  const maxCount = Math.max(1, ...counts);
-  for (let i = 0; i < BINS; i++) {
-    if (counts[i] === 0) continue;
-    const barH = (counts[i] / maxCount) * plotH * 0.55;
-    const x0 = (i / BINS) * W, x1 = ((i + 1) / BINS) * W;
-    svg.appendChild(svgEl('rect', {
-      x: x0 + 1, y: marginTop + plotH - barH, width: Math.max(1, x1 - x0 - 2), height: barH,
-      fill: 'rgba(200,200,200,0.5)',
-    }));
+  if (showValues) {
+    const values = [...gpp.rowLines.map((s) => s.value), ...gpp.colLines.map((s) => s.value)];
+    drawHistogram(values, 'rgba(255,255,255,0.75)', slots === 2 ? 1 : 0, slots);
   }
 
   // R(P) resultant curve. The translucent extension recomputes the score
@@ -119,6 +169,76 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
     svg.appendChild(svgEl('polyline', { points: toCurvePoints(translucentSamples), fill: 'none', stroke: 'rgba(255,200,60,0.3)', 'stroke-width': 2 }));
   }
   svg.appendChild(svgEl('polyline', { points: toCurvePoints(coarseSamples), fill: 'none', stroke: 'rgb(255,200,60)', 'stroke-width': 2 }));
+
+  // ── Distinctness (blue) and resultant x distinctness (violet) ───────────
+  //
+  // Both are computed HERE, not in the pipeline, and both span the whole
+  // current view the way the translucent resultant above does -- so they
+  // re-evaluate on pan/zoom and stay meaningful outside the searched bracket.
+  // That's the point: the most useful thing to see is whether the joint peak
+  // sits somewhere the integer-count search never looked, which a
+  // pipeline-precomputed curve (fixed to the bracket, fixed at capture time)
+  // structurally cannot show.
+  //
+  // The product is the interesting one. The search decides in two stages
+  // (threshold on resultant, then argmax on distinctness) precisely because
+  // neither signal is sufficient alone: the resultant is blind between a
+  // period and its sub-multiples (both fold perfectly), while distinctness is
+  // blind to spurious LONG periods (they under-sample, so their neighbours
+  // still differ). Their product is high only where BOTH are, which is the
+  // conjunction the two-stage filter is approximating -- so a clean single
+  // peak here says the staged decision landed where a continuous joint
+  // criterion would have, and a peak somewhere else says it didn't.
+  //
+  // Each is normalized to its OWN max before multiplying: the resultant is
+  // bounded (0..2, a sum of two unit resultants) but distinctness is a raw
+  // mean grayscale difference with a data-dependent scale, so a raw product
+  // would just be distinctness with a slight tilt.
+  const wantDistinct = camera.settings.showDistinctnessCurve, wantProduct = camera.settings.showProductCurve;
+  const axes = camera.lastRecoveredAxes;
+  if ((wantDistinct || wantProduct) && axes && camera.lastNoisedPreviewGray) {
+    // Deliberately coarser than TRANSLUCENT_SAMPLES: each sample reverse-
+    // projects a 13x13 cell patch (~169 grayscale reads), and unlike the
+    // resultant this redraws on every wheel/drag event. 200 samples of that
+    // would make panning visibly chunky; 90 keeps the curve smooth enough to
+    // read a peak off while staying responsive.
+    const D_SAMPLES = 90;
+    const distinctnessAt = makeCellCentreDistinctness({
+      gray: camera.lastNoisedPreviewGray, w: camera.rtSize.w, h: camera.rtSize.h,
+      quat: MATH_QUAT, vFovRad: getAnalysisVFovRad(camera), aspect: camera.aspect,
+      Drow: axes.Drow, Dcol: axes.Dcol, Dnormal: axes.Dnormal,
+      cellPitch: GRID_STEP, minGrazingCos: camera.settings.minGrazingCos,
+      rowValues, colValues,
+    });
+    const pts: { period: number; score: number; d: number | null }[] = [];
+    for (let i = 0; i < D_SAMPLES; i++) {
+      const period = xMin + ((xMax - xMin) * i) / (D_SAMPLES - 1);
+      if (period <= 1e-9) continue;
+      // One fit per family, reused for both the resultant and the phase the
+      // patch placement needs -- see makeCellCentreDistinctness' own comment.
+      const fitRow = circularFit(rowValues, rowWeights, period), fitCol = circularFit(colValues, colWeights, period);
+      pts.push({ period, score: fitRow.resultant + fitCol.resultant, d: distinctnessAt(period, fitRow.phase, fitCol.phase) });
+    }
+    const maxD = Math.max(1e-6, ...pts.map((s) => s.d ?? 0));
+    // Drawn as SEGMENTS split on unsampled periods rather than one polyline
+    // through them: a period whose patch fell off-image has no reading at all,
+    // and bridging that with a straight line would invent one.
+    const drawSplit = (valueOf: (s: typeof pts[number]) => number | null, stroke: string, width: number) => {
+      let run: string[] = [];
+      const flush = () => {
+        if (run.length > 1) svg.appendChild(svgEl('polyline', { points: run.join(' '), fill: 'none', stroke, 'stroke-width': width }));
+        run = [];
+      };
+      for (const s of pts) {
+        const v = valueOf(s);
+        if (v === null) { flush(); continue; }
+        run.push(`${xToPx(s.period)},${marginTop + plotH - v * plotH}`);
+      }
+      flush();
+    };
+    if (wantDistinct) drawSplit((s) => (s.d === null ? null : s.d / maxD), 'rgba(120,220,255,0.6)', 1.5);
+    if (wantProduct) drawSplit((s) => (s.d === null ? null : (s.score / maxScore) * (s.d / maxD)), 'rgb(190,120,255)', 2.5);
+  }
 
   // Image-tested candidate peaks: a circle per candidate whose HEIGHT encodes
   // its cell-centre distinctness (higher = more distinct), normalized across
@@ -161,6 +281,29 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
     { fill: '#ddd', 'font-size': 10, 'font-family': 'sans-serif' },
   ));
 }
+
+// The two histogram toggles. Registered here rather than in ui/cameraPanel.ts
+// because they affect NOTHING but this plot -- no recompute, no capture, no
+// other overlay -- so a plain redraw is the entire reaction. Persistence key
+// matches the BUTTON's own id, the same convention every other button-driven
+// boolean in camera/settings.ts uses.
+function bindHistogramToggle(btn: HTMLButtonElement, id: string, get: (c: Camera) => boolean, set: (c: Camera, v: boolean) => void) {
+  btn.addEventListener('click', () => {
+    const cam = activeCamera(); if (!cam) return;
+    set(cam, !get(cam));
+    btn.classList.toggle('active', get(cam));
+    persistControl(id, get(cam) ? '1' : '0');
+    drawGridPeriodPhasePlot(cam);
+  });
+}
+bindHistogramToggle(toggleGapHistogramBtn, 'toggleGapHistogram',
+  (c) => c.settings.showGapHistogram, (c, v) => { c.settings.showGapHistogram = v; });
+bindHistogramToggle(toggleValueHistogramBtn, 'toggleValueHistogram',
+  (c) => c.settings.showValueHistogram, (c, v) => { c.settings.showValueHistogram = v; });
+bindHistogramToggle(toggleDistinctnessCurveBtn, 'toggleDistinctnessCurve',
+  (c) => c.settings.showDistinctnessCurve, (c, v) => { c.settings.showDistinctnessCurve = v; });
+bindHistogramToggle(toggleProductCurveBtn, 'toggleProductCurve',
+  (c) => c.settings.showProductCurve, (c, v) => { c.settings.showProductCurve = v; });
 
 // ── Interactive pan/zoom -- wheel to zoom (centered on the cursor), drag to
 // pan. Registered once at module scope (not per-draw); reads/writes the

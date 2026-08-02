@@ -47,7 +47,24 @@ export interface CameraSettingsCommon {
   // retry tightened/shrank it) as small dots, so the raw growing result can
   // be compared directly against the fitted rectangle it produced.
   showLsdRawRegions: boolean;
-  showLsdComposite: boolean; // draw the join walk's own merged composite lines (pipeline/bucketFillJoin.ts's computeCompositeLines), fed by the segments above
+  showLsdComposite: boolean;
+  // The two histograms in the grid period/phase debug plot
+  // (overlays/gridPeriodPhaseOverlays.ts). Both are DRAWING-ONLY -- neither
+  // feeds the period search, which reads the O(n) line values directly via
+  // circularFit. Toggling one off skips computing its data entirely, which
+  // matters for the gap histogram: computePooledGaps is O(n^2) in the
+  // detected line count and exists only for this plot.
+  showGapHistogram: boolean;
+  showValueHistogram: boolean;
+  // The two debug curves in the period/phase plot, each independently
+  // toggleable: cellCentreDistinctness on its own, and its product with the
+  // resultant -- the conjunction the search's two-stage filter is
+  // approximating. Both are computed in the OVERLAY across the current view
+  // range (see overlays/gridPeriodPhaseOverlays.ts), not in the pipeline, so
+  // they follow pan/zoom and can show a joint peak sitting outside the
+  // bracket the integer-count search ever looked at.
+  showDistinctnessCurve: boolean;
+  showProductCurve: boolean; // draw the join walk's own merged composite lines (pipeline/bucketFillJoin.ts's computeCompositeLines), fed by the segments above
   lsdToleranceDeg: number; // tau -- the one angle tolerance growRegionsCCL's edge predicate, countRectanglePixels' NFA alignment count and the retry-1 refilter all test against. LSD default 22.5deg.
   // rho LOW -- hysteresis' participation floor: a pixel below this is
   // excluded entirely (from growth edges and from NFA alignment counts).
@@ -162,6 +179,13 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showLsdRejected: savedBool('toggleLsdRejected', false),
     showLsdRawRegions: savedBool('toggleLsdRawRegions', false),
     showLsdComposite: savedBool('toggleLsdComposite', false),
+    // Gap defaults ON (it was unconditional before these toggles existed, so
+    // this preserves the plot people already know); value defaults OFF as the
+    // genuinely new series.
+    showGapHistogram: savedBool('toggleGapHistogram', true),
+    showValueHistogram: savedBool('toggleValueHistogram', false),
+    showDistinctnessCurve: savedBool('toggleDistinctnessCurve', false),
+    showProductCurve: savedBool('toggleProductCurve', false),
     lsdToleranceDeg: savedNum('lsdToleranceDeg', 22.5),
     // 4/255 preserves the pre-normalization default exactly, now that
     // computeGradient2x2Field's own output tops out at 1 instead of 255.

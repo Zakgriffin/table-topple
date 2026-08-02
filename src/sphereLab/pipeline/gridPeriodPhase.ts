@@ -158,6 +158,87 @@ export function computePooledGaps(rowLines: readonly GridLineSample[], colLines:
   return pooledGaps;
 }
 
+// ── Cell-centre distinctness (harmonic disambiguation, idea 2) ────────────
+//
+// Reverse-projects a small patch of CELL CENTRES (phase + cellPitch/2) at a
+// candidate period back to image pixels -- exactly buildDecodeSampleGrid's
+// per-cell construction, with distance = cellPitch/P for THIS candidate -- and
+// returns the mean absolute adjacent grayscale difference. High at the true
+// period (neighbours are distinct De Bruijn cells), low at a sub-multiple
+// (neighbours are the same cell, repeated). null if there's no cell pitch to
+// turn a period into a distance, or too little of the patch lands on-image.
+//
+// A FACTORY rather than a plain function because everything except the period
+// itself is fixed for a given capture -- the basis flip, the inverted
+// quaternion, the patch centre medians -- and this gets called across a whole
+// sweep of candidate periods, twice over: once by computeGridPeriodPhase for
+// the handful of peaks it actually decides between, and again by
+// overlays/gridPeriodPhaseOverlays.ts to draw the distinctness and
+// resultant x distinctness curves across whatever range the plot is showing.
+// That second caller is why this is exported at all: the debug curves adapt to
+// pan/zoom, so they cannot be precomputed in the pipeline -- the view range
+// isn't known until draw time, and it changes on every wheel event.
+export interface CellCentreDistinctnessInputs {
+  gray: Float64Array; w: number; h: number;
+  quat: THREE.Quaternion; vFovRad: number; aspect: number;
+  Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3;
+  cellPitch: number | null; minGrazingCos: number;
+  rowValues: number[]; colValues: number[]; // only for the patch-centre medians
+}
+
+// phiXCol/phiXRow are arguments rather than being recomputed inside, because
+// every caller already runs circularFit at this period to get the resultant
+// and the phase falls out of the same complex sum for free. Recomputing them
+// here would double the trig work of any sweep that draws a curve.
+export function makeCellCentreDistinctness(
+  inp: CellCentreDistinctnessInputs,
+): (P: number, phiXCol: number, phiXRow: number) => number | null {
+  const { gray, w, h, quat, vFovRad, aspect, Drow, Dcol, Dnormal, cellPitch, minGrazingCos } = inp;
+  const flipped = cornerDir(0, 0, quat, vFovRad, aspect).dot(Dnormal) > 0;
+  const normalToFloor = flipped ? Dnormal.clone().negate() : Dnormal.clone();
+  const invQuat = quat.clone().invert();
+  const halfV = vFovRad / 2;
+  const med = (arr: number[]) => (arr.length ? [...arr].sort((a, b) => a - b)[arr.length >> 1] : 0);
+  const centreXRow = med(inp.colValues), centreXCol = med(inp.rowValues); // col family value = xRow, row family value = xCol
+  const tanHalfV = Math.tan(halfV);
+
+  return (P: number, phiXCol: number, phiXRow: number): number | null => {
+    if (cellPitch === null || !(P > 0)) return null;
+    const distance = cellPitch / P;
+    const uvScale = flipped ? -distance : distance;
+    // (u,v) = uvScale*(xRow, xCol); boundaries at uvScale*phi, centres +cellPitch/2 (matches buildDecodeSampleGrid).
+    const uBoundaryRaw = uvScale * phiXRow, vBoundaryRaw = uvScale * phiXCol;
+    const uPhase = (uBoundaryRaw - Math.round(uBoundaryRaw / cellPitch) * cellPitch) + cellPitch / 2;
+    const vPhase = (vBoundaryRaw - Math.round(vBoundaryRaw / cellPitch) * cellPitch) + cellPitch / 2;
+    const jC = Math.round((uvScale * centreXRow - uPhase) / cellPitch), iC = Math.round((uvScale * centreXCol - vPhase) / cellPitch);
+    const M = 6; // (2M+1)^2 cell patch, centred on the visible region's median cell
+    const p = new THREE.Vector3(), local = new THREE.Vector3();
+    const patch: (number | null)[][] = [];
+    for (let di = -M; di <= M; di++) {
+      const rowArr: (number | null)[] = [];
+      const v = vPhase + (iC + di) * cellPitch;
+      for (let dj = -M; dj <= M; dj++) {
+        const u = uPhase + (jC + dj) * cellPitch;
+        p.copy(Drow).multiplyScalar(u).addScaledVector(Dcol, v).addScaledVector(normalToFloor, -distance);
+        if (!(p.dot(normalToFloor) / p.length() < -minGrazingCos)) { rowArr.push(null); continue; }
+        local.copy(p).applyQuaternion(invQuat);
+        const ndcU = -local.x / (local.z * tanHalfV * aspect), ndcV = -local.y / (local.z * tanHalfV);
+        const xx = Math.round(((ndcU + 1) / 2) * w), yy = Math.round(((1 - ndcV) / 2) * h);
+        rowArr.push((xx >= 0 && xx < w && yy >= 0 && yy < h) ? gray[yy * w + xx] : null);
+      }
+      patch.push(rowArr);
+    }
+    let sum = 0, count = 0;
+    for (let i = 0; i < patch.length; i++) for (let j = 0; j < patch[i].length; j++) {
+      const a = patch[i][j]; if (a === null) continue;
+      const right = patch[i][j + 1], down = i + 1 < patch.length ? patch[i + 1][j] : undefined;
+      if (right != null) { sum += Math.abs(a - right); count++; }
+      if (down != null) { sum += Math.abs(a - down); count++; }
+    }
+    return count < 8 ? null : sum / count; // too little on-image to judge
+  };
+}
+
 export function computeGridPeriodPhase(
   composites: { root: number; line: CompositeLine }[],
   gray: Float64Array,
@@ -221,14 +302,15 @@ export function computeGridPeriodPhase(
   // the brief "largest-period peak wins" + 0.6 heuristic that first replaced
   // them) -- see this session's decode-robustness work and the A/B bake-off.
   //
-  //  (1) NO SEED, BOARD-BOUNDED, INTEGER-COUNT CANDIDATES. A detected line IS a
-  //      grid line, and the two extreme detected lines sit an INTEGER number of
-  //      periods apart, so the only physically-possible periods are P_n =
-  //      spread/n for integer n (= number of periods spanning the data). n runs
-  //      from 3 (fewer isn't credibly periodic; decode needs ORDER=5 cells
-  //      anyway) up to max(R,C) (you can't observe more lines of a family than
-  //      the board has cells across -- tracks the board-size slider live). The
-  //      candidate set falls straight out of the board: no seed, no tunable
+  //  (1) NO SEED, PHYSICALLY-BOUNDED, INTEGER-COUNT CANDIDATES. A detected line
+  //      IS a grid line, and the two extreme detected lines sit an INTEGER
+  //      number of periods apart, so the only physically-possible periods are
+  //      P_n = spread/n for integer n (= number of periods spanning the data).
+  //      n runs from 3 (fewer isn't credibly periodic; decode needs ORDER=5
+  //      cells anyway) up to the looser of two independent physical bounds --
+  //      the board's own cell count, and a maximum assumed camera height -- see
+  //      the nMax derivation below. Both track the board-size slider live. The
+  //      candidate set falls straight out of the geometry: no seed, no tunable
   //      width, no arbitrary sample count.
   //
   //  (2) HARMONIC DISAMBIGUATION BY IMAGE CONTENT (replaces "largest peak" +
@@ -260,8 +342,25 @@ export function computeGridPeriodPhase(
   const searchSpan = spanStart('period search (integer-count + distinctness + golden)');
   const rowValues = rowSamples.map((s) => s.value), rowWeights = rowSamples.map((s) => s.weight);
   const colValues = colSamples.map((s) => s.value), colWeights = colSamples.map((s) => s.weight);
-  const allValues = rowValues.concat(colValues);
-  const spread = Math.max(...allValues) - Math.min(...allValues);
+  // PER-FAMILY extent, then the larger of the two -- NOT the extent of the two
+  // pooled together, which is what this used to compute and was a real bug.
+  // A row line's `value` is its xCol coordinate and a column line's is its
+  // xRow (see GridLineSample) -- two DIFFERENT axes. Pooling them and taking
+  // min/max measures the extent of the union of two unrelated coordinate sets,
+  // which exceeds either one whenever the camera's nadir is off-centre
+  // asymmetrically between the axes (generic for anything oblique). Example:
+  // nadir at the floor origin with the board at u in [0,32], v in [-16,16]
+  // gives xRow in [0,32/d] and xCol in [-16/d,16/d] -- each family spans 32
+  // cells, but the pooled extent spans 48. Since nMax below is a PER-FAMILY
+  // cell count, that inflated numerator pushed the true period left of the
+  // bracket entirely and the search never evaluated it.
+  const extentOf = (vals: number[]) => {
+    if (vals.length < 2) return 0;
+    let lo = Infinity, hi = -Infinity;
+    for (const v of vals) { if (v < lo) lo = v; if (v > hi) hi = v; }
+    return hi - lo;
+  };
+  const spread = Math.max(extentOf(rowValues), extentOf(colValues));
   if (!(spread > 1e-9)) return null; // no extent to search over (all lines coincident)
   const resultantAt = (P: number) => circularFit(rowValues, rowWeights, P).resultant + circularFit(colValues, colWeights, P).resultant;
 
@@ -278,60 +377,53 @@ export function computeGridPeriodPhase(
     return (a + b) / 2;
   };
 
-  // ── Cell-centre distinctness for one candidate period (idea 2) ────────────
-  // Reverse-projects a small patch of CELL CENTRES (phase + cellPitch/2) at the
-  // candidate period back to image pixels -- exactly buildDecodeSampleGrid's
-  // per-cell construction, with distance = cellPitch/P for THIS candidate -- and
-  // returns the mean absolute adjacent grayscale difference. High at the true
-  // period (neighbours are distinct De Bruijn cells), low at a sub-multiple
-  // (neighbours are the same cell, repeated). null if there's no cell pitch to
-  // turn a period into a distance, or too little of the patch lands on-image.
-  const flipped = cornerDir(0, 0, quat, vFovRad, aspect).dot(Dnormal) > 0;
-  const normalToFloor = flipped ? Dnormal.clone().negate() : Dnormal.clone();
-  const invQuat = quat.clone().invert();
-  const halfV = vFovRad / 2;
-  const med = (arr: number[]) => (arr.length ? [...arr].sort((a, b) => a - b)[arr.length >> 1] : 0);
-  const centreXRow = med(colValues), centreXCol = med(rowValues); // col family value = xRow, row family value = xCol
-  const cellCentreDistinctness = (P: number): number | null => {
-    if (cellPitch === null) return null;
-    const distance = cellPitch / P;
-    const uvScale = flipped ? -distance : distance;
-    const phiXCol = circularFit(rowValues, rowWeights, P).phase; // row family value = xCol
-    const phiXRow = circularFit(colValues, colWeights, P).phase; // col family value = xRow
-    // (u,v) = uvScale*(xRow, xCol); boundaries at uvScale*phi, centres +cellPitch/2 (matches buildDecodeSampleGrid).
-    const uBoundaryRaw = uvScale * phiXRow, vBoundaryRaw = uvScale * phiXCol;
-    const uPhase = (uBoundaryRaw - Math.round(uBoundaryRaw / cellPitch) * cellPitch) + cellPitch / 2;
-    const vPhase = (vBoundaryRaw - Math.round(vBoundaryRaw / cellPitch) * cellPitch) + cellPitch / 2;
-    const jC = Math.round((uvScale * centreXRow - uPhase) / cellPitch), iC = Math.round((uvScale * centreXCol - vPhase) / cellPitch);
-    const M = 6; // (2M+1)^2 cell patch, centred on the visible region's median cell
-    const p = new THREE.Vector3();
-    const patch: (number | null)[][] = [];
-    for (let di = -M; di <= M; di++) {
-      const rowArr: (number | null)[] = [];
-      const v = vPhase + (iC + di) * cellPitch;
-      for (let dj = -M; dj <= M; dj++) {
-        const u = uPhase + (jC + dj) * cellPitch;
-        p.copy(Drow).multiplyScalar(u).addScaledVector(Dcol, v).addScaledVector(normalToFloor, -distance);
-        if (!(p.dot(normalToFloor) / p.length() < -minGrazingCos)) { rowArr.push(null); continue; }
-        const local = p.clone().applyQuaternion(invQuat);
-        const ndcU = -local.x / (local.z * Math.tan(halfV) * aspect), ndcV = -local.y / (local.z * Math.tan(halfV));
-        const xx = Math.round(((ndcU + 1) / 2) * w), yy = Math.round(((1 - ndcV) / 2) * h);
-        rowArr.push((xx >= 0 && xx < w && yy >= 0 && yy < h) ? gray[yy * w + xx] : null);
-      }
-      patch.push(rowArr);
-    }
-    let sum = 0, count = 0;
-    for (let i = 0; i < patch.length; i++) for (let j = 0; j < patch[i].length; j++) {
-      const a = patch[i][j]; if (a === null) continue;
-      const right = patch[i][j + 1], down = i + 1 < patch.length ? patch[i + 1][j] : undefined;
-      if (right != null) { sum += Math.abs(a - right); count++; }
-      if (down != null) { sum += Math.abs(a - down); count++; }
-    }
-    return count < 8 ? null : sum / count; // too little on-image to judge
-  };
+  const cellCentreDistinctness = makeCellCentreDistinctness({
+    gray, w, h, quat, vFovRad, aspect, Drow, Dcol, Dnormal, cellPitch, minGrazingCos,
+    rowValues, colValues,
+  });
 
   // (1) integer-count candidate curve, ASCENDING period order (n descending).
-  const nMin = 3, nMax = Math.max(R, C);
+  // Two INDEPENDENT physical bounds on how many periods can span the data, and
+  // the search uses whichever is looser so a shortfall in one can't hide the
+  // true period from the other.
+  //
+  // BOARD BOUND: n is exactly "how many cells the detected lines span" (spread
+  // = n*P and P = cellPitch/d, so n = spread/P = visible world extent /
+  // cellPitch), and you can't span more cells of a family than the board has.
+  // Tight and correct -- but only once `spread` is per-family, which it now is.
+  //
+  // HEIGHT BOUND: assume the camera never gets further from the floor than
+  // MAX_CAMERA_HEIGHT_IN_BOARDS times the board's own linear size. Since
+  // P = cellPitch/d, a maximum distance is a MINIMUM period:
+  //   d <= H * N * cellPitch   =>   P >= cellPitch / (H * N * cellPitch) = 1/(H*N)
+  // Note cellPitch cancels -- the floor on P is a pure function of the board's
+  // cell count and the height assumption, independent of world scale and of
+  // whether a cellPitch was even supplied. Converting that floor to a count
+  // gives n <= spread * H * N.
+  //
+  // These agree at exactly the assumed maximum height and the height bound is
+  // the looser one below it. That is where the headroom comes from, and it is
+  // physically argued rather than a tuning fudge -- real effects (axis-fit
+  // error, the rectification not being perfect, detection noise near the
+  // extremes) can push the APPARENT count slightly past the board's own hard
+  // limit, and the board bound alone leaves nowhere to go.
+  //
+  // Worth knowing what `spread` actually is here: it's ANGULAR, not metric.
+  // The gnomonic extent of the field of view is ~2*tan(halfVFov) regardless of
+  // camera height (values are u/d, and both scale together), so it sits near 1
+  // for a typical phone -- a 65deg/4:3 camera gives ~0.96, making the height
+  // bound ~1.4x the board bound. A very wide lens pushes it further (~2.9x at
+  // 120deg), which is why the result is capped: n can never physically exceed
+  // boardCells (you can't span more cells than the board has), so everything
+  // past it is headroom, and HEADROOM_CAP bounds both how much of it we buy
+  // and the cost -- every extra n is two more circularFits over every detected
+  // line, and this sweep is already the search's main expense.
+  const MAX_CAMERA_HEIGHT_IN_BOARDS = 1.5;
+  const HEADROOM_CAP = 2; // multiples of boardCells; 2x always covers the hard bound with room to spare
+  const boardCells = Math.max(R, C);
+  const nFromHeight = Math.floor(MAX_CAMERA_HEIGHT_IN_BOARDS * boardCells * spread);
+  const nMin = 3;
+  const nMax = Math.min(HEADROOM_CAP * boardCells, Math.max(boardCells, nFromHeight));
   const bracket: [number, number] = [spread / nMax, spread / nMin];
   const coarseSamples: PeriodSearchSample[] = [];
   for (let n = nMax; n >= nMin; n--) coarseSamples.push({ period: spread / n, score: resultantAt(spread / n) });
@@ -370,7 +462,11 @@ export function computeGridPeriodPhase(
   const candidates: { period: number; resultant: number; distinctness: number | null }[] = [];
   let chosenIdx = -1, bestDistinct = -Infinity;
   for (const cand of candidatePeaks) {
-    const d = cellCentreDistinctness(cand.period);
+    const d = cellCentreDistinctness(
+      cand.period,
+      circularFit(rowValues, rowWeights, cand.period).phase,
+      circularFit(colValues, colWeights, cand.period).phase,
+    );
     candidates.push({ period: cand.period, resultant: cand.score, distinctness: d });
     if (d !== null && d > bestDistinct) { bestDistinct = d; chosenIdx = cand.idx; }
   }

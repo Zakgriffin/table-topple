@@ -8,7 +8,9 @@ import { toggleTopGradientBtn } from '../ui/dom.ts';
 export function updateTopGradientOverlay(camera: Camera) {
   const settings = camera.settings;
   if (!settings.showTopGradient) return;
-  if (settings.fieldView !== 'gradient2x2') return;
+  // Not gated on fieldView -- derives its own field from lastNoisedPreviewGray
+  // below, so gradient2x2 was never a real dependency. See
+  // pipeline/preview.ts's overlaysNeedGray.
   if (!camera.lastNoisedPreviewGray) return;
   const { w, h } = camera.rtSize;
   const field = computeGradient2x2Field(camera.lastNoisedPreviewGray, w, h);
@@ -16,14 +18,9 @@ export function updateTopGradientOverlay(camera: Camera) {
   camera.topGradientTex.needsUpdate = true;
 }
 
+// No-op hook -- see contaminationOverlays.ts's updateContaminationAvailability
+// for why this stays a named function now that there's no field view to gate on.
 export function updateTopGradientAvailability() {
   const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'gradient2x2';
-  toggleTopGradientBtn.disabled = !relevant;
-  if (!relevant) {
-    cam.settings.showTopGradient = false;
-    toggleTopGradientBtn.classList.remove('active');
-    cam.topGradientData.fill(0);
-    cam.topGradientTex.needsUpdate = true;
-  }
+  toggleTopGradientBtn.disabled = false;
 }

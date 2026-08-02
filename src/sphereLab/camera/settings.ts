@@ -48,9 +48,25 @@ export interface CameraSettingsCommon {
   // be compared directly against the fitted rectangle it produced.
   showLsdRawRegions: boolean;
   showLsdComposite: boolean; // draw the join walk's own merged composite lines (pipeline/bucketFillJoin.ts's computeCompositeLines), fed by the segments above
-  lsdToleranceDeg: number; // tau -- region-growing angle tolerance, LSD default 22.5deg
-  lsdRhoNoiseThreshold: number; // rho -- gradient magnitude floor below which a pixel is excluded entirely (not just from growth -- from seeding and NFA counts too)
-  lsdMagnitudeBuckets: number; // approximate bucket/counting-sort resolution for stage 2's magnitude-descending pixel ordering
+  lsdToleranceDeg: number; // tau -- the one angle tolerance growRegionsCCL's edge predicate, countRectanglePixels' NFA alignment count and the retry-1 refilter all test against. LSD default 22.5deg.
+  // rho LOW -- hysteresis' participation floor: a pixel below this is
+  // excluded entirely (from growth edges and from NFA alignment counts).
+  // Scale is [0,1], matching computeGradient2x2Field's own normalized output.
+  lsdRhoNoiseThreshold: number;
+  // rho HIGH -- hysteresis' survival bar: a grown component is discarded
+  // unless at least one of its members exceeds this. Canny's two-threshold
+  // idea, and what replaces the magnitude-priority ORDERING that the old
+  // competitive growers relied on to stop weak noise out-competing a real
+  // ridge (a symmetric edge predicate has no notion of "wins"). Set at or
+  // below lsdRhoNoiseThreshold to degrade to plain single-threshold
+  // behavior. See pipeline/lsdSegments.ts's growRegionsCCL.
+  lsdRhoHighThreshold: number;
+  // DEBUG SCRUBBER ONLY (0 = run to the fixpoint, the real algorithm): caps
+  // how many hook+compress rounds growRegionsCCL runs so the overlay can
+  // watch components coalesce. Unlike the lsdGrowSteps it replaces, this
+  // cannot change the converged answer -- connected components are a
+  // fixpoint, not an iteration budget -- only how far along you're looking.
+  lsdCclSteps: number;
   lsdNfaEpsilon: number; // epsilon -- accept a candidate rectangle iff NFA < this (LSD default 1: expect <1 false detection per image)
   lsdNfaTestExponent: number; // N_tests = N^exponent, N = max(image w,h) -- LSD's own estimate of "how many rectangles could plausibly have been tested" (~5 degrees of freedom: 2 position, 1 angle, 2 size)
   lsdMaxRetries: number; // how many tighter-tolerance-then-shrink attempts before giving up on a candidate that fails NFA
@@ -66,7 +82,10 @@ export interface CameraSettingsCommon {
   // is exactly the old fixed threshold only when both sides are maximally
   // confident.
   lsdJoinSteps: number; lsdMergeMinSimilarity: number; lsdMaxTravelFactor: number; lsdMinLengthPx: number;
-  showGradientArrow: boolean; showGradientArrowPerpendicular: boolean; gradientArrowScale: number;
+  // showLevelLineArrow: the gradient rotated -90deg (LSD's own level-line
+  // convention, see pipeline/lsdSegments.ts's levelLineAngle) -- was named
+  // "perpendicular" before, renamed to match that shared terminology.
+  showGradientArrow: boolean; showLevelLineArrow: boolean; gradientArrowScale: number;
   coherenceRadius: number;
   tangentWalkMaxSteps: number; tangentWalkDeviationDeg: number; tangentWalkMagFraction: number; tangentWalkGraceSamples: number;
   tangentWalkAdaptive: boolean;
@@ -144,8 +163,15 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showLsdRawRegions: savedBool('toggleLsdRawRegions', false),
     showLsdComposite: savedBool('toggleLsdComposite', false),
     lsdToleranceDeg: savedNum('lsdToleranceDeg', 22.5),
-    lsdRhoNoiseThreshold: savedNum('lsdRhoNoiseThreshold', 4),
-    lsdMagnitudeBuckets: savedNum('lsdMagnitudeBuckets', 1024),
+    // 4/255 preserves the pre-normalization default exactly, now that
+    // computeGradient2x2Field's own output tops out at 1 instead of 255.
+    lsdRhoNoiseThreshold: savedNum('lsdRhoNoiseThreshold', 4 / 255),
+    // 3x the low bar as a starting point, not a derived value: low enough
+    // that any genuine De Bruijn edge anchors its component somewhere, high
+    // enough that a component made purely of near-floor noise has nothing to
+    // anchor with. Re-tune against a real capture.
+    lsdRhoHighThreshold: savedNum('lsdRhoHighThreshold', 12 / 255),
+    lsdCclSteps: savedNum('lsdCclSteps', 0), // 0 = run to fixpoint (the real algorithm); 1+ scrubs rounds
     lsdNfaEpsilon: savedNum('lsdNfaEpsilon', 1),
     lsdNfaTestExponent: savedNum('lsdNfaTestExponent', 5),
     lsdMaxRetries: savedNum('lsdMaxRetries', 2),
@@ -155,7 +181,11 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     lsdMergeMinSimilarity: savedNum('lsdMergeMinSimilarity', 0.9),
     lsdMaxTravelFactor: savedNum('lsdMaxTravelFactor', 1),
     lsdMinLengthPx: savedNum('lsdMinLengthPx', 3),
-    showGradientArrow: false, showGradientArrowPerpendicular: false, gradientArrowScale: 10,
+    // 10*255 preserves the pre-normalization arrow length exactly, now that
+    // computeGradient2x2Field's own output (the only field this arrow ever
+    // draws -- overlays/hoverDebugOverlays.ts derives it per-hover from
+    // lastNoisedPreviewGray) tops out at 1 instead of 255.
+    showGradientArrow: false, showLevelLineArrow: false, gradientArrowScale: 10 * 255,
     coherenceRadius: 1,
     // See the pre-Stage-A history for the full derivation of these tangent-walk
     // defaults (guided tangent walk, simNoise=8 stability etc.) -- unchanged.

@@ -42,7 +42,14 @@ export const globalState = {
   // rectangle fit) + stage 5's first NFA pass (see pipelineGPU/lsdFit.ts) --
   // the retry loop and everything before stage 4 (region growing etc.) stay
   // CPU-only regardless, see pipeline/lsdSegments.ts's own header.
-  useGPULsdFit: true,
+  //
+  // PINNED false (checkbox disabled in sphere-lab.html too, see
+  // cameraPanel.ts's own comment). The parity problem that pinned it is gone
+  // -- lsdFit.wgsl.ts's directed NFA alignment count now MATCHES the CPU
+  // path's countRectanglePixels again, since that reverted to directed too
+  // (pipeline/lsdSegments.ts). What's still missing is an actual verification
+  // run against the CPU path; do that before flipping this back on.
+  useGPULsdFit: false,
   // Mailbox-style pipelining for a physical camera's video-mode capture
   // stream (see devBridge/client.ts's realCapture handler and main.ts's
   // animate loop): when on, the phone is told it's always ready and free-

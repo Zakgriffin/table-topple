@@ -102,7 +102,8 @@ export function computePixelVotes2x2(
 // this structurally (extra fields are fine), so every existing desktop call
 // site is unaffected.
 export interface LsdCompositeSettings {
-  lsdToleranceDeg: number; lsdRhoNoiseThreshold: number; lsdMagnitudeBuckets: number; lsdNfaEpsilon: number;
+  lsdToleranceDeg: number; lsdRhoNoiseThreshold: number; lsdRhoHighThreshold: number; lsdCclSteps: number;
+  lsdNfaEpsilon: number;
   lsdNfaTestExponent: number; lsdMaxRetries: number; lsdRetryToleranceFactor: number; lsdRetryShrinkFraction: number;
   lsdMergeMinSimilarity: number; lsdJoinSteps: number; lsdMinLengthPx: number; lsdMaxTravelFactor: number;
 }
@@ -138,7 +139,8 @@ export async function computeGradient2x2Composites(
   const rects = await computeLsdRectanglesAuto(field, {
     toleranceDeg: settings.lsdToleranceDeg,
     rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
-    magnitudeBuckets: settings.lsdMagnitudeBuckets,
+    rhoHighThreshold: settings.lsdRhoHighThreshold,
+    cclSteps: settings.lsdCclSteps,
     nfaEpsilon: settings.lsdNfaEpsilon,
     nfaTestExponent: settings.lsdNfaTestExponent,
     maxRetries: settings.lsdMaxRetries,

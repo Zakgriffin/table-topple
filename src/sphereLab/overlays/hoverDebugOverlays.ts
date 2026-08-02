@@ -3,38 +3,26 @@ import { Camera } from '../camera/model.ts';
 import { CameraSettingsCommon } from '../camera/settings.ts';
 import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
+import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
-import { canvas, gradientArrowCanvas, gradientArrowCtx, lsdCompositeGroup, persistControl, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, persistControl, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
 import { updateTopGradientOverlay } from './gradientHighlightOverlays.ts';
-import { hashSeedIndexToHueDeg, updateLsdOverlay } from './lsdOverlay.ts';
-import { svgEl } from './svgUtil.ts';
+import { hashSeedIndexToHueDeg, repaintLsdRawRegionsHighlight, updateLsdOverlay } from './lsdOverlay.ts';
+import { drawOneArrow, svgEl } from './svgUtil.ts';
 
-export function clearGradientArrowOverlay() {
-  gradientArrowCtx.clearRect(0, 0, gradientArrowCanvas.width, gradientArrowCanvas.height);
-}
-export function drawOneArrow(px: number, py: number, dirVecX: number, dirVecY: number, color: string, scale: number) {
-  const tipX = px + dirVecX * scale, tipY = py + dirVecY * scale;
-  const headLen = 8, headAngle = Math.PI / 7;
-  const backAngle = Math.atan2(tipY - py, tipX - px);
-  const headPath = new Path2D();
-  headPath.moveTo(tipX, tipY);
-  headPath.lineTo(tipX - headLen * Math.cos(backAngle - headAngle), tipY - headLen * Math.sin(backAngle - headAngle));
-  headPath.lineTo(tipX - headLen * Math.cos(backAngle + headAngle), tipY - headLen * Math.sin(backAngle + headAngle));
-  headPath.closePath();
-
-  const ctx = gradientArrowCtx;
-  ctx.strokeStyle = 'rgba(0,0,0,0.85)'; ctx.fillStyle = 'rgba(0,0,0,0.85)'; ctx.lineWidth = 4;
-  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(tipX, tipY); ctx.stroke();
-  ctx.fill(headPath);
-  ctx.beginPath(); ctx.arc(px, py, 3.5, 0, Math.PI * 2); ctx.fill();
-
-  ctx.strokeStyle = color; ctx.fillStyle = color; ctx.lineWidth = 2;
-  ctx.beginPath(); ctx.moveTo(px, py); ctx.lineTo(tipX, tipY); ctx.stroke();
-  ctx.fill(headPath);
-  ctx.beginPath(); ctx.arc(px, py, 2.5, 0, Math.PI * 2); ctx.fill();
+// Clears the gradient/level-line arrow groups only -- NOT lsdRectanglesGroup/
+// lsdCompositeGroup, even though all four now share the same <svg> (see
+// ui/dom.ts's lsdSvgOverlay) -- those two are independently toggled/redrawn
+// by overlays/lsdOverlay.ts and drawCompositeLines below, so clearing them
+// here on every hover move (this function's own call sites: updateHoverOverlays,
+// onHoverPointerLeave, updateGradientArrowAvailability) would wipe overlays
+// this function has no business touching.
+export function clearArrowOverlays() {
+  while (gradientArrowGroup.firstChild) gradientArrowGroup.removeChild(gradientArrowGroup.firstChild);
+  while (levelLineArrowGroup.firstChild) levelLineArrowGroup.removeChild(levelLineArrowGroup.firstChild);
 }
 
 // Diagnostic-only re-run of guidedTangentDirection's walk that also records
@@ -142,12 +130,14 @@ export function computeTangentWalkIncludedPixelsAdaptive(
 // Paints the tangent-walk path straight into the camera's own per-field-
 // pixel texture (same DataTexture-plus-quad mechanism contamination/top-
 // gradient overlays use, see overlays/contaminationOverlays.ts and
-// overlays/gradientHighlightOverlays.ts) instead of stroking rects onto
-// gradientArrowCanvas at window resolution -- that 2D canvas is sized 1:1 to
-// CSS pixels (see ui/layout.ts) with no devicePixelRatio scaling, so it went
-// blurry on any HiDPI display; painting one texel per field pixel and
-// letting the WebGL quad blit handle the upscale (same as every other field
-// overlay) fixes that by construction, no rect/cellW/cellH mapping needed.
+// overlays/gradientHighlightOverlays.ts) instead of stroking rects at window
+// resolution the way this file's own gradient/level-line arrows do (fine
+// there since those are real SVG elements, resolution-independent by
+// construction) -- a per-window-pixel raster path here would need its own
+// devicePixelRatio handling to avoid going blurry on a HiDPI display;
+// painting one texel per field pixel and letting the WebGL quad blit handle
+// the upscale (same as every other field overlay) sidesteps that entirely,
+// no rect/cellW/cellH mapping needed.
 export function clearTangentWalkPathOverlay(camera: Camera) {
   camera.tangentWalkPathData.fill(0);
   camera.tangentWalkPathTex.needsUpdate = true;
@@ -281,28 +271,50 @@ function drawCompositeLines(camera: Camera) {
 // get them back on screen without waiting for the next pointermove.
 export function updateHoverOverlays(clientX: number, clientY: number) {
   const camera = activeCamera();
-  if (!camera) { clearGradientArrowOverlay(); return; }
+  if (!camera) { clearArrowOverlays(); return; }
   const settings = camera.settings;
-  const arrowsOn = settings.showGradientArrow || settings.showGradientArrowPerpendicular;
+  const arrowsOn = settings.showGradientArrow || settings.showLevelLineArrow;
 
-  clearGradientArrowOverlay();
+  clearArrowOverlays();
 
   if (globalState.mode !== 'through') return;
 
   drawCompositeLines(camera);
 
-  if (!arrowsOn) return;
+  // Field-pixel-under-cursor, computed UNCONDITIONALLY (not gated behind
+  // arrowsOn) -- tracked on the camera itself so other hover-driven repaints
+  // (this function's own raw-regions highlight call just below) can read it
+  // without needing their own copy of this rect-containment/field-index
+  // math. See camera.lastHoverFieldIndex's own comment.
   const rect = computeThroughRect(camera);
-  if (clientX < rect.x || clientX >= rect.x + rect.w || clientY < rect.y || clientY >= rect.y + rect.h) return; // cursor outside -- markers (if any) stay drawn, just no hover-specific content below
-
   const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
-  const nx = (clientX - rect.x) / rect.w, ny = (clientY - rect.y) / rect.h;
-  const fieldCol = Math.min(fieldW - 1, Math.max(0, Math.floor(nx * fieldW)));
-  const fieldRow = Math.min(fieldH - 1, Math.max(0, Math.floor((1 - ny) * fieldH)));
-  const i = fieldRow * fieldW + fieldCol;
+  let fieldIndex: number | null = null;
+  if (clientX >= rect.x && clientX < rect.x + rect.w && clientY >= rect.y && clientY < rect.y + rect.h) {
+    const nx = (clientX - rect.x) / rect.w, ny = (clientY - rect.y) / rect.h;
+    const fieldCol = Math.min(fieldW - 1, Math.max(0, Math.floor(nx * fieldW)));
+    const fieldRow = Math.min(fieldH - 1, Math.max(0, Math.floor((1 - ny) * fieldH)));
+    fieldIndex = fieldRow * fieldW + fieldCol;
+  }
+  camera.lastHoverFieldIndex = fieldIndex;
+  repaintLsdRawRegionsHighlight(camera);
 
-  if (arrowsOn && camera.lastDisplayedVectorField) {
-    const { fx, fy } = camera.lastDisplayedVectorField;
+  if (!arrowsOn || fieldIndex === null) return; // cursor outside -- markers (if any) stay drawn, just no hover-specific content below
+  const i = fieldIndex;
+  const fieldCol = i % fieldW, fieldRow = (i / fieldW) | 0;
+
+  // Derives its own field from lastNoisedPreviewGray rather than reading a
+  // cached "whatever was last PAINTED" field, matching how every other overlay
+  // here already works (lsdOverlay, contaminationOverlays,
+  // gradientHighlightOverlays all call computeGradient2x2Field themselves).
+  // The old cached field was only ever populated by the gradient2x2 branch of
+  // paintFieldViewFromGray, so these arrows silently vanished on every other
+  // view -- the sole REAL data dependency behind the field-view gates, as
+  // opposed to the other overlays' purely cosmetic ones.
+  const arrowField = camera.lastNoisedPreviewGray
+    ? computeGradient2x2Field(camera.lastNoisedPreviewGray, fieldW, fieldH)
+    : null;
+  if (arrowsOn && arrowField) {
+    const { fx, fy } = arrowField;
     const gx = fx[i], gy = fy[i];
     const mag = Math.hypot(gx, gy);
     if (mag > 0) {
@@ -316,11 +328,11 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
 
       if (settings.showGradientArrow) {
         const theta = Math.atan2(gy, gx);
-        drawOneArrow(px, py, Math.cos(theta) * mag, -Math.sin(theta) * mag, color, settings.gradientArrowScale);
+        drawOneArrow(gradientArrowGroup, px, py, Math.cos(theta) * mag, -Math.sin(theta) * mag, color, settings.gradientArrowScale);
       }
-      if (settings.showGradientArrowPerpendicular) {
+      if (settings.showLevelLineArrow) {
         const theta = Math.atan2(gx, -gy);
-        drawOneArrow(px, py, Math.cos(theta) * mag, -Math.sin(theta) * mag, color, settings.gradientArrowScale);
+        drawOneArrow(levelLineArrowGroup, px, py, Math.cos(theta) * mag, -Math.sin(theta) * mag, color, settings.gradientArrowScale);
       }
     }
   }
@@ -332,7 +344,14 @@ function onHoverPointerMove(e: PointerEvent) {
 }
 function onHoverPointerLeave() {
   lastHoverClientX = -1; lastHoverClientY = -1;
-  clearGradientArrowOverlay();
+  clearArrowOverlays();
+  // Also reset the raw-regions highlight back to "every region" -- without
+  // this, the last-hovered region would stay isolated forever once the
+  // cursor actually leaves the canvas (updateHoverOverlays, which would
+  // otherwise naturally null this out via its own rect-containment check,
+  // is deliberately NOT called here, see this function's own minimal scope).
+  const camera = activeCamera();
+  if (camera) { camera.lastHoverFieldIndex = null; repaintLsdRawRegionsHighlight(camera); }
 }
 canvas.addEventListener('pointermove', onHoverPointerMove);
 canvas.addEventListener('pointerleave', onHoverPointerLeave);
@@ -373,8 +392,8 @@ toggleTopGradientBtn.addEventListener('click', () => {
   updateDistortedPreview(cam);
   updateTopGradientOverlay(cam);
 });
-// These 3 (rectangles/rejected/raw-regions) no longer touch the shared
-// gradientArrowCtx canvas at all -- rectangles draw into their own SVG
+// These 3 (rectangles/rejected/raw-regions) don't touch the gradient/
+// level-line arrow groups at all -- rectangles draw into their own SVG
 // group and raw-regions/rejected paint their own raster textures, both
 // handled entirely inside updateLsdOverlay -- so no updateHoverOverlays
 // call is needed after any of them.
@@ -419,10 +438,10 @@ toggleGradientArrowBtn.addEventListener('click', () => {
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 });
-toggleGradientArrowModeBtn.addEventListener('click', () => {
+toggleLevelLineArrowBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
-  cam.settings.showGradientArrowPerpendicular = !cam.settings.showGradientArrowPerpendicular;
-  toggleGradientArrowModeBtn.classList.toggle('active', cam.settings.showGradientArrowPerpendicular);
+  cam.settings.showLevelLineArrow = !cam.settings.showLevelLineArrow;
+  toggleLevelLineArrowBtn.classList.toggle('active', cam.settings.showLevelLineArrow);
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 });
 // Purely a display-time rotation (see settings.ts's useTrueCardinalOrientation
@@ -435,16 +454,10 @@ toggleTrueCardinalOrientationBtn.addEventListener('click', () => {
 });
 
 
+// No-op hook -- see contaminationOverlays.ts's updateContaminationAvailability
+// for why this stays a named function now that there's no field view to gate on.
 export function updateGradientArrowAvailability() {
   const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'gradient2x2';
-  toggleGradientArrowBtn.disabled = !relevant;
-  toggleGradientArrowModeBtn.disabled = !relevant;
-  if (!relevant) {
-    cam.settings.showGradientArrow = false;
-    cam.settings.showGradientArrowPerpendicular = false;
-    toggleGradientArrowBtn.classList.remove('active');
-    toggleGradientArrowModeBtn.classList.remove('active');
-    clearGradientArrowOverlay();
-  }
+  toggleGradientArrowBtn.disabled = false;
+  toggleLevelLineArrowBtn.disabled = false;
 }

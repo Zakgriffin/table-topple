@@ -3,7 +3,7 @@ import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { renderer, scene } from '../scene/renderer.ts';
 import { insideCam, viewerCam } from '../scene/viewerControls.ts';
-import { gradientArrowCanvas, lsdSvgOverlay, pipFrame, pipLabel } from './dom.ts';
+import { lsdSvgOverlay, pipFrame, pipLabel } from './dom.ts';
 
 export function renderViewport(cam: THREE.Camera, x: number, y: number, w: number, h: number) {
   renderer.setViewport(x, y, w, h);
@@ -48,12 +48,9 @@ export function resize() {
   insideCam.updateProjectionMatrix();
   const cam = activeCamera();
   if (cam) layoutPip(cam);
-  gradientArrowCanvas.width = innerWidth;
-  gradientArrowCanvas.height = innerHeight;
-  gradientArrowCanvas.style.width = innerWidth + 'px';
-  gradientArrowCanvas.style.height = innerHeight + 'px';
-  // viewBox in raw pixel units so SVG user-space coordinates match
-  // computeThroughRect's screen-pixel output 1:1, same as the canvas above.
+  // viewBox in raw pixel units so SVG user-space coordinates (rectangles,
+  // composite lines, gradient/level-line arrows) match computeThroughRect's
+  // screen-pixel output 1:1.
   lsdSvgOverlay.setAttribute('viewBox', `0 0 ${innerWidth} ${innerHeight}`);
 }
 addEventListener('resize', resize);

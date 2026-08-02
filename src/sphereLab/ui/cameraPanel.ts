@@ -19,7 +19,7 @@ import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleGradientArrowModeBtn, toggleHideFieldBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -159,7 +159,8 @@ export function refreshCameraPanel() {
   setNum('gradientArrowScale', cam.settings.gradientArrowScale);
   setNum('lsdToleranceDeg', cam.settings.lsdToleranceDeg);
   setNum('lsdRhoNoiseThreshold', cam.settings.lsdRhoNoiseThreshold);
-  setNum('lsdMagnitudeBuckets', cam.settings.lsdMagnitudeBuckets);
+  setNum('lsdRhoHighThreshold', cam.settings.lsdRhoHighThreshold);
+  setNum('lsdCclSteps', cam.settings.lsdCclSteps);
   setNum('lsdNfaEpsilon', cam.settings.lsdNfaEpsilon);
   setNum('lsdNfaTestExponent', cam.settings.lsdNfaTestExponent);
   setNum('lsdMaxRetries', cam.settings.lsdMaxRetries);
@@ -184,7 +185,7 @@ export function refreshCameraPanel() {
   toggleReconContamBtn.classList.toggle('active', cam.settings.showReconstructedContamination);
   toggleTrueCardinalOrientationBtn.classList.toggle('active', cam.settings.useTrueCardinalOrientation);
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
-  toggleGradientArrowModeBtn.classList.toggle('active', cam.settings.showGradientArrowPerpendicular);
+  toggleLevelLineArrowBtn.classList.toggle('active', cam.settings.showLevelLineArrow);
   toggleTopGradientBtn.classList.toggle('active', cam.settings.showTopGradient);
   toggleLsdSegmentsBtn.classList.toggle('active', cam.settings.showLsdSegments);
   toggleLsdRejectedBtn.classList.toggle('active', cam.settings.showLsdRejected);
@@ -328,7 +329,14 @@ bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; const cam = active
 bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); pushSettingsSyncToAllPhysical(); });
 bindCheckbox('useGPUProject', (v) => { globalState.useGPUProject = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
 bindCheckbox('useGPUGradient', (v) => { globalState.useGPUGradient = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); pushSettingsSyncToAllPhysical(); });
-bindCheckbox('useGPULsdFit', (v) => { globalState.useGPULsdFit = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); pushSettingsSyncToAllPhysical(); });
+// NOT wired through bindCheckbox -- that would restore a stale "checked"
+// state from a returning user's localStorage (bindCheckbox applies
+// savedControls unconditionally, ignoring the `disabled` HTML attribute)
+// and silently flip globalState.useGPULsdFit back on, undoing state.ts's
+// own pin. Force the checkbox itself unchecked+disabled instead, and never
+// attach a change handler -- see state.ts's own comment for why this is
+// pinned off and what needs to happen before re-enabling it.
+(document.getElementById('useGPULsdFit') as HTMLInputElement).checked = false;
 // Doesn't affect any already-computed camera state, just how the NEXT
 // physical-camera frame gets scheduled -- no recomputeFromLastCapture call
 // needed (unlike the useGPU* toggles above).
@@ -384,8 +392,12 @@ function refreshLsd() {
 // pipeline/votes.ts's computeGradient2x2Composites), so recomputeFromLastCapture
 // is also needed here or camera.lastVoteComposites/lastGridPeriodPhase go stale.
 bindSlider('lsdToleranceDeg', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdToleranceDeg = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => `${v.toFixed(1)}°`);
-bindSlider('lsdRhoNoiseThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(1));
-bindSlider('lsdMagnitudeBuckets', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMagnitudeBuckets = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
+bindSlider('lsdRhoNoiseThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
+bindSlider('lsdRhoHighThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoHighThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
+// 0 is the REAL algorithm (run growRegionsCCL to its fixpoint), not "off" --
+// labelled "auto" rather than "0" so the slider's own left end doesn't read as
+// a disabled/no-growth state the way the grow-steps slider it replaces did.
+bindSlider('lsdCclSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdCclSteps = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => (v === 0 ? 'auto' : v.toFixed(0)));
 bindSlider('lsdNfaEpsilon', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaEpsilon = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
 bindSlider('lsdNfaTestExponent', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaTestExponent = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
 bindSlider('lsdMaxRetries', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMaxRetries = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));

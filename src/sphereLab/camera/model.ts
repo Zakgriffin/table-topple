@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { CompositeLine } from '../pipeline/bucketFillJoin.ts';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
-import { LsdRectangle } from '../pipeline/lsdSegments.ts';
-import { DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
+import { GrownRegion, LsdRectangle } from '../pipeline/lsdSegments.ts';
+import { DecodeCellDebug, DecodeSampleGrid, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
 import { ProfileSpan } from '../profiling/profiler.ts';
 import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
 
@@ -66,12 +66,42 @@ export interface CameraBase {
   captureDirty: boolean;
   lastPreviewUpdate: number;
   lastNoisedPreviewGray: Float64Array | null;
-  lastDisplayedVectorField: GradientField | null;
+  // The Through-Cam field-pixel index (row*w+col) currently under the
+  // cursor, or null if the cursor isn't over the field this frame --
+  // tracked unconditionally by overlays/hoverDebugOverlays.ts's
+  // updateHoverOverlays (not just when its own gradient-arrow hover is on),
+  // so OTHER hover-driven repaints (overlays/lsdOverlay.ts's raw-regions
+  // highlight) can read it directly off the camera without a circular
+  // import back into hoverDebugOverlays.ts (which already imports FROM
+  // lsdOverlay.ts).
+  lastHoverFieldIndex: number | null;
   // The from-scratch traditional LSD pipeline's own debug output (pipeline/
   // lsdSegments.ts) -- accepted rectangles AND rejected/retried candidates
   // (see LsdRectangle's own `accepted`/`retries` fields), so the debug
   // overlay can show both, not just the survivors.
   lastLsdRectangles: LsdRectangle[] | null;
+  // growRegionsCCL's own raw output (pre-fit, pre-NFA) for the SAME call
+  // updateLsdOverlay's showLsdRawRegions branch already makes -- cached here
+  // purely so hover highlighting (overlays/lsdOverlay.ts's
+  // repaintLsdRawRegionsHighlight) can look up "which region owns this pixel" on
+  // every pointermove without re-running growRegionsCCL itself.
+  // mag/theta are the full fields, kept so the edge-connectivity hover view
+  // (overlays/lsdOverlay.ts's drawEdgeConnectivityPreview) can re-run
+  // growRegionsCCL's OWN edge predicate for the single hovered pixel on every
+  // pointermove without recomputing the gradient field. They replaced a
+  // regionSumCos/regionSumSin/strideDivider trio that existed only to feed the
+  // JFA grower's growth-candidate arrows -- that view needed per-region
+  // aggregate direction and per-pixel stride state to reconstruct where a
+  // pixel would jump next; the predicate is a plain pairwise test between
+  // 8-neighbors now, so the raw fields are all it takes.
+  // roundsRun/converged report what the round loop actually did, so the
+  // readout can distinguish "reached the fixpoint in 9 rounds" from "still
+  // mid-growth because the CCL-steps scrubber is capping it".
+  lastLsdGrownRegions: {
+    regionId: Int32Array; regions: GrownRegion[];
+    mag: Float64Array; theta: Float64Array;
+    roundsRun: number; converged: boolean;
+  } | null;
   lastGridPeriodPhase: GridPeriodPhaseResult | null;
   // Interactive pan/zoom state for the period/phase debug plot (overlays/
   // gridPeriodPhaseOverlays.ts) -- null means "no interaction yet, use the

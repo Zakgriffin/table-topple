@@ -16,16 +16,43 @@ export function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
     const folded = computeTriangleFold(gray);
     fillGrayscalePreview(folded, camera.distortedPreviewData);
     camera.distortedPreviewTex.needsUpdate = true;
-  } else if (settings.fieldView === 'gradient2x2') {
+  } else if (settings.fieldView === 'gradient2x2' || settings.fieldView === 'gradient2x2Directed') {
     const field = computeGradient2x2Field(gray, w, h);
-    camera.lastDisplayedVectorField = field;
-    paintVectorFieldAsColor(field, camera.distortedPreviewData);
+    // Axial vs directed hue is purely a PAINTING choice -- same field either
+    // way. 'gradient2x2' folds theta into [0, PI) so a black-to-white edge
+    // and the white-to-black edge facing it share one hue;
+    // 'gradient2x2Directed' does not, so those two land exactly opposite on
+    // the hue wheel. See paintVectorFieldAsColor's own comment for why that
+    // distinction is worth being able to SEE -- pipeline/lsdSegments.ts's
+    // segment growing is directed now, so two edges that look identical in
+    // the axial view are genuinely different lines to it.
+    paintVectorFieldAsColor(field, camera.distortedPreviewData, settings.fieldView === 'gradient2x2Directed');
     camera.distortedPreviewTex.needsUpdate = true;
   }
 }
 
+// Every overlay that reads camera.lastNoisedPreviewGray directly, rather than
+// the painted field-view colors updateDistortedPreview's own hideField branch
+// gates. If an overlay is on but is NOT listed here, updateDistortedPreview's
+// early-returns skip recomputing the gray entirely and the overlay silently
+// reads a STALE buffer -- possibly one sized for a previous rtSize.w/h, which
+// then gets indexed at the CURRENT dimensions, reading/writing at
+// systematically wrong offsets (the diagonal "streaking" artifact). It reads
+// as "the overlay is broken", not "the gray is stale", so keep this in sync:
+// ANY new toggle whose overlay touches lastNoisedPreviewGray belongs here.
+//
+// This used to list only four flags, which was survivable only because every
+// one of these overlays was ALSO hard-gated to the gradient2x2 field view (the
+// view that always recomputes the gray anyway). Now that they render over any
+// view, the omissions became reachable -- see updateLsdOverlay's own comment.
+function overlaysNeedGray(settings: Camera['settings']): boolean {
+  return settings.showTrueContamination || settings.showReconstructedContamination
+    || settings.showTopGradient
+    || settings.showLsdSegments || settings.showLsdRejected || settings.showLsdRawRegions
+    || settings.showGradientArrow || settings.showLevelLineArrow;
+}
+
 export function updateDistortedPreview(camera: Camera) {
-  camera.lastDisplayedVectorField = null;
   const settings = camera.settings;
   if (settings.hideField) {
     for (let i = 0; i < camera.distortedPreviewData.length; i += 4) {
@@ -33,15 +60,7 @@ export function updateDistortedPreview(camera: Camera) {
     }
     camera.distortedPreviewTex.needsUpdate = true;
   }
-  // Anything that reads camera.lastNoisedPreviewGray directly (not just the
-  // painted field-view colors this function's own hideField branches gate)
-  // needs to be listed here, or hideField skips recomputing it entirely --
-  // the STALE gray buffer (e.g. from before a viewport resize, when it was
-  // a different width/height) then gets reused at the CURRENT rtSize.w/h by
-  // whichever overlay reads it, reading/writing at systematically wrong
-  // offsets -- the diagonal "streaking" artifact.
-  const needGrayForOverlay = settings.showTrueContamination || settings.showReconstructedContamination
-    || settings.showLsdSegments || settings.showTopGradient;
+  const needGrayForOverlay = overlaysNeedGray(settings);
   if (settings.hideField && !needGrayForOverlay) return;
 
   if (isPhysical(camera)) {

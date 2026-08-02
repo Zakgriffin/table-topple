@@ -1,5 +1,5 @@
 import { activeCamera } from '../camera/store.ts';
-import { clearGradientArrowOverlay } from '../overlays/hoverDebugOverlays.ts';
+import { clearArrowOverlays } from '../overlays/hoverDebugOverlays.ts';
 import { hideGridPeriodPhaseProjected } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { refreshModeVisualizations } from '../pipeline/modeRefresh.ts';
 import { worldOrbit } from '../scene/viewerControls.ts';
@@ -32,7 +32,7 @@ export function setMode(m: Mode) {
   setSectionHidden(contamToggles, m !== 'through');
   setSectionHidden(arrowToggles, m !== 'through');
   setSectionHidden(projectedToggles, m !== 'projected');
-  if (m !== 'through') { clearGradientArrowOverlay(); clearLsdSvgOverlay(); }
+  if (m !== 'through') { clearArrowOverlays(); clearLsdSvgOverlay(); }
   // Whatever this mode actually renders may be stale from whenever it was
   // last computed -- see pipeline/modeRefresh.ts.
   if (cam) refreshModeVisualizations(cam, m);

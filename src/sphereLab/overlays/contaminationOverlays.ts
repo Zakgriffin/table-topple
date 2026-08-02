@@ -10,7 +10,12 @@ import { toggleReconContamBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 export function updateContaminationOverlays(camera: Camera) {
   const settings = camera.settings;
   if (!settings.showTrueContamination && !settings.showReconstructedContamination) return;
-  if (settings.fieldView !== 'gradient2x2') return;
+  // Deliberately NOT gated on fieldView -- this overlay derives its own field
+  // from lastNoisedPreviewGray below, so it never depended on gradient2x2
+  // being the painted view, only on the gray being fresh (which
+  // preview.ts's overlaysNeedGray now guarantees for these toggles on every
+  // view). Drawing contamination over the raw/noised image is often easier to
+  // read than over the hue field it used to be locked to.
   if (!camera.lastNoisedPreviewGray) return;
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const lum = camera.lastNoisedPreviewGray;
@@ -41,17 +46,15 @@ export function updateContaminationOverlays(camera: Camera) {
 }
 
 
+// Kept as a no-op hook rather than deleted: the contamination overlays used to
+// be force-disabled on any field view other than gradient2x2, which silently
+// turned the user's own toggles OFF on a view switch. They render over every
+// view now (see updateContaminationOverlays above), so there is nothing to
+// gate -- but every caller site (ui/cameraPanel.ts's fieldView radio group and
+// its per-camera sync) still wants a single named place to hang any future
+// availability rule, and dropping the function would scatter that decision.
 export function updateContaminationAvailability() {
   const cam = activeCamera(); if (!cam) return;
-  const relevant = cam.settings.fieldView === 'gradient2x2';
-  toggleTrueContamBtn.disabled = !relevant;
-  toggleReconContamBtn.disabled = !relevant;
-  if (!relevant) {
-    cam.settings.showTrueContamination = false;
-    cam.settings.showReconstructedContamination = false;
-    toggleTrueContamBtn.classList.remove('active');
-    toggleReconContamBtn.classList.remove('active');
-    cam.trueContamData.fill(0); cam.trueContamTex.needsUpdate = true;
-    cam.reconContamData.fill(0); cam.reconContamTex.needsUpdate = true;
-  }
+  toggleTrueContamBtn.disabled = false;
+  toggleReconContamBtn.disabled = false;
 }

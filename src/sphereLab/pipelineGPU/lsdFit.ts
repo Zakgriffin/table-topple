@@ -26,6 +26,18 @@ export interface LsdFitResult {
 // disjoint-partition guarantee), so this is a plain one-thread-per-region
 // parallel map, no cross-region synchronization needed at all.
 //
+// CURRENTLY UNREACHABLE IN PRACTICE: globalState.useGPULsdFit is pinned
+// false (state.ts, checkbox disabled in sphere-lab.html). The reason it was
+// pinned is GONE, though: lsdFit.wgsl.ts's alignment/NFA-count logic does a
+// DIRECTED (non-mod-π) comparison against the rectangle's theta, which was
+// out of parity with a mod-π experiment in pipeline/lsdSegments.ts's
+// countRectanglePixels -- and that experiment has since been reverted, so
+// directed is exactly what the CPU path does again (see levelLineAngle's own
+// comment there for why). The shader should be correct as-written now.
+// TODO: actually re-verify this path's output against the CPU path on a real
+// capture, then flip useGPULsdFit back on -- it has not been run since the
+// revert, so "should be correct" is reasoning, not evidence.
+//
 // Returns null if WebGPU isn't available; caller falls back to the CPU
 // version, which stays the source of truth. Returns [] (not null) for
 // regions.length === 0 -- a valid empty-input result, not a GPU failure.

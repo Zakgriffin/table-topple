@@ -25,13 +25,25 @@ export function computeGradientField(gray: Float64Array, w: number, h: number, g
 // only 2 of the 4 corners per component and ignores the other edge
 // entirely). Leaves the last row/column at zero (no full 2x2 block there),
 // same footprint as before.
+//
+// Normalized by GRAYSCALE_MAX so hypot(fx,fy)'s own true ceiling is exactly
+// 1, not 255: fx/fy are two ORTHOGONAL unit-norm combinations of the same 4
+// corner pixels, so (being a convex quadratic over a box) the max of
+// hypot(fx,fy) is attained at a corner-pixel vertex (each corner at 0 or
+// GRAYSCALE_MAX) -- enumerating those, the true max is GRAYSCALE_MAX itself
+// (one column of the block fully black, the other fully white), reached
+// BEFORE this division. This makes `rho`/lsdRhoNoiseThreshold's own scale
+// (and every other absolute-magnitude constant downstream) a plain [0,1]
+// fraction instead of an arbitrary pixel-brightness-derived number.
+const GRAYSCALE_MAX = 255;
 export function computeGradient2x2Field(gray: Float64Array, w: number, h: number): GradientField {
   const fx = new Float64Array(w * h), fy = new Float64Array(w * h);
+  const norm = 1 / (2 * GRAYSCALE_MAX);
   for (let y = 0; y < h - 1; y++) {
     for (let x = 0; x < w - 1; x++) {
       const i = y * w + x;
-      fx[i] = ((gray[i + 1] + gray[i + 1 + w]) - (gray[i] + gray[i + w])) / 2;
-      fy[i] = ((gray[i + w] + gray[i + 1 + w]) - (gray[i] + gray[i + 1])) / 2;
+      fx[i] = ((gray[i + 1] + gray[i + 1 + w]) - (gray[i] + gray[i + w])) * norm;
+      fy[i] = ((gray[i + w] + gray[i + 1 + w]) - (gray[i] + gray[i + 1])) * norm;
     }
   }
   return { fx, fy, w, h, r: 1 };
@@ -90,7 +102,27 @@ export function computeTriangleFold(gray: Float64Array, maxVal = 255): Float64Ar
 
 // ── Display: colorizes a value field, only for whichever one is on screen ─
 
-export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array) {
+// `directed` picks which of the two hue conventions to paint, and the choice
+// is genuinely load-bearing rather than cosmetic:
+//
+// AXIAL (directed=false, the long-standing default, fieldView 'gradient2x2'):
+// theta is folded into [0, PI) before mapping to a full 0-360 hue sweep, so a
+// black-to-white edge and the white-to-black edge facing it get the SAME hue.
+// That matches every mod-PI consumer in the codebase (computeGradientAgreementField,
+// tangentWalk's guided walk) -- for them a line is a line regardless of which
+// side is darker.
+//
+// DIRECTED (directed=true, fieldView 'gradient2x2Directed'): theta maps over
+// its full [-PI, PI) range, so those two opposite-facing edges land exactly
+// 180 degrees apart on the hue wheel -- opposite hues, not identical ones.
+// This is the view that matches pipeline/lsdSegments.ts's segment growing,
+// which is DIRECTED: the two edges of a single bright stripe are two different
+// lines to it, and in the axial view they are literally indistinguishable. A
+// region that looks like it should obviously have merged (uniform hue across a
+// stripe) but didn't is explained instantly here -- the stripe turns out to be
+// two opposing hues, exactly as the grower saw it. See lsdSegments.ts's own
+// header for why growth reverted to directed angles.
+export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array, directed: boolean = false) {
   const { fx, fy, w, h } = field;
   const n = w * h;
   const mags = new Float64Array(n);
@@ -102,11 +134,18 @@ export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array) {
   }
   for (let i = 0; i < n; i++) {
     const o = i * 4;
-    let theta = Math.atan2(fy[i], fx[i]);
-    if (theta < 0) theta += Math.PI;
-    if (theta >= Math.PI) theta -= Math.PI;
+    const raw = Math.atan2(fy[i], fx[i]); // [-PI, PI)
+    let hueDeg: number;
+    if (directed) {
+      hueDeg = ((raw + 2 * Math.PI) % (2 * Math.PI)) / (2 * Math.PI) * 360;
+    } else {
+      let theta = raw;
+      if (theta < 0) theta += Math.PI;
+      if (theta >= Math.PI) theta -= Math.PI;
+      hueDeg = (theta / Math.PI) * 360;
+    }
     const sat = maxMag > 0 ? mags[i] / maxMag : 0;
-    const [rr, gg, bb] = hsvToRgb((theta / Math.PI) * 360, sat, 1);
+    const [rr, gg, bb] = hsvToRgb(hueDeg, sat, 1);
     out[o] = rr; out[o + 1] = gg; out[o + 2] = bb; out[o + 3] = 255;
   }
 }

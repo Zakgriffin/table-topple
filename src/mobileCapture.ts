@@ -715,7 +715,7 @@ fpsSlider.addEventListener('input', () => {
 let cameraSettings: PoseComputeState['settings'] = {
   horizFovDeg: 65, weightSharpenPower: 4, gridPeriodPhaseGapLowerBound: 0.005, minGrazingCos: 0.15,
   useWorldVoteOrientation: false, worldVoteRefineSteps: 4,
-  lsdToleranceDeg: 22.5, lsdRhoNoiseThreshold: 4, lsdMagnitudeBuckets: 1024, lsdNfaEpsilon: 1,
+  lsdToleranceDeg: 22.5, lsdRhoNoiseThreshold: 4 / 255, lsdRhoHighThreshold: 12 / 255, lsdCclSteps: 0, lsdNfaEpsilon: 1,
   lsdNfaTestExponent: 5, lsdMaxRetries: 2, lsdRetryToleranceFactor: 0.5, lsdRetryShrinkFraction: 0.2,
   lsdMergeMinSimilarity: 0.9, lsdJoinSteps: 0, lsdMinLengthPx: 3, lsdMaxTravelFactor: 1,
 };
@@ -1326,7 +1326,8 @@ async function captureComputeAndSendPose() {
         const lsdRects = await computeLsdRectanglesAuto(field, {
           toleranceDeg: cameraSettings.lsdToleranceDeg,
           rhoNoiseThreshold: cameraSettings.lsdRhoNoiseThreshold,
-          magnitudeBuckets: cameraSettings.lsdMagnitudeBuckets,
+          rhoHighThreshold: cameraSettings.lsdRhoHighThreshold,
+          cclSteps: cameraSettings.lsdCclSteps,
           nfaEpsilon: cameraSettings.lsdNfaEpsilon,
           nfaTestExponent: cameraSettings.lsdNfaTestExponent,
           maxRetries: cameraSettings.lsdMaxRetries,

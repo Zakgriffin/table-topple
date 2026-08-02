@@ -43,12 +43,13 @@ export const globalState = {
   // the retry loop and everything before stage 4 (region growing etc.) stay
   // CPU-only regardless, see pipeline/lsdSegments.ts's own header.
   //
-  // PINNED false (checkbox disabled in sphere-lab.html too, see
-  // cameraPanel.ts's own comment). The parity problem that pinned it is gone
-  // -- lsdFit.wgsl.ts's directed NFA alignment count now MATCHES the CPU
-  // path's countRectanglePixels again, since that reverted to directed too
-  // (pipeline/lsdSegments.ts). What's still missing is an actual verification
-  // run against the CPU path; do that before flipping this back on.
+  // Default false, and now for a PERFORMANCE reason rather than a correctness
+  // one. The GPU path is verified bit-for-decision against the CPU path (see
+  // pipelineGPU/lsdFitVerify.ts and lsdFit.ts's own header) -- but it is
+  // currently SLOWER (3.5ms CPU vs 8ms GPU on a 2931-region capture), because
+  // fitAndTestRegionsGPU still has to upload mag/theta and the CSR member
+  // arrays from CPU every call. Toggleable for A/B; worth defaulting on once
+  // growRegionsCCL is GPU-resident and that upload disappears.
   useGPULsdFit: false,
   // Mailbox-style pipelining for a physical camera's video-mode capture
   // stream (see devBridge/client.ts's realCapture handler and main.ts's

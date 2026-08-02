@@ -333,14 +333,19 @@ bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; const cam = active
 bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); pushSettingsSyncToAllPhysical(); });
 bindCheckbox('useGPUProject', (v) => { globalState.useGPUProject = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
 bindCheckbox('useGPUGradient', (v) => { globalState.useGPUGradient = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); pushSettingsSyncToAllPhysical(); });
-// NOT wired through bindCheckbox -- that would restore a stale "checked"
-// state from a returning user's localStorage (bindCheckbox applies
-// savedControls unconditionally, ignoring the `disabled` HTML attribute)
-// and silently flip globalState.useGPULsdFit back on, undoing state.ts's
-// own pin. Force the checkbox itself unchecked+disabled instead, and never
-// attach a change handler -- see state.ts's own comment for why this is
-// pinned off and what needs to happen before re-enabling it.
-(document.getElementById('useGPULsdFit') as HTMLInputElement).checked = false;
+// Wired like every other useGPU* toggle now. It used to be deliberately
+// unwired -- forced unchecked, no change handler -- because the GPU path was
+// pinned off for a CORRECTNESS reason (a mod-pi/directed NFA parity mismatch)
+// and bindCheckbox would have restored a stale `checked` from localStorage and
+// silently re-enabled a wrong path. That mismatch is resolved and the kernel is
+// verified identical to CPU (pipelineGPU/lsdFitVerify.ts), so this is now an
+// ordinary A/B toggle. It still defaults OFF -- see state.ts -- but for a
+// performance reason: the GPU path is currently upload-bound and slower.
+bindCheckbox('useGPULsdFit', (v) => {
+  globalState.useGPULsdFit = v;
+  const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
+  pushSettingsSyncToAllPhysical();
+});
 // Doesn't affect any already-computed camera state, just how the NEXT
 // physical-camera frame gets scheduled -- no recomputeFromLastCapture call
 // needed (unlike the useGPU* toggles above).

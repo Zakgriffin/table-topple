@@ -269,7 +269,7 @@
     <label class="chk"><input type="checkbox" id="useGPUDecode" checked> GPU decode tally (WebGPU)</label>
     <label class="chk"><input type="checkbox" id="useGPUProject" checked> GPU projected-sample ray-cast (WebGPU)</label>
     <label class="chk"><input type="checkbox" id="useGPUGradient" checked> GPU 2x2 gradient field (WebGPU)</label>
-    <label class="chk"><input type="checkbox" id="useGPULsdFit" disabled> GPU LSD fit + NFA test (WebGPU) -- disabled: shader/CPU NFA alignment are back in parity (both directed), but this path has not been re-verified since; see pipelineGPU/lsdFit.ts</label>
+    <label class="chk"><input type="checkbox" id="useGPULsdFit"> GPU LSD fit + NFA test (WebGPU) -- verified identical to CPU, but currently SLOWER (upload-bound); see pipelineGPU/lsdFit.ts</label>
     <div class="hint" id="gpuVotesStatus" style="margin-bottom:0;"></div>
     <label class="chk"><input type="checkbox" id="useCapturePipelining" checked> Pipelined video capture (mailbox, drop stale frames)</label>
   </div>

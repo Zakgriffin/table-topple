@@ -38,10 +38,18 @@ struct Uniforms {
 @group(0) @binding(3) var<storage, read> memberOffsets: array<u32>; // [regionCount + 1]
 @group(0) @binding(4) var<storage, read> memberIndices: array<u32>; // flat, CSR
 @group(0) @binding(5) var<storage, read> meanAngles: array<f32>; // [regionCount]
-@group(0) @binding(6) var<storage, read_write> outBuf: array<f32>; // [regionCount * 8]: cx,cy,theta,length,width,nfaLog10,accepted(0/1),pad
+@group(0) @binding(6) var<storage, read_write> outBuf: array<f32>; // [regionCount * 10]: cx,cy,theta,length,width,nfaLog10,accepted(0/1),pad,n,k
+// n and k are emitted purely so pipelineGPU/lsdFitVerify.ts can tell a
+// disagreement in the COUNTS (which pixels each path decided were inside the
+// rectangle / aligned) apart from a disagreement in the tail ARITHMETIC. They
+// cost nothing to carry and make the difference diagnosable instead of guessable.
 
 const PI: f32 = 3.14159265358979;
 const LN10: f32 = 2.302585092994046;
+// Must stay identical to countRectanglePixels' own BOUNDARY_EPS -- see that
+// function's comment for why exact-boundary pixels are guaranteed to exist and
+// why deciding them by rounding made this kernel disagree with the CPU path.
+const BOUNDARY_EPS: f32 = 1e-3;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -49,7 +57,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (ri >= u.regionCount) { return; }
   let start = memberOffsets[ri];
   let end = memberOffsets[ri + 1u];
-  let o = ri * 8u;
+  let o = ri * 10u;
   if (end - start < 2u) {
     outBuf[o + 6u] = 0.0; // too few members -- leave rejected, same as CPU's "degenerate -- no meaningful axis"
     return;
@@ -122,7 +130,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var x = x0; x <= x1; x = x + 1u) {
       let dx = f32(x) - cx; let dy = f32(y) - cy;
       let proj = dx * ax + dy * ay; let perp = dx * px + dy * py;
-      if (abs(proj) > hl || abs(perp) > hw) { continue; }
+      if (abs(proj) > hl + BOUNDARY_EPS || abs(perp) > hw + BOUNDARY_EPS) { continue; }
       n = n + 1u;
       let i = y * u.w + x;
       if (mag[i] <= u.rho) { continue; }
@@ -160,5 +168,6 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   outBuf[o + 5u] = logNfa / LN10;
   outBuf[o + 6u] = select(0.0, 1.0, accepted);
   outBuf[o + 7u] = 0.0;
+  outBuf[o + 8u] = f32(n); outBuf[o + 9u] = f32(k);
 }
 `;

@@ -34,14 +34,14 @@ import { GradientField } from '../types.ts';
 // is not merely guarded against, it is unreachable.
 //
 // GPU-friendliness note: stage 4+5's FIRST NFA pass HAS a GPU port
-// (pipelineGPU/lsdFit.ts) but it is currently PINNED OFF
-// (globalState.useGPULsdFit forced false in state.ts, checkbox disabled in
-// sphere-lab.html). The reason it was pinned off is now GONE: lsdFit.wgsl.ts's
-// alignment/NFA-count logic does a DIRECTED (non-mod-π) comparison, which was
-// a mismatch against this file's since-reverted mod-π counting -- and directed
-// is exactly what countRectanglePixels does again. The shader should be
-// correct as-written now; it still needs an actual re-verify against the CPU
-// path before the checkbox gets re-enabled, which hasn't happened yet.
+// (pipelineGPU/lsdFit.ts), and it is VERIFIED identical to this file's CPU
+// path -- zero disagreements on n, k or accept/reject across a 2931-region
+// capture, max nfaLog10 delta 7.7e-6 (see pipelineGPU/lsdFitVerify.ts, which
+// is how to re-check it after any change to either side). It defaults OFF
+// anyway, for a PERFORMANCE reason: fitAndTestRegionsGPU still uploads
+// mag/theta and the region CSR from CPU on every call, so it currently ADDS a
+// round trip and measures slower (3.5ms CPU vs 8ms GPU). That inverts once
+// stage 2+3 is GPU-resident and the labeling never lands on CPU.
 // Stage 2+3 is CPU-only for now (see growRegionsCCL's own header) -- like the
 // JFA version it replaces it's architecturally GPU-ready (each round is two
 // frozen-buffer-in/fresh-buffer-out passes with no same-round cross-pixel
@@ -384,7 +384,7 @@ export function growRegionsCCL(
 
 // ── Stage 4: magnitude-weighted PCA rectangle fit ─────────────────────────
 
-interface RectangleCandidate { cx: number; cy: number; theta: number; length: number; width: number }
+export interface RectangleCandidate { cx: number; cy: number; theta: number; length: number; width: number }
 
 // The rectangle's angle comes from PCA on the region's own PIXEL
 // COORDINATES (weighted by gradient magnitude) -- the standard image-
@@ -508,13 +508,28 @@ function nfaLog10ToLineScore(nfaLog10: number, logEpsilon: number): number {
 //
 // Sub-rho pixels count toward n (they were geometrically tested) but never
 // toward k (too weak to trust their angle at all).
-function countRectanglePixels(
+export function countRectanglePixels(
   rect: RectangleCandidate, mag: Float64Array, theta: Float64Array, w: number, h: number, rho: number, toleranceRad: number,
 ): { n: number; k: number } {
   const { cx, cy, theta: rectTheta, length } = rect;
   const ax = Math.cos(rectTheta), ay = Math.sin(rectTheta);
   const px = -ay, py = ax;
   const cosTol = Math.cos(toleranceRad);
+  // Inclusion is tested with a small tolerance because the rectangle's own
+  // extent is DEFINED by its extreme members: fitRectangle sets length =
+  // maxProj - minProj, so those members land at |proj| exactly == hl, and on a
+  // thin region every member lands at |perp| exactly == hw (which pins to the
+  // 0.5 floor). Exact-boundary pixels are therefore guaranteed to exist in
+  // every region, not a rare edge case -- and `Math.abs(proj) > hl` decides
+  // them on whichever side the last ulp of rounding falls. That made the count
+  // non-deterministic across arithmetic: the GPU port (f32) and this path
+  // (f64) disagreed on n for 180 of 2931 regions and on k for 277, by up to 4
+  // pixels each, which on a 12-pixel region moved nfaLog10 by 4.7 decades and
+  // flipped 6 accept/reject decisions. The epsilon is far above f32 geometry
+  // error (~1e-4 at image coordinates) and far below a pixel, so it includes
+  // the boundary deterministically without admitting anything that isn't
+  // genuinely inside.
+  const BOUNDARY_EPS = 1e-3;
   const hl = length / 2;
   // Floor the tested half-width so a near-zero-width fit (a nearly
   // 1-pixel-wide ridge, common on a clean synthetic edge) still tests a
@@ -535,7 +550,7 @@ function countRectanglePixels(
     for (let x = x0; x <= x1; x++) {
       const dx = x - cx, dy = y - cy;
       const proj = dx * ax + dy * ay, perp = dx * px + dy * py;
-      if (Math.abs(proj) > hl || Math.abs(perp) > hw) continue;
+      if (Math.abs(proj) > hl + BOUNDARY_EPS || Math.abs(perp) > hw + BOUNDARY_EPS) continue;
       n++;
       const i = y * w + x;
       if (mag[i] <= rho) continue;
@@ -588,7 +603,12 @@ export function computeMagTheta(field: GradientField): { mag: Float64Array; thet
 // pass rejected, re-attempted from scratch rather than resuming GPU state,
 // see this file's header). Returns null only for a degenerate region (< 2
 // members even before any retry).
-function fitRegionWithRetries(
+// Exported for pipelineGPU/lsdFitVerify.ts, which needs to compare the CPU
+// result REGION-BY-REGION against the GPU kernel's. computeLsdRectangles below
+// can't serve that purpose: it drops degenerate regions (`if (r) results.push`)
+// so its output indices no longer line up with the region array the GPU
+// dispatch was built from.
+export function fitRegionWithRetries(
   region: GrownRegion, mag: Float64Array, theta: Float64Array, w: number, h: number,
   settings: LsdSettings, logNTests: number, logEpsilon: number,
 ): LsdRectangle | null {

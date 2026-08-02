@@ -17,6 +17,10 @@ const WORKGROUP_SIZE_1D = 64;
 export interface LsdFitResult {
   cx: number; cy: number; theta: number; length: number; width: number;
   nfaLog10: number; accepted: boolean;
+  // The kernel's own NFA counts -- pixels inside the rectangle footprint, and
+  // how many of those were aligned. Diagnostic only (nothing in the production
+  // path reads them); see lsdFitVerify.ts for why they're worth carrying.
+  n: number; k: number;
 }
 
 // GPU-resident counterpart to pipeline/lsdSegments.ts's fitRectangle +
@@ -26,17 +30,27 @@ export interface LsdFitResult {
 // disjoint-partition guarantee), so this is a plain one-thread-per-region
 // parallel map, no cross-region synchronization needed at all.
 //
-// CURRENTLY UNREACHABLE IN PRACTICE: globalState.useGPULsdFit is pinned
-// false (state.ts, checkbox disabled in sphere-lab.html). The reason it was
-// pinned is GONE, though: lsdFit.wgsl.ts's alignment/NFA-count logic does a
-// DIRECTED (non-mod-π) comparison against the rectangle's theta, which was
-// out of parity with a mod-π experiment in pipeline/lsdSegments.ts's
-// countRectanglePixels -- and that experiment has since been reverted, so
-// directed is exactly what the CPU path does again (see levelLineAngle's own
-// comment there for why). The shader should be correct as-written now.
-// TODO: actually re-verify this path's output against the CPU path on a real
-// capture, then flip useGPULsdFit back on -- it has not been run since the
-// revert, so "should be correct" is reasoning, not evidence.
+// VERIFIED against the CPU path (pipelineGPU/lsdFitVerify.ts, on a real
+// 2931-region capture): zero disagreements on n, k, or accept/reject, and a
+// max nfaLog10 delta of 7.7e-6 -- pure f32-vs-f64 rounding. Geometry agrees to
+// ~4e-5. The mod-π/directed parity problem that originally pinned this is gone
+// (both sides are directed again, see levelLineAngle in lsdSegments.ts).
+//
+// Getting there required one real fix on BOTH sides: countRectanglePixels'
+// inclusion test now carries a BOUNDARY_EPS, because a rectangle's extent is
+// defined by its own extreme members, so those members land exactly ON the
+// boundary and were being included or dropped by whichever way the last ulp
+// rounded. That disagreed across arithmetic on 180/2931 regions for n and
+// 277 for k, moving nfaLog10 by up to 4.7 decades.
+//
+// STILL DEFAULT-OFF, but for a PERFORMANCE reason now, not a correctness one:
+// warm-cache timing on that same capture was CPU 3.5ms vs GPU 8ms. This
+// function takes mag/theta as CPU Float64Arrays and builds the CSR member
+// arrays on CPU, so switching it on today ADDS a round trip (gradient GPU ->
+// readback -> grow CPU -> upload -> dispatch -> readback) rather than removing
+// one. It inverts once stage 2+3 (growRegionsCCL) moves to GPU and the
+// labeling can be handed over device-side without ever landing on CPU -- that
+// is the point at which to flip the default.
 //
 // Returns null if WebGPU isn't available; caller falls back to the CPU
 // version, which stays the source of truth. Returns [] (not null) for
@@ -68,7 +82,7 @@ export async function fitAndTestRegionsGPU(
   const offsetsBuf = uploadUint32(device, memberOffsets);
   const indicesBuf = uploadUint32(device, memberIndices);
   const meanAnglesBuf = uploadFloat32(device, meanAngles);
-  const outBuf = createStorageBuffer(device, regionCount * 8 * 4);
+  const outBuf = createStorageBuffer(device, regionCount * 10 * 4);
 
   const toleranceRad = (toleranceDeg * Math.PI) / 180;
   const uniformData = new ArrayBuffer(32);
@@ -99,15 +113,15 @@ export async function fitAndTestRegionsGPU(
   pass.end();
   device.queue.submit([encoder.finish()]);
 
-  const raw = await readFloat32(device, outBuf, regionCount * 8 * 4);
+  const raw = await readFloat32(device, outBuf, regionCount * 10 * 4);
   for (const b of [magBuf, thetaBuf, offsetsBuf, indicesBuf, meanAnglesBuf, outBuf, uniformBuf]) b.destroy();
 
   const results: LsdFitResult[] = new Array(regionCount);
   for (let i = 0; i < regionCount; i++) {
-    const o = i * 8;
+    const o = i * 10;
     results[i] = {
       cx: raw[o], cy: raw[o + 1], theta: raw[o + 2], length: raw[o + 3], width: raw[o + 4],
-      nfaLog10: raw[o + 5], accepted: raw[o + 6] !== 0,
+      nfaLog10: raw[o + 5], accepted: raw[o + 6] !== 0, n: raw[o + 8], k: raw[o + 9],
     };
   }
   return results;

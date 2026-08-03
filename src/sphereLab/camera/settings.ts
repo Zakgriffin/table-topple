@@ -114,7 +114,7 @@ export interface CameraSettingsCommon {
   // confident.
   lsdJoinSteps: number; lsdMergeMinSimilarity: number; lsdMaxTravelFactor: number; lsdMinLengthPx: number;
   // showLevelLineArrow: the gradient rotated -90deg (LSD's own level-line
-  // convention, see pipeline/lsdSegments.ts's levelLineAngle) -- was named
+  // convention, see pipeline/lsdSegments.ts's level-line vector block) -- was named
   // "perpendicular" before, renamed to match that shared terminology.
   showGradientArrow: boolean; showLevelLineArrow: boolean; gradientArrowScale: number;
   coherenceRadius: number;

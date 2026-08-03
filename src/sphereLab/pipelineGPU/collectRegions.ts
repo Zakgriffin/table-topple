@@ -37,12 +37,12 @@ function getPipelines(device: GPUDevice): Pipelines {
   let p = cache.get(device);
   if (!p) {
     p = {
-      survive: makeStage(device, COLLECT_SURVIVE_WGSL, 'survive', [UNI, RO, RO, RW]),
+      survive: makeStage(device, COLLECT_SURVIVE_WGSL, 'survive', [UNI, RO, RO, RO, RW]),
       histogram: makeStage(device, COLLECT_HISTOGRAM_WGSL, 'histogram', [UNI, RO, RO, RW]),
       markKept: makeStage(device, COLLECT_MARK_KEPT_WGSL, 'markKept', [UNI, RO, RO, RW, RW]),
       regionMeta: makeStage(device, COLLECT_REGION_META_WGSL, 'regionMeta', [UNI, RO, RO, RO, RO, RW, RW]),
       scatter: makeStage(device, COLLECT_SCATTER_WGSL, 'scatter', [UNI, RO, RO, RO, RO, RW, RW, RW]),
-      finalize: makeStage(device, COLLECT_FINALIZE_WGSL, 'finalize', [UNI, RO, RO, RO, RW, RW]),
+      finalize: makeStage(device, COLLECT_FINALIZE_WGSL, 'finalize', [UNI, RO, RO, RO, RW, RW, RO]),
     };
     cache.set(device, p);
   }
@@ -74,7 +74,7 @@ export async function collectRegionsGPU(
   const device = res.device;
   if (!device) return false;
   const n = res.n;
-  const labelBuf = res.gpu('label'), magBuf = res.gpu('mag'), thetaBuf = res.gpu('theta');
+  const labelBuf = res.gpu('label'), fxBuf = res.gpu('fx'), fyBuf = res.gpu('fy');
 
   device.pushErrorScope('validation');
   const p = getPipelines(device);
@@ -82,7 +82,11 @@ export async function collectRegionsGPU(
   const uni = (() => {
     const b = new ArrayBuffer(16);
     const dv = new DataView(b);
-    dv.setUint32(0, n, true); dv.setFloat32(4, rhoHigh, true); dv.setUint32(8, minRegionSize, true);
+    // Squared here, once, rather than in the shader per pixel. Matches
+    // lsdSegments.ts's eligibilityThresholdSq, including the negative case.
+    dv.setUint32(0, n, true);
+    dv.setFloat32(4, rhoHigh >= 0 ? rhoHigh * rhoHigh : -Infinity, true);
+    dv.setUint32(8, minRegionSize, true);
     return uploadUniform(device, b);
   })();
 
@@ -126,7 +130,7 @@ export async function collectRegionsGPU(
   };
 
   const encoder = device.createCommandEncoder();
-  run(encoder, p.survive, [uni, labelBuf, magBuf, labelSurvives], up(n));
+  run(encoder, p.survive, [uni, labelBuf, fxBuf, fyBuf, labelSurvives], up(n));
   run(encoder, p.histogram, [uni, labelBuf, labelSurvives, counts], up(n));
   run(encoder, p.markKept, [uni, labelSurvives, counts, keptFlag, keptCount], up(n));
   const temps = [
@@ -147,8 +151,10 @@ export async function collectRegionsGPU(
   // for an empty capture -- a zero-length storage buffer is not a legal binding,
   // and making the consumer branch on emptiness instead would push this special
   // case into every downstream stage.
-  const meanAngles = createStorageBuffer(device, Math.max(regionCount, 1) * 4);
-  handoff.push(meanAngles);
+  // vec2<f32> per region -- a direction, not an angle, since nothing downstream
+  // wants the angle and the fitter would only take cos/sin of it again.
+  const meanDirs = createStorageBuffer(device, Math.max(regionCount, 1) * 8);
+  handoff.push(meanDirs);
   if (regionCount > 0) {
     const fUni = (() => {
       const b = new ArrayBuffer(16);
@@ -157,7 +163,7 @@ export async function collectRegionsGPU(
     })();
     scratch.push(fUni);
     const enc2 = device.createCommandEncoder();
-    run(enc2, p.finalize, [fUni, thetaBuf, regionOffsets, regionSizes, members, meanAngles], up(regionCount, 64));
+    run(enc2, p.finalize, [fUni, fxBuf, regionOffsets, regionSizes, members, meanDirs, fyBuf], up(regionCount, 64));
     device.queue.submit([enc2.finish()]);
   }
 
@@ -170,6 +176,6 @@ export async function collectRegionsGPU(
   }
 
   res.provideGPU('regionId', regionId);
-  res.provideRegionsGPU({ offsets: regionOffsets, sizes: regionSizes, members, meanAngles, regionCount, memberCount });
+  res.provideRegionsGPU({ offsets: regionOffsets, sizes: regionSizes, members, meanDirs, regionCount, memberCount });
   return true;
 }

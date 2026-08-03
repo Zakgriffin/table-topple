@@ -1,7 +1,7 @@
 import { activeCamera } from '../camera/store.ts';
 import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import { computeMagTheta, countRectanglePixels, fitRegionOnce, growRegionsCCL, LsdRectangle } from '../pipeline/lsdSegments.ts';
+import { countRectanglePixels, fitRegionOnce, growRegionsCCL, LsdRectangle } from '../pipeline/lsdSegments.ts';
 import { FieldResidency } from './fieldResidency.ts';
 import { fitAndTestRegionsGPU } from './lsdFit.ts';
 
@@ -10,7 +10,7 @@ import { fitAndTestRegionsGPU } from './lsdFit.ts';
 // globalState.useGPULsdFit has been pinned false since the shader and
 // pipeline/lsdSegments.ts's countRectanglePixels disagreed about whether the
 // NFA alignment test was directed or mod-PI. That disagreement is gone (both
-// are directed again -- see levelLineAngle's own comment there), so the shader
+// are directed again -- see the level-line vector block's  own comment there), so the shader
 // SHOULD be correct as written. This turns "should" into evidence.
 //
 // Not part of any pipeline. Call it from the devtools console on a real
@@ -62,9 +62,9 @@ export async function verifyLsdFit(camera?: Camera | null): Promise<LsdFitVerify
   const s = camera.settings;
 
   const field = computeGradient2x2Field(gray, w, h);
-  const { mag, theta } = computeMagTheta(field);
+  const { fx, fy } = field;
   const { regions } = growRegionsCCL(
-    mag, theta, w, h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
+    fx, fy, w, h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
   );
   if (regions.length === 0) return 'grower produced no regions -- nothing to compare';
 
@@ -84,7 +84,7 @@ export async function verifyLsdFit(camera?: Camera | null): Promise<LsdFitVerify
   };
 
   const cpuStart = performance.now();
-  const cpu: (LsdRectangle | null)[] = regions.map((r) => fitRegionOnce(r, mag, theta, w, h, cpuSettings, logNTests, logEpsilon));
+  const cpu: (LsdRectangle | null)[] = regions.map((r) => fitRegionOnce(r, fx, fy, w, h, cpuSettings, logNTests, logEpsilon));
   const cpuMs = performance.now() - cpuStart;
 
   // Everything is handed to the residency on the CPU side, which makes this the
@@ -94,8 +94,8 @@ export async function verifyLsdFit(camera?: Camera | null): Promise<LsdFitVerify
   // What the production path now saves is precisely the part this harness is
   // deliberately still paying.
   const res = await FieldResidency.create(w * h, true);
-  res.provideCPU('mag', mag);
-  res.provideCPU('theta', theta);
+  res.provideCPU('fx', fx);
+  res.provideCPU('fy', fy);
   res.provideRegionsCPU(regions);
 
   const gpuStart = performance.now();
@@ -137,7 +137,7 @@ export async function verifyLsdFit(camera?: Camera | null): Promise<LsdFitVerify
     // Recount on CPU using the CPU's OWN fitted rectangle, mirroring exactly
     // what fitRegionOnce did internally -- so this is the same n/k that
     // produced c.nfaLog10, not an independent estimate.
-    const { n: cpuN, k: cpuK } = countRectanglePixels(c, mag, theta, w, h, s.lsdRhoNoiseThreshold, toleranceRad);
+    const { n: cpuN, k: cpuK } = countRectanglePixels(c, fx, fy, w, h, s.lsdRhoNoiseThreshold, toleranceRad);
     if (cpuN !== g.n) { countMismatches.n++; maxCountDelta.n = Math.max(maxCountDelta.n, Math.abs(cpuN - g.n)); }
     if (cpuK !== g.k) { countMismatches.k++; maxCountDelta.k = Math.max(maxCountDelta.k, Math.abs(cpuK - g.k)); }
     if (Number.isFinite(c.nfaLog10) && Number.isFinite(g.nfaLog10)) {

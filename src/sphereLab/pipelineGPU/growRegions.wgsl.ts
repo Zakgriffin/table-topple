@@ -3,9 +3,9 @@
 //
 // Three entry points, all pure per-pixel maps over the field:
 //
-//   init     label[i] = select(-1, i, mag[i] > rhoLow); also precomputes
-//            cos/sin of theta once, since the hook pass re-reads them every
-//            round and theta itself never changes.
+//   init     seeds label[i] from the eligibility test and normalizes the
+//            level-line vector once, since the hook pass re-reads it every
+//            round and it never changes across rounds.
 //   hook     next[i] = min(label[i], min over edge-connected neighbours j of
 //            label[j]) -- reads ONLY the frozen `label`, writes ONLY `next`.
 //   compress label[i] = next[next[i]] -- pointer jumping. Reads all of `next`,
@@ -27,13 +27,13 @@
 export const GROW_REGIONS_WGSL = /* wgsl */ `
 struct Uniforms {
   w: u32, h: u32, pad0: u32, pad1: u32,
-  rhoLow: f32, cosTol: f32, pad2: f32, pad3: f32,
+  rhoLowSq: f32, cosTol: f32, pad2: f32, pad3: f32,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var<storage, read> mag: array<f32>;
-@group(0) @binding(2) var<storage, read> theta: array<f32>;
-@group(0) @binding(3) var<storage, read_write> cosT: array<f32>;
-@group(0) @binding(4) var<storage, read_write> sinT: array<f32>;
+@group(0) @binding(1) var<storage, read> fx: array<f32>;
+@group(0) @binding(2) var<storage, read> fy: array<f32>;
+@group(0) @binding(3) var<storage, read_write> ux: array<f32>;
+@group(0) @binding(4) var<storage, read_write> uy: array<f32>;
 @group(0) @binding(5) var<storage, read_write> label: array<i32>;
 @group(0) @binding(6) var<storage, read_write> next: array<i32>;
 @group(0) @binding(7) var<storage, read_write> changed: atomic<u32>;
@@ -50,13 +50,30 @@ const NDY = array<i32, 8>(0, 1, 1, 1, 0, -1, -1, -1);
 fn init(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x >= u.w || gid.y >= u.h) { return; }
   let i = gid.y * u.w + gid.x;
-  let t = theta[i];
-  cosT[i] = cos(t);
-  sinT[i] = sin(t);
+  // The level line runs perpendicular to the gradient: (ux, uy) = (fx, -fy)
+  // normalized. This used to read a theta array and take its cos/sin -- an
+  // angle that a previous pass had spent an atan2 building out of exactly
+  // these two numbers. See lsdSegments.ts.
+  //
+  // Eligibility is tested SQUARED, so an ineligible pixel costs no sqrt, and
+  // only an eligible one is normalized. Ineligible entries keep (0,0), which
+  // no round ever reads -- label -1 is checked first everywhere.
+  let gx = fx[i];
+  let gy = fy[i];
+  let m2 = gx * gx + gy * gy;
   // Dense seeding: every eligible pixel starts as its own singleton. There is
   // no "which pixels get to seed" decision to make -- with a symmetric edge
   // predicate the seed set cannot influence the result.
-  if (mag[i] > u.rhoLow) { label[i] = i32(i); } else { label[i] = -1; }
+  if (m2 > u.rhoLowSq) {
+    let inv = inverseSqrt(m2);
+    ux[i] = gx * inv;
+    uy[i] = -gy * inv;
+    label[i] = i32(i);
+  } else {
+    ux[i] = 0.0;
+    uy[i] = 0.0;
+    label[i] = -1;
+  }
   next[i] = label[i];
 }
 
@@ -67,8 +84,8 @@ fn hook(@builtin(global_invocation_id) gid: vec3<u32>) {
   let own = label[i];
   if (own < 0) { next[i] = -1; return; } // below rhoLow -- never participates
   var best = own;
-  let ci = cosT[i];
-  let si = sinT[i];
+  let ci = ux[i];
+  let si = uy[i];
   for (var k = 0; k < 8; k = k + 1) {
     let nx = i32(gid.x) + NDX[k];
     let ny = i32(gid.y) + NDY[k];
@@ -81,7 +98,7 @@ fn hook(@builtin(global_invocation_id) gid: vec3<u32>) {
     // THE predicate: one signed dot against cos(tau). Directed -- no abs() --
     // which is what keeps the two antiparallel edges of a thin stripe from
     // fusing. See levelLinesCompatible in lsdSegments.ts.
-    if (ci * cosT[j] + si * sinT[j] < u.cosTol) { continue; }
+    if (ci * ux[j] + si * uy[j] < u.cosTol) { continue; }
     best = nlab;
   }
   next[i] = best;

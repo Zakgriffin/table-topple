@@ -85,7 +85,7 @@ const ROUNDS_PER_BATCH = 8;
 // Takes mag/theta and returns label/regionId/regions THROUGH THE RESIDENCY
 // (pipelineGPU/fieldResidency.ts) rather than as CPU arrays, which is what lets
 // this stage sit next to the fitter without either of them landing the field on
-// CPU in between. `res.gpu('mag')` returns the upstream stage's own buffer when
+// CPU in between. `res.gpu('fx')` returns the upstream stage's own buffer when
 // there is one and uploads only when there isn't, so the duplicate mag/theta
 // upload this module and lsdFit.ts each used to do is now structurally
 // impossible rather than merely avoided.
@@ -111,8 +111,8 @@ export async function growRegionsCCLGPU(
   const pipelines = getPipelines(device);
 
   const n = w * h;
-  const magBuf = res.gpu('mag');
-  const thetaBuf = res.gpu('theta');
+  const magBuf = res.gpu('fx');
+  const thetaBuf = res.gpu('fy');
   const cosBuf = createStorageBuffer(device, n * 4);
   const sinBuf = createStorageBuffer(device, n * 4);
   const labelBuf = createStorageBuffer(device, n * 4);
@@ -122,7 +122,10 @@ export async function growRegionsCCLGPU(
   const uni = new ArrayBuffer(32);
   const dv = new DataView(uni);
   dv.setUint32(0, w, true); dv.setUint32(4, h, true);
-  dv.setFloat32(16, rhoLow, true);
+  // Squared, matching lsdSegments.ts's eligibilityThresholdSq (negative case
+  // included) -- the shader's init tests squared magnitude so an ineligible
+  // pixel costs no sqrt.
+  dv.setFloat32(16, rhoLow >= 0 ? rhoLow * rhoLow : -Infinity, true);
   dv.setFloat32(20, Math.cos((toleranceDeg * Math.PI) / 180), true);
   const uniBuf = uploadUniform(device, uni);
 
@@ -230,7 +233,7 @@ export async function growRegionsCCLGPU(
   }
   if (!collected) {
     const { regionId, regions } = collectRegionsFromLabels(
-      await res.cpuI32('label'), await res.cpuF64('mag'), await res.cpuF64('theta'),
+      await res.cpuI32('label'), await res.cpuF64('fx'), await res.cpuF64('fy'),
       rhoHigh, n, minRegionSize,
     );
     res.provideCPU('regionId', regionId);
@@ -247,13 +250,13 @@ export async function growRegionsCCLGPU(
 // what asking the residency for the CPU side of everything expresses. Nothing
 // in the production path should use this.
 export async function growRegionsCCLGPUToCPU(
-  mag: Float64Array, theta: Float64Array, w: number, h: number,
+  fx: Float64Array, fy: Float64Array, w: number, h: number,
   toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
 ): Promise<{ regionId: Int32Array; regions: GrownRegion[]; roundsRun: number; converged: boolean } | null> {
   const res = await FieldResidency.create(w * h, true);
   try {
-    res.provideCPU('mag', mag);
-    res.provideCPU('theta', theta);
+    res.provideCPU('fx', fx);
+    res.provideCPU('fy', fy);
     const grown = await growRegionsCCLGPU(res, w, h, toleranceDeg, rhoLow, rhoHigh, maxRounds, minRegionSize);
     if (!grown) return null;
     return { regionId: await res.cpuI32('regionId'), regions: await res.regionsCPU(), ...grown };

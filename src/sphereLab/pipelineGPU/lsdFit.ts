@@ -35,7 +35,7 @@ export interface LsdFitResult {
 // 2931-region capture): zero disagreements on n, k, or accept/reject, and a
 // max nfaLog10 delta of 7.7e-6 -- pure f32-vs-f64 rounding. Geometry agrees to
 // ~4e-5. The mod-π/directed parity problem that originally pinned this is gone
-// (both sides are directed again, see levelLineAngle in lsdSegments.ts).
+// (both sides are directed again, see the level-line vector block in lsdSegments.ts).
 //
 // Getting there required one real fix on BOTH sides: countRectanglePixels'
 // inclusion test now carries a BOUNDARY_EPS, because a rectangle's extent is
@@ -66,15 +66,18 @@ export async function fitAndTestRegionsGPU(
   if (regionCount === 0) return [];
   const pipeline = getPipeline(device);
 
-  const magBuf = res.gpu('mag');
-  const thetaBuf = res.gpu('theta');
+  const fxBuf = res.gpu('fx');
+  const fyBuf = res.gpu('fy');
   const outBuf = createStorageBuffer(device, regionCount * 10 * 4);
 
   const toleranceRad = (toleranceDeg * Math.PI) / 180;
   const uniformData = new ArrayBuffer(32);
   const dv = new DataView(uniformData);
   dv.setUint32(0, w, true); dv.setUint32(4, h, true); dv.setUint32(8, regionCount, true); dv.setUint32(12, 0, true);
-  dv.setFloat32(16, rho, true); dv.setFloat32(20, toleranceRad, true);
+  // Squared, matching lsdSegments.ts's eligibilityThresholdSq (negative case
+  // included), so the shader's per-pixel test needs no sqrt.
+  dv.setFloat32(16, rho >= 0 ? rho * rho : -Infinity, true);
+  dv.setFloat32(20, toleranceRad, true);
   dv.setFloat32(24, logNTests, true); dv.setFloat32(28, logEpsilon, true);
   const uniformBuf = uploadUniform(device, uniformData);
 
@@ -82,11 +85,11 @@ export async function fitAndTestRegionsGPU(
     layout: pipeline.getBindGroupLayout(0),
     entries: [
       { binding: 0, resource: { buffer: uniformBuf } },
-      { binding: 1, resource: { buffer: magBuf } },
-      { binding: 2, resource: { buffer: thetaBuf } },
+      { binding: 1, resource: { buffer: fxBuf } },
+      { binding: 2, resource: { buffer: fyBuf } },
       { binding: 3, resource: { buffer: rs.offsets } },
       { binding: 4, resource: { buffer: rs.members } },
-      { binding: 5, resource: { buffer: rs.meanAngles } },
+      { binding: 5, resource: { buffer: rs.meanDirs } },
       { binding: 6, resource: { buffer: outBuf } },
       { binding: 7, resource: { buffer: rs.sizes } },
     ],
@@ -100,7 +103,7 @@ export async function fitAndTestRegionsGPU(
   pass.end();
   device.queue.submit([encoder.finish()]);
 
-  // Only outBuf and the uniform are ours to free -- mag/theta and the whole
+  // Only outBuf and the uniform are ours to free -- fx/fy and the whole
   // region CSR belong to the residency, which is still holding them for any
   // other consumer this frame.
   const raw = await readFloat32(device, outBuf, regionCount * 10 * 4);

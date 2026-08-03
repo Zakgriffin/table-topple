@@ -1,12 +1,12 @@
 // ── FieldResidency: where each intermediate currently lives ────────────────
 //
-// Stages 1-4 of the LSD chain (gradient2x2 -> computeMagTheta -> growRegionsCCL
-// -> collectRegionsFromLabels -> lsdFit) each dispatch to CPU or GPU on their
+// Stages 1-4 of the LSD chain (gradient2x2 -> growRegionsCCL ->
+// collectRegionsFromLabels -> lsdFit) each dispatch to CPU or GPU on their
 // own toggle. Before this file, every GPU module hardcoded its own transfers:
 // it uploaded whatever it needed on entry and read its result back on exit,
 // unconditionally. That makes each stage self-contained, and it is why the
-// chain paid a bus crossing at nearly every stage boundary -- mag/theta were
-// uploaded TWICE per frame, by growRegions.ts and lsdFit.ts, each allocating
+// chain paid a bus crossing at nearly every stage boundary -- the gradient
+// field was uploaded TWICE per frame, by growRegions.ts and lsdFit.ts, each allocating
 // and destroying its own copy of the same numbers.
 //
 // The fix is to stop letting stages decide about transfers at all. A stage
@@ -55,7 +55,7 @@ import {
 // are stage 1/2 intermediates. Region data proper is NOT here -- its CPU and
 // GPU forms are structurally different rather than the same numbers at two
 // precisions, so it gets its own slot below.
-export type FieldName = 'gray' | 'fx' | 'fy' | 'mag' | 'theta' | 'label' | 'regionId';
+export type FieldName = 'gray' | 'fx' | 'fy' | 'label' | 'regionId';
 
 // How a field is stored on each side. 'f32' fields are Float64Array on CPU and
 // f32 on GPU -- the widening is lossy in the same 1e-7 class lsdFit and the
@@ -68,7 +68,7 @@ export type FieldName = 'gray' | 'fx' | 'fy' | 'mag' | 'theta' | 'label' | 'regi
 type FieldKind = 'f32' | 'i32';
 
 const FIELD_KINDS: Record<FieldName, FieldKind> = {
-  gray: 'f32', fx: 'f32', fy: 'f32', mag: 'f32', theta: 'f32', label: 'i32', regionId: 'i32',
+  gray: 'f32', fx: 'f32', fy: 'f32', label: 'i32', regionId: 'i32',
 };
 
 interface Slot {
@@ -85,7 +85,7 @@ export interface RegionSetGPU {
   offsets: GPUBuffer;
   sizes: GPUBuffer;
   members: GPUBuffer;
-  meanAngles: GPUBuffer;
+  meanDirs: GPUBuffer; // vec2<f32> per region -- a direction, never an angle
   regionCount: number;
   memberCount: number;
 }
@@ -240,7 +240,7 @@ export class FieldResidency {
   provideRegionsGPU(rs: RegionSetGPU): void {
     this.assertUnwritten('regions', { cpu: this.regionsCPUValue, gpu: this.regionsGPUValue });
     this.regionsGPUValue = rs;
-    this.owned.push(rs.offsets, rs.sizes, rs.members, rs.meanAngles);
+    this.owned.push(rs.offsets, rs.sizes, rs.members, rs.meanDirs);
   }
 
   hasRegionsCPU(): boolean { return this.regionsCPUValue != null; }
@@ -265,10 +265,11 @@ export class FieldResidency {
       total += sizes[i];
     }
     const members = new Uint32Array(total);
-    const meanAngles = new Float32Array(regionCount);
+    const meanDirs = new Float32Array(regionCount * 2);
     for (let i = 0; i < regionCount; i++) {
       members.set(regions[i].members, offsets[i]);
-      meanAngles[i] = regions[i].meanAngle;
+      meanDirs[i * 2] = regions[i].meanUx;
+      meanDirs[i * 2 + 1] = regions[i].meanUy;
     }
 
     // Padded to at least one element each, because a zero-byte GPUBuffer is not
@@ -281,16 +282,16 @@ export class FieldResidency {
       offsets: uploadUint32(device, pad(offsets)),
       sizes: uploadUint32(device, pad(sizes)),
       members: uploadUint32(device, pad(members)),
-      meanAngles: uploadFloat32(device, pad(meanAngles)),
+      meanDirs: uploadFloat32(device, pad(meanDirs)),
       regionCount,
       memberCount: total,
     };
     this.transfers.push({
       what: 'regions', direction: 'up',
-      bytes: (regionCount * 2 + total) * 4 + regionCount * 4,
+      bytes: (regionCount * 4 + total) * 4,
     });
     this.regionsGPUValue = rs;
-    this.owned.push(rs.offsets, rs.sizes, rs.members, rs.meanAngles);
+    this.owned.push(rs.offsets, rs.sizes, rs.members, rs.meanDirs);
     return rs;
   }
 
@@ -308,7 +309,7 @@ export class FieldResidency {
         readUint32(device, rs.offsets, regionCount * 4),
         readUint32(device, rs.sizes, regionCount * 4),
         memberCount > 0 ? readUint32(device, rs.members, memberCount * 4) : Promise.resolve(new Uint32Array(0)),
-        readFloat32(device, rs.meanAngles, regionCount * 4),
+        readFloat32(device, rs.meanDirs, regionCount * 8),
       ]);
       for (let r = 0; r < regionCount; r++) {
         regions.push({
@@ -317,12 +318,12 @@ export class FieldResidency {
           // read from the wrong place. The copy is required anyway -- memRaw is
           // transient and GrownRegion.members outlives it.
           members: Int32Array.from(memRaw.subarray(offRaw[r], offRaw[r] + sizeRaw[r])),
-          meanAngle: meanRaw[r],
+          meanUx: meanRaw[r * 2], meanUy: meanRaw[r * 2 + 1],
         });
       }
       this.transfers.push({
         what: 'regions', direction: 'down',
-        bytes: (regionCount * 3 + memberCount) * 4,
+        bytes: (regionCount * 4 + memberCount) * 4,
       });
     }
     this.regionsCPUValue = regions;

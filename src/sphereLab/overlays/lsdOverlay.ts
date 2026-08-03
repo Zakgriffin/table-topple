@@ -3,7 +3,7 @@ import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import {
-  computeEdgeNeighbors, computeLsdRectanglesAuto, computeMagTheta, growRegionsCCL, GrownRegion, LsdRectangle,
+  computeEdgeNeighbors, computeLsdRectanglesAuto, growRegionsCCL, GrownRegion, LsdRectangle,
 } from '../pipeline/lsdSegments.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import {
@@ -84,21 +84,25 @@ function drawEdgeConnectivityPreview(camera: Camera) {
   const cached = camera.lastLsdGrownRegions;
   const hoverIndex = camera.lastHoverFieldIndex;
   if (!cached || hoverIndex === null) return;
-  const { mag, theta } = cached;
+  const { fx, fy } = cached;
   const settings = camera.settings;
-  if (mag[hoverIndex] <= settings.lsdRhoNoiseThreshold) return; // below the edge floor -- never participates, so no edges to show
+  // Same eligibility test the grower applies, just spelled with the gradient
+  // directly now that there is no magnitude array to look it up in.
+  if (Math.hypot(fx[hoverIndex], fy[hoverIndex]) <= settings.lsdRhoNoiseThreshold) return; // below the edge floor -- never participates, so no edges to show
 
   const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
   const connected = new Set(computeEdgeNeighbors(
-    mag, theta, fieldW, fieldH, hoverIndex, settings.lsdToleranceDeg, settings.lsdRhoNoiseThreshold,
+    fx, fy, fieldW, fieldH, hoverIndex, settings.lsdToleranceDeg, settings.lsdRhoNoiseThreshold,
   ));
 
   const rect = computeThroughRect(camera);
   const fieldCol = hoverIndex % fieldW, fieldRow = (hoverIndex / fieldW) | 0;
   const cellW = rect.w / fieldW, cellH = rect.h / fieldH;
-  const toScreen = (fx: number, fy: number) => ({
-    x: rect.x + (fx + 0.5) * cellW,
-    y: rect.y + rect.h - (fy + 0.5) * cellH,
+  // col/row, not fx/fy -- these are FIELD COORDINATES, and naming them fx/fy
+  // would shadow the gradient arrays this function now reads.
+  const toScreen = (col: number, row: number) => ({
+    x: rect.x + (col + 0.5) * cellW,
+    y: rect.y + rect.h - (row + 0.5) * cellH,
   });
   const origin = toScreen(fieldCol, fieldRow);
 
@@ -111,7 +115,7 @@ function drawEdgeConnectivityPreview(camera: Camera) {
       const isConnected = connected.has(j);
       // A neighbor below the edge floor gets nothing drawn at all -- it isn't
       // a rejected candidate, it's not a node in the graph in the first place.
-      if (!isConnected && mag[j] <= settings.lsdRhoNoiseThreshold) continue;
+      if (!isConnected && Math.hypot(fx[j], fy[j]) <= settings.lsdRhoNoiseThreshold) continue;
       const target = toScreen(nx, ny);
       growthCandidateGroup.appendChild(svgEl('line', {
         x1: String(origin.x), y1: String(origin.y),
@@ -256,12 +260,12 @@ export async function updateLsdOverlay(camera: Camera) {
   // the way that result can (see lsdOverlaySeq's own comment): plain
   // synchronous JS code always runs in call order.
   if (settings.showLsdRawRegions) {
-    const { mag, theta } = computeMagTheta(field);
+    const { fx, fy } = field;
     const { regionId, regions, roundsRun, converged } = growRegionsCCL(
-      mag, theta, w, h, settings.lsdToleranceDeg, settings.lsdRhoNoiseThreshold, settings.lsdRhoHighThreshold,
+      fx, fy, w, h, settings.lsdToleranceDeg, settings.lsdRhoNoiseThreshold, settings.lsdRhoHighThreshold,
       settings.lsdCclSteps, settings.lsdMinRegionSize,
     );
-    camera.lastLsdGrownRegions = { regionId, regions, mag, theta, roundsRun, converged };
+    camera.lastLsdGrownRegions = { regionId, regions, fx, fy, roundsRun, converged };
     repaintLsdRawRegionsHighlight(camera); // respects whatever camera.lastHoverFieldIndex already is, not just a fresh "every region" paint
   }
 

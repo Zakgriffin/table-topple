@@ -29,11 +29,11 @@
 export const LSD_FIT_WGSL = /* wgsl */ `
 struct Uniforms {
   w: u32, h: u32, regionCount: u32, pad0: u32,
-  rho: f32, toleranceRad: f32, logNTests: f32, logEpsilon: f32,
+  rhoSq: f32, toleranceRad: f32, logNTests: f32, logEpsilon: f32,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
-@group(0) @binding(1) var<storage, read> mag: array<f32>;
-@group(0) @binding(2) var<storage, read> theta: array<f32>;
+@group(0) @binding(1) var<storage, read> fx: array<f32>;
+@group(0) @binding(2) var<storage, read> fy: array<f32>;
 // offsets + sizes rather than the regionCount+1 running-offsets array this used
 // to take. Same information (regions are laid out contiguously, so
 // offsets[r] + sizes[r] == offsets[r+1]), but it is the shape
@@ -41,7 +41,7 @@ struct Uniforms {
 // these two bind straight through with no repacking, and no readback, at all.
 @group(0) @binding(3) var<storage, read> memberOffsets: array<u32>; // [regionCount]
 @group(0) @binding(4) var<storage, read> memberIndices: array<u32>; // flat, CSR
-@group(0) @binding(5) var<storage, read> meanAngles: array<f32>; // [regionCount]
+@group(0) @binding(5) var<storage, read> meanDirs: array<vec2<f32>>; // [regionCount], a DIRECTION not an angle
 @group(0) @binding(7) var<storage, read> memberSizes: array<u32>; // [regionCount]
 @group(0) @binding(6) var<storage, read_write> outBuf: array<f32>; // [regionCount * 10]: cx,cy,theta,length,width,nfaLog10,accepted(0/1),pad,n,k
 // n and k are emitted purely so pipelineGPU/lsdFitVerify.ts can tell a
@@ -72,7 +72,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var sumW: f32 = 0.0; var sumX: f32 = 0.0; var sumY: f32 = 0.0;
   for (var mi = start; mi < end; mi = mi + 1u) {
     let i = memberIndices[mi];
-    let m = mag[i];
+    let m = length(vec2<f32>(fx[i], fy[i]));
     sumW = sumW + m;
     sumX = sumX + m * f32(i % u.w);
     sumY = sumY + m * f32(i / u.w);
@@ -83,14 +83,17 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   var Ixx: f32 = 0.0; var Iyy: f32 = 0.0; var Ixy: f32 = 0.0;
   for (var mi = start; mi < end; mi = mi + 1u) {
     let i = memberIndices[mi];
-    let m = mag[i];
+    let m = length(vec2<f32>(fx[i], fy[i]));
     let x = f32(i % u.w) - wcx;
     let y = f32(i / u.w) - wcy;
     Ixx = Ixx + m * x * x; Iyy = Iyy + m * y * y; Ixy = Ixy + m * x * y;
   }
   var th = 0.5 * atan2(2.0 * Ixy, Ixx - Iyy);
-  let meanAngle = meanAngles[ri];
-  if (cos(th) * cos(meanAngle) + sin(th) * sin(meanAngle) < 0.0) { th = th + PI; }
+  // The PCA axis is only defined up to 180 degrees; the region's own mean
+  // level-line DIRECTION picks which way. This used to cos/sin an angle that
+  // collect had just atan2'd out of exactly this vector.
+  let meanDir = meanDirs[ri];
+  if (cos(th) * meanDir.x + sin(th) * meanDir.y < 0.0) { th = th + PI; }
 
   let ax = cos(th); let ay = sin(th);
   let px = -ay; let py = ax;
@@ -112,6 +115,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let width = maxPerp - minPerp;
 
   // ── Stage 5 (first pass only): NFA validation ──────────────────────────
+  // Once per region, not per pixel, so this trig is free at this scale.
+  let cosTol = cos(u.toleranceRad);
   let hl = length * 0.5;
   let hw = max(width * 0.5, 0.5);
   var minX: f32 = 1e30; var maxX: f32 = -1e30;
@@ -138,10 +143,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (abs(proj) > hl + BOUNDARY_EPS || abs(perp) > hw + BOUNDARY_EPS) { continue; }
       n = n + 1u;
       let i = y * u.w + x;
-      if (mag[i] <= u.rho) { continue; }
-      var d = abs(theta[i] - th) % (2.0 * PI);
-      if (d > PI) { d = 2.0 * PI - d; }
-      if (d <= u.toleranceRad) { k = k + 1u; }
+      // Squared magnitude test first, so a sub-rho pixel costs no sqrt; only a
+      // pixel that survives is normalized.
+      let gx = fx[i]; let gy = fy[i];
+      let m2 = gx * gx + gy * gy;
+      if (m2 <= u.rhoSq) { continue; }
+      // The level-line unit vector dotted with the rectangle axis. This used to
+      // be an angle-difference test folded into [0, PI]; equivalent in exact
+      // arithmetic, but the dot product is now STRUCTURALLY IDENTICAL to
+      // countRectanglePixels' own line, which is what stops the two paths
+      // drifting apart under a change to either.
+      let alignDot = (gx * ax - gy * ay) * inverseSqrt(m2);
+      if (alignDot >= cosTol) { k = k + 1u; }
     }
   }
 

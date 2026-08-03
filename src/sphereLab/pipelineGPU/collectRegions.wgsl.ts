@@ -14,7 +14,8 @@
 // is exactly the deterministic region ordering the CPU path gets from sorting
 // its Map keys. Region numbering is preserved EXACTLY, not merely equivalently.
 //
-//   survive     labelSurvives[label] = 1 where a member clears rhoHigh. A
+//   survive     labelSurvives[label] = 1 where a member clears rhoHigh (tested
+//               squared, no sqrt -- see lsdSegments.ts). A
 //               scatter of a constant -- every writer writes 1, so no atomic.
 //   histogram   counts[label]++ over surviving labels. atomicAdd.
 //   markKept    per label: keptFlag = survives && count >= minRegionSize, and
@@ -23,7 +24,8 @@
 //   -- scan keptCount -> memberOffset[label], total = member count
 //   regionMeta  per label: publish offset/size/label for its region index.
 //   scatter     per pixel: regionId[i], and place i in the CSR via a cursor.
-//   finalize    one thread per region: sort its own slice, then sum cos/sin.
+//   finalize    one thread per region: sort its own slice, then sum its
+//               members' level-line unit vectors into a mean direction.
 //
 // The sort in `finalize` is what makes member order deterministic. atomicAdd
 // hands out slots in arrival order, which is nondeterministic; the CPU path
@@ -32,11 +34,12 @@
 // by one thread is cheap -- the same one-thread-per-region shape lsdFit already
 // validated as safe here.
 export const COLLECT_SURVIVE_WGSL = /* wgsl */ `
-struct U { n: u32, rhoHigh: f32, minRegionSize: u32, pad: u32 }
+struct U { n: u32, rhoHighSq: f32, minRegionSize: u32, pad: u32 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> label: array<i32>;
-@group(0) @binding(2) var<storage, read> mag: array<f32>;
-@group(0) @binding(3) var<storage, read_write> labelSurvives: array<u32>;
+@group(0) @binding(2) var<storage, read> fx: array<f32>;
+@group(0) @binding(3) var<storage, read> fy: array<f32>;
+@group(0) @binding(4) var<storage, read_write> labelSurvives: array<u32>;
 
 @compute @workgroup_size(256)
 fn survive(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -45,12 +48,13 @@ fn survive(@builtin(global_invocation_id) gid: vec3<u32>) {
   let lab = label[i];
   // Benign race by construction: every thread that writes here writes the same
   // value, so the result is the OR of all of them regardless of ordering.
-  if (lab >= 0 && mag[i] > u.rhoHigh) { labelSurvives[u32(lab)] = 1u; }
+  // Squared, so the hysteresis test costs no sqrt. See lsdSegments.ts.
+  if (lab >= 0 && fx[i] * fx[i] + fy[i] * fy[i] > u.rhoHighSq) { labelSurvives[u32(lab)] = 1u; }
 }
 `;
 
 export const COLLECT_HISTOGRAM_WGSL = /* wgsl */ `
-struct U { n: u32, rhoHigh: f32, minRegionSize: u32, pad: u32 }
+struct U { n: u32, rhoHighSq: f32, minRegionSize: u32, pad: u32 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> label: array<i32>;
 @group(0) @binding(2) var<storage, read> labelSurvives: array<u32>;
@@ -68,7 +72,7 @@ fn histogram(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 export const COLLECT_MARK_KEPT_WGSL = /* wgsl */ `
-struct U { n: u32, rhoHigh: f32, minRegionSize: u32, pad: u32 }
+struct U { n: u32, rhoHighSq: f32, minRegionSize: u32, pad: u32 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> labelSurvives: array<u32>;
 @group(0) @binding(2) var<storage, read> counts: array<u32>;
@@ -89,7 +93,7 @@ fn markKept(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 export const COLLECT_REGION_META_WGSL = /* wgsl */ `
-struct U { n: u32, rhoHigh: f32, minRegionSize: u32, pad: u32 }
+struct U { n: u32, rhoHighSq: f32, minRegionSize: u32, pad: u32 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> keptFlag: array<u32>;
 @group(0) @binding(2) var<storage, read> regionIndex: array<u32>;
@@ -113,7 +117,7 @@ fn regionMeta(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 export const COLLECT_SCATTER_WGSL = /* wgsl */ `
-struct U { n: u32, rhoHigh: f32, minRegionSize: u32, pad: u32 }
+struct U { n: u32, rhoHighSq: f32, minRegionSize: u32, pad: u32 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> label: array<i32>;
 @group(0) @binding(2) var<storage, read> keptFlag: array<u32>;
@@ -141,11 +145,12 @@ fn scatter(@builtin(global_invocation_id) gid: vec3<u32>) {
 export const COLLECT_FINALIZE_WGSL = /* wgsl */ `
 struct U { regionCount: u32, pad0: u32, pad1: u32, pad2: u32 }
 @group(0) @binding(0) var<uniform> u: U;
-@group(0) @binding(1) var<storage, read> theta: array<f32>;
+@group(0) @binding(1) var<storage, read> fx: array<f32>;
 @group(0) @binding(2) var<storage, read> regionOffsets: array<u32>;
 @group(0) @binding(3) var<storage, read> regionSizes: array<u32>;
 @group(0) @binding(4) var<storage, read_write> members: array<u32>;
-@group(0) @binding(5) var<storage, read_write> meanAngles: array<f32>;
+@group(0) @binding(5) var<storage, read_write> meanDirs: array<vec2<f32>>;
+@group(0) @binding(6) var<storage, read> fy: array<f32>;
 
 @compute @workgroup_size(64)
 fn finalize(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -174,10 +179,19 @@ fn finalize(@builtin(global_invocation_id) gid: vec3<u32>) {
   // cancel against. See collectRegionsFromLabels' own comment.
   var sc = 0.0; var ss = 0.0;
   for (var k = 0u; k < size; k = k + 1u) {
-    let t = theta[members[off + k]];
-    sc = sc + cos(t);
-    ss = ss + sin(t);
+    let p = members[off + k];
+    let gx = fx[p];
+    let gy = fy[p];
+    let inv = inverseSqrt(gx * gx + gy * gy); // every member cleared rhoLow, so m2 > 0
+    sc = sc + gx * inv;
+    ss = ss + -gy * inv;
   }
-  meanAngles[r] = atan2(ss, sc);
+  // Normalized rather than left as a raw sum: only the DIRECTION is load-
+  // bearing (fitRectangle uses it to pick which way along the PCA axis), but
+  // normalizing keeps this directly comparable to the CPU path. The degenerate
+  // all-cancel case cannot arise from directed growth; pinned, not left NaN.
+  let sLen = sqrt(sc * sc + ss * ss);
+  if (sLen > 0.0) { meanDirs[r] = vec2<f32>(sc / sLen, ss / sLen); }
+  else { meanDirs[r] = vec2<f32>(1.0, 0.0); }
 }
 `;

@@ -99,7 +99,7 @@ export interface CameraBase {
   // mid-growth because the CCL-steps scrubber is capping it".
   lastLsdGrownRegions: {
     regionId: Int32Array; regions: GrownRegion[];
-    mag: Float64Array; theta: Float64Array;
+    fx: Float64Array; fy: Float64Array;
     roundsRun: number; converged: boolean;
   } | null;
   lastGridPeriodPhase: GridPeriodPhaseResult | null;

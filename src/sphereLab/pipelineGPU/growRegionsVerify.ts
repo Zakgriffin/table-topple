@@ -1,7 +1,7 @@
 import { activeCamera } from '../camera/store.ts';
 import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import { computeMagTheta, GrownRegion, growRegionsCCL } from '../pipeline/lsdSegments.ts';
+import { GrownRegion, growRegionsCCL } from '../pipeline/lsdSegments.ts';
 import { growRegionsCCLGPUToCPU } from './growRegions.ts';
 
 // ── Dev harness: does growRegions.wgsl.ts's labeling agree with the CPU's? ──
@@ -109,17 +109,17 @@ export async function verifyGrowRegions(camera?: Camera | null): Promise<GrowReg
   // Both paths are handed the SAME mag/theta, so any difference below is the
   // round loop and not the gradient stage.
   const field = computeGradient2x2Field(gray, w, h);
-  const { mag, theta } = computeMagTheta(field);
+  const { fx, fy } = field;
   const args = [
     w, h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
   ] as const;
 
   const cpuStart = performance.now();
-  const cpu = growRegionsCCL(mag, theta, ...args);
+  const cpu = growRegionsCCL(fx, fy, ...args);
   const cpuMs = performance.now() - cpuStart;
 
   const gpuStart = performance.now();
-  const gpu = await growRegionsCCLGPUToCPU(mag, theta, ...args);
+  const gpu = await growRegionsCCLGPUToCPU(fx, fy, ...args);
   const gpuMs = performance.now() - gpuStart;
   // Null means either no WebGPU at all or a validation error the grower's own
   // error scope caught -- in the latter case it has already logged the message.
@@ -150,8 +150,12 @@ export async function verifyGrowRegions(camera?: Camera | null): Promise<GrowReg
     if (g < 0) continue; // every pixel of this region was unlabeled on the GPU side
     if (gpu.regions[g].members.length !== cpu.regions[c].members.length) continue; // contained but merged into something larger
     exactMatches++;
-    let d = Math.abs(cpu.regions[c].meanAngle - gpu.regions[g].meanAngle) % (2 * Math.PI);
-    if (d > Math.PI) d = 2 * Math.PI - d;
+    // The ANGLE BETWEEN the two mean directions, via atan2(cross, dot) rather
+    // than acos(dot): acos loses most of its precision exactly where these
+    // land, next to zero. Same quantity the old meanAngle delta reported, so
+    // the numbers stay comparable across the vector-space change.
+    const a = cpu.regions[c], b = gpu.regions[g];
+    const d = Math.abs(Math.atan2(a.meanUx * b.meanUy - a.meanUy * b.meanUx, a.meanUx * b.meanUx + a.meanUy * b.meanUy));
     maxMeanAngleDelta = Math.max(maxMeanAngleDelta, d);
   }
   let gpuRegionsMerged = 0;
@@ -165,7 +169,7 @@ export async function verifyGrowRegions(camera?: Camera | null): Promise<GrowReg
     cpuSizes: sizeStats(cpu.regions),
     gpuSizes: sizeStats(gpu.regions),
     borderlinePairs: countBorderlinePairs(
-      mag, theta, w, h, s.lsdRhoNoiseThreshold, Math.cos((s.lsdToleranceDeg * Math.PI) / 180),
+      fx, fy, w, h, s.lsdRhoNoiseThreshold, Math.cos((s.lsdToleranceDeg * Math.PI) / 180),
     ),
     cpuRounds: cpu.roundsRun, gpuRounds: gpu.roundsRun,
     cpuConverged: cpu.converged, gpuConverged: gpu.converged,

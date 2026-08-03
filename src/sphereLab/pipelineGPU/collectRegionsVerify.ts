@@ -1,7 +1,7 @@
 import { activeCamera } from '../camera/store.ts';
 import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import { computeMagTheta, GrownRegion } from '../pipeline/lsdSegments.ts';
+import { GrownRegion } from '../pipeline/lsdSegments.ts';
 import { globalState } from '../state.ts';
 import { growRegionsCCLGPUToCPU } from './growRegions.ts';
 
@@ -53,7 +53,7 @@ export async function verifyCollectRegions(camera?: Camera | null): Promise<Coll
   const s = camera.settings;
 
   const field = computeGradient2x2Field(gray, w, h);
-  const { mag, theta } = computeMagTheta(field);
+  const { fx, fy } = field;
   const args = [
     w, h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
   ] as const;
@@ -62,12 +62,12 @@ export async function verifyCollectRegions(camera?: Camera | null): Promise<Coll
   try {
     globalState.useGPUCollectRegions = false;
     const t0 = performance.now();
-    const cpu = await growRegionsCCLGPUToCPU(mag, theta, ...args);
+    const cpu = await growRegionsCCLGPUToCPU(fx, fy, ...args);
     const cpuMs = performance.now() - t0;
 
     globalState.useGPUCollectRegions = true;
     const t1 = performance.now();
-    const gpu = await growRegionsCCLGPUToCPU(mag, theta, ...args);
+    const gpu = await growRegionsCCLGPUToCPU(fx, fy, ...args);
     const gpuMs = performance.now() - t1;
 
     if (!cpu || !gpu) return 'grower returned null (WebGPU unavailable, or a validation error -- check the console)';
@@ -86,8 +86,14 @@ export async function verifyCollectRegions(camera?: Camera | null): Promise<Coll
         const sb = Array.from(b).sort((x, y) => x - y).join(',');
         if (sa === sb) memberOrderMismatches++; else memberSetMismatches++;
       }
-      let d = Math.abs(cpu.regions[r].meanAngle - gpu.regions[r].meanAngle) % (2 * Math.PI);
-      if (d > Math.PI) d = 2 * Math.PI - d;
+      // Angle between the two mean DIRECTIONS -- atan2(cross, dot), which stays
+      // accurate near zero where acos(dot) would not. Comparable to the
+      // pre-vector-space meanAngle delta.
+      const cr = cpu.regions[r], gr = gpu.regions[r];
+      const d = Math.abs(Math.atan2(
+        cr.meanUx * gr.meanUy - cr.meanUy * gr.meanUx,
+        cr.meanUx * gr.meanUx + cr.meanUy * gr.meanUy,
+      ));
       maxMeanAngleDelta = Math.max(maxMeanAngleDelta, d);
     }
 

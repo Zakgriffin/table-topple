@@ -2,11 +2,12 @@ import * as THREE from 'three';
 import { CameraSettingsCommon } from '../camera/settings.ts';
 import { jacobiEigenSymmetric, smallestEigenvector } from '../../linalg.ts';
 import { cornerDir } from '../math/geometry.ts';
+import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { GradientField, Vote } from '../types.ts';
 import { CompositeLine, compositeLineLength, computeCompositeLines, computeJoinWalk, computeMergeGroups } from './bucketFillJoin.ts';
 import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from './gradientField.ts';
-import { computeLsdRectangles, computeLsdRectanglesAuto, lsdRectanglesToBucketFillShape } from './lsdSegments.ts';
+import { computeLsdRectangles, lsdRectanglesToBucketFillShape, runLsdChain } from './lsdSegments.ts';
 import { fourFoldResidual } from './orientationLM.ts';
 import { guidedTangentDirectionForWalk } from './tangentWalk.ts';
 
@@ -114,11 +115,9 @@ export interface LsdCompositeSettings {
 // group's root -- the shared first stage behind computeSegmentVotes below
 // AND pipeline/gridPeriodPhase.ts. Runs the full traditional LSD pipeline
 // (region growing -> rectangle fit -> NFA validation, see
-// pipeline/lsdSegments.ts's own header) over the 2x2 gradient field `field`
-// (computeGradient2x2Field or its GPU twin, computeGradient2x2FieldGPU --
-// see pipeline/axesReconstruction.ts's gradient2x2Field for the CPU/GPU
-// choice), adapts the accepted rectangles into the join walk's expected
-// input shape, then runs the join walk (merge groups + composite lines).
+// pipeline/lsdSegments.ts's own header) over the gray `res` was created
+// around, adapts the accepted rectangles into the join walk's expected input
+// shape, then runs the join walk (merge groups + composite lines).
 // Deliberately NOT the radius-driven gradient field x local-agreement
 // "effective" field this used to run through (computeGradientField/
 // computeGradientAgreementField/computeEffectiveGradientField, still
@@ -129,15 +128,18 @@ export interface LsdCompositeSettings {
 // downstream consumer -- vote casting here, row/col family classification
 // in gridPeriodPhase.ts, and the "color composite lines by row/col family"
 // debug overlay -- sees the exact same lines under the exact same root
-// numbers. Takes the field pre-computed (rather than computing it from
-// `gray` itself) so the caller can pick CPU or GPU without this function --
-// or any of its downstream consumers -- needing to know or care which one
-// produced it.
+// numbers. It used to take the gradient field pre-computed, so that the caller
+// could pick CPU or GPU without this function -- or any of its downstream
+// consumers -- needing to know or care which one produced it. The residency
+// now carries that same ignorance one stage earlier and better: runLsdChain
+// computes the gradient too, on whichever side the toggle says, and holds
+// fx/fy there. Nothing between here and the fitter has to name a side, and the
+// gradient no longer has to land on the CPU just to be passed along.
 export async function computeGradient2x2Composites(
   settings: LsdCompositeSettings,
-  field: GradientField, w: number, h: number,
+  res: FieldResidency, w: number, h: number,
 ): Promise<{ root: number; line: CompositeLine }[]> {
-  const rects = await computeLsdRectanglesAuto(field, {
+  const rects = await runLsdChain(res, w, h, {
     toleranceDeg: settings.lsdToleranceDeg,
     rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
     rhoHighThreshold: settings.lsdRhoHighThreshold,

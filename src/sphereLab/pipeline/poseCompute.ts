@@ -1,15 +1,15 @@
 import * as THREE from 'three';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
+import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
-import { computeGradient2x2FieldGPU } from '../pipelineGPU/gradient2x2.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
 import { DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, RecoveredAxes, Vote } from '../types.ts';
 import { CompositeLine } from './bucketFillJoin.ts';
 import { runPositionDecode } from './decodeGrid.ts';
-import { computeGradient2x2Field } from './gradientField.ts';
 import { computeGridPeriodPhase, GridPeriodPhaseResult } from './gridPeriodPhase.ts';
+import { createLsdChainResidency } from './lsdSegments.ts';
 import { fourFoldResidual } from './orientationLM.ts';
 import {
   computeGradient2x2Composites, computePixelVotes2x2, computeSegmentVotes, fitPairOfPlanes, refineOrientationIRLS,
@@ -62,21 +62,58 @@ export interface PoseComputeTiming {
   worldVoteIterations: number | null;
 }
 
-// Same pattern as axesReconstruction.ts's old local gradient2x2Field helper
-// (moved here since it's pure, GPU/CPU dispatch driven purely by the shared
-// globalState singleton) -- see pipelineGPU/gradient2x2.ts.
-async function gradient2x2Field(gray: Float64Array, w: number, h: number): Promise<GradientField> {
-  const s = spanStart(globalState.useGPUGradient ? 'gradient2x2 (GPU)' : 'gradient2x2 (CPU)');
-  const field = globalState.useGPUGradient
-    ? (await computeGradient2x2FieldGPU(gray, w, h)) ?? computeGradient2x2Field(gray, w, h)
-    : computeGradient2x2Field(gray, w, h);
-  spanEnd(s);
-  return field;
+// The residency's fx/fy as the GradientField shape the CPU-only consumers
+// still want. Costs a readback if stage 1 ran on GPU, which is exactly why
+// only computePixelVotes2x2 calls it -- everything else on the pose path is
+// either device-agnostic or already inside the chain.
+async function gradientFieldCPU(res: FieldResidency, w: number, h: number): Promise<GradientField> {
+  return { fx: await res.cpuF64('fx'), fy: await res.cpuF64('fy'), w, h, r: 1 };
+}
+
+// Stages 1-6 -- gradient, the LSD chain, the join walk, and vote casting --
+// under ONE FieldResidency, which is the whole reason they are grouped into a
+// function here. It spans exactly as far as it is useful: gray goes in at the
+// top, votes come out at the bottom, and every per-pixel intermediate in
+// between is destroyed on the way out. Everything after this point in
+// computePoseFromCapture works on votes and poses, not on pixels, so extending
+// the residency past it would only hold GPU memory for no reader.
+async function computeCompositesAndVotes(
+  state: PoseComputeState, gray: Float64Array, w: number, h: number, vFovRad: number,
+): Promise<{ voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[] }> {
+  const res = await createLsdChainResidency(gray, w, h);
+  try {
+    // Composite lines (bucket-fill -> join walk -> merge groups -> one line
+    // per group, over the 2x2 gradient field) computed exactly once here and
+    // shared by every downstream consumer that needs them -- vote casting
+    // below and row/col family classification in computeGridPeriodPhase
+    // further down (and, for a real desktop camera, the "color composite
+    // lines by row/col family" debug overlay, which reads
+    // state.lastVoteComposites back off the camera afterward).
+    const compositesSpan = spanStart('composites (2x2 gradient field)');
+    const voteComposites = await computeGradient2x2Composites(state.settings, res, w, h);
+    spanEnd(compositesSpan);
+
+    const votesSpan = spanStart('votes (segments)');
+    // useWorldVoteOrientation swaps the vote SOURCE (one per pixel, straight
+    // off the same gradient field/composites already computed above, instead
+    // of one per composite line) -- voteComposites/gridPeriodPhase downstream
+    // are untouched either way, see this session's chat. It is also the one
+    // consumer that forces stage 1 back onto the CPU, hence the explicit
+    // gradientFieldCPU rather than a field carried down from above.
+    const votes = state.settings.useWorldVoteOrientation
+      ? computePixelVotes2x2(await gradientFieldCPU(res, w, h), w, h, MATH_QUAT, vFovRad, state.aspect)
+      : computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, state.aspect);
+    spanEnd(votesSpan);
+
+    return { voteComposites, votes };
+  } finally {
+    res.destroy();
+  }
 }
 
 // Mutates `state` in place exactly like recomputeStages used to mutate
 // `camera` -- same field names, same functions, same order:
-// computeGradient2x2Field[GPU] -> computeGradient2x2Composites ->
+// the LSD chain (stages 1-4, see runLsdChain) -> computeGradient2x2Composites ->
 // computeSegmentVotes -> fitPairOfPlanes[GPU] -> handedness assembly ->
 // computeGridPeriodPhase -> assemble RecoveredAxes -> runPositionDecode.
 // No `useGPU` parameter -- every GPU/CPU branch point reads the shared
@@ -90,28 +127,8 @@ export async function computePoseFromCapture(
   const vFovRad = getAnalysisVFovRad(state);
   const t0 = performance.now();
 
-  // Composite lines (bucket-fill -> join walk -> merge groups -> one line
-  // per group, over the 2x2 gradient field) computed exactly once here and
-  // shared by every downstream consumer that needs them -- vote casting
-  // below and row/col family classification in computeGridPeriodPhase
-  // further down (and, for a real desktop camera, the "color composite
-  // lines by row/col family" debug overlay, which reads state.lastVoteComposites
-  // back off the camera afterward).
-  const compositesSpan = spanStart('composites (2x2 gradient field)');
-  const field2x2 = await gradient2x2Field(gray, w, h);
-  const voteComposites = await computeGradient2x2Composites(state.settings, field2x2, w, h);
-  spanEnd(compositesSpan);
+  const { voteComposites, votes } = await computeCompositesAndVotes(state, gray, w, h, vFovRad);
   state.lastVoteComposites = voteComposites;
-
-  const votesSpan = spanStart('votes (segments)');
-  // useWorldVoteOrientation swaps the vote SOURCE (one per pixel, straight
-  // off the same field2x2 composites/gridPeriodPhase already computed above,
-  // instead of one per composite line) -- voteComposites/gridPeriodPhase
-  // downstream are untouched either way, see this session's chat.
-  const votes = state.settings.useWorldVoteOrientation
-    ? computePixelVotes2x2(field2x2, w, h, MATH_QUAT, vFovRad, state.aspect)
-    : computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, state.aspect);
-  spanEnd(votesSpan);
   state.lastVotes = votes;
   const t1 = performance.now();
 

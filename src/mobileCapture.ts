@@ -23,7 +23,7 @@ import { GRID_STEP } from './sphereLab/constants.ts';
 import { C, R, rebuildFloorPatternData } from './sphereLab/floorPattern.ts';
 import { getAnalysisVFovRad } from './sphereLab/math/geometry.ts';
 import { computeGradient2x2Field } from './sphereLab/pipeline/gradientField.ts';
-import { computeLsdRectanglesAuto, LsdRectangle } from './sphereLab/pipeline/lsdSegments.ts';
+import { computeLsdRectanglesFromField, LsdRectangle } from './sphereLab/pipeline/lsdSegments.ts';
 import { computePoseFromCapture, PoseComputeState } from './sphereLab/pipeline/poseCompute.ts';
 import { packPoseResultWithImage } from './sphereLab/devBridge/poseResultWire.ts';
 
@@ -1327,7 +1327,7 @@ async function captureComputeAndSendPose() {
       // runs unless this branch is taken.
       if (sendDebugInfo) {
         const field = computeGradient2x2Field(grayTopDown, cw, ch);
-        const lsdRects = await computeLsdRectanglesAuto(field, {
+        const lsdRects = await computeLsdRectanglesFromField(field, {
           toleranceDeg: cameraSettings.lsdToleranceDeg,
           rhoNoiseThreshold: cameraSettings.lsdRhoNoiseThreshold,
           rhoHighThreshold: cameraSettings.lsdRhoHighThreshold,

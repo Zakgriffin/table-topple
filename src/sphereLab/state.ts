@@ -36,7 +36,11 @@ export const globalState = {
   useGPUProject: true,
   // Same idea, independent toggle, for the 2x2 forward-difference gradient
   // field that feeds computeGradient2x2Composites (see
-  // pipelineGPU/gradient2x2.ts).
+  // pipelineGPU/gradient2x2.ts). This is stage 1 of the LSD chain and shares
+  // the chain's FieldResidency, so its cost depends on its NEIGHBOUR just like
+  // the rest: on its own it uploads gray and reads fx/fy straight back, but
+  // with useGPUGrowRegions on, fx/fy never cross at all and the gray upload is
+  // the only traffic left at the front of the pipeline.
   useGPUGradient: true,
   // Same idea, independent toggle, for the LSD pipeline's stage 4 (PCA
   // rectangle fit) + stage 5's first NFA pass (see pipelineGPU/lsdFit.ts) --
@@ -106,28 +110,45 @@ export const globalState = {
   // member-order and 0 regionId mismatches; maxMeanAngleDelta 3.6e-7, which is
   // just the f32 cos/sin summation.
   //
-  // STILL DEFAULT OFF AFTER THE RESIDENCY LANDED, and the prediction that it
-  // would flip was WRONG -- worth recording as a measurement rather than
-  // quietly re-arguing. It improved (9.7-vs-11.7ms before, 12.8-vs-13.8 in its
-  // own harness now) but stayed on the wrong side of zero: ~0.7ms worse through
-  // the real dispatch point at both fit settings (15.8 -> 16.5 with fit off,
-  // 13.9 -> 14.7 with fit on).
+  // FLIPPED ON 2026-08-03, after stage 1 joined the chain. The history is worth
+  // keeping, because this toggle reversed TWICE and the reason it finally moved
+  // is not the reason anyone predicted.
   //
-  // The reason is now understood, which is the useful part. Residency could not
-  // save the transfer this stage actually pays, because THE MEMBERS HAVE TO LAND
-  // ON CPU NO MATTER WHAT: lsdRectanglesToBucketFillShape rebuilds a per-pixel
-  // regionId from LsdRectangle.rawMembers to seed the join walk. So GPU collect
-  // trades a 786KB label readback for six dispatches plus TWO 4-BYTE COUNT
-  // READBACKS (totalRegions/totalMembers, each a full mapAsync round trip) and
-  // still reads the members back afterwards. At this scale that latency
-  // outweighs the bytes saved -- a bandwidth win losing to a latency cost.
+  // It was OFF through the residency work, at ~0.7ms worse, and the diagnosis
+  // was that residency could not save the transfer it actually pays: THE MEMBERS
+  // HAVE TO LAND ON CPU NO MATTER WHAT (lsdRectanglesToBucketFillShape rebuilds
+  // a per-pixel regionId from LsdRectangle.rawMembers to seed the join walk), so
+  // GPU collect traded a 786KB label readback for six dispatches plus two
+  // 4-byte count readbacks and still read the members back afterwards -- a
+  // bandwidth win losing to a latency cost. That diagnosis was correct and the
+  // conclusion drawn from it ("only moving the join walk would flip this") was
+  // too narrow.
   //
-  // What WOULD flip it is removing the members readback, i.e. moving the join
-  // walk (or at least its regionId seeding) onto the GPU. Not the CSR handoff,
-  // which is already free. Caveat on the numbers: at 3 reps the deltas overlap
-  // between configurations, so the direction is consistent but not separated
-  // from noise -- re-measure with more reps before treating 0.7ms as exact.
-  useGPUCollectRegions: false,
+  // What flipped it: the CPU collect needs fx/fy. Once stage 1 could keep them
+  // on the device, leaving collect on CPU stopped costing one readback and
+  // started costing THREE -- label, fx and fy. So the comparison is no longer
+  // six dispatches vs 786KB, it is six dispatches vs 2.3MB, and the dispatches
+  // win. Measured by verifyLsdChain(cam, 5) at 512x384, median of 5 interleaved
+  // reps with the page verified focused throughout, full chain, gradient and
+  // grow and fit all on GPU:
+  //   collect CPU: 5 crossings, 3.17MB, 12.2ms
+  //   collect GPU: 2 crossings, 0.92MB, 10.8ms  <- the chain's transfer floor
+  // and with the fitter on CPU, 15.5 -> 13.9ms. The members readback is still
+  // there and still unavoidable; it is simply no longer the only thing crossing.
+  //
+  // Honest caveat on the win, because the transfer floor is NOT the fastest
+  // configuration: gradient=CPU with collect on measures 10.1ms, a hair faster
+  // than the 2-crossing 10.8ms. Once the grower is on GPU the top four
+  // configurations sit within 10.1-10.8ms and crossings stop predicting time --
+  // this toggle is chosen on bytes and on being the honest floor, not on a
+  // wall-clock difference that survives scrutiny at this resolution.
+  //
+  // VERIFIED EXACT (verifyCollectRegions): 1782/1782 regions, 0 member-set, 0
+  // member-order and 0 regionId mismatches; maxMeanAngleDelta 3.6e-7, which is
+  // just the f32 cos/sin summation. verifyLsdChain's 12-configuration sweep
+  // additionally shows 0 delta in rectangle count, accepted count and member
+  // count against the all-CPU baseline.
+  useGPUCollectRegions: true,
   // Fused decode: buildDecodeSampleGrid AND the tally on GPU, with the packed
   // grid staying device-resident between them (pipelineGPU/decodeGridBuild.ts).
   // Distinct from useGPUDecode, which moves only the tally and still uploads a

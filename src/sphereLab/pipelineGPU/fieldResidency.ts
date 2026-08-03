@@ -29,7 +29,10 @@
 //
 // The floor for the chain is 2 crossings -- gray up, rectangles down -- because
 // the join walk downstream is CPU and always wants real rectangles. Everything
-// between those two points is optional traffic.
+// between those two points is optional traffic, and with stage 1 (gradient2x2)
+// now publishing here too, that floor is actually reachable: gray is the only
+// thing that has to go up, since it is the only input the chain does not
+// produce itself.
 //
 // ── The single-assignment invariant ──
 //

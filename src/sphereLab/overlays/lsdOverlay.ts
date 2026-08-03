@@ -3,7 +3,7 @@ import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import {
-  computeEdgeNeighbors, computeLsdRectanglesAuto, growRegionsCCL, GrownRegion, LsdRectangle,
+  computeEdgeNeighbors, computeLsdRectanglesFromField, growRegionsCCL, GrownRegion, LsdRectangle,
 } from '../pipeline/lsdSegments.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import {
@@ -230,7 +230,7 @@ function drawRectanglesSvg(camera: Camera, rects: readonly LsdRectangle[]) {
 // lsdSegments.ts) and repaints its 3 independent debug views (accepted
 // rectangles + rejected candidates, both SVG; raw region pixels, raster).
 //
-// Async now that computeLsdRectanglesAuto can go through a GPU round trip
+// Async now that computeLsdRectanglesFromField can go through a GPU round trip
 // (see lsdSegments.ts/lsdFit.ts) -- every caller here fires this off without
 // awaiting it (a live "redraw when ready" refresh, same pattern
 // runAxesReconstruction's own RAF callback already uses), which on its own
@@ -270,7 +270,7 @@ export async function updateLsdOverlay(camera: Camera) {
   }
 
   const seq = ++lsdOverlaySeq;
-  const rects = await computeLsdRectanglesAuto(field, {
+  const rects = await computeLsdRectanglesFromField(field, {
     toleranceDeg: settings.lsdToleranceDeg,
     rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
     rhoHighThreshold: settings.lsdRhoHighThreshold,

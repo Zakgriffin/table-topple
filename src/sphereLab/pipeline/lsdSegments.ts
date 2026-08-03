@@ -1,10 +1,13 @@
 import * as THREE from 'three';
 import { BucketFillSegment } from './bucketFillSegments.ts';
 import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
+import { computeGradient2x2FieldGPU } from '../pipelineGPU/gradient2x2.ts';
 import { fitAndTestRegionsGPU } from '../pipelineGPU/lsdFit.ts';
 import { growRegionsCCLGPU } from '../pipelineGPU/growRegions.ts';
+import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
 import { GradientField } from '../types.ts';
+import { computeGradient2x2Field } from './gradientField.ts';
 
 // ── LSD (Line Segment Detector, von Gioi/Jakubowicz/Morel/Randall 2010) ───
 // ── from scratch ────────────────────────────────────────────────────────
@@ -942,9 +945,8 @@ export async function computeLsdRectanglesGPU(field: GradientField, settings: Ls
   }
 }
 
-// Single dispatch point both production callers (pipeline/votes.ts,
-// overlays/lsdOverlay.ts) use -- centralizes the globalState GPU checks once
-// instead of duplicating them at each call site.
+// Single dispatch point every caller uses -- centralizes the globalState GPU
+// checks once instead of duplicating them at each call site.
 //
 // The two stages dispatch INDEPENDENTLY: useGPUGrowRegions picks stage 2+3,
 // useGPULsdFit picks stage 4+5's first pass, and either can fall back to CPU on
@@ -953,41 +955,112 @@ export async function computeLsdRectanglesGPU(field: GradientField, settings: Ls
 // output (see pipelineGPU/growRegions.ts's header), so it has to stay
 // separately switchable from a stage that is.
 //
-// A FieldResidency (pipelineGPU/fieldResidency.ts) spans the whole dispatch and
-// owns every intermediate. Stages no longer transfer anything themselves; they
-// publish on the side they produced on and ask for the side they want, and the
-// residency moves data only when a producer and a consumer are actually on
-// opposite sides of the bus. That is what makes these toggles cost what the
-// configuration implies rather than what each module hardcoded: with grow and
-// fit both on GPU, fx/fy are uploaded once instead of twice and the labeling
-// never crosses at all.
-export async function computeLsdRectanglesAuto(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[]> {
+// Takes the residency (pipelineGPU/fieldResidency.ts) rather than a
+// GradientField, and does NOT own it. That is deliberate: this function used to
+// create one per call, which capped the chain at stage 3 and forced stage 1's
+// output down to CPU and straight back up again no matter what either toggle
+// said. The caller owning it is what lets the gradient join the chain -- see
+// pipeline/poseCompute.ts, and computeLsdRectanglesFromField below for callers
+// that genuinely do start from a CPU field.
+//
+// Stages transfer nothing themselves; they publish on the side they produced on
+// and ask for the side they want, and the residency moves data only when a
+// producer and a consumer are actually on opposite sides of the bus. That is
+// what makes these toggles cost what the configuration implies rather than what
+// each module hardcoded: with the whole chain on GPU, fx/fy are never uploaded
+// at all and the labeling never crosses either.
+export async function computeLsdRectanglesAuto(
+  res: FieldResidency, w: number, h: number, settings: LsdSettings,
+): Promise<LsdRectangle[]> {
+  const growArgs = [
+    w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+  ] as const;
+  const grown = globalState.useGPUGrowRegions ? await growRegionsCCLGPU(res, ...growArgs) : null;
+  if (!grown) {
+    // Either the toggle is off or the GPU grower bailed; on both paths it
+    // published nothing, so the CPU grower owns these slots. Asking the
+    // residency for the CPU side of fx/fy is what pulls stage 1's output back
+    // down if -- and only if -- it was produced on the device.
+    const cpu = growRegionsCCL(await res.cpuF64('fx'), await res.cpuF64('fy'), ...growArgs);
+    res.provideCPU('regionId', cpu.regionId);
+    res.provideRegionsCPU(cpu.regions);
+  }
+
+  if (globalState.useGPULsdFit) {
+    const gpu = await fitRegionsGPU(res, w, h, settings);
+    if (gpu) return gpu;
+  }
+  return fitRegionsCPU(await res.regionsCPU(), await res.cpuF64('fx'), await res.cpuF64('fy'), w, h, settings);
+}
+
+// Whether any stage of the chain needs a device. No device is requested at all
+// when every stage is on CPU, so an all-CPU frame still never touches
+// navigator.gpu -- and useGPUGradient counts, because stage 1 can want a device
+// when nothing downstream does.
+export function lsdChainWantsGPU(): boolean {
+  return globalState.useGPUGradient || globalState.useGPUGrowRegions || globalState.useGPULsdFit;
+}
+
+// ── Stage 1: the 2x2 forward-difference gradient ──
+//
+// Publishes into the residency instead of returning a field, which is what
+// makes stage 1 part of the chain rather than a thing that happens before it.
+// Neither branch transfers anything: the GPU one leaves fx/fy on the device and
+// the CPU one leaves them in JS, and whether either ever crosses is decided
+// later, by whoever asks for the other side. Before this, the GPU branch
+// uploaded gray and read fx/fy straight back, and then growRegionsCCLGPU
+// uploaded those same two arrays again a moment later.
+async function runGradient2x2Stage(res: FieldResidency, w: number, h: number): Promise<void> {
+  const useGPU = globalState.useGPUGradient && res.device !== null;
+  const s = spanStart(useGPU ? 'gradient2x2 (GPU)' : 'gradient2x2 (CPU)');
+  if (!(useGPU && await computeGradient2x2FieldGPU(res, w, h))) {
+    // gray is CPU-resident by construction (createLsdChainResidency put it
+    // there), so this is a lookup and never a readback.
+    const field = computeGradient2x2Field(await res.cpuF64('gray'), w, h);
+    res.provideCPU('fx', field.fx);
+    res.provideCPU('fy', field.fy);
+  }
+  spanEnd(s);
+}
+
+// The chain's two entry points, always used as a pair. Split rather than fused
+// because the caller has to be able to reach into the residency AFTER the
+// rectangles come out -- pipeline/poseCompute.ts's useWorldVoteOrientation
+// branch still wants fx/fy on the CPU -- and because the caller owns the
+// destroy. Anything that runs the chain should go through these two and nothing
+// else, so that a residency-plumbing mistake is visible to the dev harness
+// (pipelineGPU/lsdChainVerify.ts) rather than only to production.
+export async function createLsdChainResidency(gray: Float64Array, w: number, h: number): Promise<FieldResidency> {
+  const res = await FieldResidency.create(w * h, lsdChainWantsGPU());
+  res.provideCPU('gray', gray);
+  return res;
+}
+
+// Stages 1 through 4: gray in, rectangles out, every intermediate left wherever
+// its producer put it.
+export async function runLsdChain(
+  res: FieldResidency, w: number, h: number, settings: LsdSettings,
+): Promise<LsdRectangle[]> {
+  await runGradient2x2Stage(res, w, h);
+  return await computeLsdRectanglesAuto(res, w, h, settings);
+}
+
+// computeLsdRectanglesAuto for callers that already hold a CPU gradient field
+// and have no interest in where anything lives: it wraps the field in a
+// residency of its own for the duration of the call. The production pose path
+// does NOT come through here -- it owns a residency spanning stage 1 as well,
+// which is the whole point (see pipeline/poseCompute.ts) -- but the debug
+// overlay and the phone both compute their gradient on CPU and would gain
+// nothing from threading one through.
+export async function computeLsdRectanglesFromField(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[]> {
   const { w, h, fx, fy } = field;
-  // No device is requested at all when every stage in the chain is on CPU, so
-  // an all-CPU frame still never touches navigator.gpu.
-  const wantGPU = globalState.useGPUGrowRegions || globalState.useGPULsdFit;
-  const res = await FieldResidency.create(w * h, wantGPU);
+  // Not lsdChainWantsGPU(): stage 1 has already happened on CPU here, so
+  // useGPUGradient says nothing about whether this call needs a device.
+  const res = await FieldResidency.create(w * h, globalState.useGPUGrowRegions || globalState.useGPULsdFit);
   try {
     res.provideCPU('fx', fx);
     res.provideCPU('fy', fy);
-
-    const growArgs = [
-      w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
-    ] as const;
-    const grown = globalState.useGPUGrowRegions ? await growRegionsCCLGPU(res, ...growArgs) : null;
-    if (!grown) {
-      // Either the toggle is off or the GPU grower bailed; on both paths it
-      // published nothing, so the CPU grower owns these slots.
-      const cpu = growRegionsCCL(fx, fy, ...growArgs);
-      res.provideCPU('regionId', cpu.regionId);
-      res.provideRegionsCPU(cpu.regions);
-    }
-
-    if (globalState.useGPULsdFit) {
-      const gpu = await fitRegionsGPU(res, w, h, settings);
-      if (gpu) return gpu;
-    }
-    return fitRegionsCPU(await res.regionsCPU(), fx, fy, w, h, settings);
+    return await computeLsdRectanglesAuto(res, w, h, settings);
   } finally {
     res.destroy();
   }

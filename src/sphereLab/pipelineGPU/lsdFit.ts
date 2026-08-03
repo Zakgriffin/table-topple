@@ -1,4 +1,5 @@
-import { createStorageBuffer, getGPUDevice, readFloat32, uploadFloat32, uploadUint32, uploadUniform } from './device.ts';
+import { createStorageBuffer, readFloat32, uploadUniform } from './device.ts';
+import { FieldResidency } from './fieldResidency.ts';
 import { LSD_FIT_WGSL } from './lsdFit.wgsl.ts';
 
 const pipelineCache = new WeakMap<GPUDevice, GPUComputePipeline>();
@@ -43,45 +44,30 @@ export interface LsdFitResult {
 // rounded. That disagreed across arithmetic on 180/2931 regions for n and
 // 277 for k, moving nfaLog10 by up to 4.7 decades.
 //
-// STILL DEFAULT-OFF, but for a PERFORMANCE reason now, not a correctness one:
-// warm-cache timing on that same capture was CPU 3.5ms vs GPU 8ms. This
-// function takes mag/theta as CPU Float64Arrays and builds the CSR member
-// arrays on CPU, so switching it on today ADDS a round trip (gradient GPU ->
-// readback -> grow CPU -> upload -> dispatch -> readback) rather than removing
-// one. It inverts once stage 2+3 (growRegionsCCL) moves to GPU and the
-// labeling can be handed over device-side without ever landing on CPU -- that
-// is the point at which to flip the default.
+// The upload that used to pin this default-off is GONE. Warm-cache timing on
+// that same capture was CPU 3.5ms vs GPU 8ms, and essentially all of the gap
+// was this function re-uploading mag/theta (which growRegions.ts had ALSO just
+// uploaded, separately) and packing the CSR by hand on CPU. Both now come from
+// the residency: when stage 3/3b ran on GPU it binds their buffers directly and
+// uploads nothing at all; when they ran on CPU the residency does the upload
+// once, in one place, and records it.
 //
-// Returns null if WebGPU isn't available; caller falls back to the CPU
-// version, which stays the source of truth. Returns [] (not null) for
-// regions.length === 0 -- a valid empty-input result, not a GPU failure.
+// Returns null if the residency has no device; caller falls back to the CPU
+// version, which stays the source of truth. Returns [] (not null) for an empty
+// region set -- a valid empty-input result, not a GPU failure.
 export async function fitAndTestRegionsGPU(
-  mag: Float64Array, theta: Float64Array, w: number, h: number,
-  regions: readonly { members: Int32Array; meanAngle: number }[],
+  res: FieldResidency, w: number, h: number,
   rho: number, toleranceDeg: number, logNTests: number, logEpsilon: number,
 ): Promise<LsdFitResult[] | null> {
-  if (regions.length === 0) return [];
-  const device = await getGPUDevice();
+  const device = res.device;
   if (!device) return null;
+  const rs = res.regionsGPU();
+  const regionCount = rs.regionCount;
+  if (regionCount === 0) return [];
   const pipeline = getPipeline(device);
 
-  const regionCount = regions.length;
-  const memberOffsets = new Uint32Array(regionCount + 1);
-  let total = 0;
-  for (let i = 0; i < regionCount; i++) { memberOffsets[i] = total; total += regions[i].members.length; }
-  memberOffsets[regionCount] = total;
-  const memberIndices = new Uint32Array(total);
-  const meanAngles = new Float32Array(regionCount);
-  for (let i = 0; i < regionCount; i++) {
-    memberIndices.set(regions[i].members, memberOffsets[i]);
-    meanAngles[i] = regions[i].meanAngle;
-  }
-
-  const magBuf = uploadFloat32(device, new Float32Array(mag));
-  const thetaBuf = uploadFloat32(device, new Float32Array(theta));
-  const offsetsBuf = uploadUint32(device, memberOffsets);
-  const indicesBuf = uploadUint32(device, memberIndices);
-  const meanAnglesBuf = uploadFloat32(device, meanAngles);
+  const magBuf = res.gpu('mag');
+  const thetaBuf = res.gpu('theta');
   const outBuf = createStorageBuffer(device, regionCount * 10 * 4);
 
   const toleranceRad = (toleranceDeg * Math.PI) / 180;
@@ -98,10 +84,11 @@ export async function fitAndTestRegionsGPU(
       { binding: 0, resource: { buffer: uniformBuf } },
       { binding: 1, resource: { buffer: magBuf } },
       { binding: 2, resource: { buffer: thetaBuf } },
-      { binding: 3, resource: { buffer: offsetsBuf } },
-      { binding: 4, resource: { buffer: indicesBuf } },
-      { binding: 5, resource: { buffer: meanAnglesBuf } },
+      { binding: 3, resource: { buffer: rs.offsets } },
+      { binding: 4, resource: { buffer: rs.members } },
+      { binding: 5, resource: { buffer: rs.meanAngles } },
       { binding: 6, resource: { buffer: outBuf } },
+      { binding: 7, resource: { buffer: rs.sizes } },
     ],
   });
 
@@ -113,8 +100,11 @@ export async function fitAndTestRegionsGPU(
   pass.end();
   device.queue.submit([encoder.finish()]);
 
+  // Only outBuf and the uniform are ours to free -- mag/theta and the whole
+  // region CSR belong to the residency, which is still holding them for any
+  // other consumer this frame.
   const raw = await readFloat32(device, outBuf, regionCount * 10 * 4);
-  for (const b of [magBuf, thetaBuf, offsetsBuf, indicesBuf, meanAnglesBuf, outBuf, uniformBuf]) b.destroy();
+  for (const b of [outBuf, uniformBuf]) b.destroy();
 
   const results: LsdFitResult[] = new Array(regionCount);
   for (let i = 0; i < regionCount; i++) {

@@ -34,9 +34,15 @@ struct Uniforms {
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> mag: array<f32>;
 @group(0) @binding(2) var<storage, read> theta: array<f32>;
-@group(0) @binding(3) var<storage, read> memberOffsets: array<u32>; // [regionCount + 1]
+// offsets + sizes rather than the regionCount+1 running-offsets array this used
+// to take. Same information (regions are laid out contiguously, so
+// offsets[r] + sizes[r] == offsets[r+1]), but it is the shape
+// collectRegions.wgsl.ts's regionMeta already writes -- so on the all-GPU route
+// these two bind straight through with no repacking, and no readback, at all.
+@group(0) @binding(3) var<storage, read> memberOffsets: array<u32>; // [regionCount]
 @group(0) @binding(4) var<storage, read> memberIndices: array<u32>; // flat, CSR
 @group(0) @binding(5) var<storage, read> meanAngles: array<f32>; // [regionCount]
+@group(0) @binding(7) var<storage, read> memberSizes: array<u32>; // [regionCount]
 @group(0) @binding(6) var<storage, read_write> outBuf: array<f32>; // [regionCount * 10]: cx,cy,theta,length,width,nfaLog10,accepted(0/1),pad,n,k
 // n and k are emitted purely so pipelineGPU/lsdFitVerify.ts can tell a
 // disagreement in the COUNTS (which pixels each path decided were inside the
@@ -55,7 +61,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let ri = gid.x;
   if (ri >= u.regionCount) { return; }
   let start = memberOffsets[ri];
-  let end = memberOffsets[ri + 1u];
+  let end = start + memberSizes[ri];
   let o = ri * 10u;
   if (end - start < 2u) {
     outBuf[o + 6u] = 0.0; // too few members -- leave rejected, same as CPU's "degenerate -- no meaningful axis"

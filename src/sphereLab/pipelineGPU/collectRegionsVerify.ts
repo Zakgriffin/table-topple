@@ -3,7 +3,7 @@ import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import { computeMagTheta, GrownRegion } from '../pipeline/lsdSegments.ts';
 import { globalState } from '../state.ts';
-import { growRegionsCCLGPU } from './growRegions.ts';
+import { growRegionsCCLGPUToCPU } from './growRegions.ts';
 
 // ── Dev harness: does the GPU region collector match the CPU one? ────────
 //
@@ -11,7 +11,7 @@ import { growRegionsCCLGPU } from './growRegions.ts';
 //
 //   await verifyCollectRegions()
 //
-// Runs growRegionsCCLGPU TWICE against the same mag/theta -- once with
+// Runs growRegionsCCLGPUToCPU TWICE against the same mag/theta -- once with
 // useGPUCollectRegions off, once on -- so the labeling is produced by the same
 // GPU round loop both times and the ONLY difference is which collector turned
 // it into regions. That isolates this stage from the f32/f64 edge-predicate
@@ -62,12 +62,12 @@ export async function verifyCollectRegions(camera?: Camera | null): Promise<Coll
   try {
     globalState.useGPUCollectRegions = false;
     const t0 = performance.now();
-    const cpu = await growRegionsCCLGPU(mag, theta, ...args);
+    const cpu = await growRegionsCCLGPUToCPU(mag, theta, ...args);
     const cpuMs = performance.now() - t0;
 
     globalState.useGPUCollectRegions = true;
     const t1 = performance.now();
-    const gpu = await growRegionsCCLGPU(mag, theta, ...args);
+    const gpu = await growRegionsCCLGPUToCPU(mag, theta, ...args);
     const gpuMs = performance.now() - t1;
 
     if (!cpu || !gpu) return 'grower returned null (WebGPU unavailable, or a validation error -- check the console)';

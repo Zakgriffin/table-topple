@@ -2,6 +2,7 @@ import { activeCamera } from '../camera/store.ts';
 import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import { computeMagTheta, countRectanglePixels, fitRegionOnce, growRegionsCCL, LsdRectangle } from '../pipeline/lsdSegments.ts';
+import { FieldResidency } from './fieldResidency.ts';
 import { fitAndTestRegionsGPU } from './lsdFit.ts';
 
 // ── Dev harness: is lsdFit.wgsl.ts's output still the CPU path's output? ──
@@ -86,11 +87,23 @@ export async function verifyLsdFit(camera?: Camera | null): Promise<LsdFitVerify
   const cpu: (LsdRectangle | null)[] = regions.map((r) => fitRegionOnce(r, mag, theta, w, h, cpuSettings, logNTests, logEpsilon));
   const cpuMs = performance.now() - cpuStart;
 
+  // Everything is handed to the residency on the CPU side, which makes this the
+  // ISOLATED cost of the stage: the timing below still includes the mag/theta
+  // upload and the CSR pack, exactly as it did before the residency existed, so
+  // these numbers stay comparable to the 3.5-vs-8ms that pinned the flag off.
+  // What the production path now saves is precisely the part this harness is
+  // deliberately still paying.
+  const res = await FieldResidency.create(w * h, true);
+  res.provideCPU('mag', mag);
+  res.provideCPU('theta', theta);
+  res.provideRegionsCPU(regions);
+
   const gpuStart = performance.now();
   const gpu = await fitAndTestRegionsGPU(
-    mag, theta, w, h, regions, s.lsdRhoNoiseThreshold, s.lsdToleranceDeg, logNTests, logEpsilon,
+    res, w, h, s.lsdRhoNoiseThreshold, s.lsdToleranceDeg, logNTests, logEpsilon,
   );
   const gpuMs = performance.now() - gpuStart;
+  res.destroy();
   if (!gpu) return 'WebGPU unavailable -- nothing to compare against';
 
   const maxAbs = { cx: 0, cy: 0, theta: 0, length: 0, width: 0, nfaLog10: 0 };

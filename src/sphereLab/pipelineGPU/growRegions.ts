@@ -1,9 +1,10 @@
 import { collectRegionsFromLabels, GrownRegion } from '../pipeline/lsdSegments.ts';
 import {
-  createStorageBuffer, dispatchCount, getGPUDevice, readUint32, uploadFloat32, uploadUniform,
+  createStorageBuffer, dispatchCount, readUint32, uploadUniform,
 } from './device.ts';
 import { GROW_REGIONS_WGSL } from './growRegions.wgsl.ts';
 import { collectRegionsGPU } from './collectRegions.ts';
+import { FieldResidency } from './fieldResidency.ts';
 import { globalState } from '../state.ts';
 
 interface GrowPipelines {
@@ -81,13 +82,23 @@ const ROUNDS_PER_BATCH = 8;
 // nonetheless well-defined: it's the transitive closure of a fixed relation, so
 // each path converges to the exact connected components OF ITS OWN graph.
 //
-// Returns null if WebGPU isn't available; caller falls back to the CPU version,
-// which stays the source of truth.
+// Takes mag/theta and returns label/regionId/regions THROUGH THE RESIDENCY
+// (pipelineGPU/fieldResidency.ts) rather than as CPU arrays, which is what lets
+// this stage sit next to the fitter without either of them landing the field on
+// CPU in between. `res.gpu('mag')` returns the upstream stage's own buffer when
+// there is one and uploads only when there isn't, so the duplicate mag/theta
+// upload this module and lsdFit.ts each used to do is now structurally
+// impossible rather than merely avoided.
+//
+// Returns null if the residency has no device or a dispatch failed validation;
+// caller falls back to the CPU version, which stays the source of truth. On
+// that path nothing has been published, so the fallback is free to publish its
+// own results into the same residency.
 export async function growRegionsCCLGPU(
-  mag: Float64Array, theta: Float64Array, w: number, h: number,
+  res: FieldResidency, w: number, h: number,
   toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
-): Promise<{ regionId: Int32Array; regions: GrownRegion[]; roundsRun: number; converged: boolean } | null> {
-  const device = await getGPUDevice();
+): Promise<{ roundsRun: number; converged: boolean } | null> {
+  const device = res.device;
   if (!device) return null;
   // Everything from pipeline creation to the last submit runs inside a
   // validation error scope. WebGPU reports validation failures asynchronously
@@ -100,8 +111,8 @@ export async function growRegionsCCLGPU(
   const pipelines = getPipelines(device);
 
   const n = w * h;
-  const magBuf = uploadFloat32(device, new Float32Array(mag));
-  const thetaBuf = uploadFloat32(device, new Float32Array(theta));
+  const magBuf = res.gpu('mag');
+  const thetaBuf = res.gpu('theta');
   const cosBuf = createStorageBuffer(device, n * 4);
   const sinBuf = createStorageBuffer(device, n * 4);
   const labelBuf = createStorageBuffer(device, n * 4);
@@ -181,33 +192,72 @@ export async function growRegionsCCLGPU(
     if (flag[0] === 0) { converged = true; break; }
   }
 
-  // Hysteresis + collect. Two routes to the same result:
-  //
-  // GPU -- collectRegionsGPU consumes label/mag/theta WHERE THEY ALREADY ARE,
-  // so the labeling never crosses the bus. This is the step that makes stages
-  // 1-4 closable into one resident run; see collectRegions.wgsl.ts for why its
-  // region numbering and member ordering are exact rather than merely
-  // equivalent.
-  //
-  // CPU -- reads the labels back and runs collectRegionsFromLabels, shared
-  // verbatim with the pure-CPU path so the two can never drift.
-  let collected: { regionId: Int32Array; regions: GrownRegion[] } | null = null;
-  if (globalState.useGPUCollectRegions) {
-    collected = await collectRegionsGPU(device, labelBuf, magBuf, thetaBuf, n, rhoHigh, minRegionSize);
-  }
-  if (!collected) {
-    const labels32 = await readUint32(device, labelBuf, n * 4);
-    const label = new Int32Array(labels32.buffer.slice(0));
-    collected = collectRegionsFromLabels(label, mag, theta, rhoHigh, n, minRegionSize);
-  }
-
-  for (const b of [magBuf, thetaBuf, cosBuf, sinBuf, labelBuf, nextBuf, changedBuf, uniBuf]) b.destroy();
-
+  // Popped BEFORE anything is published, and that ordering is load-bearing. On
+  // a validation failure the caller falls back to the CPU grower, which
+  // publishes ITS regionId/regions into this same residency -- so every failure
+  // path here has to leave the residency exactly as it found it, or the
+  // single-assignment invariant fires on the fallback's own provide() and turns
+  // a recoverable GPU fault into a thrown exception. Note mag/theta are NOT in
+  // the destroy list on either path: the residency owns them, and this stage is
+  // only borrowing.
+  const scratch = [cosBuf, sinBuf, nextBuf, changedBuf, uniBuf];
   const err = await device.popErrorScope();
   if (err) {
     console.error('growRegionsCCLGPU: WebGPU validation error, falling back to CPU --', err.message);
+    for (const b of [...scratch, labelBuf]) b.destroy();
     return null;
   }
 
-  return { regionId: collected.regionId, regions: collected.regions, roundsRun, converged };
+  // label is stage 3's output and stage 3b's only input. Handing it over rather
+  // than reading it back is the whole point of the port: with collect also on
+  // GPU it never crosses the bus, and with collect on CPU the residency does
+  // the readback in one place and records it.
+  res.provideGPU('label', labelBuf);
+
+  // Hysteresis + collect. Two routes to the same result:
+  //
+  // GPU -- collectRegionsGPU consumes label/mag/theta WHERE THEY ALREADY ARE
+  // and publishes the region CSR device-side, so neither the labeling nor the
+  // members cross the bus. See collectRegions.wgsl.ts for why its region
+  // numbering and member ordering are exact rather than merely equivalent.
+  //
+  // CPU -- pulls the labels down through the residency and runs
+  // collectRegionsFromLabels, shared verbatim with the pure-CPU path so the two
+  // can never drift.
+  let collected = false;
+  if (globalState.useGPUCollectRegions) {
+    collected = await collectRegionsGPU(res, rhoHigh, minRegionSize);
+  }
+  if (!collected) {
+    const { regionId, regions } = collectRegionsFromLabels(
+      await res.cpuI32('label'), await res.cpuF64('mag'), await res.cpuF64('theta'),
+      rhoHigh, n, minRegionSize,
+    );
+    res.provideCPU('regionId', regionId);
+    res.provideRegionsCPU(regions);
+  }
+
+  for (const b of scratch) b.destroy();
+  return { roundsRun, converged };
+}
+
+// The old all-on-CPU signature, preserved for the verify harnesses
+// (growRegionsVerify.ts, collectRegionsVerify.ts). They compare CPU arrays
+// element by element, so they genuinely want every readback -- which is exactly
+// what asking the residency for the CPU side of everything expresses. Nothing
+// in the production path should use this.
+export async function growRegionsCCLGPUToCPU(
+  mag: Float64Array, theta: Float64Array, w: number, h: number,
+  toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
+): Promise<{ regionId: Int32Array; regions: GrownRegion[]; roundsRun: number; converged: boolean } | null> {
+  const res = await FieldResidency.create(w * h, true);
+  try {
+    res.provideCPU('mag', mag);
+    res.provideCPU('theta', theta);
+    const grown = await growRegionsCCLGPU(res, w, h, toleranceDeg, rhoLow, rhoHigh, maxRounds, minRegionSize);
+    if (!grown) return null;
+    return { regionId: await res.cpuI32('regionId'), regions: await res.regionsCPU(), ...grown };
+  } finally {
+    res.destroy();
+  }
 }

@@ -43,14 +43,26 @@ export const globalState = {
   // the retry loop and everything before stage 4 (region growing etc.) stay
   // CPU-only regardless, see pipeline/lsdSegments.ts's own header.
   //
-  // Default false, and now for a PERFORMANCE reason rather than a correctness
-  // one. The GPU path is verified bit-for-decision against the CPU path (see
-  // pipelineGPU/lsdFitVerify.ts and lsdFit.ts's own header) -- but it is
-  // currently SLOWER (3.5ms CPU vs 8ms GPU on a 2931-region capture), because
-  // fitAndTestRegionsGPU still has to upload mag/theta and the CSR member
-  // arrays from CPU every call. Toggleable for A/B; worth defaulting on once
-  // growRegionsCCL is GPU-resident and that upload disappears.
-  useGPULsdFit: false,
+  // NOW DEFAULTS TRUE. It was pinned false for a performance reason -- 3.5ms CPU
+  // vs 8ms GPU -- that was entirely the mag/theta upload and the hand-packed CSR,
+  // both of which FieldResidency removed (pipelineGPU/fieldResidency.ts).
+  //
+  // Correctness was never the issue and is unchanged: verifyLsdFit reports
+  // 1258/1258 accepted, zero accept disagreements, zero n/k count mismatches,
+  // max nfaLog10 delta 7.7e-6.
+  //
+  // The measurement worth remembering is that this flag's cost DEPENDS ON ITS
+  // NEIGHBOUR, which is the whole point of the residency. Median of 3
+  // interleaved reps, whole computeLsdRectanglesAuto:
+  //
+  //   grow on CPU:  fit off 30.9ms, fit on 31.1ms  (neutral)
+  //   grow on GPU:  fit off 15.8ms, fit on 13.9ms  (a ~1.9ms WIN, 3/3 reps)
+  //
+  // Same kernel, same work, opposite verdict -- because with the grower on GPU
+  // there is no transfer left between the two stages. Turning this on while the
+  // grower is on CPU still buys nothing; that is honest and expected, not a
+  // regression.
+  useGPULsdFit: true,
   // Same idea, independent toggle, for the LSD pipeline's stage 2+3 (directed
   // connected-component region growing, see pipelineGPU/growRegions.ts).
   //
@@ -94,13 +106,27 @@ export const globalState = {
   // member-order and 0 regionId mismatches; maxMeanAngleDelta 3.6e-7, which is
   // just the f32 cos/sin summation.
   //
-  // Default OFF anyway, on measurement: 9.7ms CPU-collect vs 11.7ms GPU-collect
-  // for the whole grow call (warm). It trades a 786KB label readback for a CSR +
-  // regionId readback plus eight dispatches, so it is a small net LOSS on its
-  // own -- exactly as expected. Its value is structural: it is the step that
-  // makes closing stages 1-4 into one resident run possible at all, and it
-  // should flip once FieldResidency lets stage 4 consume the CSR in place
-  // instead of reading it back.
+  // STILL DEFAULT OFF AFTER THE RESIDENCY LANDED, and the prediction that it
+  // would flip was WRONG -- worth recording as a measurement rather than
+  // quietly re-arguing. It improved (9.7-vs-11.7ms before, 12.8-vs-13.8 in its
+  // own harness now) but stayed on the wrong side of zero: ~0.7ms worse through
+  // the real dispatch point at both fit settings (15.8 -> 16.5 with fit off,
+  // 13.9 -> 14.7 with fit on).
+  //
+  // The reason is now understood, which is the useful part. Residency could not
+  // save the transfer this stage actually pays, because THE MEMBERS HAVE TO LAND
+  // ON CPU NO MATTER WHAT: lsdRectanglesToBucketFillShape rebuilds a per-pixel
+  // regionId from LsdRectangle.rawMembers to seed the join walk. So GPU collect
+  // trades a 786KB label readback for six dispatches plus TWO 4-BYTE COUNT
+  // READBACKS (totalRegions/totalMembers, each a full mapAsync round trip) and
+  // still reads the members back afterwards. At this scale that latency
+  // outweighs the bytes saved -- a bandwidth win losing to a latency cost.
+  //
+  // What WOULD flip it is removing the members readback, i.e. moving the join
+  // walk (or at least its regionId seeding) onto the GPU. Not the CSR handoff,
+  // which is already free. Caveat on the numbers: at 3 reps the deltas overlap
+  // between configurations, so the direction is consistent but not separated
+  // from noise -- re-measure with more reps before treating 0.7ms as exact.
   useGPUCollectRegions: false,
   // Fused decode: buildDecodeSampleGrid AND the tally on GPU, with the packed
   // grid staying device-resident between them (pipelineGPU/decodeGridBuild.ts).

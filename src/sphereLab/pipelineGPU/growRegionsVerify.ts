@@ -2,7 +2,7 @@ import { activeCamera } from '../camera/store.ts';
 import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import { computeMagTheta, GrownRegion, growRegionsCCL } from '../pipeline/lsdSegments.ts';
-import { growRegionsCCLGPU } from './growRegions.ts';
+import { growRegionsCCLGPUToCPU } from './growRegions.ts';
 
 // ── Dev harness: does growRegions.wgsl.ts's labeling agree with the CPU's? ──
 //
@@ -119,7 +119,7 @@ export async function verifyGrowRegions(camera?: Camera | null): Promise<GrowReg
   const cpuMs = performance.now() - cpuStart;
 
   const gpuStart = performance.now();
-  const gpu = await growRegionsCCLGPU(mag, theta, ...args);
+  const gpu = await growRegionsCCLGPUToCPU(mag, theta, ...args);
   const gpuMs = performance.now() - gpuStart;
   // Null means either no WebGPU at all or a validation error the grower's own
   // error scope caught -- in the latter case it has already logged the message.

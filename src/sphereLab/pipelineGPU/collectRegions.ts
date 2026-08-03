@@ -1,9 +1,9 @@
-import { GrownRegion } from '../pipeline/lsdSegments.ts';
 import {
   COLLECT_FINALIZE_WGSL, COLLECT_HISTOGRAM_WGSL, COLLECT_MARK_KEPT_WGSL,
   COLLECT_REGION_META_WGSL, COLLECT_SCATTER_WGSL, COLLECT_SURVIVE_WGSL,
 } from './collectRegions.wgsl.ts';
-import { createStorageBuffer, readFloat32, readUint32, uploadUniform } from './device.ts';
+import { createStorageBuffer, readUint32, uploadUniform } from './device.ts';
+import { FieldResidency } from './fieldResidency.ts';
 import { encodeExclusiveScan } from './prefixSum.ts';
 
 const WG = 256;
@@ -51,21 +51,31 @@ function getPipelines(device: GPUDevice): Pipelines {
 
 // GPU-resident counterpart to pipeline/lsdSegments.ts's collectRegionsFromLabels.
 //
-// Takes buffers the caller owns (label/mag/theta already on device) and returns
-// the same regionId + regions the CPU version does, with the SAME region
-// numbering and the SAME member ordering -- see collectRegions.wgsl.ts for why
-// both are exact rather than merely equivalent.
+// Reads label/mag/theta out of the residency (already on device when stage 3
+// ran there) and PUBLISHES regionId plus the region CSR back into it, still on
+// device. Same region numbering and same member ordering as the CPU version --
+// see collectRegions.wgsl.ts for why both are exact rather than merely
+// equivalent.
 //
 // Two submissions, not one, and the split is forced: the region count only
-// exists after the first scan, and it is what sizes the `finalize` dispatch and
-// every readback. Everything before that point is encoded together.
+// exists after the first scan, and it is what sizes the `finalize` dispatch.
+// Those two counts are the ONLY things this function still reads back, 8 bytes
+// total. Everything else it produces is left where the fitter can consume it:
+// the ~800KB regionId array is pure debug-overlay data that the production path
+// never looks at, and the CSR is stage 4's direct input. Both used to come down
+// unconditionally, which is most of why useGPUCollectRegions measured as a loss.
 //
-// Returns null if WebGPU is unavailable or a dispatch failed validation.
+// Returns false if WebGPU is unavailable or a dispatch failed validation, in
+// which case NOTHING has been published and the caller is free to run the CPU
+// collect into the same residency.
 export async function collectRegionsGPU(
-  device: GPUDevice,
-  labelBuf: GPUBuffer, magBuf: GPUBuffer, thetaBuf: GPUBuffer,
-  n: number, rhoHigh: number, minRegionSize: number,
-): Promise<{ regionId: Int32Array; regions: GrownRegion[] } | null> {
+  res: FieldResidency, rhoHigh: number, minRegionSize: number,
+): Promise<boolean> {
+  const device = res.device;
+  if (!device) return false;
+  const n = res.n;
+  const labelBuf = res.gpu('label'), magBuf = res.gpu('mag'), thetaBuf = res.gpu('theta');
+
   device.pushErrorScope('validation');
   const p = getPipelines(device);
 
@@ -86,16 +96,22 @@ export async function collectRegionsGPU(
   const regionIndex = createStorageBuffer(device, n * 4);
   const memberOffset = createStorageBuffer(device, n * 4);
   const cursor = createStorageBuffer(device, n * 4);
+  const totalRegions = createStorageBuffer(device, 4);
+  const totalMembers = createStorageBuffer(device, 4);
+
+  // Split by DESTINATION, not by lifetime: `scratch` dies with this call,
+  // `handoff` is what gets published into the residency on success (and has to
+  // be destroyed by hand on every failure path, since nothing else has taken
+  // ownership of it yet).
   const members = createStorageBuffer(device, n * 4);
   const regionId = createStorageBuffer(device, n * 4);
   const regionOffsets = createStorageBuffer(device, n * 4);
   const regionSizes = createStorageBuffer(device, n * 4);
-  const totalRegions = createStorageBuffer(device, 4);
-  const totalMembers = createStorageBuffer(device, 4);
-  const owned = [
+  const scratch = [
     uni, labelSurvives, counts, keptFlag, keptCount, regionIndex, memberOffset,
-    cursor, members, regionId, regionOffsets, regionSizes, totalRegions, totalMembers,
+    cursor, totalRegions, totalMembers,
   ];
+  const handoff = [members, regionId, regionOffsets, regionSizes];
 
   const run = (encoder: GPUCommandEncoder, stage: Stage, resources: GPUBuffer[], groups: number) => {
     const bindGroup = device.createBindGroup({
@@ -127,48 +143,33 @@ export async function collectRegionsGPU(
   ]);
   const regionCount = rTot[0], memberCount = mTot[0];
 
-  let meanAngles: Float32Array<ArrayBufferLike> = new Float32Array(0);
+  // Sized max(regionCount, 1) so RegionSetGPU is a complete, bindable set even
+  // for an empty capture -- a zero-length storage buffer is not a legal binding,
+  // and making the consumer branch on emptiness instead would push this special
+  // case into every downstream stage.
+  const meanAngles = createStorageBuffer(device, Math.max(regionCount, 1) * 4);
+  handoff.push(meanAngles);
   if (regionCount > 0) {
     const fUni = (() => {
       const b = new ArrayBuffer(16);
       new DataView(b).setUint32(0, regionCount, true);
       return uploadUniform(device, b);
     })();
-    owned.push(fUni);
-    const meanBuf = createStorageBuffer(device, regionCount * 4);
-    owned.push(meanBuf);
+    scratch.push(fUni);
     const enc2 = device.createCommandEncoder();
-    run(enc2, p.finalize, [fUni, thetaBuf, regionOffsets, regionSizes, members, meanBuf], up(regionCount, 64));
+    run(enc2, p.finalize, [fUni, thetaBuf, regionOffsets, regionSizes, members, meanAngles], up(regionCount, 64));
     device.queue.submit([enc2.finish()]);
-    meanAngles = await readFloat32(device, meanBuf, regionCount * 4);
   }
 
-  const [ridRaw, memRaw, offRaw, sizeRaw] = await Promise.all([
-    readUint32(device, regionId, n * 4),
-    memberCount > 0 ? readUint32(device, members, memberCount * 4) : Promise.resolve(new Uint32Array(0)),
-    regionCount > 0 ? readUint32(device, regionOffsets, regionCount * 4) : Promise.resolve(new Uint32Array(0)),
-    regionCount > 0 ? readUint32(device, regionSizes, regionCount * 4) : Promise.resolve(new Uint32Array(0)),
-  ]);
-
-  for (const b of [...owned, ...temps]) b.destroy();
+  for (const b of [...scratch, ...temps]) b.destroy();
   const err = await device.popErrorScope();
   if (err) {
     console.error('collectRegionsGPU: WebGPU validation error, falling back to CPU --', err.message);
-    return null;
+    for (const b of handoff) b.destroy();
+    return false;
   }
 
-  const rid = new Int32Array(ridRaw.buffer.slice(0));
-  const regions: GrownRegion[] = [];
-  for (let r = 0; r < regionCount; r++) {
-    const off = offRaw[r], size = sizeRaw[r];
-    regions.push({
-      // subarray + from, not a view over memRaw.buffer: the readback's buffer can
-      // carry a byteOffset, and a raw Int32Array view would silently read from
-      // the wrong place. This also copies, which is required -- memRaw is
-      // transient and GrownRegion.members outlives it.
-      members: Int32Array.from(memRaw.subarray(off, off + size)),
-      meanAngle: meanAngles[r],
-    });
-  }
-  return { regionId: rid, regions };
+  res.provideGPU('regionId', regionId);
+  res.provideRegionsGPU({ offsets: regionOffsets, sizes: regionSizes, members, meanAngles, regionCount, memberCount });
+  return true;
 }

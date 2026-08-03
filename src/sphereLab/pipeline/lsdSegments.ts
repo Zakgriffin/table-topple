@@ -1,5 +1,6 @@
 import * as THREE from 'three';
 import { BucketFillSegment } from './bucketFillSegments.ts';
+import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
 import { fitAndTestRegionsGPU } from '../pipelineGPU/lsdFit.ts';
 import { growRegionsCCLGPU } from '../pipelineGPU/growRegions.ts';
 import { globalState } from '../state.ts';
@@ -785,14 +786,27 @@ function fitRegionsCPU(
 // geometry for rejected regions, which is all the "show rejected candidates"
 // overlay wants. Dropping it is also what frees stages 1-4 from needing
 // mag/theta on CPU at all.
+//
+// The one thing this still needs on CPU is each region's member list, for
+// rawMembers -- and that is NOT a residency shortfall to be optimized away
+// later. lsdRectanglesToBucketFillShape rebuilds a per-pixel regionId from
+// rawMembers to seed the join walk, so the members have to land whatever
+// happens. What the residency removes is the DOUBLE handling: they used to come
+// down from collect and then get re-packed and re-uploaded here as a CSR. Now
+// they come down once and the fitter reads the device-side copy.
 async function fitRegionsGPU(
-  regions: readonly GrownRegion[], mag: Float64Array, theta: Float64Array,
-  w: number, h: number, settings: LsdSettings,
+  res: FieldResidency, w: number, h: number, settings: LsdSettings,
 ): Promise<LsdRectangle[] | null> {
   const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
-  const gpuResults = await fitAndTestRegionsGPU(
-    mag, theta, w, h, regions as GrownRegion[], settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon,
-  );
+  // Concurrent, not sequential: fitAndTestRegionsGPU binds the region CSR
+  // synchronously before its first await, so starting it first and letting the
+  // members readback run alongside puts that transfer under the kernel instead
+  // of after it. Promise.all rather than two bare awaits so a failure in either
+  // one can't leave the other rejecting unobserved.
+  const [gpuResults, regions] = await Promise.all([
+    fitAndTestRegionsGPU(res, w, h, settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon),
+    res.regionsCPU(),
+  ]);
   if (!gpuResults) return null;
 
   const results: LsdRectangle[] = [];
@@ -823,10 +837,19 @@ export function computeLsdRectangles(field: GradientField, settings: LsdSettings
 export async function computeLsdRectanglesGPU(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[] | null> {
   const { w, h } = field;
   const { mag, theta } = computeMagTheta(field);
-  const { regions } = growRegionsCCL(
-    mag, theta, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
-  );
-  return fitRegionsGPU(regions, mag, theta, w, h, settings);
+  const res = await FieldResidency.create(w * h, true);
+  try {
+    res.provideCPU('mag', mag);
+    res.provideCPU('theta', theta);
+    const { regionId, regions } = growRegionsCCL(
+      mag, theta, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+    );
+    res.provideCPU('regionId', regionId);
+    res.provideRegionsCPU(regions);
+    return await fitRegionsGPU(res, w, h, settings);
+  } finally {
+    res.destroy();
+  }
 }
 
 // Single dispatch point both production callers (pipeline/votes.ts,
@@ -842,21 +865,46 @@ export async function computeLsdRectanglesGPU(field: GradientField, settings: Ls
 //
 // mag/theta is computed ONCE here and shared by whichever pair of stages runs,
 // rather than each stage recomputing it from the field.
+//
+// A FieldResidency (pipelineGPU/fieldResidency.ts) spans the whole dispatch and
+// owns every intermediate. Stages no longer transfer anything themselves; they
+// publish on the side they produced on and ask for the side they want, and the
+// residency moves data only when a producer and a consumer are actually on
+// opposite sides of the bus. That is what makes these toggles cost what the
+// configuration implies rather than what each module hardcoded: with grow and
+// fit both on GPU, mag/theta are uploaded once instead of twice and the
+// labeling never crosses at all.
 export async function computeLsdRectanglesAuto(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[]> {
   const { w, h } = field;
   const { mag, theta } = computeMagTheta(field);
+  // No device is requested at all when every stage in the chain is on CPU, so
+  // an all-CPU frame still never touches navigator.gpu.
+  const wantGPU = globalState.useGPUGrowRegions || globalState.useGPULsdFit;
+  const res = await FieldResidency.create(w * h, wantGPU);
+  try {
+    res.provideCPU('mag', mag);
+    res.provideCPU('theta', theta);
 
-  const growArgs = [
-    w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
-  ] as const;
-  const grown = globalState.useGPUGrowRegions ? await growRegionsCCLGPU(mag, theta, ...growArgs) : null;
-  const { regions } = grown ?? growRegionsCCL(mag, theta, ...growArgs);
+    const growArgs = [
+      w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+    ] as const;
+    const grown = globalState.useGPUGrowRegions ? await growRegionsCCLGPU(res, ...growArgs) : null;
+    if (!grown) {
+      // Either the toggle is off or the GPU grower bailed; on both paths it
+      // published nothing, so the CPU grower owns these slots.
+      const cpu = growRegionsCCL(mag, theta, ...growArgs);
+      res.provideCPU('regionId', cpu.regionId);
+      res.provideRegionsCPU(cpu.regions);
+    }
 
-  if (globalState.useGPULsdFit) {
-    const gpu = await fitRegionsGPU(regions, mag, theta, w, h, settings);
-    if (gpu) return gpu;
+    if (globalState.useGPULsdFit) {
+      const gpu = await fitRegionsGPU(res, w, h, settings);
+      if (gpu) return gpu;
+    }
+    return fitRegionsCPU(await res.regionsCPU(), mag, theta, w, h, settings);
+  } finally {
+    res.destroy();
   }
-  return fitRegionsCPU(regions, mag, theta, w, h, settings);
 }
 
 // ── Adapter: LSD rectangles -> bucketFillJoin.ts's expected input shape ──

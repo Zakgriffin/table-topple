@@ -7,7 +7,7 @@ import { updatePositionReadoutText } from '../overlays/projectedCamOverlays.ts';
 import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo, updateRecoveredFloorOutline } from '../overlays/recoveredOverlays.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { globalState } from '../state.ts';
-import { axesReadout, captureAxesBtn } from '../ui/dom.ts';
+import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
 import { captureDistortedGrayscale } from './capture.ts';
 import { computeProjectedBinsAndMarginalsAuto, paintProjectedTexture, ProjectedSampleResult } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
@@ -112,6 +112,50 @@ export function applyPoseVisualizations(camera: Camera, isActive: boolean, extra
   }
 }
 
+// ── The LSD chain's bus-traffic readout ──────────────────────────────────
+//
+// What the CURRENT toggle configuration actually cost, under the toggles that
+// set it. The point is that this is not derivable by looking at the checkboxes:
+// savings along the chain are superadditive, so a stage with CPU neighbours on
+// both sides costs two crossings while two adjacent GPU stages cost two
+// BETWEEN THEM TOTAL. Flipping one checkbox can therefore change the traffic of
+// a stage you did not touch, and that is invisible until you can see the total
+// move. Sourced from FieldResidency's own ledger, which records a transfer at
+// the moment it decides to make one, so the number cannot drift from the
+// behaviour the way a hand-maintained estimate would.
+//
+// Worth reading alongside the measurement that motivated it, and against it:
+// crossings stopped predicting wall clock once the grower moved to GPU (the top
+// four configurations sit within 10.1-10.8ms regardless of whether they move
+// 0.92MB or 2.42MB). So this readout shows what the configuration COSTS THE
+// BUS, which is a real and stable quantity -- not what it costs in time.
+export function updateChainTransfersReadout(camera: Camera | undefined) {
+  // Two different empty states, deliberately not collapsed into one: on the
+  // Global tab there may well be a captured camera sitting right there, and
+  // saying "no capture yet" would be flatly untrue.
+  if (!camera) {
+    lsdChainTransfers.textContent = 'LSD chain: select a camera to see its bus traffic.';
+    return;
+  }
+  const s = camera.lastChainTransfers;
+  if (!s) {
+    lsdChainTransfers.textContent = 'LSD chain: no capture yet.';
+    return;
+  }
+  const mb = s.bytes / 1048576;
+  const size = mb >= 0.01 ? `${mb.toFixed(2)} MB` : `${s.bytes} B`;
+  const head = `LSD chain: ${s.crossings} crossing${s.crossings === 1 ? '' : 's'}, ${size}`;
+  if (s.entries.length === 0) {
+    // Genuinely zero, not missing: an all-CPU chain never touches the bus.
+    lsdChainTransfers.textContent = `${head} -- nothing crosses (all-CPU chain).`;
+    return;
+  }
+  const detail = s.entries
+    .map((e) => `${e.what}${e.direction === 'up' ? '↑' : '↓'}`)
+    .join(' ');
+  lsdChainTransfers.textContent = `${head}  [${detail}]`;
+}
+
 // ── Axes/position reconstruction (the big orchestrator) ──────────────────
 //
 // Split into two entry points so every settings slider -- not just "capture
@@ -163,6 +207,9 @@ async function recomputeStages(camera: Camera, isActive: boolean) {
   // separately, right here, only for desktop display purposes.
   const timing = await computePoseFromCapture(camera, gray, w, h);
   camera.axesComputed = !!camera.lastQuadricPair;
+  // Right after the chain ran, so the readout always describes the toggle
+  // configuration that produced the frame currently on screen.
+  if (isActive) updateChainTransfersReadout(camera);
   updateGradientCirclesDebug(camera);
 
   const projectSpan = spanStart('projectBins (display + decode-marginals bins)');

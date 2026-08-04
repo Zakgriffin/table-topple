@@ -1295,7 +1295,7 @@ async function captureComputeAndSendPose() {
       settings: cameraSettings,
       lastVoteComposites: null, lastVotes: null, lastQuadricPair: null, lastGridPeriodPhase: null,
       lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
-      lastPositionDecode: null,
+      lastPositionDecode: null, lastChainTransfers: null,
     };
     const t0 = performance.now();
     const timing = await computePoseFromCapture(state, grayTopDown, cw, ch);

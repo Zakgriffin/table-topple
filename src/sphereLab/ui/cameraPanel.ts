@@ -9,7 +9,7 @@ import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, up
 import { updateLsdAvailability, updateLsdOverlay } from '../overlays/lsdOverlay.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
-import { recomputeFromLastCapture, runAxesReconstruction } from '../pipeline/axesReconstruction.ts';
+import { recomputeFromLastCapture, runAxesReconstruction, updateChainTransfersReadout } from '../pipeline/axesReconstruction.ts';
 import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
@@ -102,6 +102,11 @@ export function refreshCameraPanel() {
   const cam = activeCamera();
   setSectionHidden(globalSettingsSectionEl, !!cam);
   setSectionHidden(cameraSettingsSectionsEl, !cam);
+  // Before the early return, and passing whatever `cam` is: the traffic
+  // readout is per-camera, so switching tabs has to repoint it (or clear it on
+  // the Global tab) rather than leave another camera's numbers sitting under
+  // the toggles looking current.
+  updateChainTransfersReadout(cam);
   if (!cam) return;
 
   // Every slider/checkbox inside cameraSettingsSectionsEl reads its

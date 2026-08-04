@@ -3,6 +3,7 @@ import { CompositeLine } from '../pipeline/bucketFillJoin.ts';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
 import { GrownRegion, LsdRectangle } from '../pipeline/lsdSegments.ts';
+import { TransferSummary } from '../pipelineGPU/fieldResidency.ts';
 import { DecodeCellDebug, DecodeSampleGrid, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
 import { ProfileSpan } from '../profiling/profiler.ts';
 import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
@@ -26,6 +27,10 @@ export interface CameraBase {
   lastDecodeRotated: DecodeSampleGrid | null;
   lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
   lastProjectedBins: ProjectedBins | null;
+  // Bus traffic the LSD chain incurred on this camera's last frame -- see
+  // pipeline/poseCompute.ts's PoseComputeState for why it is recorded rather
+  // than derived from the toggles. Drives the readout under the GPU toggles.
+  lastChainTransfers: TransferSummary | null;
   lastVotes: Vote[];
   // Root-tagged composite lines the votes above were cast from (pipeline/
   // votes.ts's computeGradient2x2Composites) -- the SAME lines pipeline/

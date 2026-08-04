@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
-import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
+import { FieldResidency, TransferSummary } from '../pipelineGPU/fieldResidency.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
@@ -52,6 +52,12 @@ export interface PoseComputeState {
   lastDecodeRotated: DecodeSampleGrid | null;
   lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
   lastPositionDecode: PositionDecodeResult | null;
+  // What the LSD chain's toggle configuration actually cost the bus on the
+  // last frame, straight off the residency's own ledger. Recorded rather than
+  // derived because "how many crossings does this configuration imply" is not
+  // answerable by reading the toggles: it depends on which stages fell back to
+  // CPU, and on which optional readbacks a consumer happened to ask for.
+  lastChainTransfers: TransferSummary | null;
 }
 
 export interface PoseComputeTiming {
@@ -107,6 +113,9 @@ async function computeCompositesAndVotes(
 
     return { voteComposites, votes };
   } finally {
+    // Read BEFORE destroy, and in the finally rather than the happy path, so a
+    // configuration that threw still reports the traffic it managed to incur.
+    state.lastChainTransfers = res.summary();
     res.destroy();
   }
 }

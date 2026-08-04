@@ -122,6 +122,7 @@ export function clearLsdSvgOverlay() {
 
 export const globalSettingsSectionEl = document.getElementById('globalSettingsSection') as HTMLDivElement;
 export const gpuVotesStatus = document.getElementById('gpuVotesStatus') as HTMLDivElement;
+export const lsdChainTransfers = document.getElementById('lsdChainTransfers') as HTMLDivElement;
 export const cameraSettingsSectionsEl = document.getElementById('cameraSettingsSections') as HTMLDivElement;
 export const simCameraDetailFields = document.getElementById('simCameraDetailFields') as HTMLDivElement;
 export const physCameraDetailFields = document.getElementById('physCameraDetailFields') as HTMLDivElement;

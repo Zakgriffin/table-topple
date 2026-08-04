@@ -160,7 +160,27 @@
   .row span.label { flex: 0 0 88px; color: #aaa; font-size: 11px; }
   .row input[type=range] { flex: 1; min-width: 0; accent-color: var(--cam-accent, #2a7); }
   .row span.val { flex: 0 0 44px; text-align: right; font-size: 11px; color: #eee; }
+  /* Sub-grouping WITHIN a section -- labels a related run of controls without
+     starting a whole new .section (which would add a top border and rule off
+     things that belong together). */
+  .subhead { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: #789; margin: 10px 0 4px; }
+  /* The LSD chain's toggles are not four independent choices: the stages hand
+     device buffers straight to each other, so each one's COST depends on its
+     neighbours (see pipelineGPU/fieldResidency.ts). The side rule says "one
+     run" without disabling anything -- every combination stays legal and
+     correct, they just stop being independently priced. The island toggles
+     below deliberately get NO rule, because that contrast is the whole point:
+     they are fenced by CPU-only stages and always cost 2 crossings each. */
+  .chkGroup { border-left: 2px solid rgba(136,170,187,0.4); padding-left: 8px; margin: 0 0 8px 2px; }
   label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 4px; cursor: pointer; }
+  /* A control that refines the one directly above it. */
+  label.chk.sub { margin-left: 18px; }
+  /* Still bound and still clickable -- this means "on the current settings this
+     control has no effect", not "you may not touch it". Same spirit as
+     .row.disabled above, minus the pointer-events lockout, because the way you
+     make it matter again is to change the OTHER control, and hiding that
+     relationship behind a dead row would be worse than dimming it. */
+  label.chk.inactive { opacity: 0.45; }
   label.chk input { accent-color: var(--cam-accent, #2a7); }
   .fieldViewDivider {
     font-size: 10px; color: #678; text-align: center; margin: 6px 0;
@@ -271,18 +291,53 @@
     <label class="chk"><input type="checkbox" id="showFloor" checked> floor</label>
     <div class="row"><span class="label">cell outline</span><input type="range" id="floorCellOutlineSubdiv" min="0" max="20" step="1" value="0"><span class="val" id="floorCellOutlineSubdivVal"></span></div>
     <div class="row"><span class="label">De Bruijn board size</span><input type="range" id="boardSize" min="0" max="512" step="1" value="256"><span class="val" id="boardSizeVal"></span></div>
-    <label class="chk"><input type="checkbox" id="useGPUFit" checked> GPU plane fit (WebGPU)</label>
-    <label class="chk"><input type="checkbox" id="useGPUDecode" checked> GPU decode tally (WebGPU)</label>
-    <label class="chk"><input type="checkbox" id="useGPUProject" checked> GPU projected-sample ray-cast (WebGPU)</label>
-    <label class="chk"><input type="checkbox" id="useGPUGradient" checked> GPU 2x2 gradient field (WebGPU)</label>
-    <label class="chk"><input type="checkbox" id="useGPULsdFit" checked> GPU LSD fit + NFA test (WebGPU) -- verified identical to CPU; a win only with GPU region growing on (see pipelineGPU/lsdFit.ts)</label>
-    <label class="chk"><input type="checkbox" id="useGPUGrowRegions" checked> GPU LSD region growing (WebGPU) -- NOT bit-identical to CPU by construction; run verifyGrowRegions() first, see pipelineGPU/growRegions.ts</label>
-    <label class="chk"><input type="checkbox" id="useGPUCollectRegions" checked> GPU region collect (hysteresis + CSR build on device) -- needs GPU region growing; keeping this OFF now costs three readbacks (label, fx, fy), see state.ts</label>
-    <label class="chk"><input type="checkbox" id="useGPUPeriodSweep" checked> GPU period sweep (WebGPU) -- island, no shared buffers; f32 fold, run verifyPeriodSweep()</label>
-    <label class="chk"><input type="checkbox" id="useGPUDecodeFused" checked> GPU fused decode (build grid + tally on device) -- supersedes the grid upload above</label>
-    <div class="hint" id="gpuVotesStatus" style="margin-bottom:0;"></div>
-    <div class="hint" id="lsdChainTransfers" style="margin-bottom:0;"></div>
-    <label class="chk"><input type="checkbox" id="useCapturePipelining" checked> Pipelined video capture (mailbox, drop stale frames)</label>
+    <!-- First thing that happens to a frame, so it goes first. Not a WebGPU
+         toggle at all -- it changes how the NEXT capture is scheduled, not how
+         any stage computes -- hence its own heading rather than a spot among
+         the GPU ones. -->
+    <div class="subhead">capture</div>
+    <label class="chk"><input type="checkbox" id="useCapturePipelining" checked> pipelined video capture (mailbox, drop stale frames)</label>
+
+    <div class="hint" id="gpuVotesStatus"></div>
+
+    <!-- Listed in PIPELINE ORDER (stage 1 -> 3 -> 3b -> 4), not in the order
+         they were written, because adjacency is exactly what determines their
+         cost. Two neighbours both on GPU share a buffer and the crossing
+         between them disappears. -->
+    <!-- Labels are deliberately bare; the caveats live in `title` tooltips
+         rather than being deleted, because several of them are operational
+         warnings (the grower is not bit-identical to CPU) rather than trivia. -->
+    <div class="subhead">GPU: LSD chain -- stages 1-4, one resident run</div>
+    <div class="chkGroup">
+      <label class="chk" title="Stage 1. Cheap on its own -- its value is keeping fx/fy on the device for the stages below."><input type="checkbox" id="useGPUGradient" checked> 2x2 gradient field</label>
+      <label class="chk" title="Stage 3. The big single win (24 -> 15ms). NOT bit-identical to CPU by construction -- run verifyGrowRegions() before trusting it on a new capture."><input type="checkbox" id="useGPUGrowRegions" checked> region growing (CCL)</label>
+      <label class="chk" title="Stage 3b. Needs region growing on. Turning this OFF costs three readbacks (label, fx, fy), since the CPU collect needs the gradient back."><input type="checkbox" id="useGPUCollectRegions" checked> region collect (hysteresis + CSR)</label>
+      <label class="chk" title="Stage 4. Verified identical to CPU (verifyLsdFit). A win only with region growing on -- on its own it is upload-bound."><input type="checkbox" id="useGPULsdFit" checked> LSD fit + NFA test</label>
+      <div class="hint" id="lsdChainTransfers" style="margin-bottom:0;"></div>
+    </div>
+
+    <!-- Fenced by CPU-only stages on BOTH sides, so each pays its own upload
+         and its own readback no matter what its neighbours do -- they can never
+         hand each other a buffer the way the chain's stages do, and will not
+         while the join walk is on the CPU. Deliberately NOT given a crossing
+         count here: these do not go through FieldResidency, so unlike the chain
+         above there is no ledger behind such a number. -->
+    <div class="subhead">GPU: islands -- independent, each pays its own round trip</div>
+    <label class="chk" title="Stage 7. Consumes the vote array the join walk produced and returns three vectors."><input type="checkbox" id="useGPUFit" checked> pair of plane fit</label>
+    <label class="chk" title="Stage 9's coarse sweep. One workgroup per candidate period. Values are pre-scaled to [0,1] in f64 on the host so the shader's f32 fold keeps its resolution -- run verifyPeriodSweep()."><input type="checkbox" id="useGPUPeriodSweep" checked> period sweep</label>
+    <label class="chk" id="useGPUDecodeRow" title="Stages 10+11. Moves only the tally; the packed grid is still built on CPU and uploaded. Has no effect while the fused path below is on."><input type="checkbox" id="useGPUDecode" checked> decode tally</label>
+    <!-- Indented under the tally because it is the same STAGE, but the
+         precedence runs the OTHER WAY from what nesting usually implies:
+         runPositionDecode tests this one first and returns on success, so while
+         it is on the tally toggle above is dead. Greyed from cameraPanel.ts
+         when that is the case, rather than left sitting there looking live. -->
+    <label class="chk sub" title="Builds the sample grid AND tallies it on device, so the packed grid never crosses the bus. Supersedes the tally above entirely -- it is tested first and returns on success."><input type="checkbox" id="useGPUDecodeFused" checked> build grid + tally on device</label>
+
+    <!-- Off the pose path entirely: nothing here feeds a pose, so these can be
+         flipped without changing any recovered number -- only what gets drawn.
+         Its own group so that stays obvious as more display ports land. -->
+    <div class="subhead">GPU: display</div>
+    <label class="chk" title="Projected-Cam view and the World-floor decal. Display only -- a pose is already final before this runs."><input type="checkbox" id="useGPUProject" checked> projected-sample ray-cast</label>
   </div>
 
   <div id="cameraSettingsSections" class="hidden">

@@ -19,7 +19,7 @@ import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, useGPUDecodeRow, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -345,8 +345,10 @@ bindCheckbox('useGPUGradient', (v) => { globalState.useGPUGradient = v; const ca
 // and bindCheckbox would have restored a stale `checked` from localStorage and
 // silently re-enabled a wrong path. That mismatch is resolved and the kernel is
 // verified identical to CPU (pipelineGPU/lsdFitVerify.ts), so this is now an
-// ordinary A/B toggle. It still defaults OFF -- see state.ts -- but for a
-// performance reason: the GPU path is currently upload-bound and slower.
+// ordinary A/B toggle. It defaulted OFF for a while after that, on performance
+// grounds -- the GPU path was upload-bound and slower in isolation -- and now
+// defaults ON, because it stopped being upload-bound once its neighbours could
+// hand it their buffers. Its own compute never changed.
 bindCheckbox('useGPULsdFit', (v) => {
   globalState.useGPULsdFit = v;
   const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
@@ -363,13 +365,16 @@ bindCheckbox('useGPULsdFit', (v) => {
 // and consistency), so this is a pure perf toggle, not a behavioural one.
 bindCheckbox('useGPUDecodeFused', (v) => {
   globalState.useGPUDecodeFused = v;
+  updateDecodeTallyActive();
   const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
   pushSettingsSyncToAllPhysical();
 });
 // Only meaningful with useGPUGrowRegions on -- it consumes that path's own
-// device buffers. Not expected to win on its own (it trades a label readback
-// for a CSR readback); its value is structural, as the step that lets stages
-// 1-4 close into one resident run.
+// device buffers. It DOES win now, having been off for a long time on the
+// grounds that it merely traded a label readback for a CSR readback. What
+// changed is stage 1: with the gradient device-resident, the CPU collect needs
+// fx/fy pulled back down, so leaving this off costs three readbacks rather than
+// one. See state.ts for the numbers.
 bindCheckbox('useGPUCollectRegions', (v) => {
   globalState.useGPUCollectRegions = v;
   const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
@@ -391,9 +396,24 @@ bindCheckbox('useGPUGrowRegions', (v) => {
 // physical-camera frame gets scheduled -- no recomputeFromLastCapture call
 // needed (unlike the useGPU* toggles above).
 bindCheckbox('useCapturePipelining', (v) => { globalState.useCapturePipelining = v; });
+// The fused decode path is tested FIRST in runPositionDecode and returns on
+// success, so while it is on, useGPUDecode selects between two tally
+// implementations that never run. Dimming says that, where the nesting alone
+// would suggest the opposite (a child usually needs its parent). Deliberately
+// only a visual state: the checkbox stays bound and clickable, because the way
+// you make it relevant again is to turn the OTHER one off, and a dead row would
+// hide that. Falls back gracefully -- if fused bails at runtime the tally
+// toggle does decide the fallback, which is a good reason not to lock it.
+function updateDecodeTallyActive() {
+  useGPUDecodeRow.classList.toggle('inactive', globalState.useGPUDecodeFused);
+}
+updateDecodeTallyActive();
+
+// Sits at the TOP of the GPU toggle block now (it applies to all of them), so
+// it can no longer say "the checkbox above".
 gpuVotesStatus.textContent = isWebGPUSupported()
   ? 'WebGPU is available in this browser.'
-  : 'WebGPU is not available in this browser -- the checkbox above will silently fall back to the CPU pipeline.';
+  : 'WebGPU is not available in this browser -- every toggle below will silently fall back to the CPU pipeline.';
 bindCheckbox('showGizmoBody', (v) => { const cam = activeCamera(); if (cam) cam.settings.showGizmoBody = v; });
 bindCheckbox('showRecoveredFloor', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredFloor = v; });
 bindSlider('recoveredFloorOpacity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.recoveredFloorOpacity = v; cam.recoveredFloorOverlayMat.opacity = v; } }, (v) => v.toFixed(2));

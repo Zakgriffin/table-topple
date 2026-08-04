@@ -21,7 +21,16 @@ let enabled = false;
 export function profilerSetEnabled(v: boolean): void { enabled = v; }
 export function profilerEnabled(): boolean { return enabled; }
 
-export function profilerReset(): void { stack = []; roots = []; }
+export function profilerReset(): void {
+  stack = [];
+  roots = [];
+  // The User Timing buffer is finite and would otherwise accumulate every span
+  // of every run for the life of the tab. Clearing ALL measures rather than
+  // ours by name is safe here specifically because this profiler is the only
+  // producer of them in the app -- worth re-checking if that ever stops being
+  // true.
+  try { performance.clearMeasures(); } catch { /* diagnostics must not throw */ }
+}
 
 export function spanStart(name: string, kind: 'cpu' | 'gpu' = 'cpu'): ProfileSpan | null {
   if (!enabled) return null;
@@ -32,11 +41,45 @@ export function spanStart(name: string, kind: 'cpu' | 'gpu' = 'cpu'): ProfileSpa
   return span;
 }
 
+// ── Mirroring spans into the browser's User Timing track ─────────────────
+//
+// The span tree above is only visible through this module's own
+// formatFlamechart/getFlamechartJSON. Mirroring each span as a
+// performance.measure ALSO puts it in Chrome DevTools' "Timings" track, which
+// is worth more than it costs for one specific reason: this pipeline is an
+// async function that suspends at roughly a dozen GPU readbacks, so in the
+// main-thread flame chart it appears as a dozen unrelated task slices with the
+// render loop interleaved between them, and reading it as one operation is
+// essentially impossible. A measure spans the whole thing INCLUDING its
+// suspensions, so the pipeline reads as one labeled bar in Timings while the
+// interleaved work stays visible underneath in the main track -- structure on
+// top, interruptions below.
+//
+// The object form (explicit start/end) rather than mark pairs: the timestamps
+// are already recorded, marks would double the entries for nothing, and
+// concurrent same-named marks would need disambiguating.
+function emitUserTiming(span: ProfileSpan): void {
+  // 'gpu' spans come only from attachGPUKernelBreakdown, whose placement on the
+  // wall clock is SYNTHETIC by its own admission -- only the durations are
+  // real. Drawing those at a made-up position next to genuine measures would
+  // read as fact, so they are deliberately not mirrored. They remain in the
+  // module's own flamechart, where the surrounding comment explains them.
+  if (span.kind === 'gpu') return;
+  try {
+    performance.measure(span.name, { start: span.start, end: span.end });
+  } catch {
+    // Never let instrumentation break the thing it is instrumenting: the
+    // object form is not universally supported, and a UA may reject
+    // timestamps it considers out of range.
+  }
+}
+
 export function spanEnd(span: ProfileSpan | null): void {
   if (!span) return;
   span.end = performance.now();
   const idx = stack.lastIndexOf(span);
   if (idx >= 0) stack.splice(idx, 1);
+  emitUserTiming(span);
 }
 
 // GPU kernel durations (from WebGPU timestamp queries) are only known once

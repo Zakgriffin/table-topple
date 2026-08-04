@@ -5,6 +5,15 @@
 // time -- the span stack is a single shared module-level array, not
 // per-call-isolated -- which matches runAxesReconstruction's own
 // camera.axesCapturing guard against overlapping captures.
+//
+// That assumption is load-bearing, not incidental: a second operation running
+// concurrently does not corrupt anything (spanEnd splices by identity) but its
+// spans get reparented under whatever the first has open, which silently files
+// one subsystem's cost under another. The deferred display tail
+// (pipeline/axesReconstruction.ts's drainVisuals) is async and outlives its own
+// caller, so it is held to the SAME exclusion -- captures and drains refuse to
+// start underneath each other. Anything else added here that suspends across
+// awaits needs the same treatment, or its own stack.
 
 export interface ProfileSpan {
   name: string;

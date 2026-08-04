@@ -14,12 +14,13 @@ import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { isWebGPUSupported } from '../pipelineGPU/device.ts';
+import { getRoots, profilerEnabled, profilerReset, profilerSetEnabled } from '../profiling/profiler.ts';
 import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
 import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, useGPUDecodeRow, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, useGPUDecodeRow, physCameraDetailFields, physCaptureModeReadout, profilerStatus, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -396,6 +397,72 @@ bindCheckbox('useGPUGrowRegions', (v) => {
 // physical-camera frame gets scheduled -- no recomputeFromLastCapture call
 // needed (unlike the useGPU* toggles above).
 bindCheckbox('useCapturePipelining', (v) => { globalState.useCapturePipelining = v; });
+// Same story -- this only picks WHEN the display tail runs, never what it
+// computes, so there is nothing to recompute on a flip. Turning it off leaves
+// any already-posted mailbox slot to be drained normally (markVisualsDirty and
+// drainVisuals are both unconditional; only the caller in recomputeStages
+// consults the flag), so a camera can't be stranded mid-repaint by a toggle.
+bindCheckbox('useDeferredVisuals', (v) => { globalState.useDeferredVisuals = v; });
+
+// ── The profiler toggle ──────────────────────────────────────────────────
+//
+// Bound by hand rather than through bindCheckbox, and that is the whole point
+// of it being here instead of one line above. bindCheckbox PERSISTS to
+// localStorage and restores at bind time, which is correct for a setting and
+// wrong for this: profiling is the one switch on this panel that changes what
+// the pipeline COSTS rather than what it computes. It turns on WebGPU
+// timestamp queries in fitPlanes/decodeTally whose resolve pays its own
+// mapAsync -- the recorded case is a `GPU dispatch` span reading 9.3ms around
+// a kernel that actually ran for 0.07ms. A checkbox that quietly survived a
+// reload would tax every measurement taken afterwards, and every conclusion
+// drawn from one. So it starts OFF on every load, always.
+//
+// Explicitly assigning `checked = false` is load-bearing, not belt-and-braces:
+// browsers restore form control state across a plain reload on their own, so
+// an absent `checked` attribute in the HTML is NOT enough to guarantee off.
+const profilerCheckbox = document.getElementById('profilerEnabled') as HTMLInputElement;
+
+// Called every frame from animate() so the capture count stays live, which is
+// why it memoizes on the rendered string rather than writing unconditionally:
+// a textContent write per frame WHILE PROFILING would add main-thread work to
+// the very recording being taken. Reduces to one call and one string compare
+// on frames where nothing changed, which is nearly all of them.
+let lastProfilerStatusText = '';
+export function updateProfilerStatus() {
+  let text: string;
+  if (!profilerEnabled()) {
+    text = 'Profiler off. On: spans mirror into DevTools’ Timings track, and GPU dispatch spans inflate.';
+  } else {
+    // ROOT SPANS, not captures -- with deferred visuals on, one capture leaves
+    // three (axesReconstruction, then the drain's projectBins and
+    // poleMarkers+overlays, which are roots precisely BECAUSE the tail no
+    // longer runs inside the reconstruction). Calling them captures would
+    // misreport the thing this readout exists to show.
+    const n = getRoots().length;
+    text = n === 0
+      ? 'Recording. Start the DevTools capture FIRST, then take one here.'
+      : `Recording -- ${n} root span${n === 1 ? '' : 's'}. formatFlamechart() for the text form.`;
+  }
+  if (text === lastProfilerStatusText) return;
+  lastProfilerStatusText = text;
+  profilerStatus.textContent = text;
+}
+
+function applyProfilerToggle() {
+  const on = profilerCheckbox.checked;
+  // Reset on the way ON, per session -- deliberately NOT per capture.
+  // profilerReset also calls performance.clearMeasures(), so resetting each
+  // reconstruction would delete earlier captures out of the DevTools recording
+  // currently in progress, which is the exact opposite of "switch it on and
+  // every following capture shows up". Turning it OFF leaves the tree intact so
+  // formatFlamechart() still has something to print.
+  if (on) profilerReset();
+  profilerSetEnabled(on);
+  updateProfilerStatus();
+}
+profilerCheckbox.checked = false;
+profilerCheckbox.addEventListener('change', applyProfilerToggle);
+applyProfilerToggle();
 // The fused decode path is tested FIRST in runPositionDecode and returns on
 // success, so while it is on, useGPUDecode selects between two tally
 // implementations that never run. Dimming says that, where the nesting alone

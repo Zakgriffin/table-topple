@@ -176,4 +176,23 @@ export const globalState = {
   // half of video mode's total per-frame time); off falls back to the
   // original strict one-frame-in-flight handshake.
   useCapturePipelining: true,
+  // Defers the reconstruction's DISPLAY tail (projected bins + texture paint,
+  // pole markers/floor overlay, the mode-specific overlays) out of the pipeline
+  // window and into a one-slot per-camera mailbox drained by animate() -- see
+  // pipeline/axesReconstruction.ts's drainVisuals.
+  //
+  // The tail is idempotent in camera state, not a queue of work items, so the
+  // mailbox is a single `visualsDirty` boolean rather than a list: three
+  // captures landing before visuals get a turn repaint ONCE, from the newest
+  // state, instead of three times. What it buys is that ~20ms of display GPU
+  // work (`projectBins` measured at 19.8ms of a 158.9ms reconstruction, and
+  // every reader of lastProjectedBins is an overlay/decal/lattice -- nothing on
+  // the pose path) stops being AWAITED inside the pose window, where it
+  // serialized against the same device queue.
+  //
+  // Cost, stated plainly: overlays land one animation frame (~16ms) after the
+  // pose gizmos rather than in the same frame. Off runs the identical tail
+  // inline at the end of recomputeStages, which is the baseline to measure
+  // against.
+  useDeferredVisuals: true,
 };

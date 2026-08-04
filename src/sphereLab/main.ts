@@ -68,7 +68,7 @@ import { globalState } from './state.ts';
 import { euler } from './constants.ts';
 import { canvas, readout, savedControls } from './ui/dom.ts';
 import { setMode, setPanelCollapsed } from './ui/mode.ts';
-import { renderCameraTabs, refreshCameraPanel } from './ui/cameraPanel.ts';
+import { renderCameraTabs, refreshCameraPanel, updateProfilerStatus } from './ui/cameraPanel.ts';
 import { renderViewport, layoutPip, resize, computeThroughRect } from './ui/layout.ts';
 import './ui/cameraPanel.ts'; // side effect: wires every slider/checkbox to the active camera
 import { renderer } from './scene/renderer.ts';
@@ -82,7 +82,7 @@ import {
 import { getAnalysisVFovRad, ingestRealCapture, ingestRemotePose, markCaptureDirty, resizeCaptureBuffers, renderCamRT } from './pipeline/capture.ts';
 import { updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS } from './pipeline/preview.ts';
 import { buildProjectedTexture } from './pipeline/decodeGrid.ts';
-import { runAxesReconstruction } from './pipeline/axesReconstruction.ts';
+import { drainVisuals, runAxesReconstruction } from './pipeline/axesReconstruction.ts';
 import { refreshModeVisualizations } from './pipeline/modeRefresh.ts';
 import { updateContaminationOverlays } from './overlays/contaminationOverlays.ts';
 import { updateGizmo, updateSphereOverlays } from './overlays/sphereOverlays.ts';
@@ -269,8 +269,28 @@ function animate() {
         if (justFinished && camera.computeMode === 'desktop') pushPoseSync(camera);
       }
     }
+
+    // Drain the deferred-visualization mailbox (see
+    // pipeline/axesReconstruction.ts's drainVisuals). Per-camera rather than
+    // active-only because most of that tail is not active-only: pole markers,
+    // the recovered-cam gizmo and the World-view floor decal are drawn for
+    // EVERY camera, and only the mode-specific overlays are restricted to
+    // whichever one is on screen. No-op on the overwhelming majority of ticks.
+    //
+    // Deliberately here, in the cheap per-camera pass, rather than down in the
+    // `active` block below -- that block's auto-capture trigger flips
+    // axesCapturing synchronously, and this drain declines to start while that
+    // flag is set, so running afterwards would starve it on exactly the ticks
+    // it could have run (every one, once the capture interval drops below a
+    // reconstruction's duration).
+    drainVisuals(camera);
   }
   floorMesh.visible = globalState.showFloor;
+  // Keeps the diagnostics hint's capture count live while recording. Self-
+  // memoizing (see its own comment) -- it only touches the DOM when the text
+  // it would write actually changed, so it costs nothing on a normal frame and
+  // does not pollute the profile it is reporting on.
+  updateProfilerStatus();
 
   // Expensive pass: only ever needed for the active camera (Through-Cam/
   // Projected-Cam/Inside-Sphere, and the PIP preview, only ever show one
@@ -285,7 +305,14 @@ function animate() {
       refreshModeVisualizations(active, globalState.mode);
     }
 
-    if (active.settings.axesAutoCapture && !active.axesCapturing && now - active.lastAxesCapture >= active.settings.axesCaptureIntervalMs) {
+    // visualsDraining joins axesCapturing here, and has to be tested HERE
+    // rather than left to runAxesReconstruction's own guard: lastAxesCapture is
+    // stamped before the call, so an attempt that bails inside would still burn
+    // the interval slot and push the next capture out by a whole period
+    // instead of by the drain's ~20ms. Both flags mean the same thing to this
+    // trigger -- this camera is busy, don't restart the clock.
+    if (active.settings.axesAutoCapture && !active.axesCapturing && !active.visualsDraining
+      && now - active.lastAxesCapture >= active.settings.axesCaptureIntervalMs) {
       active.lastAxesCapture = now;
       runAxesReconstruction(active);
     }

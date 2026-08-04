@@ -3,6 +3,7 @@ import { CompositeLine } from '../pipeline/bucketFillJoin.ts';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
 import { GrownRegion, LsdRectangle } from '../pipeline/lsdSegments.ts';
+import type { PoseComputeTiming } from '../pipeline/poseCompute.ts';
 import { TransferSummary } from '../pipelineGPU/fieldResidency.ts';
 import { DecodeCellDebug, DecodeSampleGrid, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
 import { ProfileSpan } from '../profiling/profiler.ts';
@@ -63,6 +64,25 @@ export interface CameraBase {
   // by resizeCaptureBuffers so a stale-sized buffer can never be reused
   // after a viewport/supersample resize.
   lastAxesCaptureGray: { gray: Float64Array; w: number; h: number } | null;
+  // -- deferred-visualization mailbox (globalState.useDeferredVisuals) --
+  //
+  // One slot, freshest-wins, exactly like pendingCapture below, but holding no
+  // payload at all: the display tail is an idempotent function of this
+  // camera's already-settled state, so "there is newer state to paint" is the
+  // whole message. Set at the end of recomputeStages, drained by animate()
+  // once this camera is no longer capturing (pipeline/axesReconstruction.ts's
+  // markVisualsDirty/drainVisuals).
+  visualsDirty: boolean;
+  // Guards the drain against re-entering itself: the tail awaits real GPU work
+  // (the projection, the texture paint), so it spans several animate() ticks
+  // and would otherwise be started again on each of them.
+  visualsDraining: boolean;
+  // The per-stage timings computePoseFromCapture returned for the frame the
+  // mailbox is holding, kept here rather than passed as an argument because
+  // the drain runs long after its producer returned. Read only to build the
+  // readout's timing line, so a null (nothing captured yet, or a pose that
+  // arrived from a device-compute phone) just means that line is omitted.
+  lastPoseTiming: PoseComputeTiming | null;
 
   // -- capture/analysis buffers, shared shape for both camera types --
   rtSize: { w: number; h: number };

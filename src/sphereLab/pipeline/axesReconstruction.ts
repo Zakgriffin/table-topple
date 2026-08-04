@@ -169,12 +169,27 @@ export function updateChainTransfersReadout(camera: Camera | undefined) {
 // work so the guard/busy-UI/span bookkeeping isn't duplicated in a way that
 // could drift out of sync.
 
-// Assumes camera.lastAxesCaptureGray is already populated and
-// camera.axesCapturing is already true -- callers (runAxesReconstruction,
-// recomputeFromLastCapture) own the guard/busy-UI/RAF wrapper and the
-// capture step itself.
-async function recomputeStages(camera: Camera, isActive: boolean) {
-  const { gray, w, h } = camera.lastAxesCaptureGray!;
+// ── The display tail, and the mailbox that defers it ─────────────────────
+//
+// Everything below the pose itself: the projected bins + texture paint, the
+// pole markers/floor overlay, and the mode-specific overlays. Split out of
+// recomputeStages so it can run EITHER inline (the old behaviour, kept as the
+// measurement baseline) or deferred through a one-slot mailbox drained by
+// animate() -- globalState.useDeferredVisuals picks which.
+//
+// The reason a boolean is enough where a work queue looks like it's needed:
+// this function reads NOTHING but camera state, and that state is already
+// settled by the time it's asked to run. It is idempotent -- running it twice
+// paints the same thing, and running it once after three captures paints the
+// third, not the first. So the mailbox holds no payload and coalescing is
+// free rather than a feature that had to be built.
+//
+// `isActive` is re-evaluated HERE rather than inherited from whenever the
+// reconstruction started, since deferral makes "was this the active camera
+// 160ms ago" the wrong question -- what the readouts and mode overlays want
+// is which camera is on screen at PAINT time.
+async function runVisualTail(camera: Camera): Promise<void> {
+  const isActive = camera === activeCamera();
 
   // Painting projectedPreviewTex is a real GPU texture upload -- worth
   // skipping unless this camera's Projected-Cam view is what's actually
@@ -190,25 +205,10 @@ async function recomputeStages(camera: Camera, isActive: boolean) {
   const showProjected = (isActive && globalState.mode === 'projected')
     || (globalState.mode === 'world' && camera.settings.showRecoveredFloor);
 
-  // Every stage from the 2x2-gradient composite lines through
-  // runPositionDecode now lives in pipeline/poseCompute.ts's
-  // computePoseFromCapture -- a pure function operating on the same field
-  // names (a real Camera structurally satisfies its PoseComputeState), so
-  // it can also run standalone on the phone (see this session's
-  // on-device-pose-recovery plan). Mutates camera.lastVoteComposites/
-  // lastVotes/lastQuadricPair/lastGridPeriodPhase/lastRecoveredAxes/
-  // lastDecodeGrid/lastDecodeRotated/lastDecodeCorrectness/lastPositionDecode
-  // in place, exactly like this function's own inline stages used to.
-  // computeProjectedBinsAndMarginalsAuto/paintProjectedTexture (below) are
-  // deliberately NOT part of that shared prefix -- confirmed not on the
-  // critical path to a pose (distance is already finalized by
-  // gridPeriodPhase before that stage would run); they exist only to feed
-  // Projected-Cam/World-floor-decal DISPLAY, so this keeps calling them
-  // separately, right here, only for desktop display purposes.
-  const timing = await computePoseFromCapture(camera, gray, w, h);
-  camera.axesComputed = !!camera.lastQuadricPair;
-  // Right after the chain ran, so the readout always describes the toggle
-  // configuration that produced the frame currently on screen.
+  // The readout describes the toggle configuration that produced the frame
+  // being painted right now, which is why it sits in the tail rather than
+  // next to the chain that recorded it -- deferred, those are different
+  // moments, and this is the one the user is looking at.
   if (isActive) updateChainTransfersReadout(camera);
   updateGradientCirclesDebug(camera);
 
@@ -227,8 +227,18 @@ async function recomputeStages(camera: Camera, isActive: boolean) {
   spanEnd(projectSpan);
 
   const overlaySpan = spanStart('poleMarkers+overlays');
-  const irlsSuffix = timing.worldVoteIterations !== null ? `  irls ${timing.worldVoteIterations} iter` : '';
-  const timingLine = `votes ${timing.votesMs.toFixed(0)}ms  fit ${timing.fitMs.toFixed(0)}ms  pose ${timing.poseMs.toFixed(0)}ms  distance ${timing.distanceMs.toFixed(0)}ms  project ${projectMs.toFixed(0)}ms  decode ${timing.decodeMs.toFixed(0)}ms${irlsSuffix}`;
+  // applyPoseVisualizations MUST stay downstream of the projection above, not
+  // move back up next to the pose: applyRecoveredFloorOverlay builds the floor
+  // quad's geometry out of lastProjectedBins' own u/v extent (see
+  // overlays/recoveredOverlays.ts), so hoisting it would size this frame's
+  // floor from the PREVIOUS frame's bins. That coupling is the reason the
+  // whole tail defers as one unit instead of only its expensive half.
+  const t = camera.lastPoseTiming;
+  let timingLine: string | undefined;
+  if (t) {
+    const irlsSuffix = t.worldVoteIterations !== null ? `  irls ${t.worldVoteIterations} iter` : '';
+    timingLine = `votes ${t.votesMs.toFixed(0)}ms  fit ${t.fitMs.toFixed(0)}ms  pose ${t.poseMs.toFixed(0)}ms  distance ${t.distanceMs.toFixed(0)}ms  project ${projectMs.toFixed(0)}ms  decode ${t.decodeMs.toFixed(0)}ms${irlsSuffix}`;
+  }
   applyPoseVisualizations(camera, isActive, timingLine);
   spanEnd(overlaySpan);
 
@@ -248,8 +258,117 @@ async function recomputeStages(camera: Camera, isActive: boolean) {
   }
 }
 
+// Posts to the mailbox. Deliberately NOT gated on useDeferredVisuals: the
+// flag decides who CALLS this, and a slot left full when the flag is switched
+// off mid-session still has to get drained rather than sit stale forever.
+export function markVisualsDirty(camera: Camera): void {
+  camera.visualsDirty = true;
+}
+
+// Drains the mailbox for one camera. Called from animate() every tick, for
+// every camera -- cheap to the point of free when nothing is dirty, which is
+// most ticks.
+//
+// Two things have to be true to START: something is pending, and this camera
+// is not mid-reconstruction. The second is the staleness guard, and it is the
+// important one: computePoseFromCapture mutates lastRecoveredAxes,
+// lastPositionDecode and friends IN PLACE as it goes, so painting from a
+// camera that is halfway through one would mix two frames -- new axes against
+// an old decode -- and produce a picture that never existed.
+//
+// That exclusion is MUTUAL: runAxesReconstruction and recomputeFromLastCapture
+// both decline to start while visualsDraining is set. Three reasons, in
+// ascending order of how much they matter:
+//
+//   1. It costs nothing anyone can feel. The window it blocks is the same
+//      window that was already blocked before deferral existed -- the tail
+//      used to run INSIDE axesCapturing, so "reconstruction + tail" was one
+//      uninterruptible stretch either way. All this does is split the flag
+//      that covers it in two.
+//   2. Overlapping wouldn't have bought much. The tail's cost is display GPU
+//      work on the SAME device queue the pose stages use, so running it
+//      alongside the next reconstruction trades a serial wait for queue
+//      contention. The win here was never parallelism -- it is that the tail
+//      stops being AWAITED on the pose path, and it gets that either way by
+//      running in the idle gap between captures (~340ms of one, at the default
+//      500ms interval against a ~159ms reconstruction).
+//   3. It keeps the profiler honest, which is the reason it is unconditional
+//      rather than a measurement-only mode. profiling/profiler.ts keeps ONE
+//      module-level span stack and openly assumes a single profiled operation
+//      is in flight. A drain that outlived the start of the next capture would
+//      have its inner spans (projectBins' own GPU/CPU children, and
+//      projectSamples' upload/dispatch/finish) reparented under whatever that
+//      capture happened to have open -- they are opened after awaits, so
+//      forcing just the two outer spans to be roots would not have covered it.
+//      Nothing corrupts (spanEnd splices by identity), but a flamechart that
+//      files display work under the pose pipeline is worse than no flamechart:
+//      it is the exact measurement this deferral exists to move.
+//
+// Still per-camera, and so is the profiler's assumption: two cameras
+// reconstructing at once would break the span stack regardless of this, since
+// axesCapturing is per-camera too. Not a new problem and not one to solve here
+// -- there is exactly one camera today (see main.ts's animate loop).
+//
+// Placement in animate() matters just as much as the guard: this must run
+// BEFORE the auto-capture trigger. runAxesReconstruction sets axesCapturing
+// synchronously, so on the one tick where a reconstruction has just finished
+// and the next is about to start, whichever runs first wins the tick -- and if
+// the capture wins every time (interval shorter than a reconstruction) the
+// drain never runs at all.
+export function drainVisuals(camera: Camera): void {
+  if (!camera.visualsDirty || camera.visualsDraining || camera.axesCapturing) return;
+  camera.visualsDirty = false;
+  camera.visualsDraining = true;
+  runVisualTail(camera)
+    .catch((e) => console.error('[visuals] deferred refresh failed:', e))
+    .finally(() => {
+      camera.visualsDraining = false;
+      // UNREACHABLE while the mutual exclusion above holds -- nothing can set
+      // axesCapturing between this drain starting and finishing. Kept as the
+      // invariant's own tripwire rather than deleted as dead code: if either
+      // capture-side guard is ever relaxed, this is what stops a half-repainted
+      // frame from being the LAST thing painted, by re-arming for a clean pass
+      // over one settled state. Cheap enough that proving it unnecessary is not
+      // worth as much as it costing nothing to be wrong about.
+      if (camera.axesCapturing) camera.visualsDirty = true;
+    });
+}
+
+// Assumes camera.lastAxesCaptureGray is already populated and
+// camera.axesCapturing is already true -- callers (runAxesReconstruction,
+// recomputeFromLastCapture) own the guard/busy-UI/RAF wrapper and the
+// capture step itself.
+async function recomputeStages(camera: Camera) {
+  const { gray, w, h } = camera.lastAxesCaptureGray!;
+
+  // Every stage from the 2x2-gradient composite lines through
+  // runPositionDecode now lives in pipeline/poseCompute.ts's
+  // computePoseFromCapture -- a pure function operating on the same field
+  // names (a real Camera structurally satisfies its PoseComputeState), so
+  // it can also run standalone on the phone (see this session's
+  // on-device-pose-recovery plan). Mutates camera.lastVoteComposites/
+  // lastVotes/lastQuadricPair/lastGridPeriodPhase/lastRecoveredAxes/
+  // lastDecodeGrid/lastDecodeRotated/lastDecodeCorrectness/lastPositionDecode
+  // in place, exactly like this function's own inline stages used to.
+  // computeProjectedBinsAndMarginalsAuto/paintProjectedTexture (in
+  // runVisualTail) are deliberately NOT part of that shared prefix --
+  // confirmed not on the critical path to a pose (distance is already
+  // finalized by gridPeriodPhase before that stage would run); they exist
+  // only to feed Projected-Cam/World-floor-decal DISPLAY.
+  camera.lastPoseTiming = await computePoseFromCapture(camera, gray, w, h);
+  camera.axesComputed = !!camera.lastQuadricPair;
+
+  // The pose is final here; everything past this point is display. Deferred,
+  // that display work stops being awaited inside the reconstruction's own
+  // window, where it serialized ~20ms of GPU work against the same device
+  // queue the pose stages were using.
+  if (globalState.useDeferredVisuals) markVisualsDirty(camera);
+  else await runVisualTail(camera);
+}
+
 export function runAxesReconstruction(camera: Camera) {
   if (camera.axesCapturing) return; // don't stack overlapping captures
+  if (camera.visualsDraining) return; // ...or start one underneath a repaint, see drainVisuals
   camera.axesCapturing = true;
   const isActive = camera === activeCamera();
   const prevLabel = captureAxesBtn.textContent;
@@ -285,7 +404,7 @@ export function runAxesReconstruction(camera: Camera) {
       spanEnd(captureSpan);
       camera.lastAxesCaptureGray = { gray: rawGray, w, h };
 
-      await recomputeStages(camera, isActive);
+      await recomputeStages(camera);
     } finally {
       spanEnd(rootSpan);
       if (isActive) {
@@ -313,6 +432,7 @@ export function runAxesReconstruction(camera: Camera) {
 // click today.
 export function recomputeFromLastCapture(camera: Camera) {
   if (camera.axesCapturing) return;
+  if (camera.visualsDraining) return; // see drainVisuals -- same self-throttle, one stage later
   if (!camera.lastAxesCaptureGray) return; // nothing captured yet
   camera.axesCapturing = true;
   const isActive = camera === activeCamera();
@@ -326,7 +446,7 @@ export function recomputeFromLastCapture(camera: Camera) {
     let rootSpan: ProfileSpan | null = null;
     try {
       rootSpan = spanStart('axesReconstruction (recompute)');
-      await recomputeStages(camera, isActive);
+      await recomputeStages(camera);
     } finally {
       spanEnd(rootSpan);
       if (isActive) {

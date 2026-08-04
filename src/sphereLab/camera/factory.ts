@@ -195,6 +195,7 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
     lastDecodeCorrectness: null, lastProjectedBins: null, lastChainTransfers: null, lastVotes: [], lastVoteComposites: null,
     lastQuadricPair: null,
     axesComputed: false, axesCapturing: false, lastAxesCapture: 0, lastAxesCaptureGray: null,
+    visualsDirty: false, visualsDraining: false, lastPoseTiming: null,
     rtSize: { ...rtSize }, aspect, pipRect: { x: 0, y: 0, w: 0, h: 0 }, captureDirty: true, lastPreviewUpdate: 0,
     lastNoisedPreviewGray: null, lastHoverFieldIndex: null,
     lastLsdRectangles: null, lastLsdGrownRegions: null,

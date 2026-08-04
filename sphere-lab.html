@@ -297,6 +297,7 @@
          the GPU ones. -->
     <div class="subhead">capture</div>
     <label class="chk"><input type="checkbox" id="useCapturePipelining" checked> pipelined video capture (mailbox, drop stale frames)</label>
+    <label class="chk" title="Moves the projected-bins/overlay/decal repaint out of the reconstruction and into a per-camera mailbox drained by the render loop. Overlays land one animation frame after the pose instead of in the same frame."><input type="checkbox" id="useDeferredVisuals" checked> deferred visuals (mailbox, repaint after the pose)</label>
 
     <div class="hint" id="gpuVotesStatus"></div>
 
@@ -338,6 +339,14 @@
          Its own group so that stays obvious as more display ports land. -->
     <div class="subhead">GPU: display</div>
     <label class="chk" title="Projected-Cam view and the World-floor decal. Display only -- a pose is already final before this runs."><input type="checkbox" id="useGPUProject" checked> projected-sample ray-cast</label>
+
+    <!-- Deliberately last, and deliberately NOT persisted across reloads (see
+         ui/cameraPanel.ts's bind) -- this one changes what the pipeline COSTS,
+         not what it computes, so a sticky checkbox would silently tax every
+         later measurement. -->
+    <div class="subhead">diagnostics</div>
+    <label class="chk" title="Records the nested span tree AND mirrors every span into Chrome DevTools' Timings track, so a reconstruction reads as one bar instead of a dozen unrelated task slices. Costs real time -- leave it off when measuring."><input type="checkbox" id="profilerEnabled"> profile captures (DevTools Timings track)</label>
+    <div class="hint" id="profilerStatus" style="margin-bottom:0;"></div>
   </div>
 
   <div id="cameraSettingsSections" class="hidden">

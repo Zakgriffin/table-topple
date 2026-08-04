@@ -183,8 +183,8 @@ fn finalize(@builtin(global_invocation_id) gid: vec3<u32>) {
     let gx = fx[p];
     let gy = fy[p];
     let inv = inverseSqrt(gx * gx + gy * gy); // every member cleared rhoLow, so m2 > 0
-    sc = sc + gx * inv;
-    ss = ss + -gy * inv;
+    sc = sc + -gy * inv;
+    ss = ss + gx * inv;
   }
   // Normalized rather than left as a raw sum: only the DIRECTION is load-
   // bearing (fitRectangle uses it to pick which way along the PCA axis), but

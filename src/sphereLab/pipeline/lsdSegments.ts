@@ -126,9 +126,36 @@ import { computeGradient2x2Field } from './gradientField.ts';
 // The level line at a pixel runs perpendicular to the gradient, i.e. a quarter
 // turn from it. Written as a unit vector that is simply
 //
-//   (ux, uy) = (fx, -fy) / ‖(fx, fy)‖
+//   (ux, uy) = (-fy, fx) / ‖(fx, fy)‖
 //
 // and that vector is what every consumer in this file actually wants.
+//
+// GET THE COMPONENT ORDER RIGHT -- it was wrong here from faf55f6 until
+// 2026-08-04, and the way it was wrong is worth keeping because the same slip
+// is one keystroke away at every site below. The angle this replaced was
+// `theta = atan2(fx, -fy)`, and the vector was written as `(fx, -fy)` by
+// reading those two arguments left to right. But atan2 takes Y FIRST, so
+// (cos theta, sin theta) = (-fy, fx). The buggy form is the correct one with
+// its components SWAPPED, i.e. reflected about the 45-degree line rather than
+// rotated a quarter turn.
+//
+// WHY IT SURVIVED SO LONG, which is the genuinely instructive part: swapping
+// components is an ORTHOGONAL map, and every growth test is a dot product
+// between two pixels' vectors. dot(Mu, Mv) == dot(u, v) for orthogonal M, so
+// region growing was BIT-IDENTICAL under the bug -- the clumps looked perfect,
+// and faf55f6's own verification (0 edge-predicate flips over 187630 pairs,
+// max dot delta 5.6e-16) was measuring a quantity that is INVARIANT under the
+// error it was meant to catch. The CPU-vs-GPU harnesses were equally blind,
+// since both sides carried the same reflection.
+//
+// It only became observable where a level-line vector meets something that is
+// NOT reflected with it: the fitted rectangle's own axis, which comes from a
+// PCA of member POSITIONS. countRectanglePixels' alignment count is that
+// meeting point, and dot(Mu, a) == dot(u, Ma) means the count was scored
+// against an axis mirrored about 45 degrees. A vertical edge (fx>0, fy=0) has
+// level line (0,1) but scored as (1,0) -- exactly perpendicular, k=0, rejected
+// every time. Only edges near +/-45 degrees, where the mirror is close to the
+// identity, survived at all.
 //
 // It used to be materialized as an ANGLE: computeMagTheta stored
 // theta = atan2(fx, -fy) per pixel, and then every single consumer immediately
@@ -290,14 +317,14 @@ export function computeEdgeNeighbors(
   const cosTol = Math.cos(THREE.MathUtils.degToRad(toleranceDeg));
   const x = i % w, y = (i / w) | 0;
   // The quarter turn plus normalize -- see the level-line vector block above.
-  const ci = fx[i] / mi, si = -fy[i] / mi;
+  const ci = -fy[i] / mi, si = fx[i] / mi;
   for (let k = 0; k < 8; k++) {
     const nx = x + NEIGHBOR_DX[k], ny = y + NEIGHBOR_DY[k];
     if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
     const j = ny * w + nx;
     const mj = Math.hypot(fx[j], fy[j]);
     if (mj <= rhoLow) continue;
-    if (levelLinesCompatible(ci, si, fx[j] / mj, -fy[j] / mj, cosTol)) out.push(j);
+    if (levelLinesCompatible(ci, si, -fy[j] / mj, fx[j] / mj, cosTol)) out.push(j);
   }
   return out;
 }
@@ -398,7 +425,7 @@ export function collectRegionsFromLabels(
     for (const p of members) {
       const m = Math.hypot(fx[p], fy[p]);
       // Every member cleared rhoLow to be labeled at all, so m > 0 here.
-      sc += fx[p] / m; ss += -fy[p] / m;
+      sc += -fy[p] / m; ss += fx[p] / m;
     }
     // Normalized for comparability across paths; only the DIRECTION is load-
     // bearing. The degenerate all-cancel case can't arise from directed growth
@@ -439,7 +466,7 @@ export function growRegionsCCL(
     const m2 = gx * gx + gy * gy;
     if (m2 > rhoLowSq) {
       const inv = 1 / Math.sqrt(m2);
-      ux[i] = gx * inv; uy[i] = -gy * inv;
+      ux[i] = -gy * inv; uy[i] = gx * inv;
       label[i] = i; // dense: every eligible pixel is its own singleton
     } else {
       label[i] = -1;
@@ -678,13 +705,13 @@ export function countRectanglePixels(
       // rectangle's footprint passes through here. The squared test rejects a
       // sub-rho pixel with no sqrt at all, and a pixel that survives pays
       // exactly one: alignDot is the level-line unit vector dotted with the
-      // rectangle axis, and the unit vector is (fx, -fy)/‖g‖, so the whole
+      // rectangle axis, and the unit vector is (-fy, fx)/‖g‖, so the whole
       // thing is one divide by the magnitude. This used to be a cos and a sin
       // per pixel, on an angle that had itself cost an atan2 to build.
       const gx = fx[i], gy = fy[i];
       const m2 = gx * gx + gy * gy;
       if (m2 <= rhoSq) continue;
-      const alignDot = (gx * ax - gy * ay) / Math.sqrt(m2); // = cos(levelLine(i) - rectTheta)
+      const alignDot = (-gy * ax + gx * ay) / Math.sqrt(m2); // = cos(levelLine(i) - rectTheta)
       if (alignDot >= cosTol) k++;
     }
   }
@@ -818,7 +845,7 @@ export function fitRegionWithRetries(
       for (let mi = 0; mi < members.length; mi++) {
         const i = members[mi];
         const m = Math.hypot(fx[i], fy[i]);
-        if ((fx[i] * region.meanUx - fy[i] * region.meanUy) / m >= cosTol) kept.push(i);
+        if ((-fy[i] * region.meanUx + fx[i] * region.meanUy) / m >= cosTol) kept.push(i);
       }
       members = Int32Array.from(kept);
     } else {

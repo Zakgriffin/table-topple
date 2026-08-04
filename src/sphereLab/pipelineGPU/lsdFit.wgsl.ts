@@ -153,7 +153,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       // arithmetic, but the dot product is now STRUCTURALLY IDENTICAL to
       // countRectanglePixels' own line, which is what stops the two paths
       // drifting apart under a change to either.
-      let alignDot = (gx * ax - gy * ay) * inverseSqrt(m2);
+      let alignDot = (-gy * ax + gx * ay) * inverseSqrt(m2);
       if (alignDot >= cosTol) { k = k + 1u; }
     }
   }

@@ -50,10 +50,12 @@ const NDY = array<i32, 8>(0, 1, 1, 1, 0, -1, -1, -1);
 fn init(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (gid.x >= u.w || gid.y >= u.h) { return; }
   let i = gid.y * u.w + gid.x;
-  // The level line runs perpendicular to the gradient: (ux, uy) = (fx, -fy)
+  // The level line runs perpendicular to the gradient: (ux, uy) = (-fy, fx)
   // normalized. This used to read a theta array and take its cos/sin -- an
   // angle that a previous pass had spent an atan2 building out of exactly
-  // these two numbers. See lsdSegments.ts.
+  // these two numbers. COMPONENT ORDER IS EASY TO GET WRONG HERE and was, from
+  // faf55f6 until 2026-08-04 -- see the level-line vector block in
+  // lsdSegments.ts for why growing stayed bit-identical while the fit did not.
   //
   // Eligibility is tested SQUARED, so an ineligible pixel costs no sqrt, and
   // only an eligible one is normalized. Ineligible entries keep (0,0), which
@@ -66,8 +68,8 @@ fn init(@builtin(global_invocation_id) gid: vec3<u32>) {
   // predicate the seed set cannot influence the result.
   if (m2 > u.rhoLowSq) {
     let inv = inverseSqrt(m2);
-    ux[i] = gx * inv;
-    uy[i] = -gy * inv;
+    ux[i] = -gy * inv;
+    uy[i] = gx * inv;
     label[i] = i32(i);
   } else {
     ux[i] = 0.0;

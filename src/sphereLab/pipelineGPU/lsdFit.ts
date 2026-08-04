@@ -64,6 +64,9 @@ export async function fitAndTestRegionsGPU(
   const rs = res.regionsGPU();
   const regionCount = rs.regionCount;
   if (regionCount === 0) return [];
+  // Opened AFTER the two early returns above, so no path can leave a scope
+  // pushed and unpopped. See the pop below for why this is here at all.
+  device.pushErrorScope('validation');
   const pipeline = getPipeline(device);
 
   const fxBuf = res.gpu('fx');
@@ -108,6 +111,19 @@ export async function fitAndTestRegionsGPU(
   // other consumer this frame.
   const raw = await readFloat32(device, outBuf, regionCount * 10 * 4);
   for (const b of [outBuf, uniformBuf]) b.destroy();
+
+  // Checked BEFORE `raw` is believed. WebGPU reports validation failures
+  // asynchronously: an invalid bind group or pipeline does not throw, it makes
+  // every command that uses it a silent no-op, so the readback above would be
+  // all zeros and this function would return a full set of plausible-looking
+  // rectangles at the origin rather than null -- and the caller's CPU fallback
+  // would never fire, because nothing reported a failure. Returning null is
+  // what turns that class of bug into an honest fall back to the CPU fitter.
+  const err = await device.popErrorScope();
+  if (err) {
+    console.error('fitAndTestRegionsGPU: WebGPU validation error, falling back to CPU --', err.message);
+    return null;
+  }
 
   const results: LsdFitResult[] = new Array(regionCount);
   for (let i = 0; i < regionCount; i++) {

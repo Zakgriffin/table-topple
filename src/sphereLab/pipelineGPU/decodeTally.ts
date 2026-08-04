@@ -133,6 +133,13 @@ export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<Vot
 export async function tallyFromDeviceGrid(
   device: GPUDevice, gridBuf: GPUBuffer, gr: number, gc: number,
 ): Promise<VoteResult | null> {
+  // Scoped HERE rather than in the two entry points, so both the
+  // pack-and-upload route and decodeGridBuild.ts's device-grid route are
+  // covered by one copy. Nesting is fine and intended: decodeGridBuild pushes
+  // its own scope around this call, and since an error is captured by the
+  // INNERMOST enclosing scope, this one takes it, returns null, and that
+  // caller's `if (!winner)` path pops its own scope and falls back.
+  device.pushErrorScope('validation');
   const pipeline = getPipeline(device);
   const { keysBuf, valuesBuf, size: tableSize } = getHashTable(device);
 
@@ -179,6 +186,17 @@ export async function tallyFromDeviceGrid(
     readUint32(device, totalWindowsBuf, 4),
   ]);
   for (const b of [tallyBuf, totalWindowsBuf, ...uniformBufs]) b.destroy(); // gridBuf is the caller's
+
+  // This one would have degraded almost-safely by accident -- an all-zero tally
+  // leaves bestIdx at -1, which already returns null. Made explicit anyway,
+  // because "almost" is doing real work in that sentence: it relies on no
+  // orientation scoring a single vote, and it would report a validation bug as
+  // an ordinary undecodable frame with nothing in the console.
+  const err = await device.popErrorScope();
+  if (err) {
+    console.error('tallyFromDeviceGrid: WebGPU validation error, falling back to CPU --', err.message);
+    return null;
+  }
 
   let bestIdx = -1, bestVotes = 0;
   for (let i = 0; i < tallyRaw.length; i++) {

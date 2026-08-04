@@ -56,6 +56,13 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   if (!camera.lastRecoveredAxes) return null;
   const device = await getGPUDevice();
   if (!device) return null;
+  // The most exposed of these modules, and the reason is structural: TWO
+  // `layout: 'auto'` pipelines with two different entry points. That is the
+  // exact shape of the bug that hit growRegions -- auto layout PRUNES bindings
+  // an entry point does not reference, so a buffer set shared across two auto
+  // layouts can fail createBindGroup validation, asynchronously, and turn every
+  // submit into a silent no-op returning plausible zeros.
+  device.pushErrorScope('validation');
   const { gradient, project } = getPipelines(device);
 
   const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
@@ -134,6 +141,17 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   const buffersToDestroy = [fxBuf, fyBuf, gradDimsBuf, projUniformBuf, sampleOutBuf, validOutBuf];
   if (grayBuf) buffersToDestroy.push(grayBuf);
   for (const b of buffersToDestroy) b.destroy();
+
+  // Popped before the unpack loop reads a single sample, and before the buffers
+  // it describes are gone from scope. Note this one would NOT have degraded
+  // safely on its own: an all-zero validOut makes every sample invalid, minU
+  // stays Infinity, and the isFinite guard at the end returns null -- which
+  // looks identical to "the camera sees nothing", with no console output.
+  const err = await device.popErrorScope();
+  if (err) {
+    console.error('projectSamplesGPU: WebGPU validation error, falling back to CPU --', err.message);
+    return null;
+  }
 
   const finishSpan = spanStart('CPU finish (unpack + min/max)');
   const uArr = new Float32Array(n), vArr = new Float32Array(n), cxArr = new Float32Array(n), cyArr = new Float32Array(n);

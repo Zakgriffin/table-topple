@@ -29,6 +29,8 @@ export async function fitPairOfPlanesGPU(
   const device = await getGPUDevice();
   if (!device) return null;
   if (votes.length === 0) return null;
+  // After the early returns, so no path leaves a scope pushed. See the pop.
+  device.pushErrorScope('validation');
   const pipeline = getPipeline(device);
 
   const n = votes.length;
@@ -78,6 +80,18 @@ export async function fitPairOfPlanesGPU(
 
   const raw = await readFloat32(device, outBuf, numWorkgroups * 21 * 4);
   for (const b of [voteBuf, outBuf, uniformBuf]) b.destroy();
+
+  // Before `raw` is believed. A validation failure is reported asynchronously
+  // and silently no-ops every command that uses the offending resource, so
+  // without this the readback would be all zeros, the eigen-decomposition below
+  // would run on an all-zero ATA, and this would return an arbitrary basis
+  // instead of null -- with the caller's `?? fitPairOfPlanes(...)` fallback
+  // never firing, because nothing reported a failure.
+  const err = await device.popErrorScope();
+  if (err) {
+    console.error('fitPairOfPlanesGPU: WebGPU validation error, falling back to CPU --', err.message);
+    return null;
+  }
 
   const finishSpan = spanStart('CPU finish (sum partials + eigen)');
   const packed = new Float64Array(21);

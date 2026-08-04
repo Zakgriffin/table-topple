@@ -741,8 +741,28 @@ export async function runPositionDecode(camera: PoseCameraLike, gray: Float64Arr
   // and that stands either way.
   //
   // readGrid/release stay as the seam, so making this conditional later is a
-  // one-line change rather than a redesign. Falls back to the CPU pair on any
-  // failure.
+  // one-line change rather than a redesign.
+  //
+  // Falls through to the CPU pair below on failure -- but the two ways of
+  // failing are NOT alike, and only one of them is a recovery:
+  //
+  //   fused === null is an ENVIRONMENT failure (no device, a validation error,
+  //   device loss, a limit exceeded). The input is perfectly decodable and the
+  //   CPU is simply not subject to whatever refused, so the fall-through
+  //   genuinely rescues the frame.
+  //
+  //   layout === null is a DATA state -- no recovered axes, no period/phase, no
+  //   uvScale, i.e. "there is no pose to decode yet". buildDecodeSampleGrid
+  //   calls the SAME decodeGridLayout with the same arguments, so it
+  //   deterministically reproduces the same null and gives up. The
+  //   fall-through recomputes an answer it already has.
+  //
+  // That redundancy is deliberate and worth keeping: the alternative is
+  // returning early here, which means duplicating the four assignments that
+  // define the give-up state (lastDecodeGrid/lastDecodeRotated/
+  // lastPositionDecode/lastDecodeCorrectness all cleared). Two places that must
+  // agree on what "no decode this frame" means is a worse failure mode than one
+  // extra decodeGridLayout call, which does no per-pixel work.
   if (globalState.useGPUDecodeFused) {
     const fusedSpan = spanStart('decode (fused GPU build+tally)');
     const layout = decodeGridLayout(camera, gray, vFovRad);

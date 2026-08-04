@@ -117,7 +117,12 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Browser -> unsolicited low-rate auto frame (keeps latest-frame.png fresh)
+    // Browser -> unsolicited auto frame. NOTHING SENDS THIS ANYMORE -- the 1Hz
+    // pusher that did was removed (see devBridge/client.ts for why: a
+    // synchronous full-canvas readback + JPEG encode every second, into a file
+    // nothing reads, which it also corrupted in Through-Cam mode). Kept as a
+    // no-cost inbox so an older tab left open against a newer server still
+    // works rather than logging an unknown-message warning.
     if (msg.type === 'frame' && msg.dataUrl) {
       saveFrame(msg.dataUrl);
       return;

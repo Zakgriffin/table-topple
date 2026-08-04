@@ -314,11 +314,22 @@ export function pushPoseSync(cam: PhysicalCamera) {
   }
   connect();
 
-  // Low-rate unsolicited frame push so a reasonably fresh screenshot is
-  // always on disk without an explicit request.
-  setInterval(() => {
-    if (devBridgeSocket && devBridgeSocket.readyState === WebSocket.OPEN) {
-      devBridgeSocket.send(JSON.stringify({ type: 'frame', dataUrl: renderer.domElement.toDataURL('image/jpeg', 0.7) }));
-    }
-  }, 1000);
+  // REMOVED: a 1Hz unsolicited frame push that existed only to keep
+  // latest-frame.png warm without an explicit request. Do not reinstate it
+  // without reading this, because it looked harmless and was not:
+  //
+  //  - It cost a full window-sized SYNCHRONOUS drawing-buffer readback plus a
+  //    JPEG encode on the main thread, once a second, forever, purely so a file
+  //    nothing reads programmatically would be at most a second stale.
+  //  - It ran during every profiling session, since the bridge is connected
+  //    exactly when someone is measuring. Any periodic gap on a flame chart is
+  //    the first thing it would have been mistaken for.
+  //  - It was WRONG in Through-Cam mode. The pull path (the 'screenshot'
+  //    handler above) deliberately switches to throughCamCanvas there, because
+  //    renderer.domElement shows only its clear color; this push always grabbed
+  //    renderer.domElement, so it overwrote latest-frame.png with a blank frame
+  //    every second -- clobbering the good screenshot a pull had just saved.
+  //
+  // The pull path is complete on its own: server.js's saveFrame writes the same
+  // FRAME_PATH on every screenshotResult. Nothing was lost except staleness.
 })();

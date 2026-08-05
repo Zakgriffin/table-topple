@@ -204,9 +204,19 @@ export interface TorusCandidate { taps: number[]; r0: number; c0: number; cropSi
 // Found by scripts/search-order5-torus.ts, checkpointed in
 // scripts/best-order5-candidate.json — reflCount=338 rotCount=314 bothCount=0
 // anyCount=652/63504 (1.027%), vs. order 4's measured 98.1% collision rate.
+//
+// Those figures were measured at the searched cropSize of 256. The board now
+// defaults to 144 instead, to match the 144x144 the board game plays on (see
+// src/game/constants.ts's BOARD_CELLS) so that the AR overlay's cells and the
+// game's cells are the same cells. Since the crop origin (r0, c0) is
+// unchanged, a 144 board is a strict sub-region of the 256 one rather than a
+// new unsearched crop -- its windows are a subset of the measured ones, so its
+// absolute collision count can only be lower. The RATE over the smaller window
+// count is not re-measured, and deliberately so: re-running the search is
+// expensive and the decode is verified end-to-end anyway.
 export const ORDER5_CANDIDATE: TorusCandidate = {
   taps: [25, 1, 4, 6, 7, 10, 11, 15, 16, 19, 21, 22],
-  r0: 17719, c0: 1435, cropSize: 256,
+  r0: 17719, c0: 1435, cropSize: 144,
 };
 
 // The full (un-cropped) sequence/torus depends only on (order, taps) -- NOT

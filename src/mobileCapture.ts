@@ -19,8 +19,17 @@
 import * as THREE from 'three';
 import { toGrayscale } from './decode.ts';
 import { globalState } from './sphereLab/state.ts';
-import { GRID_STEP } from './sphereLab/constants.ts';
-import { C, R, rebuildFloorPatternData } from './sphereLab/floorPattern.ts';
+// Only the data-side rebuild is needed here now. The board's world EXTENT
+// (C/R/GRID_STEP) is read by gameOverlay.ts instead, which is the only thing
+// on this page that still draws anything at board scale.
+import { rebuildFloorPatternData } from './sphereLab/floorPattern.ts';
+// What the AR overlay actually draws -- the board game, hosted here. Kept in
+// its own module so that nothing under src/game has to be edited to render on
+// this page; see its header for why that boundary is load-bearing.
+import {
+  fitBoardToPattern, renderOverlay, syncOverlayRendererSize, updateOverlayCamera,
+  type ARCameraPose,
+} from './gameOverlay.ts';
 import { getAnalysisVFovRad } from './sphereLab/math/geometry.ts';
 import { computeGradient2x2Field } from './sphereLab/pipeline/gradientField.ts';
 import { computeLsdRectanglesFromField, LsdRectangle } from './sphereLab/pipeline/lsdSegments.ts';
@@ -70,18 +79,23 @@ const imuReadoutEl = document.getElementById('imuReadout')!;
 //
 // The whole point of pose recovery is an ABSOLUTE camera position/
 // orientation relative to the known, fixed De Bruijn board -- see this
-// session's chat. The board itself never moves: it's the exact same static
-// C*GRID_STEP x R*GRID_STEP rectangle at world ORIGIN that scene/floor.ts's
-// floorMesh already is on the desktop (PlaneGeometry(C*GRID_STEP,
-// R*GRID_STEP), rotation.x = -PI/2, no position offset). So this scene's
-// plane/cube are built ONCE (and rebuilt only when boardSize itself changes,
-// see applySettingsSync) and never repositioned; the only thing that updates
-// per-capture is the AR CAMERA -- placed at the recovered camPos/
-// recoveredCamQuat, with the SAME vertical FOV/aspect the pose pipeline
-// itself used for ray-casting (getAnalysisVFovRad). That directly
-// reproduces "standard AR": look straight through the phone into the
-// reconstructed scene, from wherever the recovered pose says the phone
-// actually is.
+// session's chat. The board itself never moves: it sits at world ORIGIN in
+// the XZ plane, the same place scene/floor.ts's floorMesh sits on the
+// desktop. The only thing that updates per-capture is the AR CAMERA --
+// placed at the recovered camPos/recoveredCamQuat, with the SAME vertical
+// FOV/aspect the pose pipeline itself used for ray-casting
+// (getAnalysisVFovRad). That directly reproduces "standard AR": look
+// straight through the phone into the reconstructed scene, from wherever the
+// recovered pose says the phone actually is.
+//
+// WHAT is drawn there now lives in gameOverlay.ts: the board game itself,
+// replacing the translucent blue rectangle and red marker cube this used to
+// draw. Those were a pose-correctness readout and nothing else; the game is
+// what all of the pose work is FOR, so the overlay now shows whether the
+// pose is good AND what it is good for at the same time. The board game is
+// developed on its own branch touching only src/game, so every adaptation
+// needed to host it here stays on this side of that boundary -- see
+// gameOverlay.ts's own header.
 //
 // Independent of computeOnDevice (its own checkbox, per an explicit ask --
 // see this session's chat): a camera pose can arrive from EITHER of two
@@ -91,10 +105,7 @@ const imuReadoutEl = document.getElementById('imuReadout')!;
 // after IT finishes a desktop-compute capture (see devBridge/client.ts's
 // pushPoseSync, sent exactly symmetric to this page's own poseResult send
 // upward). Both normalize to the same ARCameraPose shape before reaching
-// updateARCamera, which doesn't care which source produced it.
-interface ARCameraPose {
-  camPos: THREE.Vector3; recoveredCamQuat: THREE.Quaternion; aspect: number; fovDeg: number;
-}
+// updateOverlayCamera, which doesn't care which source produced it.
 
 let arOverlayEnabled = false;
 function setAROverlayEnabled(enabled: boolean) {
@@ -103,84 +114,9 @@ function setAROverlayEnabled(enabled: boolean) {
 }
 arOverlayCheckbox.addEventListener('change', () => setAROverlayEnabled(arOverlayCheckbox.checked));
 
-const arScene = new THREE.Scene();
-const arCamera = new THREE.PerspectiveCamera(50, 1, 0.05, 500);
-arScene.add(arCamera);
-
-// Same lighting rig as the desktop's own scene/renderer.ts -- only the cube
-// actually needs it (a lit material, MeshStandardMaterial below, so its
-// faces shade by angle instead of reading as a flat unlit silhouette); the
-// plane stays MeshBasicMaterial (unlit) since it's a translucent floor
-// decal, not a 3D object anyone needs to read shape from.
-arScene.add(new THREE.HemisphereLight(0xffffff, 0x222233, 1.2));
-const arSun = new THREE.DirectionalLight(0xffffff, 0.8);
-arSun.position.set(1, 2, 1);
-arScene.add(arSun);
-
-const arPlaneMat = new THREE.MeshBasicMaterial({ color: 0x33aaff, transparent: true, opacity: 0.35, side: THREE.DoubleSide, depthWrite: false });
-const arPlane = new THREE.Mesh(new THREE.PlaneGeometry(C * GRID_STEP, R * GRID_STEP), arPlaneMat);
-arPlane.rotation.x = -Math.PI / 2; // flat in world XZ, same convention as scene/floor.ts's floorMesh
-arPlane.visible = false; // no fix yet -- see updateARCamera
-arScene.add(arPlane);
-
-// 10 board cells per side -- a landmark big enough to spot from across the
-// board. At the board's own center (world origin), resting on top of the
-// plane.
-const AR_CUBE_SIZE = GRID_STEP * 10;
-const arCubeMat = new THREE.MeshStandardMaterial({ color: 0xff2222, roughness: 0.6 });
-const arCube = new THREE.Mesh(new THREE.BoxGeometry(AR_CUBE_SIZE, AR_CUBE_SIZE, AR_CUBE_SIZE), arCubeMat);
-arCube.position.set(0, AR_CUBE_SIZE / 2, 0);
-arCube.visible = false; // no fix yet -- see updateARCamera
-arScene.add(arCube);
-
-// Rebuilds the board plane at a new size -- mirrors scene/floor.ts's own
-// rebuildFloorPattern (position/rotation never change, only C/R do) --
-// called from applySettingsSync whenever boardSize actually changes.
-function rebuildARBoardGeometry() {
-  arPlane.geometry.dispose();
-  arPlane.geometry = new THREE.PlaneGeometry(C * GRID_STEP, R * GRID_STEP);
-}
-
-const arRenderer = new THREE.WebGLRenderer({ canvas: arCanvas, alpha: true, antialias: true });
-arRenderer.setClearColor(0x000000, 0);
-arRenderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
-
-// Mirrors captureCanvas's own INTRINSIC (cw,ch) directly, not its rendered
-// CSS box -- both canvases share the exact same CSS (max-width/max-height
-// letterbox fit, see mobile-capture.html), so matching intrinsic dimensions
-// is what keeps arCanvas scaled/positioned identically to captureCanvas
-// (the browser's own replaced-element sizing does the rest, since both
-// elements then have the same aspect ratio driving that letterbox). `false`
-// (skip three.js's own inline-style sizing) since the stylesheet already
-// owns display sizing for both canvases identically -- letting setSize
-// ALSO write inline width/height here would just fight that. Only actually
-// resizes the GL backing store when (cw,ch) genuinely changed, since this
-// gets called every drawCurrentFrameToCanvas (i.e. every rAF tick).
-let arSizedCw = 0, arSizedCh = 0;
-function syncARRendererSize(cw: number, ch: number) {
-  if (cw === arSizedCw && ch === arSizedCh) return;
-  arSizedCw = cw; arSizedCh = ch;
-  if (cw > 0 && ch > 0) arRenderer.setSize(cw, ch, false);
-}
-
-// Only ever moves the CAMERA -- see this section's header comment on why
-// the board itself (arPlane/arCube) is static. No fix (pose === null) hides
-// the render output rather than leaving a stale camera pose on screen from
-// a previous fix.
-function updateARCamera(pose: ARCameraPose | null) {
-  arPlane.visible = !!pose;
-  arCube.visible = !!pose;
-  if (!pose) return;
-  arCamera.position.copy(pose.camPos);
-  arCamera.quaternion.copy(pose.recoveredCamQuat);
-  arCamera.fov = pose.fovDeg;
-  arCamera.aspect = pose.aspect;
-  arCamera.updateProjectionMatrix();
-}
-
 // Resolves a local computePoseFromCapture result (device-compute mode) into
 // the same ARCameraPose shape a poseSync message already arrives in -- see
-// updateARCamera's own comment on why it stays agnostic to the source.
+// updateOverlayCamera's own comment on why it stays agnostic to the source.
 function buildLocalARCameraPose(state: PoseComputeState): ARCameraPose | null {
   const decode = state.lastPositionDecode;
   if (!decode) return null;
@@ -208,17 +144,26 @@ function parseRemoteARCameraPose(fix: {
 // predicted; aspect and FOV are properties of the lens, not of motion.
 let lastArIntrinsics: { aspect: number; fovDeg: number } | null = null;
 
+// Drives the game's own simulation (walk cycles, AI, combat) -- see
+// gameOverlay.ts's renderOverlay. Capped for the same reason game.html caps
+// its own: a backgrounded tab stops rAF, and the first frame after refocusing
+// would otherwise arrive carrying the whole away-time as a single step.
+const arClock = new THREE.Clock();
+
 function arRenderLoop() {
   requestAnimationFrame(arRenderLoop);
   // Skips the render entirely while hidden -- this page is already CPU/GPU
   // constrained by continuous pose recovery in video mode, no reason to also
-  // pay for a WebGL draw call nobody can see.
+  // pay for a WebGL draw call, or a simulation step, that nobody can see.
+  // getDelta is read regardless so the gap spent hidden is discarded rather
+  // than landing on the first visible frame.
+  const dt = Math.min(arClock.getDelta(), 0.1);
   if (!arOverlayEnabled) return;
 
   // ── Why the pose is re-derived HERE, every frame ─────────────────────
   //
-  // updateARCamera is otherwise only called once per reconstruction, i.e. at
-  // ~6.8Hz, so the overlay sits frozen for ~147ms at a time and then jumps.
+  // updateOverlayCamera is otherwise only called once per reconstruction, i.e.
+  // at ~6.8Hz, so the overlay sits frozen for ~147ms at a time and then jumps.
   // Predicting at RENDER rate is the entire visible point of IMU correction:
   // 60fps of motion between fixes instead of 7 steps per second. Without
   // this the toggle would change almost nothing a person could see, even
@@ -231,12 +176,12 @@ function arRenderLoop() {
   if (useImuCorrection && lastArIntrinsics) {
     const c = imuTracker.predictAt(nowMs());
     if (c) {
-      updateARCamera({ camPos: c.camPos, recoveredCamQuat: c.camQuat, ...lastArIntrinsics });
+      updateOverlayCamera({ camPos: c.camPos, recoveredCamQuat: c.camQuat, ...lastArIntrinsics });
     } else {
-      arPlane.visible = false; arCube.visible = false;
+      updateOverlayCamera(null);
     }
   }
-  arRenderer.render(arScene, arCamera);
+  renderOverlay(dt);
 }
 // SCHEDULED, not called directly. The loop body now reads `imuTracker` and
 // `useImuCorrection`, which are `const`/`let` declared much further down this
@@ -791,13 +736,13 @@ function applySettingsSync(msg: any) {
       // Was MISSING, and the omission is why a settings diff read as a board
       // mismatch: rebuildFloorPatternData updates the decode's actual inputs
       // (R/C/torus/debruijnLookup in floorPattern.ts) but this page's own
-      // globalState.boardSize stayed at its hardcoded 256 forever. Harmless
+      // globalState.boardSize stayed at its hardcoded default forever. Harmless
       // today -- nothing here reads it -- but it makes the phone misreport
       // its own configuration, which is exactly how the far worse bug below
       // stayed hidden.
       globalState.boardSize = boardSize;
       rebuildFloorPatternData(boardSize);
-      rebuildARBoardGeometry();
+      fitBoardToPattern();
     }
   }
   if (msg.cameraSettings) cameraSettings = { ...cameraSettings, ...msg.cameraSettings };
@@ -1737,12 +1682,12 @@ function connectRelay() {
     } else if (msg.type === 'poseSync') {
       // The desktop's mirror-image send of this page's own poseResult (see
       // devBridge/client.ts's pushPoseSync) -- lets the AR overlay work with
-      // computeOnDevice OFF, feeding updateARCamera from a desktop-compute
+      // computeOnDevice OFF, feeding updateOverlayCamera from a desktop-compute
       // capture's pose instead of a local one. Only ever arrives for a
       // camera the desktop currently has in desktop-compute mode (see
       // main.ts's own guard), so this can't race/fight with a concurrent
       // local devicePoseLoop update.
-      updateARCamera(parseRemoteARCameraPose(msg.fix ?? null));
+      updateOverlayCamera(parseRemoteARCameraPose(msg.fix ?? null));
     } else if (msg.type === 'eval' && msg.id) {
       // ── Dev bridge, phone side ──────────────────────────────────────────
       //
@@ -1846,7 +1791,7 @@ function drawCurrentFrameToCanvas(): { cw: number; ch: number } {
   // backing bitmap even when set to the same value, so skipping it when
   // unchanged avoids a pointless reallocation on every one of these ticks.
   if (captureCanvas.width !== cw || captureCanvas.height !== ch) { captureCanvas.width = cw; captureCanvas.height = ch; }
-  syncARRendererSize(cw, ch);
+  syncOverlayRendererSize(cw, ch);
   if (currentFacing === 'user') {
     captureCtx.save();
     captureCtx.translate(cw, 0);
@@ -2156,7 +2101,7 @@ async function captureComputeAndSendPose() {
     // decode passes null -- which hides the overlay. That contrast IS the
     // A/B: off, the overlay drops out whenever a decode fails; on, it
     // coasts through.
-    if (!useImuCorrection) updateARCamera(buildLocalARCameraPose(state));
+    if (!useImuCorrection) updateOverlayCamera(buildLocalARCameraPose(state));
     else if (imuTracker.hasFix()) imuStats.predicted++;
 
     if (ws && ws.readyState === WebSocket.OPEN) {

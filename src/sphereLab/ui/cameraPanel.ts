@@ -20,7 +20,7 @@ import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, useGPUDecodeRow, physCameraDetailFields, physCaptureModeReadout, profilerStatus, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, useGPUDecodeRow, physCameraDetailFields, physCaptureModeReadout, profilerStatus, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -323,6 +323,18 @@ bindSlider('floorCellOutlineSubdiv', (v) => {
 function pushSettingsSyncToAllPhysical() {
   for (const cam of cameras.values()) if (isPhysical(cam)) pushSettingsSync(cam);
 }
+// One-time migration off the old 256 default, and it has to run BEFORE the
+// binding below. bindSlider restores whatever was last persisted (dom.ts's
+// savedControls, localStorage), which on any browser that has opened this page
+// before would silently override the new 144 default the moment it loads --
+// and a stale 256 doesn't just mis-size the desktop floor, pushSettingsSync
+// below sends it straight down to the phone, where it re-crops the decode
+// table and pulls the AR board off the printed one.
+//
+// Only the EXACT old default is dropped, so a board size somebody actually
+// chose is left alone. Safe to delete once no browser is still carrying a 256.
+if (savedControls.boardSize === '256') delete savedControls.boardSize;
+
 bindSlider('boardSize', (v) => {
   globalState.boardSize = v;
   rebuildFloorPattern(v); // re-crops the torus, rebuilds the decode lookup table, resizes the floor mesh/texture/reference lines

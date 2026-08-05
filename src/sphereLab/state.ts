@@ -14,9 +14,12 @@ export const globalState = {
   // The De Bruijn floor pattern's board size (cells per side) -- mirrors
   // debruijn.ts's ORDER5_CANDIDATE.cropSize, which this now overrides at
   // runtime via scene/floor.ts's rebuildFloorPattern (see the "De Bruijn
-  // board size" slider in ui/cameraPanel.ts). 256 matches that candidate's
-  // original fixed cropSize, i.e. today's actual default board.
-  boardSize: 256,
+  // board size" slider in ui/cameraPanel.ts). Must stay in step with that
+  // candidate's cropSize, since this is only the value the slider STARTS at
+  // -- 144, so that one pattern cell is one board-game cell (BOARD_CELLS in
+  // src/game/constants.ts) and the AR overlay's board lands on the physical
+  // one 1:1 rather than at some scale factor.
+  boardSize: 144,
   // Manual dev-time switch for the plane-fit reduction (see
   // pipelineGPU/fitPlanes.ts) -- not auto-detected/fallback yet, per an
   // explicit choice to keep that decision simple while the GPU path is

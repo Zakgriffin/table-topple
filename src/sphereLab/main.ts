@@ -387,7 +387,7 @@ function animate() {
 // it's still a real Mode.
 const VALID_MODES: Mode[] = ['world', 'through', 'inside', 'projected'];
 const savedMode = savedControls['mode'];
-setMode(VALID_MODES.includes(savedMode as Mode) ? (savedMode as Mode) : 'world');
+setMode(VALID_MODES.includes(savedMode as Mode) ? (savedMode as Mode) : 'through');
 
 // No default camera (see this file's header) -- activeCameraId is already
 // '' at this point, so this just paints the tab bar (Global tab only, "+")

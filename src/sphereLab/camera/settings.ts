@@ -186,29 +186,35 @@ export interface PhysicalCameraSettings extends CameraSettingsCommon {
 
 export function createDefaultCommonSettings(): CameraSettingsCommon {
   return {
-    showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: savedNum('recoveredFloorOpacity', 0.92),
+    showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: savedNum('recoveredFloorOpacity', 0.9),
     showTrueContamination: false, showReconstructedContamination: false, hideField: false,
     showTopGradient: false,
     showLsdSegments: savedBool('toggleLsdSegments', false),
     showLsdRejected: savedBool('toggleLsdRejected', false),
     showLsdRawRegions: savedBool('toggleLsdRawRegions', false),
     showLsdComposite: savedBool('toggleLsdComposite', false),
-    // Gap defaults ON (it was unconditional before these toggles existed, so
-    // this preserves the plot people already know); value defaults OFF as the
-    // genuinely new series.
-    showGapHistogram: savedBool('toggleGapHistogram', true),
+    // All four plot series default OFF. Gap used to default ON (it was
+    // unconditional before these toggles existed), but it was turned off in
+    // practice and the working default was rebaselined from the live UI on
+    // 2026-08-05 -- see this file's header note.
+    showGapHistogram: savedBool('toggleGapHistogram', false),
     showValueHistogram: savedBool('toggleValueHistogram', false),
     showDistinctnessCurve: savedBool('toggleDistinctnessCurve', false),
     showProductCurve: savedBool('toggleProductCurve', false),
-    lsdToleranceDeg: savedNum('lsdToleranceDeg', 22.5),
-    // 4/255 preserves the pre-normalization default exactly, now that
-    // computeGradient2x2Field's own output tops out at 1 instead of 255.
-    lsdRhoNoiseThreshold: savedNum('lsdRhoNoiseThreshold', 4 / 255),
-    // 3x the low bar as a starting point, not a derived value: low enough
-    // that any genuine De Bruijn edge anchors its component somewhere, high
-    // enough that a component made purely of near-floor noise has nothing to
-    // anchor with. Re-tune against a real capture.
-    lsdRhoHighThreshold: savedNum('lsdRhoHighThreshold', 12 / 255),
+    lsdToleranceDeg: savedNum('lsdToleranceDeg', 9.5),
+    // Rebaselined from the live UI 2026-08-05. Was 4/255 (~0.0157), which
+    // preserved the pre-normalization default exactly once
+    // computeGradient2x2Field's output started topping out at 1 instead of 255
+    // -- that lineage is over; this is a tuned value.
+    lsdRhoNoiseThreshold: savedNum('lsdRhoNoiseThreshold', 0.132),
+    // ZERO, rebaselined from the live UI 2026-08-05 -- which makes hysteresis
+    // DEGENERATE by construction: every pixel clearing the noise floor also
+    // clears the high bar, so the survival path never discriminates. Was 12/255
+    // (3x the low bar). Worth knowing because it is exactly the condition that
+    // made an earlier hysteresis verification VACUOUS (see the perf TODO's
+    // cleanup list) -- any check of the high threshold against this default
+    // proves nothing.
+    lsdRhoHighThreshold: savedNum('lsdRhoHighThreshold', 0),
     lsdCclSteps: savedNum('lsdCclSteps', 0), // 0 = run to fixpoint (the real algorithm); 1+ scrubs rounds
     lsdNfaEpsilon: savedNum('lsdNfaEpsilon', 1),
     lsdNfaTestExponent: savedNum('lsdNfaTestExponent', 5),
@@ -234,30 +240,30 @@ export function createDefaultCommonSettings(): CameraSettingsCommon {
     showAxisVectors: false,
     showTopCircles: true,
     topCirclesLineWidth: savedNum('topCirclesLineWidth', 1),
-    weightSharpenPower: 4,
+    weightSharpenPower: 1,
     useWorldVoteOrientation: savedBool('useWorldVoteOrientation', false),
-    worldVoteRefineSteps: savedNum('worldVoteRefineSteps', 4),
-    minGrazingCos: savedNum('minGrazingCos', 0.15),
-    gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 30),
+    worldVoteRefineSteps: savedNum('worldVoteRefineSteps', 0),
+    minGrazingCos: savedNum('minGrazingCos', 0.1),
+    gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 150),
     gridPeriodPhaseGapLowerBound: savedNum('gridPeriodPhaseGapLowerBound', 0.005),
     // Key matches the BUTTON's own id (toggleCompositeLineFamilies), not
     // this field's name -- same persistence convention every other button-
     // driven boolean here uses (e.g. showLsdSegments/toggleLsdSegments).
     showCompositeLineFamilies: savedBool('toggleCompositeLineFamilies', false),
-    showSampleLattice: savedBool('showSampleLattice', false),
+    showSampleLattice: savedBool('showSampleLattice', true),
     useTrueCardinalOrientation: false,
-    fieldView: 'gradient2x2',
+    fieldView: 'noised',
     axesAutoCapture: false, axesCaptureIntervalMs: 500,
-    viewportW: 512, viewportH: 384, aspectLocked: false,
+    viewportW: 480, viewportH: 640, aspectLocked: false,
     horizFovDeg: 65,
   };
 }
 export function createDefaultSimulatedSettings(): SimulatedCameraSettings {
   return {
     ...createDefaultCommonSettings(),
-    camX: 0, camY: 20.7, camZ: 8,
-    camYawDeg: -43, camPitchDeg: -50,
-    simNoise: 1, simBlur: 0, captureSupersample: 2,
+    camX: 0, camY: 16.5, camZ: 8,
+    camYawDeg: -43, camPitchDeg: -32,
+    simNoise: 2, simBlur: 0, captureSupersample: 2,
   };
 }
 export function createDefaultPhysicalSettings(): PhysicalCameraSettings {

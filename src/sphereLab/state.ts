@@ -118,14 +118,21 @@ export const globalState = {
   // is not the reason anyone predicted.
   //
   // It was OFF through the residency work, at ~0.7ms worse, and the diagnosis
-  // was that residency could not save the transfer it actually pays: THE MEMBERS
-  // HAVE TO LAND ON CPU NO MATTER WHAT (lsdRectanglesToBucketFillShape rebuilds
+  // was that residency could not save the transfer it actually pays: the members
+  // had to land on CPU no matter what (lsdRectanglesToBucketFillShape rebuilt
   // a per-pixel regionId from LsdRectangle.rawMembers to seed the join walk), so
   // GPU collect traded a 786KB label readback for six dispatches plus two
   // 4-byte count readbacks and still read the members back afterwards -- a
   // bandwidth win losing to a latency cost. That diagnosis was correct and the
   // conclusion drawn from it ("only moving the join walk would flip this") was
   // too narrow.
+  //
+  // UPDATE 2026-08-05: the join walk IS gone now, and that half of the
+  // diagnosis resolved -- rawMembers is no longer required by the pose path.
+  // It is still read every frame though, because the raw-region/rejected debug
+  // overlays consume it, so nothing has actually changed for this flag yet.
+  // What would change it is deferring that readback off the pose path
+  // (perf TODO item 4), not the join walk removal on its own.
   //
   // What flipped it: the CPU collect needs fx/fy. Once stage 1 could keep them
   // on the device, leaving collect on CPU stopped costing one readback and

@@ -4,10 +4,9 @@ import { jacobiEigenSymmetric, smallestEigenvector } from '../../linalg.ts';
 import { cornerDir } from '../math/geometry.ts';
 import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
-import { GradientField, Vote } from '../types.ts';
-import { CompositeLine, compositeLineLength, computeCompositeLines, computeJoinWalk, computeMergeGroups } from './bucketFillJoin.ts';
+import { CompositeLine, GradientField, Vote } from '../types.ts';
 import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from './gradientField.ts';
-import { computeLsdRectangles, lsdRectanglesToBucketFillShape, runLsdChain } from './lsdSegments.ts';
+import { computeLsdRectangles, runLsdChain } from './lsdSegments.ts';
 import { fourFoldResidual } from './orientationLM.ts';
 import { guidedTangentDirectionForWalk } from './tangentWalk.ts';
 
@@ -93,7 +92,7 @@ export function computePixelVotes2x2(
   return votes;
 }
 
-// Just the LSD/join-walk tuning knobs computeGradient2x2Composites/
+// Just the LSD tuning knobs computeGradient2x2Composites/
 // compositesFromLsdRectangles actually read off `settings` -- narrowed off
 // the full CameraSettingsCommon (which also carries dozens of display-only
 // toggles a real Camera has but a bare phone-side PoseComputeState never
@@ -107,17 +106,21 @@ export interface LsdCompositeSettings {
   lsdMinRegionSize: number;
   lsdNfaEpsilon: number;
   lsdNfaTestExponent: number; lsdMaxRetries: number; lsdRetryToleranceFactor: number; lsdRetryShrinkFraction: number;
-  lsdMergeMinSimilarity: number; lsdJoinSteps: number; lsdMinLengthPx: number; lsdMaxTravelFactor: number;
+  // lsdMergeMinSimilarity/lsdJoinSteps/lsdMaxTravelFactor USED TO BE HERE and
+  // are gone: they were the join walk's own four parameters and nothing reads
+  // them now. They survive on CameraSettingsCommon and on the dev-bridge wire
+  // (removing them there is a separate, wider change), so a real camera's
+  // settings still satisfies this structurally.
+  lsdMinLengthPx: number;
 }
 
-// One composite LINE per LSD-rectangle-and-JOIN-WALK merge group (see
-// pipeline/lsdSegments.ts and pipeline/bucketFillJoin.ts), tagged with that
-// group's root -- the shared first stage behind computeSegmentVotes below
-// AND pipeline/gridPeriodPhase.ts. Runs the full traditional LSD pipeline
-// (region growing -> rectangle fit -> NFA validation, see
-// pipeline/lsdSegments.ts's own header) over the gray `res` was created
-// around, adapts the accepted rectangles into the join walk's expected input
-// shape, then runs the join walk (merge groups + composite lines).
+// One LINE per accepted LSD rectangle, tagged with its root -- the shared
+// first stage behind computeSegmentVotes below AND pipeline/gridPeriodPhase.ts.
+// Runs the full traditional LSD pipeline (region growing -> rectangle fit ->
+// NFA validation, see pipeline/lsdSegments.ts's own header) over the gray `res`
+// was created around, then turns each accepted rectangle into a line.
+// It used to run a JOIN WALK between those two steps, merging collinear
+// rectangles into composites; that is retired, see compositesFromLsdRectangles.
 // Deliberately NOT the radius-driven gradient field x local-agreement
 // "effective" field this used to run through (computeGradientField/
 // computeGradientAgreementField/computeEffectiveGradientField, still
@@ -154,27 +157,66 @@ export async function computeGradient2x2Composites(
   return compositesFromLsdRectangles(rects, w, h, settings);
 }
 
-// The join-walk half of computeGradient2x2Composites, split out so
-// overlays/lsdOverlay.ts's live debug preview (which already has its own
-// freshly-computed LsdRectangle[] for the rectangle/rejected/raw-region
-// views) can produce composite lines from that SAME array instead of
-// re-running stages 2-5 a second time just to get here.
+// One line per ACCEPTED LSD rectangle -- its own two endpoints, no merging.
+// Split out from computeGradient2x2Composites so overlays/lsdOverlay.ts's live
+// debug preview (which already has its own freshly-computed LsdRectangle[] for
+// the rectangle/rejected/raw-region views) can produce lines from that SAME
+// array instead of re-running the chain a second time just to get here.
+//
+// ── The join walk was REMOVED here (2026-08-05), not disabled ──
+//
+// This used to run pipeline/bucketFillJoin.ts's front-walking merge (via
+// lsdRectanglesToBucketFillShape, which rebuilt a per-pixel regionId buffer to
+// seed it) and emit one line per MERGE GROUP. Both are retired; see
+// bucketFillJoin.ts's own header for the walk's design and why it went.
+//
+// **This change is a NO-OP at lsdJoinSteps = 0, which is what was actually
+// running.** That is worth stating precisely, because it bounds the risk: with
+// numSteps 0 the walk's step loop never executes, so `merges` comes back empty,
+// computeMergeGroups makes every segment its own root, and computeCompositeLines
+// picks the farthest-apart pair among that root's only two candidate points --
+// which are exactly the endpoints below. The old length filter compared that
+// same pair's length against lsdMinLengthPx, so `r.length` here is the identical
+// test. Every line, every root number, every filter decision is unchanged.
+//
+// So removing this did NOT answer the accuracy question the perf plan raised
+// (does voting per raw segment instead of per merged composite hurt the fit or
+// the row/col classification?). At joinSteps 0 there was never a merged
+// composite to lose. That question only exists for a configuration that was not
+// in use, and it goes away with the code.
+//
+// What the removal DOES buy is structural: a serial, unparallelizable stage is
+// off the pose path, and the members readback stops being MANDATORY. Rebuilding
+// regionId to seed the walk was the reason the GPU plan recorded that readback
+// as "not going away"; it is now going away.
+//
+// Be precise about what that does and does not mean TODAY, because it is easy
+// to bank a win that has not landed: fitRegionsGPU still calls res.regionsCPU()
+// unconditionally, because LsdRectangle.rawMembers feeds the raw-region and
+// rejected DEBUG OVERLAYS (overlays/lsdOverlay.ts). So the bytes still cross on
+// every frame. The difference is that they now cross for DISPLAY rather than
+// for the pose, which moves them into the deferred-readback bucket (perf TODO
+// item 4) instead of being a hard floor. The chain reaches one crossing when
+// that lands, not here.
+//
+// `root` is the index among ACCEPTED rectangles, not among all of them. That is
+// what lsdRectanglesToBucketFillShape's own `id = segments.length` counter
+// produced, and gridPeriodPhase/the composite overlay both key off it.
 export function compositesFromLsdRectangles(
   rects: ReturnType<typeof computeLsdRectangles>, w: number, h: number, settings: LsdCompositeSettings,
 ): { root: number; line: CompositeLine }[] {
-  const { regionId, segments } = lsdRectanglesToBucketFillShape(rects, w, h);
-
-  const { merges } = computeJoinWalk(
-    segments, regionId, w, h, settings.lsdMergeMinSimilarity, settings.lsdJoinSteps, settings.lsdMinLengthPx,
-    settings.lsdMaxTravelFactor,
-  );
-  const groupOf = computeMergeGroups(segments.length, merges);
-  const composites = computeCompositeLines(segments, groupOf);
-
   const result: { root: number; line: CompositeLine }[] = [];
-  for (const [root, line] of composites) {
-    if (compositeLineLength(line) < settings.lsdMinLengthPx) continue; // an unmerged singleton whose own segment was already too short
-    result.push({ root, line });
+  let root = 0;
+  for (const r of rects) {
+    if (!r.accepted) continue;
+    const id = root++; // consumed even when the length filter drops this line, to keep numbering stable
+    if (r.length < settings.lsdMinLengthPx) continue;
+    const ax = Math.cos(r.theta), ay = Math.sin(r.theta);
+    const hl = r.length / 2;
+    result.push({
+      root: id,
+      line: { x1: r.cx + hl * ax, y1: r.cy + hl * ay, x2: r.cx - hl * ax, y2: r.cy - hl * ay },
+    });
   }
   return result;
 }

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CompositeLine } from '../pipeline/bucketFillJoin.ts';
+import { CompositeLine } from '../types.ts';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
 import { GrownRegion, LsdRectangle } from '../pipeline/lsdSegments.ts';

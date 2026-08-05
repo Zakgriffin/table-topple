@@ -5,8 +5,7 @@ import { FieldResidency, TransferSummary } from '../pipelineGPU/fieldResidency.t
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
-import { DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, RecoveredAxes, Vote } from '../types.ts';
-import { CompositeLine } from './bucketFillJoin.ts';
+import { CompositeLine, DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, RecoveredAxes, Vote } from '../types.ts';
 import { runPositionDecode } from './decodeGrid.ts';
 import { computeGridPeriodPhase, GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { createLsdChainResidency } from './lsdSegments.ts';

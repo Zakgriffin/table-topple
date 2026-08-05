@@ -4,7 +4,7 @@ import { C, R } from '../floorPattern.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
 import { sweepResultantsGPU } from '../pipelineGPU/periodSweep.ts';
-import { CompositeLine } from './bucketFillJoin.ts';
+import { CompositeLine } from '../types.ts';
 
 // ── Grid period/phase recovery from composite lines (pure) ────────────────
 //

@@ -1,5 +1,45 @@
 import { BucketFillSegment, segmentLength } from './bucketFillSegments.ts';
+import { CompositeLine } from '../types.ts';
 
+// ═══════════════════════════════════════════════════════════════════════════
+// ── RETIRED 2026-08-05: the join walk ──────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════════
+//
+// NOT CALLED FROM ANYWHERE. pipeline/votes.ts's compositesFromLsdRectangles was
+// this file's only live caller; it now emits one line per accepted LSD
+// rectangle directly. Kept in the repo as reference code, the same way
+// growRegionsJFA and computeBucketFillRegions are -- see votes.ts for the
+// removal's own justification, and note it was a NO-OP at the lsdJoinSteps = 0
+// this was actually running with.
+//
+// TWO REASONS IT WENT, and the second is the one that mattered:
+//
+//   1. It is inherently SERIAL -- a stepped walk with a mutable shared
+//      cell-claim buffer, a live union-find, and merges that spawn new fronts
+//      mid-step. There is no version of this that runs as a compute pass, so it
+//      fenced the whole pose pipeline on the CPU at exactly the point the GPU
+//      chain was trying to hand off.
+//   2. It forced rawMembers to land on the CPU every frame.
+//      lsdRectanglesToBucketFillShape (lsdSegments.ts, retired alongside this)
+//      rebuilt a per-pixel regionId buffer purely to SEED this walk, so the
+//      members readback was mandatory no matter which side the fitter ran on.
+//      That was the single constraint the GPU plan recorded as "not going
+//      away". Removing this is what makes the LSD chain's floor one crossing:
+//      gray up, nothing down.
+//
+// Its own tuning parameters (lsdJoinSteps, lsdMergeMinSimilarity,
+// lsdMaxTravelFactor) still exist on CameraSettingsCommon and are still bound
+// to greyed-out sliders, matching how the retired NFA retry loop's three knobs
+// were handled. lsdMinLengthPx is NOT one of them -- it outlived this file and
+// is still a live filter.
+//
+// If this is ever revived: the design below is worth reading first, and the
+// reason it existed at all was to bridge segments across gradient dropouts and
+// level-line POLARITY flips. Whatever replaces it has to solve that same
+// problem in a form that is not a serial walk.
+//
+// ── Original design notes, preserved verbatim ─────────────────────────────
+//
 // ── Line-segment joining (pure) ───────────────────────────────────────────
 //
 // A second, separate stepped process on top of the bucket-fill segments
@@ -398,7 +438,9 @@ export function computeMergeGroups(numSegments: number, merges: readonly Segment
   return groupOf;
 }
 
-export interface CompositeLine { x1: number; y1: number; x2: number; y2: number }
+// CompositeLine moved to types.ts when this file was retired -- live code
+// should not import a type out of a retired module. Imported back in above
+// only so the reference implementations below still typecheck.
 
 // Pixel-space length of a composite line -- same idea as
 // bucketFillSegments.ts's segmentLength, for the group-level composite

@@ -728,12 +728,20 @@ fpsSlider.addEventListener('input', () => {
 // createDefaultCommonSettings so a device-compute cycle run before the
 // first settingsSync arrives (e.g. right after toggling the checkbox on
 // before the desktop's on-connect push lands) still produces a sane result.
+//
+// THESE ARE A HAND-MAINTAINED COPY and they have already drifted once (the
+// 2026-08-05 default rebaseline moved seven of them and this list was missed
+// until the compiler caught an unrelated change here). If a default moves in
+// createDefaultCommonSettings, move it here too -- the drift is invisible in
+// normal use, because the desktop's on-connect settingsSync overwrites all of
+// it within a second of the phone connecting, and only shows up in the narrow
+// window before that push lands.
 let cameraSettings: PoseComputeState['settings'] = {
-  horizFovDeg: 65, weightSharpenPower: 4, gridPeriodPhaseGapLowerBound: 0.005, minGrazingCos: 0.15,
-  useWorldVoteOrientation: false, worldVoteRefineSteps: 4,
-  lsdToleranceDeg: 22.5, lsdRhoNoiseThreshold: 4 / 255, lsdRhoHighThreshold: 12 / 255, lsdCclSteps: 0, lsdNfaEpsilon: 1,
+  horizFovDeg: 65, weightSharpenPower: 1, gridPeriodPhaseGapLowerBound: 0.005, minGrazingCos: 0.1,
+  useWorldVoteOrientation: false, worldVoteRefineSteps: 0,
+  lsdToleranceDeg: 9.5, lsdRhoNoiseThreshold: 0.132, lsdRhoHighThreshold: 0, lsdCclSteps: 0, lsdNfaEpsilon: 1,
   lsdMinRegionSize: 2, lsdNfaTestExponent: 5, lsdMaxRetries: 2, lsdRetryToleranceFactor: 0.5, lsdRetryShrinkFraction: 0.2,
-  lsdMergeMinSimilarity: 0.9, lsdJoinSteps: 0, lsdMinLengthPx: 3, lsdMaxTravelFactor: 1,
+  lsdMinLengthPx: 3,
 };
 // Tracks the last boardSize a settingsSync actually applied, so
 // rebuildFloorPatternData (which rebuilds the whole De Bruijn lookup table --

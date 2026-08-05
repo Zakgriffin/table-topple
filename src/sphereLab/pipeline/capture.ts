@@ -7,7 +7,7 @@ import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
-import { CompositeLine } from './bucketFillJoin.ts';
+import { CompositeLine } from '../types.ts';
 import { buildProjectedTexture, computeProjectedBinsAndMarginalsAuto, paintProjectedTexture } from './decodeGrid.ts';
 import { GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';

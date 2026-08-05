@@ -27,9 +27,12 @@ import { computeGradient2x2Field } from './gradientField.ts';
 // statistical validation with a bounded tighten-then-shrink retry loop
 // (stage 5).
 //
-// This file now forms segments ONLY. Bridging genuinely disjoint segments
-// (across a gradient dropout, or across a level-line POLARITY flip -- see
-// below) is exclusively pipeline/bucketFillJoin.ts's job. The previous design
+// This file forms segments ONLY, and as of 2026-08-05 NOTHING bridges them
+// afterwards: pipeline/bucketFillJoin.ts's join walk is retired and
+// pipeline/votes.ts turns each accepted rectangle straight into one line.
+// Bridging genuinely disjoint segments (across a gradient dropout, or across a
+// level-line POLARITY flip -- see below) is therefore currently UNSOLVED rather
+// than solved elsewhere; it was a no-op at the settings in use. The previous design
 // tried to do both at once via long strided jumps, which is where all of its
 // complexity and all of its failure modes lived: a jump of tens or hundreds
 // of pixels only checks ANGLE agreement, so it could silently land on a
@@ -910,10 +913,12 @@ function fitRegionsCPU(
 // the gradient field on CPU at all.
 //
 // The one thing this still needs on CPU is each region's member list, for
-// rawMembers -- and that is NOT a residency shortfall to be optimized away
-// later. lsdRectanglesToBucketFillShape rebuilds a per-pixel regionId from
-// rawMembers to seed the join walk, so the members have to land whatever
-// happens. What the residency removes is the DOUBLE handling: they used to come
+// rawMembers. This USED TO BE mandatory -- lsdRectanglesToBucketFillShape
+// rebuilt a per-pixel regionId from rawMembers to seed the join walk, so the
+// members had to land no matter what. Both are retired as of 2026-08-05, and
+// the only remaining consumer is the raw-region/rejected debug overlay, so this
+// readback is now DISPLAY-ONLY and a candidate for deferral rather than a
+// floor. What the residency removes is the DOUBLE handling: they used to come
 // down from collect and then get re-packed and re-uploaded here as a CSR. Now
 // they come down once and the fitter reads the device-side copy.
 async function fitRegionsGPU(
@@ -1122,6 +1127,15 @@ export async function computeLsdRectanglesFromField(field: GradientField, settin
 // region "mass" the way the original did -- populated for type completeness
 // and in case a future consumer reads it, not because anything currently
 // downstream (computeJoinWalk, computeCompositeLines) actually does.
+// RETIRED-NOTE 2026-08-05: NOT CALLED FROM ANYWHERE. This existed solely to
+// adapt accepted rectangles into pipeline/bucketFillJoin.ts's expected input,
+// and that join walk is retired (see its header). Kept as reference alongside
+// it.
+//
+// Its `regionId` half is the reason worth remembering: rebuilding a per-pixel
+// region buffer to SEED the walk is what forced `rawMembers` to land on the CPU
+// every single frame, whichever side the fitter ran on. That was the one
+// transfer the GPU plan had written off as permanent. It went with this.
 export function lsdRectanglesToBucketFillShape(
   rects: readonly LsdRectangle[], w: number, h: number,
 ): { regionId: Int32Array; segments: BucketFillSegment[] } {

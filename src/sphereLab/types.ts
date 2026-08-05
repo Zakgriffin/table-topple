@@ -7,6 +7,18 @@ export type FieldView = 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'tria
 
 export interface Vote { n: THREE.Vector3; weight: number }
 export interface GradientField { fx: Float64Array; fy: Float64Array; w: number; h: number; r: number }
+// One detected line in pixel space -- what the pose pipeline casts votes from
+// and what gridPeriodPhase classifies into row/column families.
+//
+// It lived in pipeline/bucketFillJoin.ts back when a "composite" genuinely was
+// a composite: several raw segments merged into one line by the join walk. That
+// walk is retired (see its header), so today this is exactly ONE accepted LSD
+// rectangle's own two endpoints and nothing is composed at all. The name is
+// kept because it is threaded through Camera, the dev bridge wire format and
+// the phone's own pose path, and renaming it would touch all of those to say
+// the same thing. Home moved here so live code does not import a type out of a
+// retired module.
+export interface CompositeLine { x1: number; y1: number; x2: number; y2: number }
 export interface ProjectedBins { minU: number; maxU: number; minV: number; maxV: number; binWidthU: number; binWidthV: number; w: number; h: number }
 // Stage-1 output of castAndBucketProjectedSamples (decodeGrid.ts) -- one
 // ray-cast+project result per SCREEN pixel, dense (w*h, valid=0 for pixels

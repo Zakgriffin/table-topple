@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { CompositeLine } from '../types.ts';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
+import type { PendingDecodeGrid } from '../pipeline/decodeGrid.ts';
 import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
 import { GrownRegion, LsdRectangle } from '../pipeline/lsdSegments.ts';
 import type { PoseComputeTiming } from '../pipeline/poseCompute.ts';
@@ -44,6 +45,10 @@ export interface CameraBase {
   lastDecodeGrid: DecodeSampleGrid | null;
   lastDecodeRotated: DecodeSampleGrid | null;
   lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
+  // The decode grid's deferred readback, parked here by computePoseFromCapture
+  // and drained by pipeline/axesReconstruction.ts's runVisualTail. Non-null only
+  // between a reconstruction finishing and its visual tail running.
+  pendingDecodeGrid: PendingDecodeGrid | null;
   lastProjectedBins: ProjectedBins | null;
   // Bus traffic the LSD chain incurred on this camera's last frame -- see
   // pipeline/poseCompute.ts's PoseComputeState for why it is recorded rather

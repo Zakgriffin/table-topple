@@ -191,6 +191,23 @@ export function updateChainTransfersReadout(camera: Camera | undefined) {
 async function runVisualTail(camera: Camera): Promise<void> {
   const isActive = camera === activeCamera();
 
+  // FIRST, before anything reads lastDecodeGrid/lastDecodeRotated/
+  // lastDecodeCorrectness. computePoseFromCapture left those null and parked the
+  // readback here (see pipeline/decodeGrid.ts's PendingDecodeGrid) so the pose
+  // did not have to wait 0.45MB for display data; this is the moment they get
+  // filled. updateGradientCirclesDebug, applyPoseVisualizations and every mode
+  // overlay below are downstream of it.
+  //
+  // This is the ONE thing in this function that is not idempotent-by-reading-
+  // settled-state: it consumes a handle. resolve() is itself idempotent, so a
+  // second drain over the same capture is still safe -- it just finds the fields
+  // already populated and the handle already spent.
+  const pending = camera.pendingDecodeGrid;
+  if (pending) {
+    camera.pendingDecodeGrid = null;
+    await pending.resolve();
+  }
+
   // Painting projectedPreviewTex is a real GPU texture upload -- worth
   // skipping unless this camera's Projected-Cam view is what's actually
   // on screen right now. The numeric half (bins) stays unconditional --
@@ -355,7 +372,11 @@ async function recomputeStages(camera: Camera) {
   // confirmed not on the critical path to a pose (distance is already
   // finalized by gridPeriodPhase before that stage would run); they exist
   // only to feed Projected-Cam/World-floor-decal DISPLAY.
-  camera.lastPoseTiming = await computePoseFromCapture(camera, gray, w, h);
+  // Deferring the decode grid is tied to useDeferredVisuals rather than given
+  // its own toggle: the handle is drained by runVisualTail, so with the tail
+  // running inline there is nothing to defer INTO -- the drain would be one
+  // statement later, buying nothing and adding a lifetime.
+  camera.lastPoseTiming = await computePoseFromCapture(camera, gray, w, h, globalState.useDeferredVisuals);
   camera.axesComputed = !!camera.lastQuadricPair;
 
   // The pose is final here; everything past this point is display. Deferred,

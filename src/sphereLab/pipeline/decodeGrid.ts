@@ -31,6 +31,30 @@ interface PoseCameraLike {
   lastDecodeRotated: DecodeSampleGrid | null;
   lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
   lastPositionDecode: PositionDecodeResult | null;
+  pendingDecodeGrid: PendingDecodeGrid | null;
+}
+
+// ── The decode grid's readback, handed to the caller instead of taken here ──
+//
+// The fused GPU decode produces the pose from `winner` plus two correctness
+// counts (8 bytes); the GRID itself -- 0.45MB across decode:gridGeom and
+// decode:gridPacked -- feeds only lastDecodeGrid/lastDecodeRotated/
+// lastDecodeCorrectness, which is display. So the pose does not have to wait
+// for it, and this is what lets a caller say so.
+//
+// `resolve` is IDEMPOTENT and `release` is safe to call twice, in either order,
+// because the two callers use them differently: a phone or a harness resolves
+// immediately, while the desktop parks this on the camera and drains it a frame
+// later -- possibly never, if a newer reconstruction supersedes it first, which
+// is exactly when release-without-resolve has to be free.
+//
+// NOT view-conditional, and the distinction is the whole reason this is a
+// deferral rather than the skip that was rejected before (see runPositionDecode
+// below): whoever holds this WILL resolve it, so every observable ends up
+// identical and only the timing moves.
+export interface PendingDecodeGrid {
+  resolve(): Promise<void>;
+  release(): void;
 }
 
 // castAndBucketProjectedSamples reruns this same full-frame gradient field
@@ -725,7 +749,16 @@ export async function runPositionDecode(
   // residency is still alive. Purely an optimization -- null means decode
   // uploads its own copy exactly as it always did.
   sharedGray?: GPUBuffer | null,
+  // When set, the fused path's grid readback is parked on
+  // camera.pendingDecodeGrid instead of awaited here. Only a caller with a drain
+  // to resolve it in should pass true -- see PendingDecodeGrid.
+  defer = false,
 ) {
+  // A previous frame's handle can still be sitting here if the drain never got
+  // to it. Released BEFORE this frame overwrites the pointer, since nothing else
+  // holds it and the GPU buffers would otherwise live until device loss.
+  camera.pendingDecodeGrid?.release();
+  camera.pendingDecodeGrid = null;
   // ── Fused GPU path: grid built on device, tally consumes it in place ────
   //
   // Distinct from useGPUDecode (which only moves the TALLY, and still packs and
@@ -734,20 +767,25 @@ export async function runPositionDecode(
   // what comes back is the winner and two correctness counts, and the reference
   // cell's u/v are recomputed on the host in f64 rather than read back.
   //
-  // The grid IS still read back, UNCONDITIONALLY, and that is a deliberate
-  // reversal. The split-buffer design exists to make a view-conditional readback
-  // possible, and it works -- but measured, the geometry readback costs only
-  // ~1.3ms of the fused path's ~4.5ms (562KB at a 187x188 lattice), while
-  // skipping it would leave lastDecodeGrid/lastDecodeRotated/
-  // lastDecodeCorrectness null outside Projected-Cam mode. Consumers read those
-  // fields synchronously -- mobileCapture's AR readout among them -- so that
-  // trade buys ~1.3ms in exchange for a real behavioural difference between the
-  // CPU and GPU routes. Not worth it. The win here is that the PACKED grid never
-  // crosses the bus at all (298KB of upload per call at a 270x276 lattice, gone),
-  // and that stands either way.
+  // The grid is still read back UNCONDITIONALLY -- but as of 2026-08-05 not
+  // necessarily HERE. `defer` hands the readback to the caller as a
+  // PendingDecodeGrid instead of awaiting it on the pose path.
   //
-  // readGrid/release stay as the seam, so making this conditional later is a
-  // one-line change rather than a redesign.
+  // Read the distinction carefully, because the obvious version of this was
+  // tried and rejected. SKIPPING the readback when no view wants it was the
+  // rejected one: it leaves lastDecodeGrid/lastDecodeRotated/
+  // lastDecodeCorrectness null outside Projected-Cam mode, and consumers read
+  // those fields synchronously -- mobileCapture's AR readout among them -- so it
+  // buys ~1.3ms in exchange for a real behavioural difference between the CPU
+  // and GPU routes. That trade is still refused.
+  //
+  // DEFERRING is not that trade. Whoever takes the handle resolves it, so the
+  // same three fields end up populated with the same values; only the moment
+  // moves. A caller with nowhere to defer TO (the phone, the timing harness)
+  // passes defer=false and gets exactly the old behaviour.
+  //
+  // The win that stands either way: the PACKED grid never crosses the bus at all
+  // (298KB of upload per call at a 270x276 lattice, gone).
   //
   // Falls through to the CPU pair below on failure -- but the two ways of
   // failing are NOT alike, and only one of them is a recovery:
@@ -775,23 +813,59 @@ export async function runPositionDecode(
     const fused = layout ? await buildAndTallyDecodeGPU(layout, gray, w, h, sharedGray) : null;
     if (layout && fused) {
       try {
-        const built = await fused.readGrid();
-        camera.lastDecodeGrid = built;
-        const rot = rotateGrid(built, fused.winner.orientation);
-        camera.lastDecodeRotated = rot;
-        camera.lastDecodeCorrectness =
-          buildCorrectnessArray(rot, fused.winner.anchorRow, fused.winner.anchorCol).correctness;
-        // The reference cell is unchanged by rotation -- only its INDEX moves --
-        // so its u/v are the original lattice's (zeroI, zeroJ), computed here in
-        // f64 instead of read back off the device.
+        // Fills the three display fields off the device-side grid. Closed over
+        // rather than inlined so the deferred and immediate paths run the SAME
+        // code -- a deferral that quietly did something slightly different from
+        // what it replaced would be indistinguishable from a bug in the pose.
+        const applyGrid = async () => {
+          const built = await fused.readGrid();
+          camera.lastDecodeGrid = built;
+          const rot = rotateGrid(built, fused.winner.orientation);
+          camera.lastDecodeRotated = rot;
+          camera.lastDecodeCorrectness =
+            buildCorrectnessArray(rot, fused.winner.anchorRow, fused.winner.anchorCol).correctness;
+        };
+
+        // The pose needs NONE of that. The reference cell is unchanged by
+        // rotation -- only its INDEX moves -- so its u/v are the original
+        // lattice's (zeroI, zeroJ), computed here in f64 rather than read back;
+        // the counts came down with the winner. Hoisted above the grid work so
+        // the ordering says so out loud, and so the deferred path finalizes the
+        // pose at exactly the same point the immediate one does.
         const ref = decodeGridCellUV(layout, layout.zeroI, layout.zeroJ);
         const [rzI, rzJ] = rotatedZeroIndex(layout.rows, layout.cols, layout.zeroI, layout.zeroJ, fused.winner.orientation);
         finishPositionDecode(
           camera, vFovRad, fused.winner, ref.u, ref.v, rzI, rzJ,
           fused.correctCount, fused.wrongCount,
         );
+
+        if (defer) {
+          // STALE FIELDS ARE CLEARED, not left showing the previous frame. The
+          // drain is a frame or two away and an overlay repainting in between
+          // would otherwise mix this frame's pose with the last frame's decode
+          // -- the exact "picture that never existed" drainVisuals' own guard
+          // exists to prevent.
+          camera.lastDecodeGrid = null;
+          camera.lastDecodeRotated = null;
+          camera.lastDecodeCorrectness = null;
+          let done = false;
+          camera.pendingDecodeGrid = {
+            resolve: async () => {
+              if (done) return;
+              done = true;
+              try { await applyGrid(); } finally { fused.release(); }
+            },
+            release: () => { done = true; fused.release(); },
+          };
+        } else {
+          await applyGrid();
+        }
       } finally {
-        fused.release();
+        // Only the immediate path frees here; the deferred one handed ownership
+        // to the pendingDecodeGrid above and releases through it. fused.release()
+        // is idempotent (see buildAndTallyDecodeGPU), so the double call on the
+        // deferred path's own error unwind is harmless.
+        if (!camera.pendingDecodeGrid) fused.release();
         spanEnd(fusedSpan);
       }
       return;

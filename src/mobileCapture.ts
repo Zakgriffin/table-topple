@@ -2069,6 +2069,10 @@ async function captureComputeAndSendPose() {
       lastVoteComposites: null, lastVotes: null, lastQuadricPair: null, lastGridPeriodPhase: null,
       lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
       lastPositionDecode: null, lastChainTransfers: null,
+      // Never deferred on the phone: buildDebugPayload below reads
+      // lastDecodeGrid synchronously and there is no visual drain here to
+      // resolve a handle in. See computePoseFromCapture's deferDecodeGrid.
+      pendingDecodeGrid: null,
     };
     const t0 = performance.now();
     const timing = await computePoseFromCapture(state, grayTopDown, cw, ch);

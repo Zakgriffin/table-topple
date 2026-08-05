@@ -6,7 +6,7 @@ import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
 import { CompositeLine, DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, RecoveredAxes, Vote } from '../types.ts';
-import { runPositionDecode } from './decodeGrid.ts';
+import { PendingDecodeGrid, runPositionDecode } from './decodeGrid.ts';
 import { computeGridPeriodPhase, GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { createLsdChainResidency } from './lsdSegments.ts';
 import { fourFoldResidual } from './orientationLM.ts';
@@ -51,6 +51,10 @@ export interface PoseComputeState {
   lastDecodeRotated: DecodeSampleGrid | null;
   lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
   lastPositionDecode: PositionDecodeResult | null;
+  // Set only when the caller asked to defer the decode grid's readback (see
+  // computePoseFromCapture's `deferDecodeGrid`). Whoever set it owns resolving
+  // or releasing it; left unresolved it holds ~0.45MB of GPU buffers.
+  pendingDecodeGrid: PendingDecodeGrid | null;
   // What the LSD chain's toggle configuration actually cost the bus on the
   // last frame, straight off the residency's own ledger. Recorded rather than
   // derived because "how many crossings does this configuration imply" is not
@@ -129,8 +133,19 @@ async function computeCompositesAndVotes(
 // independent globalState module instance (separate JS realm, not shared
 // memory with the desktop), kept in sync by settingsSync (see
 // mobileCapture.ts), so this needs no parameter threading at all.
+//
+// `deferDecodeGrid` moves the decode grid's 0.45MB readback off the pose path
+// and onto state.pendingDecodeGrid for the caller to drain. It is a PARAMETER
+// rather than a globalState read on purpose: this function has three callers and
+// only one of them can honour it. axesReconstruction has the visual mailbox and
+// passes globalState.useDeferredVisuals; mobileCapture reads state.lastDecodeGrid
+// synchronously the moment this returns (buildDebugPayload) and has no drain at
+// all; reconstructionTiming releases without resolving, because it is measuring
+// the pose path and the readback is no longer on it. A globalState flag would
+// have silently deferred on the phone, where nothing would ever resolve it.
 export async function computePoseFromCapture(
   state: PoseComputeState, gray: Float64Array, w: number, h: number,
+  deferDecodeGrid = false,
 ): Promise<PoseComputeTiming> {
   const vFovRad = getAnalysisVFovRad(state);
   const t0 = performance.now();
@@ -232,7 +247,7 @@ export async function computePoseFromCapture(
     // no device on an all-CPU chain, and `gray` is only device-resident if some
     // stage put it there. Null just means decode uploads its own, as before.
     const sharedGray = res.device && res.hasGPU('gray') ? res.gpu('gray') : null;
-    await runPositionDecode(state, gray, w, h, vFovRad, sharedGray);
+    await runPositionDecode(state, gray, w, h, vFovRad, sharedGray, deferDecodeGrid);
     spanEnd(decodeSpan);
     const t5 = performance.now();
 

@@ -169,13 +169,35 @@ function median(xs: number[]): number {
 // One fresh state per rep. Nothing carries over between reps, which matters:
 // a state reused across reps would keep the previous pose alive and let a rep
 // that should have failed silently inherit the last good answer.
+// The pose exactly as production runs it, INCLUDING deferring the decode grid's
+// readback -- and then dropping it on the floor.
+//
+// Passing false instead would have been the tempting "measure everything"
+// choice, and it would have made this harness the only caller still paying for a
+// readback the real pose path stopped paying for: the fence count would report
+// 12 where production does 10, and the median would carry ~0.45MB this pipeline
+// no longer moves. What is being timed is gray in / pose out, and the grid is
+// not part of the pose.
+//
+// Released rather than resolved, since nothing here paints: releasing frees the
+// device buffers without performing the transfer, which is the whole point. A
+// rep that leaked instead would hold ~0.45MB per rep across the sweep.
+async function poseOnce(state: PoseComputeState, gray: Float64Array, w: number, h: number) {
+  try {
+    return await computePoseFromCapture(state, gray, w, h, true);
+  } finally {
+    state.pendingDecodeGrid?.release();
+    state.pendingDecodeGrid = null;
+  }
+}
+
 function freshState(camera: Camera): PoseComputeState {
   return {
     aspect: camera.aspect,
     settings: camera.settings,
     lastVoteComposites: null, lastVotes: null, lastQuadricPair: null, lastGridPeriodPhase: null,
     lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
-    lastPositionDecode: null, lastChainTransfers: null,
+    lastPositionDecode: null, lastChainTransfers: null, pendingDecodeGrid: null,
   };
 }
 
@@ -255,7 +277,7 @@ export async function timeReconstruction(
       let improved = false;
       for (let i = 0; i < WARMUP_BATCH && warmupMs.length < WARMUP_MAX; i++) {
         const t = performance.now();
-        await computePoseFromCapture(freshState(camera), gray, w, h);
+        await poseOnce(freshState(camera), gray, w, h);
         const ms = performance.now() - t;
         warmupMs.push(ms);
         if (ms < best * (1 - WARMUP_IMPROVE)) { best = Math.min(best, ms); improved = true; }
@@ -292,7 +314,7 @@ export async function timeReconstruction(
       const state = freshState(camera);
       transferLedgerReset();
       const t0 = performance.now();
-      const timing = await computePoseFromCapture(state, gray, w, h);
+      const timing = await poseOnce(state, gray, w, h);
       poseMsAll.push(performance.now() - t0);
 
       const led = transferLedger();
@@ -319,7 +341,7 @@ export async function timeReconstruction(
     try {
       setTransferProbe(true);
       transferLedgerReset();
-      await computePoseFromCapture(freshState(camera), gray, w, h);
+      await poseOnce(freshState(camera), gray, w, h);
       probe = groupLedger(transferLedger());
     } finally {
       setTransferProbe(false);

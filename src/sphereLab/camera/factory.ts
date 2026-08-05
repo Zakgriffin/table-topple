@@ -192,7 +192,7 @@ export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THR
 
   const base: Omit<CameraBase, 'id' | 'name' | 'color'> = {
     lastRecoveredAxes: null, lastPositionDecode: null, lastDecodeGrid: null, lastDecodeRotated: null,
-    lastDecodeCorrectness: null, lastProjectedBins: null, lastChainTransfers: null, lastVotes: [], lastVoteComposites: null,
+    lastDecodeCorrectness: null, pendingDecodeGrid: null, lastProjectedBins: null, lastChainTransfers: null, lastVotes: [], lastVoteComposites: null,
     lastQuadricPair: null,
     axesComputed: false, axesCapturing: false, lastAxesCapture: 0, lastAxesCaptureGray: null,
     visualsDirty: false, visualsDraining: false, lastPoseTiming: null,

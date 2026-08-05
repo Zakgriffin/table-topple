@@ -734,8 +734,19 @@ export interface LsdRectangle {
   // complete flood-fill result this rectangle came from. For debug display
   // only (overlays/hoverDebugOverlays.ts's raw-region-pixels toggle) -- not
   // read anywhere in the accept/reject decision itself.
+  //
+  // EMPTY ON THE POSE PATH as of 2026-08-05 -- see NO_MEMBERS below and
+  // fitRegionsGPU's header. Populated only by the CPU fitter, which is what
+  // overlays/lsdOverlay.ts's own from-scratch recomputation runs.
   rawMembers: Int32Array;
 }
+
+// The one shared empty membership, handed to every rectangle the GPU fitter
+// produces. Shared rather than allocated per rectangle because there are a few
+// thousand per frame and nothing ever writes through it -- and a single identity
+// makes "this rectangle has no members because nobody asked for them" greppable,
+// which `new Int32Array(0)` scattered at four call sites would not be.
+export const NO_MEMBERS = new Int32Array(0);
 
 export interface LsdSettings {
   toleranceDeg: number;
@@ -912,37 +923,62 @@ function fitRegionsCPU(
 // overlay wants. Dropping it is also what frees stages 1-4 from needing
 // the gradient field on CPU at all.
 //
-// The one thing this still needs on CPU is each region's member list, for
-// rawMembers. This USED TO BE mandatory -- lsdRectanglesToBucketFillShape
-// rebuilt a per-pixel regionId from rawMembers to seed the join walk, so the
-// members had to land no matter what. Both are retired as of 2026-08-05, and
-// the only remaining consumer is the raw-region/rejected debug overlay, so this
-// readback is now DISPLAY-ONLY and a candidate for deferral rather than a
-// floor. What the residency removes is the DOUBLE handling: they used to come
-// down from collect and then get re-packed and re-uploaded here as a CSR. Now
-// they come down once and the fitter reads the device-side copy.
+// ── THE MEMBERS READBACK IS NOW OPT-IN (2026-08-05) ──
+//
+// This used to `await res.regionsCPU()` alongside the fit, unconditionally, to
+// fill in each rectangle's `rawMembers`: four readbacks (offsets/sizes/members/
+// meanDirs) and the largest byte cost left in the chain. Now it happens only
+// when `wantMembers` is set, which the pose path never sets.
+//
+// WHO ACTUALLY READS rawMembers, since a first audit got this wrong in a way
+// worth recording. The tempting conclusion is that NOBODY does, because
+// overlays/lsdOverlay.ts recomputes its own rectangles from
+// lastNoisedPreviewGray rather than reading the camera field the pose path
+// fills. That is true and it is not the point: its recomputation calls
+// computeLsdRectanglesFromField, which lands in THIS function whenever
+// useGPULsdFit is on -- which is the shipping setting. Deleting the readback
+// outright would have blanked the rejected-region raster and thrown on
+// `rawMembers[0]` in the accepted-rectangle hue. Same function, two callers,
+// only one of which needs the data.
+//
+// So the split is by CALLER, not by field:
+//   - pose path (votes.ts's computeGradient2x2Composites -> runLsdChain): the
+//     rectangles feed compositesFromLsdRectangles, which reads only
+//     accepted/length/theta/cx/cy, and are then dropped. Nothing stores them.
+//     wantMembers stays false and the CSR never crosses.
+//   - display (computeLsdRectanglesFromField, i.e. the LSD debug overlay and the
+//     phone's sendDebugInfo pass): opts in, and pays for what it draws.
+//   - pipelineGPU/lsdChainVerify.ts wants the member TOTALS but not per
+//     rectangle, so it leaves this false and asks the residency directly --
+//     after taking the transfer ledger, so its own readback is not charged to
+//     the configuration it is measuring.
 async function fitRegionsGPU(
-  res: FieldResidency, w: number, h: number, settings: LsdSettings,
+  res: FieldResidency, w: number, h: number, settings: LsdSettings, wantMembers: boolean,
 ): Promise<LsdRectangle[] | null> {
   const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
-  // Concurrent, not sequential: fitAndTestRegionsGPU binds the region CSR
-  // synchronously before its first await, so starting it first and letting the
-  // members readback run alongside puts that transfer under the kernel instead
-  // of after it. Promise.all rather than two bare awaits so a failure in either
-  // one can't leave the other rejecting unobserved.
+  // Concurrent when both are wanted, not sequential: fitAndTestRegionsGPU binds
+  // the region CSR synchronously before its first await, so starting it first
+  // and letting the members readback run alongside puts that transfer under the
+  // kernel instead of after it. Promise.all rather than two bare awaits so a
+  // failure in either one can't leave the other rejecting unobserved.
   const [gpuResults, regions] = await Promise.all([
     fitAndTestRegionsGPU(res, w, h, settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon),
-    res.regionsCPU(),
+    wantMembers ? res.regionsCPU() : Promise.resolve(null),
   ]);
   if (!gpuResults) return null;
 
+  // Counted off the fitter rather than off `regions`, which may not be here at
+  // all now. fitAndTestRegionsGPU allocates `new Array(regionCount)` -- the same
+  // count regionsCPU() returns -- so rectangle numbering downstream is
+  // unchanged, and `regions[i]` still lines up index for index when present.
   const results: LsdRectangle[] = [];
-  for (let i = 0; i < regions.length; i++) {
+  for (let i = 0; i < gpuResults.length; i++) {
     const g = gpuResults[i];
     results.push({
       cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
       accepted: g.accepted, retries: 0, nfaLog10: g.nfaLog10,
-      lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon), rawMembers: regions[i].members,
+      lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon),
+      rawMembers: regions ? regions[i].members : NO_MEMBERS,
     });
   }
   return results;
@@ -971,7 +1007,12 @@ export async function computeLsdRectanglesGPU(field: GradientField, settings: Ls
     );
     res.provideCPU('regionId', regionId);
     res.provideRegionsCPU(regions);
-    return await fitRegionsGPU(res, w, h, settings);
+    // wantMembers TRUE, and it is free here: the grower above ran on CPU and
+    // provideRegionsCPU already put the regions in the residency, so
+    // regionsCPU() hands them straight back with no readback. Keeping it on
+    // means this harness entry point still produces the exact rectangle shape
+    // lsdFitVerify's recorded numbers were taken against.
+    return await fitRegionsGPU(res, w, h, settings, true);
   } finally {
     res.destroy();
   }
@@ -1001,8 +1042,16 @@ export async function computeLsdRectanglesGPU(field: GradientField, settings: Ls
 // what makes these toggles cost what the configuration implies rather than what
 // each module hardcoded: with the whole chain on GPU, fx/fy are never uploaded
 // at all and the labeling never crosses either.
+//
+// `wantMembers` decides whether the GPU fitter pays for LsdRectangle.rawMembers
+// -- four readbacks of the region CSR, and the largest byte cost left in the
+// chain. It defaults to FALSE because the pose path never looks at them; the two
+// callers that render them (see computeLsdRectanglesFromField) opt in. The CPU
+// fitter ignores the flag entirely: it is holding the regions already, so its
+// members are free either way, and that is what keeps the two fitters
+// comparable under the verify sweep.
 export async function computeLsdRectanglesAuto(
-  res: FieldResidency, w: number, h: number, settings: LsdSettings,
+  res: FieldResidency, w: number, h: number, settings: LsdSettings, wantMembers = false,
 ): Promise<LsdRectangle[]> {
   const growArgs = [
     w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
@@ -1019,7 +1068,7 @@ export async function computeLsdRectanglesAuto(
   }
 
   if (globalState.useGPULsdFit) {
-    const gpu = await fitRegionsGPU(res, w, h, settings);
+    const gpu = await fitRegionsGPU(res, w, h, settings, wantMembers);
     if (gpu) return gpu;
   }
   return fitRegionsCPU(await res.regionsCPU(), await res.cpuF64('fx'), await res.cpuF64('fy'), w, h, settings);
@@ -1070,6 +1119,12 @@ export async function createLsdChainResidency(gray: Float64Array, w: number, h: 
 
 // Stages 1 through 4: gray in, rectangles out, every intermediate left wherever
 // its producer put it.
+//
+// No `wantMembers` parameter, deliberately: this is the POSE path's entry point
+// (and the verify harness's), and neither renders per-rectangle membership.
+// Leaving it off the signature means a future caller that does need members has
+// to notice it is asking for four extra readbacks, rather than passing `true`
+// through a chain of defaults without seeing the bill.
 export async function runLsdChain(
   res: FieldResidency, w: number, h: number, settings: LsdSettings,
 ): Promise<LsdRectangle[]> {
@@ -1084,6 +1139,13 @@ export async function runLsdChain(
 // which is the whole point (see pipeline/poseCompute.ts) -- but the debug
 // overlay and the phone both compute their gradient on CPU and would gain
 // nothing from threading one through.
+//
+// Asks for rawMembers, and is the ONLY caller that does. Both of its callers
+// are display: overlays/lsdOverlay.ts paints the rejected-region raster and
+// hues each accepted rectangle by `rawMembers[0]`, and mobileCapture's
+// sendDebugInfo pass runs the same function. This is the one place the region
+// CSR still comes down, and it is off the pose path entirely -- neither caller
+// runs during a reconstruction.
 export async function computeLsdRectanglesFromField(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[]> {
   const { w, h, fx, fy } = field;
   // Not lsdChainWantsGPU(): stage 1 has already happened on CPU here, so
@@ -1092,7 +1154,7 @@ export async function computeLsdRectanglesFromField(field: GradientField, settin
   try {
     res.provideCPU('fx', fx);
     res.provideCPU('fy', fy);
-    return await computeLsdRectanglesAuto(res, w, h, settings);
+    return await computeLsdRectanglesAuto(res, w, h, settings, true);
   } finally {
     res.destroy();
   }
@@ -1131,6 +1193,13 @@ export async function computeLsdRectanglesFromField(field: GradientField, settin
 // adapt accepted rectangles into pipeline/bucketFillJoin.ts's expected input,
 // and that join walk is retired (see its header). Kept as reference alongside
 // it.
+//
+// REVIVING THIS NEEDS MORE THAN UNCOMMENTING A CALL: it reads `rawMembers`,
+// which the GPU fitter no longer populates (it hands out the shared NO_MEMBERS,
+// see fitRegionsGPU). Against a GPU-fit rectangle this would now build an
+// all -1 regionId and zero-count segments -- silently, since every loop below
+// simply iterates zero times. Restoring the members readback in fitRegionsGPU is
+// part of the cost of bringing this back.
 //
 // Its `regionId` half is the reason worth remembering: rebuilding a per-pixel
 // region buffer to SEED the walk is what forced `rawMembers` to land on the CPU

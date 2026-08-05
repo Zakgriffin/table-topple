@@ -143,12 +143,18 @@ function legalConfigs(): ChainToggles[] {
   return out;
 }
 
-function summarize(rects: LsdRectangle[]): { n: number; accepted: number; members: number } {
-  let accepted = 0, members = 0;
-  for (const r of rects) {
-    if (r.accepted) accepted++;
-    members += r.rawMembers.length;
-  }
+// `members` is passed in rather than summed off rects[].rawMembers, and that is
+// load-bearing rather than cosmetic. The production fitter stopped filling
+// rawMembers in (see pipeline/lsdSegments.ts's fitRegionsGPU), so summing it
+// here would report 0 for every fit=GPU configuration and a real total for every
+// fit=CPU one -- i.e. this harness's single most alarming-looking column would
+// show a large dMembers on exactly the configurations it exists to clear. That
+// is a false positive manufactured by the instrument, which is worse than no
+// column at all. Sourced from the residency instead, where the number is the
+// same one either side of every toggle.
+function summarize(rects: LsdRectangle[], members: number): { n: number; accepted: number; members: number } {
+  let accepted = 0;
+  for (const r of rects) if (r.accepted) accepted++;
   return { n: rects.length, accepted, members };
 }
 
@@ -199,7 +205,18 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
       const t0 = performance.now();
       const rects = await runLsdChain(res, w, h, settings);
       const ms = performance.now() - t0;
-      return { rects, ms, summary: res.summary() };
+      // ORDER MATTERS: the ledger is taken BEFORE the member readback below, so
+      // `crossings`/`bytes` still describe what the CHAIN cost rather than what
+      // verifying it cost. The production path no longer brings the region CSR
+      // down at all, so asking for it here adds a crossing that exists only for
+      // this harness -- charging it to the configuration would make every
+      // fit=GPU row look one crossing more expensive than it is, and the
+      // crossings column is one of the two things this sweep is read for.
+      // `ms` is already clear of it (measured around runLsdChain alone).
+      const summary = res.summary();
+      let members = 0;
+      for (const r of await res.regionsCPU()) members += r.members.length;
+      return { rects, ms, summary, members };
     } finally {
       res.destroy();
     }
@@ -209,21 +226,22 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
     const focusWaitMs = await awaitPageFocus();
     const configs = legalConfigs();
     const baseline = configs[0]; // all-CPU, and the source of truth every stage is verified against
-    const baseRects = (await runOnce(baseline)).rects;
-    const base = summarize(baseRects);
+    const baseRun = await runOnce(baseline);
+    const baseRects = baseRun.rects;
+    const base = summarize(baseRects, baseRun.members);
 
     // Interleaved (config-inner, rep-outer) rather than reps-inner, so a JIT
     // tier change or thermal drift shows up as spread across every
     // configuration instead of as a fake win for whichever one ran last.
     const times = new Map<string, number[]>();
-    const results = new Map<string, { rects: LsdRectangle[]; crossings: number; bytes: number } | string>();
+    const results = new Map<string, { rects: LsdRectangle[]; crossings: number; bytes: number; members: number } | string>();
     for (let rep = 0; rep < reps; rep++) {
       for (const t of configs) {
         const key = label(t);
         try {
-          const { rects, ms, summary } = await runOnce(t);
+          const { rects, ms, summary, members } = await runOnce(t);
           times.set(key, [...(times.get(key) ?? []), ms]);
-          results.set(key, { rects, crossings: summary.crossings, bytes: summary.bytes });
+          results.set(key, { rects, crossings: summary.crossings, bytes: summary.bytes, members });
         } catch (e) {
           // Keep sweeping: which OTHER configurations also fail is the most
           // useful thing to know about a residency bug.
@@ -244,7 +262,7 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
         });
         continue;
       }
-      const sum = summarize(got.rects);
+      const sum = summarize(got.rects, got.members);
       let maxCenterDelta = 0, maxLengthDelta = 0, maxNfaLog10Delta = 0;
       const pairs = Math.min(got.rects.length, baseRects.length);
       for (let i = 0; i < pairs; i++) {

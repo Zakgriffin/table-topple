@@ -190,14 +190,15 @@ export async function computeGradient2x2Composites(
 // regionId to seed the walk was the reason the GPU plan recorded that readback
 // as "not going away"; it is now going away.
 //
-// Be precise about what that does and does not mean TODAY, because it is easy
-// to bank a win that has not landed: fitRegionsGPU still calls res.regionsCPU()
-// unconditionally, because LsdRectangle.rawMembers feeds the raw-region and
-// rejected DEBUG OVERLAYS (overlays/lsdOverlay.ts). So the bytes still cross on
-// every frame. The difference is that they now cross for DISPLAY rather than
-// for the pose, which moves them into the deferred-readback bucket (perf TODO
-// item 4) instead of being a hard floor. The chain reaches one crossing when
-// that lands, not here.
+// AND IT HAS NOW GONE (2026-08-05, same day). This comment used to warn that
+// the win had not landed yet -- that fitRegionsGPU still called res.regionsCPU()
+// unconditionally to feed the raw-region and rejected debug overlays, so the
+// bytes crossed every frame regardless. That turned out to be wrong about the
+// overlays: overlays/lsdOverlay.ts recomputes its own rectangles on CPU from
+// lastNoisedPreviewGray and reads rawMembers off THAT array, never off this
+// path's. So the readback had no consumer at all and was deleted rather than
+// deferred. See fitRegionsGPU's own header in lsdSegments.ts for the full
+// consumer audit.
 //
 // `root` is the index among ACCEPTED rectangles, not among all of them. That is
 // what lsdRectanglesToBucketFillShape's own `id = segments.length` counter

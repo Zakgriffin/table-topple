@@ -75,18 +75,23 @@ async function gradientFieldCPU(res: FieldResidency, w: number, h: number): Prom
   return { fx: await res.cpuF64('fx'), fy: await res.cpuF64('fy'), w, h, r: 1 };
 }
 
-// Stages 1-6 -- gradient, the LSD chain, the join walk, and vote casting --
-// under ONE FieldResidency, which is the whole reason they are grouped into a
-// function here. It spans exactly as far as it is useful: gray goes in at the
-// top, votes come out at the bottom, and every per-pixel intermediate in
-// between is destroyed on the way out. Everything after this point in
-// computePoseFromCapture works on votes and poses, not on pixels, so extending
-// the residency past it would only hold GPU memory for no reader.
+// Stages 1-4 plus vote casting, over a FieldResidency the CALLER now owns.
+//
+// The residency used to be created and destroyed right here, on the reasoning
+// that "everything after this point works on votes and poses, not on pixels, so
+// extending it would only hold GPU memory for no reader." That was WRONG about
+// one reader: the fused decode wants `gray`, and with the residency already
+// gone it re-uploaded all 1.19MB of it, narrowing f64->f32 again on the way. So
+// the lifetime is hoisted into computePoseFromCapture and the buffer is handed
+// down to runPositionDecode.
+//
+// The rest of the reasoning stands -- the per-pixel intermediates really do have
+// no reader past this point -- but "no reader" turned out to be a claim worth
+// checking against the transfer ledger rather than asserting.
 async function computeCompositesAndVotes(
-  state: PoseComputeState, gray: Float64Array, w: number, h: number, vFovRad: number,
+  state: PoseComputeState, res: FieldResidency, gray: Float64Array, w: number, h: number, vFovRad: number,
 ): Promise<{ voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[] }> {
-  const res = await createLsdChainResidency(gray, w, h);
-  try {
+  {
     // Composite lines (bucket-fill -> join walk -> merge groups -> one line
     // per group, over the 2x2 gradient field) computed exactly once here and
     // shared by every downstream consumer that needs them -- vote casting
@@ -111,11 +116,6 @@ async function computeCompositesAndVotes(
     spanEnd(votesSpan);
 
     return { voteComposites, votes };
-  } finally {
-    // Read BEFORE destroy, and in the finally rather than the happy path, so a
-    // configuration that threw still reports the traffic it managed to incur.
-    state.lastChainTransfers = res.summary();
-    res.destroy();
   }
 }
 
@@ -135,95 +135,112 @@ export async function computePoseFromCapture(
   const vFovRad = getAnalysisVFovRad(state);
   const t0 = performance.now();
 
-  const { voteComposites, votes } = await computeCompositesAndVotes(state, gray, w, h, vFovRad);
-  state.lastVoteComposites = voteComposites;
-  state.lastVotes = votes;
-  const t1 = performance.now();
+  // Owned here rather than inside computeCompositesAndVotes so `gray` stays on
+  // the device long enough for the fused decode at the bottom to reuse it --
+  // see that function's own comment. Destroyed in the finally, which is also
+  // what makes it safe to hand a raw GPUBuffer to runPositionDecode: nothing
+  // outlives this call.
+  const res = await createLsdChainResidency(gray, w, h);
+  try {
+    const { voteComposites, votes } = await computeCompositesAndVotes(state, res, gray, w, h, vFovRad);
+    state.lastVoteComposites = voteComposites;
+    state.lastVotes = votes;
+    const t1 = performance.now();
 
-  const fitSpan = spanStart('fit (fitPairOfPlanes)');
-  let quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
-  let worldVoteIterations: number | null = null;
-  if (state.settings.useWorldVoteOrientation) {
-    // CPU-only for now, no GPU port yet -- see this session's chat.
-    const irlsSpan = spanStart('fitPairOfPlanes (IRLS, CPU)');
-    const refined = refineOrientationIRLS(votes, state.settings.weightSharpenPower, state.settings.worldVoteRefineSteps);
-    quadricPair = refined;
-    worldVoteIterations = refined?.iterations ?? null;
-    if (refined) {
-      // Rewrite each vote's OWN weight to its final combined (magnitude x
-      // residual-agreement, against the converged poles) trust -- so the
-      // rings overlay (updateGradientCirclesDebug, keyed off
-      // camera.lastVotes) visibly shows corner/noise votes faded out by
-      // however many iterations actually ran, not just their raw input
-      // gradient magnitude. Purely a display rewrite: the fit itself is
-      // already finished, nothing re-reads these weights for math.
-      let maxW = 0;
-      for (const v of votes) if (v.weight > maxW) maxW = v.weight;
-      for (const v of votes) {
-        const magnitudeWeight = maxW > 0 ? Math.pow(v.weight / maxW, state.settings.weightSharpenPower) : 0;
-        const residual = Math.abs(fourFoldResidual(v.n, refined.Drow, refined.Dcol));
-        v.weight = magnitudeWeight * THREE.MathUtils.clamp(1 - residual, 0, 1);
+    const fitSpan = spanStart('fit (fitPairOfPlanes)');
+    let quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
+    let worldVoteIterations: number | null = null;
+    if (state.settings.useWorldVoteOrientation) {
+      // CPU-only for now, no GPU port yet -- see this session's chat.
+      const irlsSpan = spanStart('fitPairOfPlanes (IRLS, CPU)');
+      const refined = refineOrientationIRLS(votes, state.settings.weightSharpenPower, state.settings.worldVoteRefineSteps);
+      quadricPair = refined;
+      worldVoteIterations = refined?.iterations ?? null;
+      if (refined) {
+        // Rewrite each vote's OWN weight to its final combined (magnitude x
+        // residual-agreement, against the converged poles) trust -- so the
+        // rings overlay (updateGradientCirclesDebug, keyed off
+        // camera.lastVotes) visibly shows corner/noise votes faded out by
+        // however many iterations actually ran, not just their raw input
+        // gradient magnitude. Purely a display rewrite: the fit itself is
+        // already finished, nothing re-reads these weights for math.
+        let maxW = 0;
+        for (const v of votes) if (v.weight > maxW) maxW = v.weight;
+        for (const v of votes) {
+          const magnitudeWeight = maxW > 0 ? Math.pow(v.weight / maxW, state.settings.weightSharpenPower) : 0;
+          const residual = Math.abs(fourFoldResidual(v.n, refined.Drow, refined.Dcol));
+          v.weight = magnitudeWeight * THREE.MathUtils.clamp(1 - residual, 0, 1);
+        }
       }
+      spanEnd(irlsSpan);
+    } else {
+      // Same fallback pattern as every other GPU sub-pipeline: fitPairOfPlanes
+      // stays the source of truth, the GPU version is verified against it.
+      const fitOnlySpan = spanStart(globalState.useGPUFit ? 'fitPairOfPlanes (GPU)' : 'fitPairOfPlanes (CPU)');
+      quadricPair = globalState.useGPUFit
+        ? (await fitPairOfPlanesGPU(votes, state.settings.weightSharpenPower))
+          ?? fitPairOfPlanes(votes, state.settings.weightSharpenPower)
+        : fitPairOfPlanes(votes, state.settings.weightSharpenPower);
+      spanEnd(fitOnlySpan);
     }
-    spanEnd(irlsSpan);
-  } else {
-    // Same fallback pattern as every other GPU sub-pipeline: fitPairOfPlanes
-    // stays the source of truth, the GPU version is verified against it.
-    const fitOnlySpan = spanStart(globalState.useGPUFit ? 'fitPairOfPlanes (GPU)' : 'fitPairOfPlanes (CPU)');
-    quadricPair = globalState.useGPUFit
-      ? (await fitPairOfPlanesGPU(votes, state.settings.weightSharpenPower))
-        ?? fitPairOfPlanes(votes, state.settings.weightSharpenPower)
-      : fitPairOfPlanes(votes, state.settings.weightSharpenPower);
-    spanEnd(fitOnlySpan);
+    spanEnd(fitSpan);
+    const t2 = performance.now();
+
+    const poseAssemblySpan = spanStart('poseAssembly');
+    let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
+    if (quadricPair) {
+      const normalForHandedness = quadricPair.Dnormal.clone();
+      if (cornerDir(0, 0, MATH_QUAT, vFovRad, state.aspect).dot(normalForHandedness) > 0) normalForHandedness.negate();
+      rowDirRecovered = quadricPair.Drow.clone();
+      colDirRecovered = quadricPair.Dcol.clone();
+      const handedness = rowDirRecovered.clone().cross(colDirRecovered).dot(normalForHandedness);
+      if (handedness > 0) colDirRecovered.negate();
+    }
+    // Captured AFTER handedness correction (matching what axesReconstruction.ts's
+    // pole markers actually rendered pre-refactor off their own local
+    // rowDirRecovered/colDirRecovered vars) but BEFORE gridPeriodPhase's
+    // period-search gating -- so pole markers still have something to render
+    // off even when gridPeriodPhase fails below and lastRecoveredAxes ends up
+    // null. Deliberately NOT the raw pre-handedness-correction quadricPair.
+    state.lastQuadricPair = (quadricPair && rowDirRecovered && colDirRecovered)
+      ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal }
+      : null;
+    spanEnd(poseAssemblySpan);
+    const t3 = performance.now();
+
+    // Grid period/phase is the SOLE source of state.lastRecoveredAxes.distance
+    // -- runs unconditionally whenever a quadric pair was found (real distance
+    // depends on it).
+    const gppSpan = spanStart('gridPeriodPhase (distance source)');
+    const gpp = rowDirRecovered && colDirRecovered && quadricPair
+      ? await computeGridPeriodPhase(
+          voteComposites, gray, w, h, MATH_QUAT, vFovRad, state.aspect,
+          rowDirRecovered, colDirRecovered, quadricPair.Dnormal, GRID_STEP,
+          state.settings.minGrazingCos,
+        )
+      : null;
+    state.lastGridPeriodPhase = gpp;
+    spanEnd(gppSpan);
+    const t4 = performance.now();
+
+    state.lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair && gpp
+      ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: gpp.height ?? 1 }
+      : null;
+
+    const decodeSpan = spanStart('positionDecode');
+    // Hand down the chain's own gray buffer when there IS one -- the residency has
+    // no device on an all-CPU chain, and `gray` is only device-resident if some
+    // stage put it there. Null just means decode uploads its own, as before.
+    const sharedGray = res.device && res.hasGPU('gray') ? res.gpu('gray') : null;
+    await runPositionDecode(state, gray, w, h, vFovRad, sharedGray);
+    spanEnd(decodeSpan);
+    const t5 = performance.now();
+
+    return { votesMs: t1 - t0, fitMs: t2 - t1, poseMs: t3 - t2, distanceMs: t4 - t3, decodeMs: t5 - t4, worldVoteIterations };
+  } finally {
+    // Read BEFORE destroy, and in the finally rather than the happy path, so a
+    // configuration that threw still reports the traffic it managed to incur.
+    state.lastChainTransfers = res.summary();
+    res.destroy();
   }
-  spanEnd(fitSpan);
-  const t2 = performance.now();
-
-  const poseAssemblySpan = spanStart('poseAssembly');
-  let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
-  if (quadricPair) {
-    const normalForHandedness = quadricPair.Dnormal.clone();
-    if (cornerDir(0, 0, MATH_QUAT, vFovRad, state.aspect).dot(normalForHandedness) > 0) normalForHandedness.negate();
-    rowDirRecovered = quadricPair.Drow.clone();
-    colDirRecovered = quadricPair.Dcol.clone();
-    const handedness = rowDirRecovered.clone().cross(colDirRecovered).dot(normalForHandedness);
-    if (handedness > 0) colDirRecovered.negate();
-  }
-  // Captured AFTER handedness correction (matching what axesReconstruction.ts's
-  // pole markers actually rendered pre-refactor off their own local
-  // rowDirRecovered/colDirRecovered vars) but BEFORE gridPeriodPhase's
-  // period-search gating -- so pole markers still have something to render
-  // off even when gridPeriodPhase fails below and lastRecoveredAxes ends up
-  // null. Deliberately NOT the raw pre-handedness-correction quadricPair.
-  state.lastQuadricPair = (quadricPair && rowDirRecovered && colDirRecovered)
-    ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal }
-    : null;
-  spanEnd(poseAssemblySpan);
-  const t3 = performance.now();
-
-  // Grid period/phase is the SOLE source of state.lastRecoveredAxes.distance
-  // -- runs unconditionally whenever a quadric pair was found (real distance
-  // depends on it).
-  const gppSpan = spanStart('gridPeriodPhase (distance source)');
-  const gpp = rowDirRecovered && colDirRecovered && quadricPair
-    ? await computeGridPeriodPhase(
-        voteComposites, gray, w, h, MATH_QUAT, vFovRad, state.aspect,
-        rowDirRecovered, colDirRecovered, quadricPair.Dnormal, GRID_STEP,
-        state.settings.minGrazingCos,
-      )
-    : null;
-  state.lastGridPeriodPhase = gpp;
-  spanEnd(gppSpan);
-  const t4 = performance.now();
-
-  state.lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair && gpp
-    ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: gpp.height ?? 1 }
-    : null;
-
-  const decodeSpan = spanStart('positionDecode');
-  await runPositionDecode(state, gray, w, h, vFovRad);
-  spanEnd(decodeSpan);
-  const t5 = performance.now();
-
-  return { votesMs: t1 - t0, fitMs: t2 - t1, poseMs: t3 - t2, distanceMs: t4 - t3, decodeMs: t5 - t4, worldVoteIterations };
 }

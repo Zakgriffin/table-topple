@@ -10,7 +10,7 @@ import { awaitPageFocus } from './lsdChainVerify.ts';
 
 // ── Dev harness: what does ONE WHOLE RECONSTRUCTION cost? ─────────────────
 //
-//   await timeReconstruction()          // 5 reps, default
+//   await timeReconstruction()          // 9 timed reps after an adaptive warm-up
 //   await timeReconstruction(null, 9)
 //
 // This is the instrument the 2026-08-05 perf plan is blocked on, and it exists
@@ -79,7 +79,22 @@ export interface ReconstructionTimingReport {
   cameraKind: 'simulated' | 'physical';
 
   // ── the headline ──
+  //
+  // TWO statistics, because they answer different questions and the second is
+  // the one to compare code changes with.
+  //
+  // poseMedianMs is what a reconstruction typically costs -- the user-facing
+  // number, and the one to quote for "how fast is the pipeline".
+  //
+  // poseMinMs is the least-contaminated sample: no rAF frame landed mid-rep, no
+  // GC, no scheduler interference. Measured spread here is 15-38% while the
+  // MINIMUM is stable across runs, which makes the min the sensitive instrument
+  // for "did that change help" even though it flatters the pipeline. The spread
+  // is not noise to average away -- 16 fences per rep are 16 browser-scheduled
+  // mapAsync callbacks, and whether a rep straddles a frame boundary is exactly
+  // the rAF-alignment effect the perf plan lists as item 11.
   poseMedianMs: number;
+  poseMinMs: number;
   poseMsAll: number[];
   // computePoseFromCapture's own per-stage breakdown, median over reps.
   stageMedianMs: { votes: number; fit: number; pose: number; distance: number; decode: number };
@@ -111,9 +126,27 @@ export interface ReconstructionTimingReport {
   consistency: number | null;
   distance: number | null;
 
+  // ── did this run actually reach steady state ──
+  warmupMs: number[]; // untimed warm-up reps, in order -- should be visibly descending then flat
+  warmedUp: boolean;  // false means WARMUP_MAX hit while still improving; the reps below are still warming
+  // Interquartile range over median, as a percent -- a ROBUST spread, so one
+  // scheduler hiccup does not define the whole run's credibility the way a
+  // max-minus-min does. The harness's own noise floor, measured rather than
+  // assumed: do not believe a median-to-median change smaller than this.
+  spreadPct: number;
+
   focusWaitMs: number;
   focusedThroughout: boolean;
   profilerWasOn: boolean; // if true, this run is invalid -- see the restore below
+}
+
+// Interquartile range. Nearest-rank quartiles rather than interpolated -- with
+// 9 reps the difference is noise, and this way the number is always one real
+// sample minus another.
+function iqr(xs: number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  if (s.length < 4) return s.length ? s[s.length - 1] - s[0] : 0;
+  return s[Math.floor(s.length * 0.75)] - s[Math.floor(s.length * 0.25)];
 }
 
 function median(xs: number[]): number {
@@ -165,7 +198,7 @@ function groupLedger(samples: readonly TransferSample[]): TransferGroup[] {
 }
 
 export async function timeReconstruction(
-  camera?: Camera | null, reps = 5,
+  camera?: Camera | null, reps = 9,
 ): Promise<ReconstructionTimingReport | string> {
   camera = camera ?? activeCamera() ?? null;
   if (!camera) return 'no active camera';
@@ -184,12 +217,40 @@ export async function timeReconstruction(
   try {
     const focusWaitMs = await awaitPageFocus();
 
-    // One untimed warm-up: first-call shader compilation is on the order of
-    // 88ms for the fused decode alone (measured, see the plan file), which
-    // would dominate rep 0 and drag a mean without ever touching the median.
-    // Timing the median of N would survive it; reporting poseMsAll honestly
-    // would not, and the array is there to be read.
-    await computePoseFromCapture(freshState(camera), gray, w, h);
+    // ── Warm-up, until it stops getting faster ──────────────────────────────
+    //
+    // ONE warm-up rep was not enough and the first two real runs of this harness
+    // proved it: identical code and an identical capture measured 39.4ms and
+    // then 30.1ms, a 24% swing that dwarfs the +-2-3ms noise floor recorded for
+    // verifyLsdChain. That is not variance to average away, it is a TREND --
+    // shader compilation (~88ms for the fused decode alone) plus V8 tiering,
+    // which keeps improving for several iterations, not one.
+    //
+    // A fixed larger count would work but has to be guessed. This instead runs
+    // until the improvement stops, which is well defined here because warm-up is
+    // MONOTONE: tiering only ever makes it faster, so the running MINIMUM is a
+    // clean progress signal in a way the median or mean is not (either can move
+    // either direction on noise alone). Stop once a whole batch fails to beat
+    // the best by more than WARMUP_IMPROVE, i.e. the floor has stopped falling.
+    //
+    // The min is used ONLY to decide when to stop. The reported number is still
+    // the median of the timed reps that follow, because a minimum is a
+    // best-case and this is supposed to report a typical reconstruction.
+    const WARMUP_BATCH = 3, WARMUP_MAX = 18, WARMUP_IMPROVE = 0.02;
+    const warmupMs: number[] = [];
+    let best = Infinity, warmedUp = false;
+    while (warmupMs.length < WARMUP_MAX) {
+      let improved = false;
+      for (let i = 0; i < WARMUP_BATCH && warmupMs.length < WARMUP_MAX; i++) {
+        const t = performance.now();
+        await computePoseFromCapture(freshState(camera), gray, w, h);
+        const ms = performance.now() - t;
+        warmupMs.push(ms);
+        if (ms < best * (1 - WARMUP_IMPROVE)) { best = Math.min(best, ms); improved = true; }
+        else best = Math.min(best, ms);
+      }
+      if (!improved) { warmedUp = true; break; }
+    }
 
     const poseMsAll: number[] = [];
     const stages = { votes: [] as number[], fit: [] as number[], pose: [] as number[], distance: [] as number[], decode: [] as number[] };
@@ -197,18 +258,25 @@ export async function timeReconstruction(
     let last: PoseComputeState | null = null;
     let fences = 0, transferBytes = 0, transferMs = 0;
 
-    for (let rep = 0; rep < reps; rep++) {
-      // Capture is measured but its output is DISCARDED -- the pose reps all
-      // run on the same cached `gray` so that every rep is the same
-      // computation. Re-capturing per rep would re-render the scene and make
-      // each rep a slightly different input, which is the wrong tradeoff for a
-      // timing harness even though it is closer to what the app does.
-      if (isSimulated(camera)) {
+    // Capture is timed in its OWN loop, BEFORE the pose reps, and its output is
+    // discarded. Interleaving the two (which this did first) was a real
+    // methodological bug, not a style choice: captureDistortedGrayscale renders
+    // the RT and runs ~36ms of supersampled CPU filtering, which evicts cache
+    // and leaves the GPU queue in a different state than the pose stage would
+    // otherwise see. The symptom was unmissable once warm-up was fixed -- the
+    // warm-up tail (no capture between reps) settled around 20ms while the timed
+    // reps (capture between reps) sat at 27.7ms, measuring the same code on the
+    // same input. Whichever of those is "right", they cannot both be, and the
+    // one contaminated by an unrelated 36ms of work is the wrong one.
+    if (isSimulated(camera)) {
+      for (let rep = 0; rep < reps; rep++) {
         const t0 = performance.now();
         captureDistortedGrayscale(camera);
         captureMs.push(performance.now() - t0);
       }
+    }
 
+    for (let rep = 0; rep < reps; rep++) {
       const state = freshState(camera);
       transferLedgerReset();
       const t0 = performance.now();
@@ -269,6 +337,10 @@ export async function timeReconstruction(
       votes: last?.lastVotes?.length ?? 0,
       consistency: pd ? pd.consistency : null,
       distance: last?.lastRecoveredAxes?.distance ?? null,
+      warmupMs,
+      warmedUp,
+      poseMinMs: Math.min(...poseMsAll),
+      spreadPct: poseMedianMs > 0 ? (iqr(poseMsAll) / poseMedianMs) * 100 : 0,
       focusWaitMs,
       // Checked at the END as well as the start: focus can be lost mid-run, and
       // if it was, every millisecond above is garbage. Same gate verifyLsdChain
@@ -293,9 +365,13 @@ export function formatReconstructionTiming(r: ReconstructionTimingReport | strin
   if (!r.ok) warn.push('!! ok=false -- the pipeline did not produce a pose. TIMING IS MEANINGLESS.');
   if (!r.focusedThroughout) warn.push('!! focus was lost mid-run -- every ms below is invalid.');
   if (r.profilerWasOn) warn.push('note: profiler was on before this run; it was forced off and restored.');
+  if (!r.warmedUp) warn.push(`!! never reached steady state in ${r.warmupMs.length} warm-up reps -- still speeding up, treat as an upper bound.`);
+  if (r.spreadPct > 12) warn.push(`!! IQR spread ${r.spreadPct.toFixed(0)}% across reps -- this run cannot resolve a change smaller than that.`);
   lines.push(...warn);
-  lines.push(`reconstruction: ${r.poseMedianMs.toFixed(1)}ms median of ${r.reps}  (${r.w}x${r.h}, ${r.cameraKind})`);
-  lines.push(`  reps: ${r.poseMsAll.map((m) => m.toFixed(1)).join(', ')}`);
+  lines.push(`reconstruction: ${r.poseMedianMs.toFixed(1)}ms median / ${r.poseMinMs.toFixed(1)}ms min of ${r.reps}  (${r.w}x${r.h}, ${r.cameraKind})`);
+  lines.push(`  compare changes on the MIN; quote the MEDIAN.`);
+  lines.push(`  reps: ${r.poseMsAll.map((m) => m.toFixed(1)).join(', ')}   (IQR spread ${r.spreadPct.toFixed(0)}%)`);
+  lines.push(`  warm-up (${r.warmupMs.length} reps, ${r.warmedUp ? 'settled' : 'NOT settled'}): ${r.warmupMs.map((m) => m.toFixed(1)).join(', ')}`);
   const s = r.stageMedianMs;
   lines.push(`  stages: votes ${s.votes.toFixed(1)}  fit ${s.fit.toFixed(1)}  pose ${s.pose.toFixed(1)}  distance ${s.distance.toFixed(1)}  decode ${s.decode.toFixed(1)}`);
   if (r.captureMedianMs !== null) lines.push(`  capture+preprocess: ${r.captureMedianMs.toFixed(1)}ms (SIMULATED ONLY, not in the median above)`);

@@ -719,7 +719,13 @@ export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array
 
 // Decodes the camera's absolute world position -- see pre-Stage-A history
 // for the full derivation.
-export async function runPositionDecode(camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number) {
+export async function runPositionDecode(
+  camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number,
+  // The LSD chain's device-resident gray, when the chain ran on GPU and its
+  // residency is still alive. Purely an optimization -- null means decode
+  // uploads its own copy exactly as it always did.
+  sharedGray?: GPUBuffer | null,
+) {
   // ── Fused GPU path: grid built on device, tally consumes it in place ────
   //
   // Distinct from useGPUDecode (which only moves the TALLY, and still packs and
@@ -766,7 +772,7 @@ export async function runPositionDecode(camera: PoseCameraLike, gray: Float64Arr
   if (globalState.useGPUDecodeFused) {
     const fusedSpan = spanStart('decode (fused GPU build+tally)');
     const layout = decodeGridLayout(camera, gray, vFovRad);
-    const fused = layout ? await buildAndTallyDecodeGPU(layout, gray, w, h) : null;
+    const fused = layout ? await buildAndTallyDecodeGPU(layout, gray, w, h, sharedGray) : null;
     if (layout && fused) {
       try {
         const built = await fused.readGrid();

@@ -112,8 +112,19 @@ export interface FusedDecodeResult {
 //
 // Returns null if WebGPU is unavailable or a dispatch failed validation; the
 // caller falls back to the CPU pair, which stays the source of truth.
+// `sharedGray`, when given, is a gray buffer ALREADY on the device -- the LSD
+// chain's own, handed down by pipeline/poseCompute.ts. Passing it skips a second
+// 1.19MB upload of numbers that are already sitting in GPU memory, plus the
+// f64->f32 narrowing loop in front of it; measured together at ~0.8ms of the
+// ~2.1ms of byte-proportional cost in the whole reconstruction, i.e. this one
+// duplicate was about a third of it.
+//
+// Ownership does NOT transfer: a shared buffer belongs to the residency and is
+// destroyed with it, so this must not destroy it. Only the buffer it uploaded
+// itself gets dropped below.
 export async function buildAndTallyDecodeGPU(
   layout: DecodeGridLayout, gray: Float64Array, w: number, h: number,
+  sharedGray?: GPUBuffer | null,
 ): Promise<FusedDecodeResult | null> {
   const device = await getGPUDevice();
   if (!device) return null;
@@ -122,7 +133,8 @@ export async function buildAndTallyDecodeGPU(
 
   const { rows, cols } = layout;
   const cells = rows * cols;
-  const grayBuf = uploadFloat32(device, new Float32Array(gray), 0, 'decode:gray');
+  const ownGray = sharedGray ? null : uploadFloat32(device, new Float32Array(gray), 0, 'decode:gray');
+  const grayBuf = sharedGray ?? ownGray!;
   const packedBuf = createStorageBuffer(device, cells * 4);
   const geomBuf = createStorageBuffer(device, cells * 16);
   const uniBuf = uploadUniform(device, buildUniforms(layout, w, h));
@@ -146,8 +158,9 @@ export async function buildAndTallyDecodeGPU(
     device.queue.submit([encoder.finish()]);
   }
   // gray is only needed by the build pass; drop it before the tally so the
-  // largest buffer in flight isn't held across the rest of the sequence.
-  grayBuf.destroy();
+  // largest buffer in flight isn't held across the rest of the sequence. Only
+  // ever OUR copy -- a shared buffer is the residency's to free.
+  ownGray?.destroy();
 
   const winner = await tallyFromDeviceGrid(device, packedBuf, rows, cols);
   if (!winner) {

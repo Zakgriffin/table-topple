@@ -8,17 +8,25 @@ import { yawFromDirection } from './frame.ts';
 // once per frame gives smooth motion and free diagonals.
 const held = new Set<string>();
 
-addEventListener('keydown', (e) => {
-  // Leave browser/OS chords alone -- Cmd+R must still reload rather than
-  // registering a held 'r'.
-  if (e.metaKey || e.ctrlKey || e.altKey) return;
-  held.add(e.code);
-});
-addEventListener('keyup', (e) => held.delete(e.code));
-// A window that loses focus never delivers the keyup, so the key would stay
-// "held" forever and the player would walk into the wall while you're in
-// another tab.
-addEventListener('blur', () => held.clear());
+/**
+ * Starts listening for the movement keys. Called by the standalone page's
+ * boot, and by nothing else: a host that isn't the game's own page has its own
+ * claim on the keyboard, and until this runs the set below simply stays empty,
+ * so moveAxes reports no input rather than needing a mode flag.
+ */
+export function wireKeys() {
+  addEventListener('keydown', (e) => {
+    // Leave browser/OS chords alone -- Cmd+R must still reload rather than
+    // registering a held 'r'.
+    if (e.metaKey || e.ctrlKey || e.altKey) return;
+    held.add(e.code);
+  });
+  addEventListener('keyup', (e) => held.delete(e.code));
+  // A window that loses focus never delivers the keyup, so the key would stay
+  // "held" forever and the player would walk into the wall while you're in
+  // another tab.
+  addEventListener('blur', () => held.clear());
+}
 
 const forward = new THREE.Vector3();
 

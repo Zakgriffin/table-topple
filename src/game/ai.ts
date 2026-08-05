@@ -198,10 +198,16 @@ export function updateAI(dt: number) {
 
 // ── UI ────────────────────────────────────────────────────────────────────
 
-const button = document.getElementById('battleToggle') as HTMLButtonElement;
-button.addEventListener('click', () => {
-  setBattle(!battleOn);
-  button.classList.toggle('active', battleOn);
-  button.textContent = battleOn ? 'battle: on' : 'battle: off';
-  button.blur();
-});
+/** Adopts the battle switch, if the host page has one. A host without it can
+ *  still start a fight -- setBattle() above is the actual control, and the
+ *  button is only one way to reach it. */
+export function wireBattleButton() {
+  const button = document.getElementById('battleToggle') as HTMLButtonElement | null;
+  if (!button) return;
+  button.addEventListener('click', () => {
+    setBattle(!battleOn);
+    button.classList.toggle('active', battleOn);
+    button.textContent = battleOn ? 'battle: on' : 'battle: off';
+    button.blur();
+  });
+}

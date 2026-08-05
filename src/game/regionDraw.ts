@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { camera, canvas, scene } from './scene.ts';
+import { camera, scene } from './scene.ts';
 import { mode } from './mode.ts';
 import { BOARD_SIZE, COLOR_TEAM_RED } from './constants.ts';
 import { CHARACTER_HALF_WIDTH } from './character.ts';
@@ -107,33 +107,44 @@ function commit() {
   you.moveTarget = target;
 }
 
-canvas.addEventListener('pointerdown', (e) => {
-  if (mode !== 'path' || e.button !== 0) return;
-  if (!pointerToGround(e, scratch)) return;
-  // Starting a new stroke abandons the previous region, drawn or committed --
-  // the newest instruction wins.
-  clearRegion();
-  drawing = true;
-  // Capture, so a drag that leaves the window still delivers move/up here and
-  // can't strand the tool mid-stroke.
-  canvas.setPointerCapture(e.pointerId);
-  pushPoint(scratch);
-});
+/**
+ * Starts listening for path strokes on the game's own canvas.
+ *
+ * Unlike aim.ts these listeners are canvas-local, so an unwired host is in no
+ * danger from them -- but the canvas is still something only the standalone
+ * page has, and taking it as an argument is what keeps this module off
+ * view.ts's import path. Never wired means `path` mode is simply unreachable,
+ * and the ribbon added to the scene above stays hidden for the whole session.
+ */
+export function wireRegionDraw(canvas: HTMLElement) {
+  canvas.addEventListener('pointerdown', (e) => {
+    if (mode !== 'path' || e.button !== 0) return;
+    if (!pointerToGround(e, scratch)) return;
+    // Starting a new stroke abandons the previous region, drawn or committed --
+    // the newest instruction wins.
+    clearRegion();
+    drawing = true;
+    // Capture, so a drag that leaves the window still delivers move/up here and
+    // can't strand the tool mid-stroke.
+    canvas.setPointerCapture(e.pointerId);
+    pushPoint(scratch);
+  });
 
-canvas.addEventListener('pointermove', (e) => {
-  if (!drawing) return;
-  // Switching mode mid-stroke hands the mouse elsewhere; the stroke it was in
-  // the middle of is abandoned, not committed.
-  if (mode !== 'path') { clearRegion(); return; }
-  if (pointerToGround(e, scratch)) pushPoint(scratch);
-});
+  canvas.addEventListener('pointermove', (e) => {
+    if (!drawing) return;
+    // Switching mode mid-stroke hands the mouse elsewhere; the stroke it was in
+    // the middle of is abandoned, not committed.
+    if (mode !== 'path') { clearRegion(); return; }
+    if (pointerToGround(e, scratch)) pushPoint(scratch);
+  });
 
-canvas.addEventListener('pointerup', (e) => {
-  if (!drawing) return;
-  if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
-  commit();
-});
+  canvas.addEventListener('pointerup', (e) => {
+    if (!drawing) return;
+    if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
+    commit();
+  });
 
-// A cancelled pointer (OS gesture, focus loss) is an abandoned stroke, not a
-// destination -- drop it rather than committing a half-drawn shape.
-canvas.addEventListener('pointercancel', clearRegion);
+  // A cancelled pointer (OS gesture, focus loss) is an abandoned stroke, not a
+  // destination -- drop it rather than committing a half-drawn shape.
+  canvas.addEventListener('pointercancel', clearRegion);
+}

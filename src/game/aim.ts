@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { camera, canvas } from './scene.ts';
+import { camera } from './scene.ts';
 import { equipped, mode, onModeChange, onWeaponChange, setMode } from './mode.ts';
 import { equipWeapon, holdingArm, WEAPONS } from './weapons.ts';
 import { you } from './denizens.ts';
@@ -51,12 +51,19 @@ const BODY_TURN_RATE = 9;
 const PITCH_MIN = -2.7, PITCH_MAX = 0.5;
 const YAW_MIN = -1.1, YAW_MAX = 1.1;
 
-const locked = () => document.pointerLockElement === canvas;
+// All three are claimed by wireAim() and stay null otherwise -- see its own
+// comment. Every read below is guarded, so an unwired host aims at nothing and
+// draws no reticle rather than throwing on a missing element.
+let canvas: HTMLElement | null = null;
+let crosshair: HTMLDivElement | null = null;
+let chargeRing: HTMLDivElement | null = null;
 
-const crosshair = document.getElementById('crosshair') as HTMLDivElement;
+const locked = () => canvas !== null && document.pointerLockElement === canvas;
 
-/** Reticle position in CSS pixels. Starts centered. */
-const reticle = { x: innerWidth / 2, y: innerHeight / 2 };
+/** Reticle position in CSS pixels. Centered by wireAim rather than here, so
+ *  that merely importing this module reads nothing off the window -- entering
+ *  fight mode re-centers it anyway, and nothing reads it before then. */
+const reticle = { x: 0, y: 0 };
 
 let engaged = false;
 
@@ -101,69 +108,89 @@ export function handPosition(d: Denizen, out: THREE.Vector3): THREE.Vector3 {
 
 // ── Input ─────────────────────────────────────────────────────────────────
 
-addEventListener('mousemove', (e) => {
-  if (!locked() || mode !== 'fight') return;
-  // movementX/Y, not clientX/Y: under pointer lock the cursor has no position,
-  // only deltas. The reticle is our own cursor, so it also has to be held
-  // inside the window by hand.
-  reticle.x = THREE.MathUtils.clamp(reticle.x + e.movementX * SENSITIVITY, 0, innerWidth);
-  reticle.y = THREE.MathUtils.clamp(reticle.y + e.movementY * SENSITIVITY, 0, innerHeight);
-});
+/**
+ * Hands this module the game canvas and the reticle elements, and starts
+ * listening.
+ *
+ * A call rather than import-time wiring, because the listeners below are on
+ * the WINDOW, not on the canvas -- a pointer lock delivers its deltas nowhere
+ * else. Attaching them at import would install them on any page that so much
+ * as runs the simulation, and on the capture page that means every tap on the
+ * shutter also engages a weapon. Never called there; the aim path then simply
+ * reports "not engaged" forever, which is exactly what an overlay with no
+ * player wants.
+ */
+export function wireAim(gameCanvas: HTMLElement) {
+  canvas = gameCanvas;
+  crosshair = document.getElementById('crosshair') as HTMLDivElement | null;
+  chargeRing = document.getElementById('charge') as HTMLDivElement | null;
+  reticle.x = innerWidth / 2;
+  reticle.y = innerHeight / 2;
 
-// A resize can strand the reticle outside the new viewport.
-addEventListener('resize', () => {
-  reticle.x = THREE.MathUtils.clamp(reticle.x, 0, innerWidth);
-  reticle.y = THREE.MathUtils.clamp(reticle.y, 0, innerHeight);
-});
+  addEventListener('mousemove', (e) => {
+    if (!locked() || mode !== 'fight') return;
+    // movementX/Y, not clientX/Y: under pointer lock the cursor has no position,
+    // only deltas. The reticle is our own cursor, so it also has to be held
+    // inside the window by hand.
+    reticle.x = THREE.MathUtils.clamp(reticle.x + e.movementX * SENSITIVITY, 0, innerWidth);
+    reticle.y = THREE.MathUtils.clamp(reticle.y + e.movementY * SENSITIVITY, 0, innerHeight);
+  });
 
-// pointerdown/up rather than mousedown/up: pointer events already cover touch,
-// so the same press-drag-release path works unchanged on a phone later.
-addEventListener('pointerdown', (e) => {
-  if (mode !== 'fight' || e.button !== 0) return;
-  engaged = true;
-});
-const disengage = () => { engaged = false; };
-addEventListener('pointerup', disengage);
-addEventListener('pointercancel', disengage);
-// A window that loses focus never delivers the release, which would otherwise
-// leave the weapon stuck under manual control with nothing driving it.
-addEventListener('blur', disengage);
+  // A resize can strand the reticle outside the new viewport.
+  addEventListener('resize', () => {
+    reticle.x = THREE.MathUtils.clamp(reticle.x, 0, innerWidth);
+    reticle.y = THREE.MathUtils.clamp(reticle.y, 0, innerHeight);
+  });
 
-onModeChange((next) => {
-  engaged = false;
-  if (next === 'fight') {
-    equipWeapon(you, equipped());
-    // Re-center, so a fight always opens aiming straight ahead rather than
-    // wherever the reticle happened to be left.
-    reticle.x = innerWidth / 2;
-    reticle.y = innerHeight / 2;
-    // Can reject (no user activation, or a lock released moments ago). Not
-    // fatal -- the weapon is still drawn and aimable the instant a lock does
-    // land -- so swallow it rather than letting it surface as an unhandled
-    // rejection.
-    void canvas.requestPointerLock?.()?.catch?.(() => {});
-  } else {
-    equipWeapon(you, null);
-    if (locked()) document.exitPointerLock();
-  }
-  crosshair.style.display = next === 'fight' ? 'block' : 'none';
-});
+  // pointerdown/up rather than mousedown/up: pointer events already cover touch,
+  // so the same press-drag-release path works unchanged on a phone later.
+  addEventListener('pointerdown', (e) => {
+    if (mode !== 'fight' || e.button !== 0) return;
+    engaged = true;
+  });
+  const disengage = () => { engaged = false; };
+  addEventListener('pointerup', disengage);
+  addEventListener('pointercancel', disengage);
+  // A window that loses focus never delivers the release, which would otherwise
+  // leave the weapon stuck under manual control with nothing driving it.
+  addEventListener('blur', disengage);
 
-// Swapping weapons WHILE already fighting. Without this, only the first 1/2/3
-// did anything: entering fight mode equips via the mode change above, but a
-// later press stays in fight mode, so nothing was listening and the old weapon
-// simply stayed in hand.
-onWeaponChange((key) => {
-  if (mode === 'fight') equipWeapon(you, key);
-});
+  onModeChange((next) => {
+    engaged = false;
+    if (next === 'fight') {
+      equipWeapon(you, equipped());
+      // Re-center, so a fight always opens aiming straight ahead rather than
+      // wherever the reticle happened to be left.
+      reticle.x = innerWidth / 2;
+      reticle.y = innerHeight / 2;
+      // Can reject (no user activation, or a lock released moments ago). Not
+      // fatal -- the weapon is still drawn and aimable the instant a lock does
+      // land -- so swallow it rather than letting it surface as an unhandled
+      // rejection.
+      void canvas?.requestPointerLock?.()?.catch?.(() => {});
+    } else {
+      equipWeapon(you, null);
+      if (locked()) document.exitPointerLock();
+    }
+    if (crosshair) crosshair.style.display = next === 'fight' ? 'block' : 'none';
+  });
 
-// Escape never reaches our keydown handler while the pointer is locked -- the
-// browser consumes it to release the lock. Catching the release here is what
-// makes Escape still mean "back to camera", and it also covers the other ways
-// a lock can end (tab switch, window manager).
-document.addEventListener('pointerlockchange', () => {
-  if (!locked() && mode === 'fight') setMode('camera');
-});
+  // Swapping weapons WHILE already fighting. Without this, only the first 1/2/3
+  // did anything: entering fight mode equips via the mode change above, but a
+  // later press stays in fight mode, so nothing was listening and the old weapon
+  // simply stayed in hand.
+  onWeaponChange((key) => {
+    if (mode === 'fight') equipWeapon(you, key);
+  });
+
+  // Escape never reaches our keydown handler while the pointer is locked -- the
+  // browser consumes it to release the lock. Catching the release here is what
+  // makes Escape still mean "back to camera", and it also covers the other ways
+  // a lock can end (tab switch, window manager).
+  document.addEventListener('pointerlockchange', () => {
+    if (!locked() && mode === 'fight') setMode('camera');
+  });
+}
 
 // ── Pose ──────────────────────────────────────────────────────────────────
 
@@ -243,13 +270,11 @@ function swingOffset(t: number): number {
     : -0.9 + 2.1 * ((u - 0.33) / 0.67) ** 0.7;
 }
 
-const chargeRing = document.getElementById('charge') as HTMLDivElement;
-
 /** Moves the on-screen crosshair to the reticle and fills its charge ring.
  *  Driven per frame rather than from the mousemove handler so it can't run
- *  ahead of the rendered frame. */
+ *  ahead of the rendered frame. No-op on a host with no reticle to move. */
 export function updateCrosshair(charge: number) {
-  if (mode !== 'fight') return;
+  if (mode !== 'fight' || !crosshair || !chargeRing) return;
   crosshair.style.transform =
     `translate(${reticle.x}px, ${reticle.y}px) translate(-50%, -50%)`;
   chargeRing.style.setProperty('--charge', String(charge));

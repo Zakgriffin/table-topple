@@ -47,7 +47,7 @@
 
 import { GrownRegion } from '../pipeline/lsdSegments.ts';
 import {
-  createStorageBuffer, getGPUDevice, readFloat32, readUint32, uploadFloat32, uploadUint32,
+  createStorageBuffer, getGPUDevice, readFloat32, readUint32, recordTransfer, uploadFloat32, uploadUint32,
 } from './device.ts';
 
 // The per-pixel scalar fields of the chain. Each is exactly `n` elements.
@@ -187,10 +187,25 @@ export class FieldResidency {
     // a CPU copy exists, and since fields are single-assignment that copy stays
     // current forever, so cpu() below will always short-circuit to it and never
     // try to download this buffer.
+    // The f64 -> f32 NARROWING is timed separately from the upload itself
+    // because it is invisible from inside device.ts and is, on the 2026-08-05
+    // reading of the flamegraph, plausibly the larger half: it walks n elements
+    // and allocates a fresh n*4 buffer, every field, every frame. `i32` fields
+    // pay none of it -- the Uint32Array is a REINTERPRETING VIEW over the same
+    // memory, no copy and no loop -- which makes the two branches below a
+    // free controlled comparison of exactly this cost.
     const kind = FIELD_KINDS[name];
+    const tConv = performance.now();
+    const narrowed = kind === 'f32'
+      ? new Float32Array(s.cpu as Float64Array)
+      : new Uint32Array(s.cpu.buffer, s.cpu.byteOffset, s.cpu.length);
+    recordTransfer({
+      what: `${name} (f64→f32 narrow)`, kind: 'convert', dir: 'up', bytes: this.n * 4,
+      ms: performance.now() - tConv, bareFenceMs: null, queueDrainMs: null,
+    });
     const buf = kind === 'f32'
-      ? uploadFloat32(device, new Float32Array(s.cpu as Float64Array))
-      : uploadUint32(device, new Uint32Array(s.cpu.buffer, s.cpu.byteOffset, s.cpu.length));
+      ? uploadFloat32(device, narrowed as Float32Array, 0, name)
+      : uploadUint32(device, narrowed as Uint32Array, 0, name);
     this.transfers.push({ what: name, direction: 'up', bytes: this.n * 4 });
     // Cached, not transient. This is the line that removes the duplicate
     // mag/theta upload: the second consumer on this side finds the buffer
@@ -209,9 +224,23 @@ export class FieldResidency {
 
     const bytes = this.n * 4;
     const kind = FIELD_KINDS[name];
+    // Mirror of the upload path: the readback helper's own cost is recorded
+    // inside device.ts, and the WIDENING that follows is recorded here. On an
+    // f32 field this is the third full pass over the data for one crossing
+    // (device.ts's slice(0) is the second), and it allocates n*8 rather than
+    // n*4 -- the single most expensive line in a readback, and entirely
+    // deletable by storing Float32Array on the CPU side (perf TODO item 2).
+    const raw = kind === 'f32'
+      ? await readFloat32(device, s.gpu, bytes, name)
+      : await readUint32(device, s.gpu, bytes, name);
+    const tConv = performance.now();
     const out = kind === 'f32'
-      ? new Float64Array(await readFloat32(device, s.gpu, bytes))
-      : new Int32Array((await readUint32(device, s.gpu, bytes)).buffer.slice(0));
+      ? new Float64Array(raw as Float32Array)
+      : new Int32Array((raw as Uint32Array).buffer.slice(0));
+    recordTransfer({
+      what: `${name} (f32→f64 widen)`, kind: 'convert', dir: 'down', bytes,
+      ms: performance.now() - tConv, bareFenceMs: null, queueDrainMs: null,
+    });
     this.transfers.push({ what: name, direction: 'down', bytes });
     s.cpu = out;
     return out;

@@ -42,14 +42,88 @@ export async function getGPUDevice(): Promise<GPUDevice | null> {
   return devicePromise;
 }
 
+// ── Transfer ledger + the byte-vs-fence probe ─────────────────────────────
+//
+// Every bus crossing in the pipeline funnels through the four helpers below,
+// which makes this the one place that can answer the question the 2026-08-05
+// reframe turns on: WHAT does a crossing actually cost -- bytes, or the fence?
+//
+// The two known regimes, so the numbers below are read correctly:
+//   - a 4-byte readback pays fence latency plus however much work was already
+//     queued ahead of it, and NO byte-proportional cost whatsoever;
+//   - a 786KB readback pays that SAME fence, plus real byte-proportional CPU
+//     work: `getMappedRange().slice(0)` here, and then (for f32 fields) a
+//     widening loop in FieldResidency.cpu() on top.
+// A flamegraph cannot separate those, because both land inside one span.
+//
+// PROBE MODE separates them, at the cost of making every readback ~3x slower
+// (so its wall-clock column is meaningless -- read only the attribution):
+//   1. a 4-byte read from the same buffer, which DRAINS whatever was queued;
+//   2. a second 4-byte read, now against an empty queue -- a BARE FENCE;
+//   3. the real read.
+// Then `ms - bareFenceMs` is the byte-proportional cost of this specific
+// transfer, and `queueDrainMs - bareFenceMs` is what was sitting in the queue
+// ahead of it. Two probes rather than one because a single probe would leave
+// the real read paying a fence the probe already absorbed, over-attributing a
+// whole round trip to bytes.
+//
+// Uploads are recorded too, but they never fence (mappedAtCreation is
+// synchronous), so their `ms` is pure CPU: allocation plus memcpy. The f64->f32
+// NARROWING that precedes them happens in the caller, and FieldResidency
+// reports that separately via recordTransfer -- see its own comment.
+
+export interface TransferSample {
+  what: string;
+  // 'readback' is the ONLY kind that fences -- uploads are synchronous
+  // (mappedAtCreation) and 'convert' is pure CPU. Counting fences means
+  // counting readbacks, so this distinction has to be in the data rather
+  // than inferred from the label.
+  kind: 'readback' | 'upload' | 'convert';
+  dir: 'up' | 'down';
+  bytes: number;
+  ms: number;
+  // Probe mode only; null otherwise. See the header for how to read them.
+  bareFenceMs: number | null;
+  queueDrainMs: number | null;
+}
+
+let ledger: TransferSample[] = [];
+let probeEnabled = false;
+
+export function transferLedgerReset(): void { ledger = []; }
+export function transferLedger(): readonly TransferSample[] { return ledger; }
+export function setTransferProbe(on: boolean): void { probeEnabled = on; }
+export function transferProbeEnabled(): boolean { return probeEnabled; }
+
+// For byte-proportional work that happens OUTSIDE these helpers but is part of
+// the same crossing -- currently FieldResidency's f64<->f32 conversions, which
+// are the single largest per-crossing cost and are invisible from in here.
+export function recordTransfer(s: TransferSample): void { ledger.push(s); }
+
+// A 4-byte read from `buffer`, used only by probe mode. Every buffer reaching
+// the read helpers is at least 4 bytes and already carries COPY_SRC (it is
+// about to be copied from anyway), so this needs no cooperation from callers.
+async function bareRead(device: GPUDevice, buffer: GPUBuffer): Promise<number> {
+  const t0 = performance.now();
+  const staging = device.createBuffer({ size: 4, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
+  const encoder = device.createCommandEncoder();
+  encoder.copyBufferToBuffer(buffer, 0, staging, 0, 4);
+  device.queue.submit([encoder.finish()]);
+  await staging.mapAsync(GPUMapMode.READ);
+  staging.unmap();
+  staging.destroy();
+  return performance.now() - t0;
+}
+
 // ── Buffer helpers ──────────────────────────────────────────────────────
 //
 // Every GPU-resident intermediate in this pipeline stays a plain storage
 // buffer (STORAGE | COPY_SRC | COPY_DST as needed) -- nothing is read back
 // to CPU except the final vote array, see voteGeneration.ts.
 
-export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage = 0): GPUBuffer {
+export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage = 0, label = 'f32'): GPUBuffer {
   const s = spanStart(`CPU→GPU upload (${data.byteLength}B)`);
+  const t0 = performance.now();
   const buffer = device.createBuffer({
     size: data.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | extraUsage,
@@ -57,12 +131,14 @@ export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage 
   });
   new Float32Array(buffer.getMappedRange()).set(data);
   buffer.unmap();
+  ledger.push({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, bareFenceMs: null, queueDrainMs: null });
   spanEnd(s);
   return buffer;
 }
 
-export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 0): GPUBuffer {
+export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 0, label = 'u32'): GPUBuffer {
   const s = spanStart(`CPU→GPU upload (${data.byteLength}B)`);
+  const t0 = performance.now();
   const buffer = device.createBuffer({
     size: data.byteLength,
     usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | extraUsage,
@@ -70,6 +146,7 @@ export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 
   });
   new Uint32Array(buffer.getMappedRange()).set(data);
   buffer.unmap();
+  ledger.push({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, bareFenceMs: null, queueDrainMs: null });
   spanEnd(s);
   return buffer;
 }
@@ -103,8 +180,13 @@ export function uploadUniform(device: GPUDevice, data: ArrayBuffer): GPUBuffer {
 // copyBufferToBuffer (device-local, effectively free next to a PCIe/unified-
 // memory round trip through the driver). See profiling/profiler.ts's
 // attachGPUKernelBreakdown for how this compares against actual kernel time.
-export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLength: number): Promise<Float32Array> {
+export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'f32'): Promise<Float32Array> {
   const s = spanStart(`GPU→CPU readback (${byteLength}B)`);
+  // Both probes BEFORE the timed read, so the real read is measured against a
+  // drained queue and its excess over bareFenceMs is byte cost alone.
+  const queueDrainMs = probeEnabled ? await bareRead(device, buffer) : null;
+  const bareFenceMs = probeEnabled ? await bareRead(device, buffer) : null;
+  const t0 = performance.now();
   const staging = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
   encoder.copyBufferToBuffer(buffer, 0, staging, 0, byteLength);
@@ -113,12 +195,16 @@ export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLeng
   const result = new Float32Array(staging.getMappedRange().slice(0));
   staging.unmap();
   staging.destroy();
+  ledger.push({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, ms: performance.now() - t0, bareFenceMs, queueDrainMs });
   spanEnd(s);
   return result;
 }
 
-export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLength: number): Promise<Uint32Array> {
+export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'u32'): Promise<Uint32Array> {
   const s = spanStart(`GPU→CPU readback (${byteLength}B)`);
+  const queueDrainMs = probeEnabled ? await bareRead(device, buffer) : null;
+  const bareFenceMs = probeEnabled ? await bareRead(device, buffer) : null;
+  const t0 = performance.now();
   const staging = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
   encoder.copyBufferToBuffer(buffer, 0, staging, 0, byteLength);
@@ -127,6 +213,7 @@ export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLengt
   const result = new Uint32Array(staging.getMappedRange().slice(0));
   staging.unmap();
   staging.destroy();
+  ledger.push({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, ms: performance.now() - t0, bareFenceMs, queueDrainMs });
   spanEnd(s);
   return result;
 }

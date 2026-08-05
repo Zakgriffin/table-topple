@@ -1,0 +1,89 @@
+// Board dimensions, in world units. One world unit == one board cell, so a
+// piece's integer (col, row) doubles as its world (x, z) -- worth keeping
+// true as pieces/movement land, since it makes every board<->world
+// conversion a floor() instead of a scale factor nobody remembers.
+import type { Rank } from './ranks.ts';
+
+export const BOARD_CELLS = 64;
+export const BOARD_SIZE = BOARD_CELLS;
+
+// Starting layout: one court per edge, each with their castle behind them.
+// Here rather than in denizens.ts so the whole board layout can be checked
+// against BOARD_SIZE without loading anything that touches the DOM.
+//
+// Note that denizens, their speed, and their castles are all in absolute world
+// units and do NOT scale with the board -- growing the board buys open ground
+// between the castles, nothing else. Crossing the full board at WALK_SPEED
+// takes about BOARD_SIZE/WALK_SPEED = 16s.
+/** How far a court's line forms up from the board's center at the start. */
+export const START_RADIUS = 20;
+/** Gap between the line's back and their castle's front wall. */
+export const CASTLE_GAP = 1.5;
+
+/** The line each court forms up in, read left to right. Symmetric about the
+ *  king, with rank descending outward from him -- so the formation itself
+ *  shows the hierarchy, and the tallest figure stands dead center. */
+export const FORMATION: Rank[] = [
+  'soldier', 'soldier', 'captain', 'constable',
+  'king',
+  'constable', 'captain', 'soldier', 'soldier',
+];
+
+/** Spacing between neighbours in the line. Comfortably wider than a king's
+ *  shoulders (the widest figure) so nobody overlaps. */
+export const RANK_SPACING = 2.2;
+
+// Palette lifted from Sphere Lab (scene/renderer.ts's 0x0a0a0f clear color,
+// floor.ts's red/blue row/column line families) so the two pages read as one
+// project. Nothing here is shared code -- this page is deliberately isolated
+// from the pose pipeline -- just the same colors.
+export const COLOR_BG = 0x0a0a0f;
+export const COLOR_FLOOR = 0x15151d;
+export const COLOR_GRID = 0x2e2e3e;
+// Neutral, NOT the old blue: with four colored courts on the board, blue
+// center lines read as blue's territory running through everyone else's half.
+export const COLOR_GRID_CENTER = 0x4a4d63;
+
+// Team colors, one per court. Red and blue are Sphere Lab's row/column line
+// families exactly (floor.ts's 0xff5555 / 0x5599ff); green and yellow are
+// chosen to sit at the same weight rather than at their pure hues -- a raw
+// 0x00ff00 or 0xffff00 is far brighter than either original and would make
+// those two courts dominate the board. Each denizen's own color is its team's,
+// deepened by its rank (ranks.ts). You are the red king (denizens.ts).
+export const COLOR_TEAM_RED = 0xff5555;
+export const COLOR_TEAM_BLUE = 0x5599ff;
+export const COLOR_TEAM_GREEN = 0x5ecf6a;
+export const COLOR_TEAM_YELLOW = 0xf0c74e;
+
+// Height of a SOLDIER, feet to top of head -- the base every other rank is a
+// multiple of (ranks.ts), and the unit castle dimensions are quoted in too.
+// Every part dimension in character.ts is a fraction of this, so the whole
+// scene's scale follows this one number.
+export const SOLDIER_HEIGHT = 1.0;
+// World units per second. Rank does not change it: a king covers ground at a
+// soldier's pace, he just does it in half as many, much longer strides.
+export const WALK_SPEED = 4;
+
+// Movement is velocity-based rather than position-based, so stopping coasts
+// instead of cutting out. These are exponential rates (per second): higher
+// converges faster.
+//
+// Deliberately asymmetric. Starting should feel immediate -- input lag on
+// acceleration reads as unresponsive controls -- while stopping wants visible
+// weight. At these values a release from full speed coasts about
+// WALK_SPEED/WALK_DECEL_RATE = 0.57 units, a bit over half a cell.
+export const WALK_ACCEL_RATE = 25;
+export const WALK_DECEL_RATE = 7;
+
+// ── Health and death ──────────────────────────────────────────────────────
+/** Hit points every denizen starts with, regardless of rank. Rank is currently
+ *  size and colour only -- a king is no tougher than a soldier. */
+export const MAX_HP = 10;
+/** How long a health bar stays up after the last hit it took. */
+export const HEALTH_BAR_LINGER = 3;
+/** ...and how long it spends fading out at the end of that. */
+export const HEALTH_BAR_FADE = 0.6;
+/** The stagger on death, before the body starts to fade. */
+export const DEATH_SHAKE_TIME = 0.4;
+/** How long the body takes to fade away once the shake is done. */
+export const DEATH_FADE_TIME = 0.9;

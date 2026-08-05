@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Board Game</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body { background: #0a0a0f; overflow: hidden; font-family: monospace; }
+  canvas#gl { display: block; }
+
+  /* Navigation only -- the controls explain themselves by being used. */
+  #home {
+    position: fixed; top: 16px; left: 16px; z-index: 10;
+    color: #555; font-size: 11px; text-decoration: none;
+  }
+  #home:hover { color: #6c9; }
+
+  /* Segmented control: all three modes visible at once, the active one lit.
+     A single cycling button would hide which mode comes next. */
+  #modeToggle {
+    position: fixed; top: 16px; right: 16px; z-index: 10;
+    display: flex; gap: 4px; padding: 4px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.18);
+    background: rgba(20,20,20,0.85); backdrop-filter: blur(6px);
+  }
+  #modeToggle button {
+    padding: 8px 12px; border-radius: 7px; border: 1px solid transparent;
+    background: transparent; color: #999;
+    font-family: monospace; font-size: 12px; cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  #modeToggle button:hover { background: rgba(255,255,255,0.07); color: #ccc; }
+  /* Active segment takes the player's own red. */
+  #modeToggle button.active {
+    background: rgba(255,85,85,0.55); border-color: #ff5555; color: #fff;
+  }
+  #modeToggle button .key {
+    display: block; font-size: 9px; opacity: 0.6; margin-top: 2px;
+  }
+
+  /* Weapon rack, directly under the mode bar: a separate axis from the mode,
+     so it gets its own row rather than more mode segments. */
+  #weaponToggle {
+    position: fixed; top: 66px; right: 16px; z-index: 10;
+    display: flex; gap: 4px; padding: 4px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.12);
+    background: rgba(20,20,20,0.7); backdrop-filter: blur(6px);
+  }
+  #weaponToggle button {
+    padding: 6px 10px; border-radius: 6px; border: 1px solid transparent;
+    background: transparent; color: #888;
+    font-family: monospace; font-size: 11px; cursor: pointer;
+    transition: background 0.15s, color 0.15s;
+  }
+  #weaponToggle button:hover { background: rgba(255,255,255,0.07); color: #ccc; }
+  #weaponToggle button.active {
+    background: rgba(255,255,255,0.14); border-color: rgba(255,255,255,0.4); color: #fff;
+  }
+  #weaponToggle button .key {
+    display: block; font-size: 9px; opacity: 0.5; margin-top: 1px;
+  }
+
+  /* Battle switch, opposite corner from the mode bar: it isn't an input mode,
+     it's a thing happening to the world. */
+  #battleToggle {
+    position: fixed; bottom: 16px; right: 16px; z-index: 10;
+    padding: 10px 16px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(20,20,20,0.85); backdrop-filter: blur(6px);
+    color: #999; font-family: monospace; font-size: 12px; cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  #battleToggle:hover { background: rgba(255,255,255,0.08); color: #ccc; }
+  #battleToggle.active {
+    background: rgba(230,70,70,0.6); border-color: #e64646; color: #fff;
+  }
+
+  /* The reticle. Not the OS cursor -- pointer lock takes that away, and this
+     is drawn at a position the game owns (see aim.ts). A ring plus a center
+     dot stays readable over both the dark floor and a lit castle wall. */
+  #crosshair {
+    position: fixed; top: 0; left: 0; z-index: 9;
+    width: 22px; height: 22px; display: none; pointer-events: none;
+    border: 1.5px solid rgba(255,255,255,0.85); border-radius: 50%;
+    box-shadow: 0 0 0 1px rgba(0,0,0,0.5), inset 0 0 0 1px rgba(0,0,0,0.5);
+  }
+  #crosshair::after {
+    content: ''; position: absolute; left: 50%; top: 50%;
+    width: 3px; height: 3px; margin: -1.5px 0 0 -1.5px;
+    background: #fff; border-radius: 50%;
+  }
+  /* Charge ring: a conic sweep that fills as a bow is drawn or a staff
+     charges. Sits around the reticle so the eye never has to leave the aim
+     point to read it. */
+  #charge {
+    position: absolute; left: 50%; top: 50%; width: 40px; height: 40px;
+    margin: -20px 0 0 -20px; border-radius: 50%; opacity: 0;
+    background: conic-gradient(#8fd8ff calc(var(--charge, 0) * 360deg), transparent 0);
+    -webkit-mask: radial-gradient(circle, transparent 13px, #000 14px, #000 17px, transparent 18px);
+    mask: radial-gradient(circle, transparent 13px, #000 14px, #000 17px, transparent 18px);
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<div id="modeToggle">
+  <button data-mode="camera" type="button"></button>
+  <button data-mode="path" type="button"></button>
+  <button data-mode="fight" type="button"></button>
+</div>
+<div id="weaponToggle">
+  <button data-weapon="sword" type="button"></button>
+  <button data-weapon="bow" type="button"></button>
+  <button data-weapon="staff" type="button"></button>
+</div>
+<div id="crosshair"><div id="charge"></div></div>
+<button id="battleToggle" type="button">battle: off</button>
+<a id="home" href="/index.html">&larr; home</a>
+<script type="module" src="/src/game/main.ts"></script>
+</body>
+</html>

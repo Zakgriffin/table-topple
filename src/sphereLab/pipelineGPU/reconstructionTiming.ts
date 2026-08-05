@@ -7,6 +7,7 @@ import {
   AllocationSample, allocationProbeResult, getGPUDevice, setAllocationProbe,
   setTransferProbe, TransferSample, transferLedger, transferLedgerReset,
 } from './device.ts';
+import { GpuTimelineResult, gpuTimelineArm, gpuTimelineDisarm, gpuTimelineResolve } from './gpuTimeline.ts';
 import { awaitPageFocus } from './lsdChainVerify.ts';
 
 // ── Dev harness: what does ONE WHOLE RECONSTRUCTION cost? ─────────────────
@@ -132,6 +133,12 @@ export interface ReconstructionTimingReport {
   // fenceMs/byteMs split is. Sorted by ms descending -- the actionable order.
   probe: TransferGroup[] | null;
   probeNote: string;
+
+  // ── where the GPU compute actually goes, from its own rep ──
+  // The only instrument that can see INSIDE `votes`. Null when the device lacks
+  // the optional 'timestamp-query' feature -- which is a different statement
+  // from "no kernels ran", so it must not be reported as zeros.
+  gpuTimeline: GpuTimelineResult | null;
 
   // ── what buffer churn costs, from its own rep ──
   // The question perf-TODO item 5 rests on. Null only if there is no device.
@@ -375,6 +382,22 @@ export async function timeReconstruction(
       }
     }
 
+    // ── And one more, for per-pass GPU kernel time ──
+    // Its own rep for the strongest reason of the three: a timestamp query set
+    // is bound into every compute pass descriptor, so arming it changes what the
+    // passes ARE. Timing a rep that is measuring itself would be the same
+    // mistake the per-module timestamps make (see gpuTimeline.ts's header on
+    // the 9.3ms-around-a-0.07ms-kernel case), just at a different scale.
+    let gpuTimeline: GpuTimelineResult | null = null;
+    if (probeDevice && gpuTimelineArm(probeDevice)) {
+      try {
+        await poseOnce(freshState(camera), gray, w, h);
+        gpuTimeline = await gpuTimelineResolve();
+      } finally {
+        gpuTimelineDisarm();
+      }
+    }
+
     const poseMedianMs = median(poseMsAll);
     const pd = last?.lastPositionDecode ?? null;
 
@@ -395,6 +418,7 @@ export async function timeReconstruction(
       probe,
       probeNote: 'probe rep only: read fenceMs/byteMs, IGNORE its ms (probing triples every readback)',
       allocation,
+      gpuTimeline,
       ok: !!pd,
       votes: last?.lastVotes?.length ?? 0,
       consistency: pd ? pd.consistency : null,
@@ -442,6 +466,20 @@ export function formatReconstructionTiming(r: ReconstructionTimingReport | strin
     let f = 0, b = 0, q = 0;
     for (const g of r.probe) { f += g.fenceMs ?? 0; b += g.byteMs ?? (g.kind === 'readback' ? 0 : g.ms); q += g.queuedAheadMs ?? 0; }
     lines.push(`  attributed: ${q.toFixed(1)}ms GPU compute queued ahead | ${f.toFixed(1)}ms fence latency | ${b.toFixed(1)}ms byte-proportional`);
+  }
+  if (r.gpuTimeline) {
+    const t = r.gpuTimeline;
+    // Stated against the median rather than left as a bare total, because the
+    // useful question is what fraction of a reconstruction is device execution
+    // -- and the answer is expected to be LESS than 100%, since the host does
+    // not wait for every kernel.
+    const pct = r.poseMedianMs > 0 ? (t.totalMs / r.poseMedianMs) * 100 : 0;
+    lines.push(`  GPU kernels: ${t.totalMs.toFixed(2)}ms across ${t.passes} passes (${pct.toFixed(0)}% of the median)${t.overflowed ? '  !! PASS CAP HIT, undercounted' : ''}`);
+    for (const e of t.entries) {
+      lines.push(`    ${e.label.padEnd(20)} x${String(e.count).padStart(3)}  ${e.totalMs.toFixed(2).padStart(7)}ms   max ${e.maxMs.toFixed(3)}ms`);
+    }
+  } else {
+    lines.push(`  GPU kernels: unavailable (no 'timestamp-query' feature on this device)`);
   }
   if (r.allocation) {
     const a = r.allocation;

@@ -1,5 +1,6 @@
 import { createStorageBuffer, readFloat32, uploadUniform } from './device.ts';
 import { FieldResidency } from './fieldResidency.ts';
+import { gpuTimelineSlot } from './gpuTimeline.ts';
 import { LSD_FIT_WGSL } from './lsdFit.wgsl.ts';
 
 const pipelineCache = new WeakMap<GPUDevice, GPUComputePipeline>();
@@ -127,7 +128,7 @@ export async function fitAndTestRegionsGPU(
   });
 
   const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
+  const pass = encoder.beginComputePass(gpuTimelineSlot('lsdFit:fitRegion'));
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   // INDIRECT, off the same triple collect's finalize used -- both are

@@ -1,6 +1,7 @@
 import { createStorageBuffer, dispatchCount, uploadUniform } from './device.ts';
 import { FieldResidency } from './fieldResidency.ts';
 import { GRADIENT_2X2_WGSL } from './gradient2x2.wgsl.ts';
+import { gpuTimelineSlot } from './gpuTimeline.ts';
 
 const pipelineCache = new WeakMap<GPUDevice, GPUComputePipeline>();
 function getPipeline(device: GPUDevice): GPUComputePipeline {
@@ -64,7 +65,7 @@ export async function computeGradient2x2FieldGPU(res: FieldResidency, w: number,
   });
 
   const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass();
+  const pass = encoder.beginComputePass(gpuTimelineSlot('gradient2x2'));
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(dispatchCount(w), dispatchCount(h));

@@ -4,6 +4,7 @@ import {
 } from './collectRegions.wgsl.ts';
 import { createStorageBuffer, uploadUniform } from './device.ts';
 import { FieldResidency, maxRegionCount } from './fieldResidency.ts';
+import { gpuTimelineSlot } from './gpuTimeline.ts';
 import { encodeExclusiveScan } from './prefixSum.ts';
 
 const WG = 256;
@@ -140,24 +141,24 @@ export async function collectRegionsGPU(
   ];
   const handoff = [members, regionId, regionOffsets, regionSizes, meanDirs, counts, dispatchArgs];
 
-  const run = (encoder: GPUCommandEncoder, stage: Stage, resources: GPUBuffer[], groups: number) => {
+  const run = (encoder: GPUCommandEncoder, stage: Stage, label: string, resources: GPUBuffer[], groups: number) => {
     const bindGroup = device.createBindGroup({
       layout: stage.layout,
       entries: resources.map((buffer, binding) => ({ binding, resource: { buffer } })),
     });
-    const cp = encoder.beginComputePass();
+    const cp = encoder.beginComputePass(gpuTimelineSlot(label));
     cp.setPipeline(stage.pipeline);
     cp.setBindGroup(0, bindGroup);
     cp.dispatchWorkgroups(groups);
     cp.end();
   };
 
-  const runIndirect = (encoder: GPUCommandEncoder, stage: Stage, resources: GPUBuffer[], args: GPUBuffer) => {
+  const runIndirect = (encoder: GPUCommandEncoder, stage: Stage, label: string, resources: GPUBuffer[], args: GPUBuffer) => {
     const bindGroup = device.createBindGroup({
       layout: stage.layout,
       entries: resources.map((buffer, binding) => ({ binding, resource: { buffer } })),
     });
-    const cp = encoder.beginComputePass();
+    const cp = encoder.beginComputePass(gpuTimelineSlot(label));
     cp.setPipeline(stage.pipeline);
     cp.setBindGroup(0, bindGroup);
     cp.dispatchWorkgroupsIndirect(args, 0);
@@ -165,15 +166,15 @@ export async function collectRegionsGPU(
   };
 
   const encoder = device.createCommandEncoder();
-  run(encoder, p.survive, [uni, labelBuf, fxBuf, fyBuf, labelSurvives], up(n));
-  run(encoder, p.histogram, [uni, labelBuf, labelSurvives, labelCounts], up(n));
-  run(encoder, p.markKept, [uni, labelSurvives, labelCounts, keptFlag, keptCount], up(n));
+  run(encoder, p.survive, 'collect:survive', [uni, labelBuf, fxBuf, fyBuf, labelSurvives], up(n));
+  run(encoder, p.histogram, 'collect:histogram', [uni, labelBuf, labelSurvives, labelCounts], up(n));
+  run(encoder, p.markKept, 'collect:markKept', [uni, labelSurvives, labelCounts, keptFlag, keptCount], up(n));
   const temps = [
     ...encodeExclusiveScan(device, encoder, keptFlag, regionIndex, totalRegions, n),
     ...encodeExclusiveScan(device, encoder, keptCount, memberOffset, totalMembers, n),
   ];
-  run(encoder, p.regionMeta, [uni, keptFlag, regionIndex, memberOffset, labelCounts, regionOffsets, regionSizes, totalRegions, dispatchArgs], up(n));
-  run(encoder, p.scatter, [uni, labelBuf, keptFlag, regionIndex, memberOffset, cursor, members, regionId], up(n));
+  run(encoder, p.regionMeta, 'collect:regionMeta', [uni, keptFlag, regionIndex, memberOffset, labelCounts, regionOffsets, regionSizes, totalRegions, dispatchArgs], up(n));
+  run(encoder, p.scatter, 'collect:scatter', [uni, labelBuf, keptFlag, regionIndex, memberOffset, cursor, members, regionId], up(n));
   // The two scans wrote their totals into separate 4-byte buffers; put them
   // side by side so one binding serves finalize's bounds check here and
   // lsdFit's downstream. copyBufferToBuffer, not a pass -- there is nothing to
@@ -189,7 +190,7 @@ export async function collectRegionsGPU(
   // The `if (regionCount > 0)` guard this replaced is gone too: regionMeta
   // writes 0 workgroups for an empty capture, and a zero-workgroup indirect
   // dispatch is legal and does nothing.
-  runIndirect(encoder, p.finalize, [counts, fxBuf, regionOffsets, regionSizes, members, meanDirs, fyBuf], dispatchArgs);
+  runIndirect(encoder, p.finalize, 'collect:finalize', [counts, fxBuf, regionOffsets, regionSizes, members, meanDirs, fyBuf], dispatchArgs);
   device.queue.submit([encoder.finish()]);
 
   for (const b of [...scratch, ...temps]) b.destroy();

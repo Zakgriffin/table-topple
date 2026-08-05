@@ -5,6 +5,7 @@ import {
 import { GROW_REGIONS_WGSL } from './growRegions.wgsl.ts';
 import { collectRegionsGPU } from './collectRegions.ts';
 import { FieldResidency } from './fieldResidency.ts';
+import { gpuTimelineSlot } from './gpuTimeline.ts';
 import { globalState } from '../state.ts';
 
 interface GrowPipelines {
@@ -157,7 +158,7 @@ export async function growRegionsCCLGPU(
     // compress reads next[l] for an arbitrary l that some other thread wrote
     // during hook, and WebGPU only guarantees the storage-buffer memory barrier
     // BETWEEN passes.
-    const pass = encoder.beginComputePass();
+    const pass = encoder.beginComputePass(gpuTimelineSlot(`grow:${which}`));
     pass.setPipeline(pipelines[which]);
     pass.setBindGroup(0, bg);
     pass.dispatchWorkgroups(gx, gy);

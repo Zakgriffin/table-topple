@@ -1,5 +1,6 @@
 import { createStorageBuffer, getGPUDevice, readUint32, uploadUint32, uploadUniform } from './device.ts';
 import { PREFIX_SUM_ADD_WGSL, PREFIX_SUM_SCAN_WGSL } from './prefixSum.wgsl.ts';
+import { gpuTimelineSlot } from './gpuTimeline.ts';
 
 export const SCAN_BLOCK = 256;
 
@@ -93,7 +94,7 @@ export function encodeExclusiveScan(
         { binding: 3, resource: { buffer: blockSums } },
       ],
     });
-    const pass = encoder.beginComputePass();
+    const pass = encoder.beginComputePass(gpuTimelineSlot('scan:block'));
     pass.setPipeline(p.scan);
     pass.setBindGroup(0, bg);
     pass.dispatchWorkgroups(numBlocks);
@@ -123,7 +124,7 @@ export function encodeExclusiveScan(
         { binding: 4, resource: { buffer: totalBuf } },
       ],
     });
-    const pass = encoder.beginComputePass();
+    const pass = encoder.beginComputePass(gpuTimelineSlot('scan:addOffsets'));
     pass.setPipeline(p.add);
     pass.setBindGroup(0, bg);
     pass.dispatchWorkgroups(numBlocks);

@@ -4,7 +4,7 @@
 // conversion a floor() instead of a scale factor nobody remembers.
 import type { Rank } from './ranks.ts';
 
-export const BOARD_CELLS = 64;
+export const BOARD_CELLS = 144;
 export const BOARD_SIZE = BOARD_CELLS;
 
 // Starting layout: one court per edge, each with their castle behind them.
@@ -14,9 +14,19 @@ export const BOARD_SIZE = BOARD_CELLS;
 // Note that denizens, their speed, and their castles are all in absolute world
 // units and do NOT scale with the board -- growing the board buys open ground
 // between the castles, nothing else. Crossing the full board at WALK_SPEED
-// takes about BOARD_SIZE/WALK_SPEED = 16s.
-/** How far a court's line forms up from the board's center at the start. */
-export const START_RADIUS = 20;
+// takes about BOARD_SIZE/WALK_SPEED = 36s.
+/** Space left between a court's line and the board edge behind it. Sized to
+ *  hold that court's castle: the setback denizens.ts uses is one castle
+ *  half-extent plus CASTLE_GAP, and the castle then reaches a further half
+ *  extent back, which comes to ~11.65 for the default square plan. 12 puts the
+ *  back wall a third of a unit off the edge. Not imported from castle.ts on
+ *  purpose -- castle.ts reads SOLDIER_HEIGHT from here, and taking the
+ *  dependency the other way would close the cycle. */
+export const COURT_EDGE_MARGIN = 12;
+/** How far a court's line forms up from the board's center at the start.
+ *  Derived, so the courts stay backed up against their own edge at any board
+ *  size instead of huddling in the middle of a bigger one. */
+export const START_RADIUS = BOARD_SIZE / 2 - COURT_EDGE_MARGIN;
 /** Gap between the line's back and their castle's front wall. */
 export const CASTLE_GAP = 1.5;
 
@@ -38,11 +48,6 @@ export const RANK_SPACING = 2.2;
 // project. Nothing here is shared code -- this page is deliberately isolated
 // from the pose pipeline -- just the same colors.
 export const COLOR_BG = 0x0a0a0f;
-export const COLOR_FLOOR = 0x15151d;
-export const COLOR_GRID = 0x2e2e3e;
-// Neutral, NOT the old blue: with four colored courts on the board, blue
-// center lines read as blue's territory running through everyone else's half.
-export const COLOR_GRID_CENTER = 0x4a4d63;
 
 // Team colors, one per court. Red and blue are Sphere Lab's row/column line
 // families exactly (floor.ts's 0xff5555 / 0x5599ff); green and yellow are
@@ -54,6 +59,22 @@ export const COLOR_TEAM_RED = 0xff5555;
 export const COLOR_TEAM_BLUE = 0x5599ff;
 export const COLOR_TEAM_GREEN = 0x5ecf6a;
 export const COLOR_TEAM_YELLOW = 0xf0c74e;
+
+// Terrain (terrain.ts). These replace the old single COLOR_FLOOR -- the board
+// surface is now forest everywhere except the patches.
+//
+// All four are deliberately dark and low-saturation, for two reasons. The
+// board is the largest thing on screen, so a colour that would be pleasant on
+// a small swatch dominates everything standing on it; and the courts are
+// identified BY colour, so a floor that competes with them makes a green
+// denizen on a field, or a yellow one on hallowed ground, hard to pick out.
+// Compare COLOR_TEAM_GREEN (0x5ecf6a) with COLOR_FIELD below: same hue family,
+// much less light. The floor is the ground the game is read against, not a
+// participant in it.
+export const COLOR_FOREST = 0x142317;
+export const COLOR_FIELD = 0x4a7a43;
+export const COLOR_CAVE = 0x44454f;
+export const COLOR_HALLOWED = 0x8e7a35;
 
 // Height of a SOLDIER, feet to top of head -- the base every other rank is a
 // multiple of (ranks.ts), and the unit castle dimensions are quoted in too.

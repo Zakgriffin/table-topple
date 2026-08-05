@@ -7,7 +7,12 @@
 // Layout:
 //   constants.ts  board dimensions, palette, denizen size/speed
 //   scene.ts      renderer, camera, orbit controls, lights, resize
-//   board.ts      the playing surface (floor plane + grid)
+//   board.ts      the playing surface: one plane, coloured cell by cell
+//   terrain.ts    what each cell is made of: forest, and patches in it
+//   landmarks.ts  one structure per patch: shrubbery, mine, ruined church
+//   forest.ts     trees scattered over the forest terrain, instanced
+//   blocks.ts     the shared box-assembly kit scenery is built from
+//   noise.ts      deterministic value noise + the seeded RNG the world uses
 //   character.ts  the blocky humanoid model, built from boxes
 //   ranks.ts      the denizen hierarchy: size, shading, crown
 //   denizens.ts   the four courts: figures with a rank, position, and facing
@@ -42,7 +47,7 @@ import { isEngaged, updateAim, updateCrosshair } from './aim.ts'; // also wires 
 import { retire, updateVitals } from './health.ts';
 import { updateAI } from './ai.ts'; // also wires the battle button
 import { chargeLevel, updateCombat } from './combat.ts';
-import './board.ts'; // side effect: adds the floor + grid to the scene
+import './board.ts'; // side effect: adds the floor to the scene
 
 const clock = new THREE.Clock();
 const axes = new THREE.Vector2();

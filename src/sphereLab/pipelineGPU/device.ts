@@ -158,6 +158,107 @@ export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 
   return buffer;
 }
 
+// ── The allocation probe ─────────────────────────────────────────────────
+//
+// Answers the question perf-TODO item 5 (the persistent buffer arena) rests on
+// and that NOTHING else can currently answer: what does creating and destroying
+// ~60 buffers per reconstruction actually cost?
+//
+// It is genuinely invisible to every other instrument. The transfer ledger above
+// counts BYTES MOVED, so an allocation that is never uploaded or read back --
+// which is most of them, since intermediates stay device-side by design -- does
+// not appear in it at all. The probe's three buckets (GPU compute / fence /
+// bytes) have no allocation column either, so this cost is sitting inside the
+// unattributed remainder of the median. It may well be ZERO: drivers commonly
+// pool same-size allocations, and every one of these buffers is recreated at an
+// identical size every frame, which is the easiest possible case to pool. That
+// is the outcome worth finding out cheaply, because it retires the arena.
+//
+// PATCHES device.createBuffer AND GPUBuffer.prototype.destroy rather than
+// wrapping createStorageBuffer and friends, and that is the point rather than a
+// shortcut: the allocation sites are spread across nine modules and several of
+// them (prefixSum's recursion, device.ts's own staging buffers) do not go
+// through a shared helper. A wrapper can MISS a site and quietly under-report;
+// a patch on the constructor cannot. It also catches whatever a future stage
+// adds without that stage having to know this exists.
+//
+// Cost of the instrument itself is one performance.now() pair per call, so
+// unlike the transfer probe it does not distort what it measures -- but it still
+// runs in its own rep, because mixing it into the timed reps would put its
+// overhead into the headline median for no reason.
+export interface AllocationSample {
+  creates: number;
+  createMs: number;
+  bytesAllocated: number;
+  destroys: number;
+  destroyMs: number;
+  // Same-size-and-usage repeats, i.e. how much of the churn a driver-side pool
+  // or an arena could plausibly serve. A high number here is the ARGUMENT for
+  // item 5; a low one means the sizes genuinely vary and an arena would have to
+  // take worst-case bounds to help at all.
+  repeatedShapes: number;
+  // The biggest single allocations, descending -- what an arena would target
+  // first. Keyed by size+usage.
+  top: { bytes: number; usage: number; count: number }[];
+}
+
+let alloc: AllocationSample | null = null;
+let shapeCounts: Map<string, { bytes: number; usage: number; count: number }> | null = null;
+let restoreAlloc: (() => void) | null = null;
+
+export function allocationProbeResult(): AllocationSample | null { return alloc; }
+
+// Installs (on=true) or removes the patches. Safe to call unbalanced -- an
+// install over an existing one restores first, so a throw between the two never
+// leaves createBuffer permanently wrapped.
+export function setAllocationProbe(device: GPUDevice, on: boolean): void {
+  restoreAlloc?.();
+  restoreAlloc = null;
+  if (!on) return;
+
+  alloc = { creates: 0, createMs: 0, bytesAllocated: 0, destroys: 0, destroyMs: 0, repeatedShapes: 0, top: [] };
+  shapeCounts = new Map();
+
+  const realCreate = device.createBuffer.bind(device);
+  const proto = (globalThis as { GPUBuffer?: { prototype: GPUBuffer } }).GPUBuffer?.prototype;
+  const realDestroy = proto?.destroy;
+
+  device.createBuffer = (desc: GPUBufferDescriptor): GPUBuffer => {
+    const t = performance.now();
+    const b = realCreate(desc);
+    alloc!.createMs += performance.now() - t;
+    alloc!.creates++;
+    alloc!.bytesAllocated += desc.size;
+    const key = `${desc.size}:${desc.usage}`;
+    const prev = shapeCounts!.get(key);
+    if (prev) { prev.count++; alloc!.repeatedShapes++; }
+    else shapeCounts!.set(key, { bytes: desc.size, usage: desc.usage, count: 1 });
+    return b;
+  };
+
+  // destroy() is patched on the PROTOTYPE, not per buffer, because buffers are
+  // created by more than one path (mappedAtCreation uploads, staging buffers,
+  // and anything three.js or a future stage makes). Guarded: if the environment
+  // does not expose GPUBuffer globally, allocation still gets counted and only
+  // the destroy half goes unmeasured, which is better than refusing to run.
+  if (proto && realDestroy) {
+    proto.destroy = function patchedDestroy(this: GPUBuffer) {
+      const t = performance.now();
+      realDestroy.call(this);
+      alloc!.destroyMs += performance.now() - t;
+      alloc!.destroys++;
+    };
+  }
+
+  restoreAlloc = () => {
+    delete (device as { createBuffer?: unknown }).createBuffer;
+    if (proto && realDestroy) proto.destroy = realDestroy;
+    if (alloc && shapeCounts) {
+      alloc.top = [...shapeCounts.values()].sort((a, b) => b.bytes * b.count - a.bytes * a.count).slice(0, 6);
+    }
+  };
+}
+
 export function createStorageBuffer(device: GPUDevice, byteLength: number, extraUsage = 0): GPUBuffer {
   return device.createBuffer({
     size: byteLength,

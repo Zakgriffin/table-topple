@@ -4,6 +4,7 @@ import { captureDistortedGrayscale } from '../pipeline/capture.ts';
 import { computePoseFromCapture, PoseComputeState } from '../pipeline/poseCompute.ts';
 import { profilerEnabled, profilerSetEnabled } from '../profiling/profiler.ts';
 import {
+  AllocationSample, allocationProbeResult, getGPUDevice, setAllocationProbe,
   setTransferProbe, TransferSample, transferLedger, transferLedgerReset,
 } from './device.ts';
 import { awaitPageFocus } from './lsdChainVerify.ts';
@@ -131,6 +132,12 @@ export interface ReconstructionTimingReport {
   // fenceMs/byteMs split is. Sorted by ms descending -- the actionable order.
   probe: TransferGroup[] | null;
   probeNote: string;
+
+  // ── what buffer churn costs, from its own rep ──
+  // The question perf-TODO item 5 rests on. Null only if there is no device.
+  // Read createMs+destroyMs against poseMedianMs: that ratio is the entire case
+  // for or against a persistent arena, and it has never been measured.
+  allocation: AllocationSample | null;
 
   // ── correctness, so a "fast" bail cannot masquerade as a win ──
   ok: boolean;
@@ -348,6 +355,26 @@ export async function timeReconstruction(
       transferLedgerReset();
     }
 
+    // ── And ONE more rep, for what a buffer costs to exist ──
+    // Its own rep for the same reason as the transfer probe, though for a
+    // weaker reason: the patches add only a performance.now() pair per call, so
+    // this would not visibly distort the median -- but there is no reason to put
+    // measurement overhead in the headline number when a spare rep is free.
+    // Separate from the transfer probe because that one triples every readback,
+    // which would inflate the allocation count with staging buffers that only
+    // exist because it is running.
+    let allocation: AllocationSample | null = null;
+    const probeDevice = await getGPUDevice();
+    if (probeDevice) {
+      try {
+        setAllocationProbe(probeDevice, true);
+        await poseOnce(freshState(camera), gray, w, h);
+      } finally {
+        setAllocationProbe(probeDevice, false);
+        allocation = allocationProbeResult();
+      }
+    }
+
     const poseMedianMs = median(poseMsAll);
     const pd = last?.lastPositionDecode ?? null;
 
@@ -367,6 +394,7 @@ export async function timeReconstruction(
       transferSharePct: poseMedianMs > 0 ? (transferMs / poseMedianMs) * 100 : 0,
       probe,
       probeNote: 'probe rep only: read fenceMs/byteMs, IGNORE its ms (probing triples every readback)',
+      allocation,
       ok: !!pd,
       votes: last?.lastVotes?.length ?? 0,
       consistency: pd ? pd.consistency : null,
@@ -414,6 +442,22 @@ export function formatReconstructionTiming(r: ReconstructionTimingReport | strin
     let f = 0, b = 0, q = 0;
     for (const g of r.probe) { f += g.fenceMs ?? 0; b += g.byteMs ?? (g.kind === 'readback' ? 0 : g.ms); q += g.queuedAheadMs ?? 0; }
     lines.push(`  attributed: ${q.toFixed(1)}ms GPU compute queued ahead | ${f.toFixed(1)}ms fence latency | ${b.toFixed(1)}ms byte-proportional`);
+  }
+  if (r.allocation) {
+    const a = r.allocation;
+    const churnMs = a.createMs + a.destroyMs;
+    // The verdict is printed rather than left to be worked out, because the
+    // whole point of this row is a go/no-go on perf-TODO item 5 and "1.2ms" on
+    // its own does not say against what.
+    const pct = r.poseMedianMs > 0 ? (churnMs / r.poseMedianMs) * 100 : 0;
+    lines.push(`  buffers: ${a.creates} created (${(a.bytesAllocated / 1048576).toFixed(1)}MB), ${a.destroys} destroyed`
+      + `  --  ${churnMs.toFixed(2)}ms total (${pct.toFixed(1)}% of the median), ${a.repeatedShapes} repeat shapes`);
+    if (a.top.length) {
+      lines.push(`  biggest repeat allocations (what an arena would take first):`);
+      for (const t of a.top) {
+        lines.push(`    ${(t.bytes / 1048576).toFixed(2).padStart(7)}MB x${String(t.count).padStart(3)} = ${((t.bytes * t.count) / 1048576).toFixed(2).padStart(7)}MB   usage 0x${t.usage.toString(16)}`);
+      }
+    }
   }
   lines.push(`  pose: votes ${r.votes}, consistency ${r.consistency !== null ? (r.consistency * 100).toFixed(1) + '%' : 'n/a'}, distance ${r.distance !== null ? r.distance.toFixed(2) : 'n/a'}`);
   if (r.probe) {

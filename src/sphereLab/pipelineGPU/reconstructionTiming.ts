@@ -56,6 +56,18 @@ import { awaitPageFocus } from './lsdChainVerify.ts';
 // happily report a large speedup for a change that broke the pipeline. `ok`,
 // `votes` and `consistency` are here to make that impossible to miss, and a
 // run where ok is false should be treated as having no timing result at all.
+//
+// HOW TO READ `consistency`, because it is easy to misjudge: it is the LOCAL
+// consistency of a CORRECT patch -- the fraction of sampled cells whose decoded
+// bit matches the torus at the winning registration. **The failure floor is
+// ~50%**, i.e. chance, meaning the winner means nothing. Values in the 60s are a
+// clear, good local patch, NOT a warning sign.
+//
+// It also doubles as a free ACCURACY signal rather than just a bail check,
+// which is the more useful property here: it rises as the POSE improves,
+// because a better pose skews the sampling lattice less, so cell centres land
+// nearer the middle of their cells and fewer bits flip. So if a PERF change ever
+// moves this number, that is a real pose regression hiding inside a speedup.
 
 export interface TransferGroup {
   what: string;

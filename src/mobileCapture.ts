@@ -74,6 +74,29 @@ const imuCheckbox = document.getElementById('imuEnabled') as HTMLInputElement;
 const imuCorrectionCheckbox = document.getElementById('imuCorrection') as HTMLInputElement;
 const imuReadoutEl = document.getElementById('imuReadout')!;
 
+// ── Hiding the page's own UI ─────────────────────────────────────────────
+//
+// One switch that takes every control off the screen, leaving the viewfinder
+// and the AR overlay on top of it and nothing else -- see mobile-capture.html's
+// `body.chromeHidden` rule, which is where the list of what counts as chrome
+// lives. Kept there rather than as a set of element handles here so the list
+// sits next to the elements it names and cannot drift out of step with them.
+//
+// Purely presentational: nothing downstream reads this state, so hiding the
+// controls does not pause capture, pose recovery, or the relay. Note that it
+// takes the SHUTTER with it -- which is the intent (in video mode capture is
+// continuous, so a clean view is exactly what you want), but it does mean a
+// single-photo capture needs the controls brought back first.
+const chromeToggleBtn = document.getElementById('chromeToggle') as HTMLButtonElement;
+chromeToggleBtn.addEventListener('click', () => {
+  const hidden = document.body.classList.toggle('chromeHidden');
+  chromeToggleBtn.classList.toggle('active', hidden);
+  chromeToggleBtn.setAttribute('aria-pressed', String(hidden));
+  // A focused button stays outlined over an otherwise-clean picture, and also
+  // treats the next Enter/Space as another click.
+  chromeToggleBtn.blur();
+});
+
 // ── AR overlay: the known board sits FIXED in world space, only the camera
 // moves ──────────────────────────────────────────────────────────────────
 //

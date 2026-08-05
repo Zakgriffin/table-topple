@@ -199,6 +199,12 @@
   }
   #debugToggles label { color: #ccc; font-family: monospace; font-size: 12px; display: flex; align-items: center; gap: 8px; }
   #debugToggles input { accent-color: #f80; }
+  /* white-space: pre-line so updateImuReadout's two-line string breaks where
+     its \n says to, without needing markup for the second line. :empty
+     collapses the box entirely when the toggle is off, so an unused readout
+     costs no vertical space in the flex column above it. */
+  #imuReadout { color: #9cf; font-family: monospace; font-size: 11px; white-space: pre-line; line-height: 1.35; }
+  #imuReadout:empty { display: none; }
   /* Local-only timing/fps readout -- see mobileCapture.ts's own comment on
      why this is never sent over the network. */
   #poseReadout {
@@ -237,6 +243,23 @@
 <div id="debugToggles">
   <label><input type="checkbox" id="sendDebugInfo"> send debug info (perf impact)</label>
   <label><input type="checkbox" id="sendCapturedImage"> send captured image (perf impact)</label>
+  <!-- Deliberately NOT checked by default and deliberately a checkbox rather
+       than something automatic: iOS only grants devicemotion from a user
+       gesture, so a tap here IS the permission request. Nothing downstream
+       consumes IMU data yet (phase A is recording only). -->
+  <label><input type="checkbox" id="imuEnabled"> record IMU (motion/orientation)</label>
+  <!-- Independent of "record IMU" on purpose: this is the A/B switch, and it
+       has to be flippable mid-session without disturbing a recording. Needs
+       the motion permission that the record toggle obtains, so turning this
+       on alone does nothing until that has been granted at least once. -->
+  <label><input type="checkbox" id="imuCorrection"> use IMU correction</label>
+  <!-- Inside the toggles box on purpose: every other panel here is
+       fixed-positioned against a hand-computed `bottom`, and adding a fourth
+       one to that stack means re-deriving the offsets of everything below it
+       every time a row is added. Flowing inside the container it belongs to
+       costs nothing and cannot drift. Empty (and zero-height) whenever the
+       checkbox is off. -->
+  <div id="imuReadout"></div>
 </div>
 <div id="modeToggle">
   <button id="modeSingleBtn" class="active" data-mode="single">photo</button>

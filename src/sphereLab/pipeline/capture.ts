@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Camera, PhysicalCamera, SimulatedCamera } from '../camera/model.ts';
+import { Camera, FrameMeta, PhysicalCamera, SimulatedCamera } from '../camera/model.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer, scene } from '../scene/renderer.ts';
@@ -176,12 +176,36 @@ export function captureDistortedGrayscale(camera: SimulatedCamera): { gray: Floa
 // changed, not the pixel data or its orientation.
 export async function ingestRealCapture(
   camera: PhysicalCamera,
-  pending: { blob: Blob; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number },
+  pending: {
+    blob: Blob; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number;
+    drawnAt?: number; frameMeta?: FrameMeta | null;
+  },
 ): Promise<void> {
   if (camera.idleSpan) { spanEnd(camera.idleSpan); camera.idleSpan = null; }
   camera.lastPullMs = pending.pulledAt - pending.sentAt;
   camera.lastEncodeMs = pending.encodedAt - pending.pulledAt;
   camera.lastTransitMs = pending.receivedAt - pending.encodedAt;
+  // pendingCapture is a MAILBOX -- main.ts pops it and it is gone. Everything
+  // above survives only as a derived duration, which is exactly what the IMU
+  // work cannot use: a filter needs the ABSOLUTE time this frame was
+  // captured, on the phone's own clock, to line the measurement up against
+  // IMU samples stamped by the same clock. So the raw phone-side stamps are
+  // retained here rather than recomputed later, because later they no longer
+  // exist.
+  //
+  // ON THE CLOCK, AND WHY THESE MUST NOT BE MIXED WITH lastTransitMs:
+  // that field is `receivedAt (DESKTOP clock) - encodedAt (PHONE clock)`, and
+  // it measures ~-38ms on this pair of machines -- a NEGATIVE transit time,
+  // i.e. it is reporting cross-device clock SKEW, not network time. 38ms is a
+  // third of the whole prediction horizon this project is trying to cover.
+  // Everything stored below is phone-clock-only and therefore mutually
+  // consistent with imuSamples; nothing here may be compared against a
+  // desktop timestamp without solving for that offset first.
+  camera.lastCaptureTiming = {
+    sentAt: pending.sentAt, pulledAt: pending.pulledAt, encodedAt: pending.encodedAt,
+    drawnAt: pending.drawnAt ?? null, frameMeta: pending.frameMeta ?? null,
+    receivedAtDesktop: pending.receivedAt,
+  };
   camera.pullMsHistory.push(camera.lastPullMs);
   camera.encodeMsHistory.push(camera.lastEncodeMs);
   camera.transitMsHistory.push(camera.lastTransitMs);

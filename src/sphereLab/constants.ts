@@ -2,6 +2,26 @@ import * as THREE from 'three';
 
 export const SPHERE_RADIUS = 2.5;
 export const GRID_STEP = 1; // world units per pattern cell
+
+// ── The one place the PHYSICAL board's size is written down ──────────────
+//
+// Everything upstream of here is deliberately scale-invariant: the pose
+// pipeline recovers position in board units (GRID_STEP per cell) and never
+// needs to know how big a cell actually is. That invariance is why this
+// constant did not exist until IMU fusion needed it -- an accelerometer
+// reports m/s^2, so SOMETHING has to relate metres to board units, and until
+// now nothing in the codebase did.
+//
+// Measured from the printed board: 1/2 cm cells. Change this if the board is
+// reprinted at another size; nothing else needs to move.
+//
+// Sanity check it against a live capture rather than trusting it blind: with
+// this value the recovered `distance` of ~31.9 board units reads as ~16cm,
+// which is the actual working distance. A wrong scale here does not break the
+// pose pipeline at all -- it only mis-scales IMU-predicted translation, which
+// is exactly the kind of error that looks like bad filter tuning.
+export const CELL_SIZE_METRES = 0.005;
+export const BOARD_UNITS_PER_METRE = GRID_STEP / CELL_SIZE_METRES; // 200
 export const VIS_HALF_EXTENT = 20; // cap on how many grid lines get a reference line / great circle drawn (perf + clutter, independent of the floor's true size)
 export const CIRCLE_SEGMENTS = 96;
 export const PATCH_RES = 48; // patch-mesh tessellation, shared by every camera's own patch geometry

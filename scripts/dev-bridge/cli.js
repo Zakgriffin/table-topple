@@ -13,6 +13,15 @@
 //   node scripts/dev-bridge/cli.js eval "activeCamera().settings.camYawDeg"
 //   node scripts/dev-bridge/cli.js screenshot
 //
+// Add --phone to run the snippet inside mobile-capture.html on the connected
+// phone instead of the Sphere Lab tab (--phone=<captureId> when more than one
+// is attached). That page's module scope is what's visible there:
+//   node scripts/dev-bridge/cli.js eval --phone "currentStream.getVideoTracks()[0].getSettings()"
+// It exists because reloading the phone is expensive in a way reloading the
+// desktop is not -- iOS motion permission has to be re-granted from a user
+// gesture and the camera stream re-negotiates -- so "add a readout and
+// reload" was costing a physical trip to the phone per question asked.
+//
 // For real-capture testing: save-capture.mjs / restore-capture.mjs let a
 // page reload (e.g. to pick up a change eval can't hot-apply, like a new
 // module-scope function) be followed by a scripted restore of the last real
@@ -61,6 +70,18 @@ if (!cmd || !['eval', 'screenshot'].includes(cmd)) {
   process.exit(1);
 }
 
+// --phone / --phone=<captureId> retargets an eval at mobile-capture.html
+// instead of a Sphere Lab tab (see server.js's routing block). Stripped out of
+// `rest` before the code is joined so it can appear either side of the
+// snippet. Screenshot has no phone form -- it reads the desktop's THREE
+// canvas.
+let target = null;
+const rest2 = rest.filter((a) => {
+  if (a === '--phone') { target = 'phone'; return false; }
+  if (a.startsWith('--phone=')) { target = a.slice('--phone='.length); return false; }
+  return true;
+});
+
 const id = Math.random().toString(36).slice(2);
 const ws = new WebSocket(`ws://localhost:${PORT}`);
 
@@ -72,7 +93,7 @@ const timeout = setTimeout(() => {
 ws.on('open', () => {
   ws.send(JSON.stringify({ role: 'controller' }));
   ws.send(cmd === 'eval'
-    ? JSON.stringify({ type: 'eval', id, code: rest.join(' ') })
+    ? JSON.stringify({ type: 'eval', id, code: rest2.join(' '), ...(target ? { target } : {}) })
     : JSON.stringify({ type: 'screenshot', id }));
 });
 

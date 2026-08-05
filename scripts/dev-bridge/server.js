@@ -96,6 +96,34 @@ wss.on('connection', (ws) => {
     // were never meant to fan out to multiple tabs at once)
     if ((msg.type === 'eval' || msg.type === 'screenshot') && msg.id) {
       pending.set(msg.id, ws);
+      // msg.target routes an eval to a PHONE (mobile-capture.html) instead of
+      // a Sphere Lab tab -- 'phone' for the only connected one, or an explicit
+      // captureId when more than one is attached. Screenshot stays
+      // browser-only: it reads the desktop's THREE canvas, which has no
+      // counterpart on the phone.
+      //
+      // Worth the routing branch because a phone reload is expensive in a way
+      // a desktop reload is not (iOS motion permission has to be re-granted
+      // from a user gesture, and the camera stream re-negotiates) -- see
+      // mobileCapture.ts's own eval handler.
+      if (msg.type === 'eval' && msg.target) {
+        const entries = [...captureSockets.entries()].filter(([s]) => s.readyState === s.OPEN);
+        const match = msg.target === 'phone'
+          ? (entries.length === 1 ? entries[0] : null)
+          : entries.find(([, id]) => id === msg.target);
+        if (!match) {
+          const why = entries.length === 0
+            ? 'no phone connected — is mobile-capture.html open?'
+            : msg.target === 'phone'
+              ? `${entries.length} phones connected — pass --phone=<captureId>: ${entries.map(([, id]) => id).join(', ')}`
+              : `no phone with captureId ${msg.target}`;
+          send(ws, { type: 'evalResult', id: msg.id, ok: false, error: why });
+          pending.delete(msg.id);
+          return;
+        }
+        send(match[0], msg);
+        return;
+      }
       if (!latestBrowserSocket || latestBrowserSocket.readyState !== latestBrowserSocket.OPEN) {
         send(ws, { type: msg.type + 'Result', id: msg.id, ok: false, error: 'no browser connected — is sphere-lab.html open?' });
         pending.delete(msg.id);
@@ -194,6 +222,23 @@ wss.on('connection', (ws) => {
     // apart from "the phone's camera isn't producing frames any faster than
     // this in the first place."
     if (msg.type === 'frameStats') {
+      const captureId = captureSockets.get(ws);
+      for (const bs of browserSockets) {
+        if (bs.readyState === bs.OPEN) send(bs, { ...msg, captureId });
+      }
+      return;
+    }
+
+    // Capture source -> broadcast, same fan-out as frameStats: batched
+    // accelerometer/gyro samples from the phone (mobileCapture.ts's
+    // devicemotion handler), ~10 messages/second each carrying ~6 samples.
+    // Recording only for now -- nothing in the pose pipeline consumes these
+    // yet; see the motion-blur/IMU plan's phase A.
+    //
+    // Deliberately NOT logged per message the way realCapture/poseResult are:
+    // this arrives at 10Hz continuously for as long as the toggle is on, and
+    // a console line per batch would bury every other bridge message.
+    if (msg.type === 'imu') {
       const captureId = captureSockets.get(ws);
       for (const bs of browserSockets) {
         if (bs.readyState === bs.OPEN) send(bs, { ...msg, captureId });

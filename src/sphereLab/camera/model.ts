@@ -9,6 +9,23 @@ import { DecodeCellDebug, DecodeSampleGrid, PositionDecodeResult, ProjectedBins,
 import { ProfileSpan } from '../profiling/profiler.ts';
 import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
 
+// requestVideoFrameCallback's metadata for one decoded video frame, captured
+// on the phone (mobileCapture.ts's onVideoFrame) and relayed with the frame
+// it describes. All times are on the PHONE's clock, in epoch milliseconds,
+// except mediaTime/presentationTime/expectedDisplayTime which are on the
+// browser's own media/presentation timelines.
+//
+// `captureTime` is the field genuinely wanted for IMU fusion and it is
+// OPTIONAL IN THE SPEC -- widely present for WebRTC sources, not guaranteed
+// for getUserMedia ones. Everything else is recorded alongside it precisely
+// because which field is trustworthy is per-device, and picking one here
+// would bake in a guess that the calibration step is supposed to test.
+export interface FrameMeta {
+  mediaTime: number; presentationTime: number; expectedDisplayTime: number;
+  captureTime: number | null; processingDuration: number | null;
+  presentedFrames: number | null; observedAt: number;
+}
+
 // ── Camera model ─────────────────────────────────────────────────────────
 //
 // Any number of these can exist at once (zero included -- see this file's
@@ -282,6 +299,21 @@ export interface PhysicalCamera extends CameraBase {
   // ~1.33x-inflated string-length approximation it used to be.
   pendingCapture: {
     blob: Blob; sentAt: number; pulledAt: number; encodedAt: number; receivedAt: number; bytes: number;
+    // ── Added for IMU fusion; both OPTIONAL because an older phone client
+    // against a newer desktop simply won't send them ──────────────────────
+    //
+    // drawnAt is the phone's high-resolution monotonic twin of pulledAt.
+    // frameMeta is requestVideoFrameCallback's own metadata for the frame
+    // that was drawn, and is the only thing here that says anything about
+    // when the photons actually landed -- sentAt/pulledAt/encodedAt all
+    // describe the SEND, which happens an unknown amount of time after
+    // capture. A filter must timestamp its measurement from these, not from
+    // sentAt; see mobileCapture.ts's latestFrameMeta comment for why a
+    // constant timestamp error is specifically dangerous here (it produces
+    // pose error proportional to velocity, which is indistinguishable from
+    // the problem being solved).
+    drawnAt?: number;
+    frameMeta?: FrameMeta | null;
   } | null;
   // Mailbox slot for a device-compute phone's poseResult, exactly mirroring
   // pendingCapture's own "always overwrite with the newest arrived message,
@@ -362,6 +394,48 @@ export interface PhysicalCamera extends CameraBase {
     nominalFrameRate: number | null;
     avgIntervalMs: number | null; maxIntervalMs: number | null; sampleCount: number | null;
     loopTicks: number; backpressureBlockedTicks: number; readinessBlockedTicks: number; sendsAttempted: number;
+  } | null;
+
+  // ── IMU (phase A of the motion-blur/IMU plan: RECORDING ONLY) ──────────
+  //
+  // Raw devicemotion samples relayed from this phone, newest last, capped at
+  // IMU_RING_CAPACITY. Nothing in the pose pipeline reads these -- they exist
+  // so a session can be dumped and replayed offline, which is the only way a
+  // filter can be tuned against a fixed dataset rather than against whatever
+  // the phone happened to be doing at the time.
+  //
+  // `t` is the phone's own high-resolution monotonic epoch clock
+  // (mobileCapture.ts's nowMs), stamped when the event HANDLER RAN -- which
+  // is not when the sensor sampled. That offset is a phase B calibration,
+  // not a defect, and correcting it here by guesswork would destroy the
+  // information needed to estimate it.
+  //
+  // Angular rates are DEGREES/SECOND and accelerations m/s^2, in the DEVICE
+  // frame, not the camera's -- see mobileCapture.ts's block comment on axes
+  // before using any of this for anything.
+  imuSamples: {
+    t: number;
+    rrAlpha: number; rrBeta: number; rrGamma: number;
+    ax: number; ay: number; az: number;
+    agx: number; agy: number; agz: number;
+    interval: number;
+  }[];
+  // Per-batch context + liveness, from the most recent 'imu' message.
+  // screenAngle is what a replay needs to get from the DeviceMotion frame to
+  // anything camera-relative; receivedAt lets a stale stream be told apart
+  // from a phone that simply isn't moving (both leave the samples static).
+  lastImuMeta: { screenAngle: number; rateHz: number | null; receivedAt: number; totalReceived: number } | null;
+
+  // The most recently INGESTED frame's raw timing, kept because pendingCapture
+  // is a mailbox that gets popped and discarded -- see ingestRealCapture's own
+  // comment. Everything except receivedAtDesktop is on the PHONE's clock, the
+  // same clock imuSamples[].t uses, and the two are only meaningful together.
+  // receivedAtDesktop is carried alongside precisely so the cross-device skew
+  // stays visible rather than being silently baked into a difference.
+  lastCaptureTiming: {
+    sentAt: number; pulledAt: number; encodedAt: number;
+    drawnAt: number | null; frameMeta: FrameMeta | null;
+    receivedAtDesktop: number;
   } | null;
 }
 export type Camera = SimulatedCamera | PhysicalCamera;

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { PhysicalCamera } from '../camera/model.ts';
+import { FrameMeta, PhysicalCamera } from '../camera/model.ts';
 import { createPhysicalCamera } from '../camera/factory.ts';
 import { findPhysicalCameraByConnection, removeCameraTab } from '../camera/lifecycle.ts';
 import { activeCamera, cameras, isPhysical, nextCameraColor } from '../camera/store.ts';
@@ -10,6 +10,12 @@ import { renderer } from '../scene/renderer.ts';
 import { globalState } from '../state.ts';
 import { renderCameraTabs, refreshCameraPanel } from '../ui/cameraPanel.ts';
 import { throughCamCanvas } from '../ui/dom.ts';
+
+// Desktop-side cap on the relayed IMU ring, matching mobileCapture.ts's own
+// IMU_RING_CAPACITY -- ~40s at the ~60Hz browsers actually deliver. Both ends
+// keep a buffer because they answer different questions: the phone's survives
+// a websocket drop, this one is what a recording gets dumped from.
+const IMU_RING_CAPACITY = 2400;
 
 // Shared by both the realCapture and captureMode handlers below -- either
 // one can be the first message ever received from a given phone (toggling
@@ -139,7 +145,10 @@ export function pushPoseSync(cam: PhysicalCamera) {
   // strict adjacency also keeps this correct if more than one phone is
   // sending at once and their broadcasts interleave in this tab's own
   // message stream.
-  const pendingRealCaptureMeta = new Map<string, { sentAt: number; pulledAt: number; encodedAt: number }>();
+  const pendingRealCaptureMeta = new Map<string, {
+    sentAt: number; pulledAt: number; encodedAt: number;
+    drawnAt?: number; frameMeta?: FrameMeta | null;
+  }>();
 
   function scheduleReconnect() {
     devBridgeSocket = null;
@@ -201,7 +210,10 @@ export function pushPoseSync(cam: PhysicalCamera) {
           // handler's own comment on why: always overwrite with the
           // freshest frame, main.ts's animate loop pumps it once the
           // camera is actually free.
-          cam.pendingCapture = { blob, sentAt: meta.sentAt, pulledAt: meta.pulledAt, encodedAt: meta.encodedAt, receivedAt: now, bytes: blob.size };
+          cam.pendingCapture = {
+            blob, sentAt: meta.sentAt, pulledAt: meta.pulledAt, encodedAt: meta.encodedAt,
+            receivedAt: now, bytes: blob.size, drawnAt: meta.drawnAt, frameMeta: meta.frameMeta,
+          };
         }
         return;
       }
@@ -242,7 +254,17 @@ export function pushPoseSync(cam: PhysicalCamera) {
         if (msg.captureId) {
           findOrCreatePhysicalCamera(msg.captureId); // auto-create the tab even if the binary frame never arrives
           const now = Date.now();
-          pendingRealCaptureMeta.set(msg.captureId, { sentAt: msg.sentAt ?? now, pulledAt: msg.pulledAt ?? now, encodedAt: msg.encodedAt ?? now });
+          // drawnAt/frameMeta stay UNDEFINED rather than falling back to
+          // `now` the way the three above do. The fallbacks exist so derived
+          // DURATIONS degrade to ~0 instead of NaN; but a capture timestamp
+          // has no such harmless default -- substituting the desktop's own
+          // clock would silently hand a filter a confidently wrong time on
+          // the wrong machine's clock. Absent must stay distinguishable from
+          // present-and-zero here.
+          pendingRealCaptureMeta.set(msg.captureId, {
+            sentAt: msg.sentAt ?? now, pulledAt: msg.pulledAt ?? now, encodedAt: msg.encodedAt ?? now,
+            drawnAt: msg.drawnAt, frameMeta: msg.frameMeta ?? null,
+          });
         }
       } else if (msg.type === 'poseResult') {
         // Same broadcast/routing as realCapture (see server.js), sent
@@ -297,6 +319,32 @@ export function pushPoseSync(cam: PhysicalCamera) {
             avgIntervalMs: msg.avgIntervalMs ?? null, maxIntervalMs: msg.maxIntervalMs ?? null, sampleCount: msg.sampleCount ?? null,
             loopTicks: msg.loopTicks, backpressureBlockedTicks: msg.backpressureBlockedTicks,
             readinessBlockedTicks: msg.readinessBlockedTicks, sendsAttempted: msg.sendsAttempted,
+          };
+        }
+      } else if (msg.type === 'imu') {
+        // Same posture as frameStats: doesn't auto-create a tab. A phone
+        // streaming IMU without ever having sent a frame has nothing to
+        // attach the samples to, and inventing a camera for it would put an
+        // empty tab on screen for a phone that may never capture.
+        const cam = msg.captureId ? findPhysicalCameraByConnection(msg.captureId) : undefined;
+        if (cam && Array.isArray(msg.samples)) {
+          for (const s of msg.samples) {
+            // Positional tuples on the wire (see mobileCapture.ts's send) --
+            // ~6 of these arrive 10x/second, and the field names cost more
+            // bytes than the numbers do at that rate.
+            cam.imuSamples.push({
+              t: s[0], rrAlpha: s[1], rrBeta: s[2], rrGamma: s[3],
+              ax: s[4], ay: s[5], az: s[6], agx: s[7], agy: s[8], agz: s[9], interval: s[10],
+            });
+          }
+          if (cam.imuSamples.length > IMU_RING_CAPACITY) {
+            cam.imuSamples.splice(0, cam.imuSamples.length - IMU_RING_CAPACITY);
+          }
+          cam.lastImuMeta = {
+            screenAngle: msg.screenAngle ?? 0,
+            rateHz: msg.rateHz ?? null,
+            receivedAt: performance.timeOrigin + performance.now(),
+            totalReceived: (cam.lastImuMeta?.totalReceived ?? 0) + msg.samples.length,
           };
         }
       } else if (msg.type === 'captureDisconnected' && msg.captureId) {

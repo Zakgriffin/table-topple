@@ -290,6 +290,7 @@ export function createPhysicalCamera(color: THREE.Color, connectionId: string): 
     lastPullMs: null, lastEncodeMs: null, lastTransitMs: null,
     pullMsHistory: [], encodeMsHistory: [], transitMsHistory: [], payloadBytesHistory: [],
     lastFrameStats: null,
+    imuSamples: [], lastImuMeta: null, lastCaptureTiming: null,
   };
   bumpCameraSerial();
   return camera;

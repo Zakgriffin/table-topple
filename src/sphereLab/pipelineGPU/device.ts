@@ -95,6 +95,13 @@ export function transferLedger(): readonly TransferSample[] { return ledger; }
 export function setTransferProbe(on: boolean): void { probeEnabled = on; }
 export function transferProbeEnabled(): boolean { return probeEnabled; }
 
+// `label` defaults to UNLABELLED rather than to a type name so an unlabelled
+// call site is visible AS a defect in the readout instead of quietly merging
+// into a 'u32' bucket with ten unrelated transfers. That is not hypothetical:
+// the first run of this instrument reported "11 u32 readbacks, 4.30ms of fence"
+// and could not say which eleven, which is the difference between knowing there
+// are 16 fences and knowing which 4 to kill.
+
 // For byte-proportional work that happens OUTSIDE these helpers but is part of
 // the same crossing -- currently FieldResidency's f64<->f32 conversions, which
 // are the single largest per-crossing cost and are invisible from in here.
@@ -121,7 +128,7 @@ async function bareRead(device: GPUDevice, buffer: GPUBuffer): Promise<number> {
 // buffer (STORAGE | COPY_SRC | COPY_DST as needed) -- nothing is read back
 // to CPU except the final vote array, see voteGeneration.ts.
 
-export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage = 0, label = 'f32'): GPUBuffer {
+export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage = 0, label = 'UNLABELLED f32'): GPUBuffer {
   const s = spanStart(`CPU→GPU upload (${data.byteLength}B)`);
   const t0 = performance.now();
   const buffer = device.createBuffer({
@@ -136,7 +143,7 @@ export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage 
   return buffer;
 }
 
-export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 0, label = 'u32'): GPUBuffer {
+export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 0, label = 'UNLABELLED u32'): GPUBuffer {
   const s = spanStart(`CPU→GPU upload (${data.byteLength}B)`);
   const t0 = performance.now();
   const buffer = device.createBuffer({
@@ -180,7 +187,7 @@ export function uploadUniform(device: GPUDevice, data: ArrayBuffer): GPUBuffer {
 // copyBufferToBuffer (device-local, effectively free next to a PCIe/unified-
 // memory round trip through the driver). See profiling/profiler.ts's
 // attachGPUKernelBreakdown for how this compares against actual kernel time.
-export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'f32'): Promise<Float32Array> {
+export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED f32'): Promise<Float32Array> {
   const s = spanStart(`GPU→CPU readback (${byteLength}B)`);
   // Both probes BEFORE the timed read, so the real read is measured against a
   // drained queue and its excess over bareFenceMs is byte cost alone.
@@ -200,7 +207,7 @@ export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLeng
   return result;
 }
 
-export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'u32'): Promise<Uint32Array> {
+export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED u32'): Promise<Uint32Array> {
   const s = spanStart(`GPU→CPU readback (${byteLength}B)`);
   const queueDrainMs = probeEnabled ? await bareRead(device, buffer) : null;
   const bareFenceMs = probeEnabled ? await bareRead(device, buffer) : null;

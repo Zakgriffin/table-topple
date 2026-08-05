@@ -109,7 +109,7 @@ export async function fitAndTestRegionsGPU(
   // Only outBuf and the uniform are ours to free -- fx/fy and the whole
   // region CSR belong to the residency, which is still holding them for any
   // other consumer this frame.
-  const raw = await readFloat32(device, outBuf, regionCount * 10 * 4);
+  const raw = await readFloat32(device, outBuf, regionCount * 10 * 4, 'lsdFit:rects');
   for (const b of [outBuf, uniformBuf]) b.destroy();
 
   // Checked BEFORE `raw` is believed. WebGPU reports validation failures

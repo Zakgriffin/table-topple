@@ -68,8 +68,8 @@ export async function sweepResultantsGPU(
   device.pushErrorScope('validation');
   const { pipeline, bindGroupLayout } = getPipeline(device);
 
-  const scaledBuf = uploadFloat32(device, scaled);
-  const weightsBuf = uploadFloat32(device, weights);
+  const scaledBuf = uploadFloat32(device, scaled, 0, 'sweep:scaled');
+  const weightsBuf = uploadFloat32(device, weights, 0, 'sweep:weights');
   const scoresBuf = createStorageBuffer(device, candidateCount * 4);
 
   const uni = new ArrayBuffer(16);
@@ -99,7 +99,7 @@ export async function sweepResultantsGPU(
   pass.end();
   device.queue.submit([encoder.finish()]);
 
-  const scores = await readFloat32(device, scoresBuf, candidateCount * 4);
+  const scores = await readFloat32(device, scoresBuf, candidateCount * 4, 'sweep:scores');
   for (const b of [scaledBuf, weightsBuf, scoresBuf, uniBuf]) b.destroy();
 
   const err = await device.popErrorScope();

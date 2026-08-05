@@ -78,9 +78,9 @@ export async function refineOrientationAndPositionLMGPU(
   const torusBuf = getTorusBuffer(device, torus, torusR, torusC);
 
   const n = samples.length;
-  const pxBuf = uploadFloat32(device, Float32Array.from(samples, (s) => s.px));
-  const pyBuf = uploadFloat32(device, Float32Array.from(samples, (s) => s.py));
-  const obsBuf = uploadFloat32(device, Float32Array.from(samples, (s) => s.observed));
+  const pxBuf = uploadFloat32(device, Float32Array.from(samples, (s) => s.px), 0, 'posLM:px');
+  const pyBuf = uploadFloat32(device, Float32Array.from(samples, (s) => s.py), 0, 'posLM:py');
+  const obsBuf = uploadFloat32(device, Float32Array.from(samples, (s) => s.observed), 0, 'posLM:obs');
   const outBuf = createStorageBuffer(device, n * 6 * 8); // vec2<f32> x 6 per sample
 
   const EPS_ROT = 1e-5, EPS_POS = 1e-3;
@@ -114,7 +114,7 @@ export async function refineOrientationAndPositionLMGPU(
       attachGPUKernelBreakdown([{ name: `${label} kernel`, durationMs }]);
       querySet.destroy();
     }
-    const raw = await readFloat32(device!, outBuf, n * 6 * 8);
+    const raw = await readFloat32(device!, outBuf, n * 6 * 8, 'posLM:out');
     uniformsBuf.destroy();
     spanEnd(dispatchSpan);
     return raw;

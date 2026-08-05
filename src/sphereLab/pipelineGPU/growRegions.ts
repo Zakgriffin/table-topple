@@ -187,7 +187,7 @@ export async function growRegionsCCLGPU(
     }
     device.queue.submit([encoder.finish()]);
     roundsRun += batch;
-    const flag = await readUint32(device, changedBuf, 4);
+    const flag = await readUint32(device, changedBuf, 4, 'grow:converged');
     // Still batch-granular in the sense that we always RUN a whole batch --
     // convergence at round 7 of 8 costs the 8th round, which is what proves it.
     // So roundsRun stays an upper bound on the rounds that did real work, and

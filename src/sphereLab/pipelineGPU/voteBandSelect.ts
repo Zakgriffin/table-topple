@@ -54,7 +54,7 @@ export async function votesInMagnitudeBandGPU(votes: Vote[], minPercent: number,
   let maxWeight = 0;
   for (const { weight } of votes) if (weight > maxWeight) maxWeight = weight;
 
-  const votesBuf = uploadFloat32(device, votesToFloat32(votes));
+  const votesBuf = uploadFloat32(device, votesToFloat32(votes), 0, 'band:votes');
   const numWorkgroups = Math.ceil(n / WORKGROUP_SIZE_1D);
 
   // ── Pass 1: histogram ────────────────────────────────────────────────
@@ -85,7 +85,7 @@ export async function votesInMagnitudeBandGPU(votes: Vote[], minPercent: number,
     device.queue.submit([encoder.finish()]);
   }
   spanEnd(histSpan);
-  const histRaw = await readUint32(device, histBuf, NUM_BUCKETS * 4);
+  const histRaw = await readUint32(device, histBuf, NUM_BUCKETS * 4, 'band:hist');
 
   // ── CPU: translate the two rank cutoffs into weight thresholds by
   // walking the (tiny) histogram from the highest-weight bucket down. ────
@@ -140,9 +140,9 @@ export async function votesInMagnitudeBandGPU(votes: Vote[], minPercent: number,
   }
   spanEnd(filterSpan);
 
-  const outCountRaw = await readUint32(device, outCountBuf, 4);
+  const outCountRaw = await readUint32(device, outCountBuf, 4, 'band:count');
   const count = outCountRaw[0];
-  const outRaw = count > 0 ? await readFloat32(device, votesOutBuf, count * 16) : new Float32Array(0);
+  const outRaw = count > 0 ? await readFloat32(device, votesOutBuf, count * 16, 'band:out') : new Float32Array(0);
 
   for (const b of [votesBuf, histBuf, histUniformBuf, votesOutBuf, outCountBuf, filterUniformBuf]) b.destroy();
 

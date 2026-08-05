@@ -311,10 +311,10 @@ export class FieldResidency {
     // branch on emptiness before it binds.
     const pad = <T extends Uint32Array | Float32Array>(a: T): T => (a.length > 0 ? a : new (a.constructor as new (n: number) => T)(1));
     const rs: RegionSetGPU = {
-      offsets: uploadUint32(device, pad(offsets)),
-      sizes: uploadUint32(device, pad(sizes)),
-      members: uploadUint32(device, pad(members)),
-      meanDirs: uploadFloat32(device, pad(meanDirs)),
+      offsets: uploadUint32(device, pad(offsets), 0, 'regions:offsets'),
+      sizes: uploadUint32(device, pad(sizes), 0, 'regions:sizes'),
+      members: uploadUint32(device, pad(members), 0, 'regions:members'),
+      meanDirs: uploadFloat32(device, pad(meanDirs), 0, 'regions:meanDirs'),
       regionCount,
       memberCount: total,
     };
@@ -338,10 +338,10 @@ export class FieldResidency {
     const regions: GrownRegion[] = [];
     if (regionCount > 0) {
       const [offRaw, sizeRaw, memRaw, meanRaw] = await Promise.all([
-        readUint32(device, rs.offsets, regionCount * 4),
-        readUint32(device, rs.sizes, regionCount * 4),
-        memberCount > 0 ? readUint32(device, rs.members, memberCount * 4) : Promise.resolve(new Uint32Array(0)),
-        readFloat32(device, rs.meanDirs, regionCount * 8),
+        readUint32(device, rs.offsets, regionCount * 4, 'regions:offsets'),
+        readUint32(device, rs.sizes, regionCount * 4, 'regions:sizes'),
+        memberCount > 0 ? readUint32(device, rs.members, memberCount * 4, 'regions:members') : Promise.resolve(new Uint32Array(0)),
+        readFloat32(device, rs.meanDirs, regionCount * 8, 'regions:meanDirs'),
       ]);
       for (let r = 0; r < regionCount; r++) {
         regions.push({

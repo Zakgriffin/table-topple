@@ -58,8 +58,8 @@ function getHashTable(device: GPUDevice): HashTable {
     keys[slot] = key;
     values[slot] = value;
   }
-  const keysBuf = uploadUint32(device, keys);
-  const valuesBuf = uploadUint32(device, values);
+  const keysBuf = uploadUint32(device, keys, 0, 'tally:keys');
+  const valuesBuf = uploadUint32(device, values, 0, 'tally:values');
   table = { keysBuf, valuesBuf, size };
   hashTableCache.set(device, table);
   return table;
@@ -118,7 +118,7 @@ export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<Vot
       gridData[i * gc + j] = pt.valid ? (1 | (pt.bit << 1)) : 0;
     }
   }
-  const gridBuf = uploadUint32(device, gridData);
+  const gridBuf = uploadUint32(device, gridData, 0, 'tally:grid');
   try {
     return await tallyFromDeviceGrid(device, gridBuf, gr, gc);
   } finally {
@@ -182,8 +182,8 @@ export async function tallyFromDeviceGrid(
   spanEnd(dispatchSpan);
 
   const [tallyRaw, totalWindowsRaw] = await Promise.all([
-    readUint32(device, tallyBuf, 4 * R * C * 4),
-    readUint32(device, totalWindowsBuf, 4),
+    readUint32(device, tallyBuf, 4 * R * C * 4, 'tally:hist'),
+    readUint32(device, totalWindowsBuf, 4, 'tally:totalWindows'),
   ]);
   for (const b of [tallyBuf, totalWindowsBuf, ...uniformBufs]) b.destroy(); // gridBuf is the caller's
 

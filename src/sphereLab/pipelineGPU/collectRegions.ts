@@ -142,8 +142,8 @@ export async function collectRegionsGPU(
   device.queue.submit([encoder.finish()]);
 
   const [rTot, mTot] = await Promise.all([
-    readUint32(device, totalRegions, 4),
-    readUint32(device, totalMembers, 4),
+    readUint32(device, totalRegions, 4, 'collect:regionCount'),
+    readUint32(device, totalMembers, 4, 'collect:memberCount'),
   ]);
   const regionCount = rTot[0], memberCount = mTot[0];
 

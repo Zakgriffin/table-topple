@@ -88,8 +88,16 @@ export interface ReconstructionTimingReport {
   // ── the fence/byte accounting, from the probe-OFF reps ──
   fences: number; // readbacks per reconstruction -- the count the single-fence plan is trying to drive to 1
   transferBytes: number;
-  transferMs: number; // total time inside upload/readback/convert, probe off
-  transferSharePct: number; // transferMs as a share of poseMedianMs
+  // Total time inside the upload/readback/convert helpers, probe off.
+  //
+  // READ THIS AS AN UPPER BOUND, NOT AS "TRANSFER COST". A readback blocks until
+  // everything already queued has executed, so this number INCLUDES the GPU
+  // compute the CPU happened to be waiting on -- measured at ~16ms of ~33ms on
+  // the first real run, i.e. the majority of it was the pipeline working, not
+  // the bus. Only the probe table below separates the two, and the honest
+  // summary of that split is fenceMs + byteMs, not this.
+  transferMs: number;
+  transferSharePct: number;
 
   // ── attribution, from ONE probe-ON rep ──
   // Its wall clock is meaningless (probing triples every readback); only the
@@ -291,7 +299,12 @@ export function formatReconstructionTiming(r: ReconstructionTimingReport | strin
   const s = r.stageMedianMs;
   lines.push(`  stages: votes ${s.votes.toFixed(1)}  fit ${s.fit.toFixed(1)}  pose ${s.pose.toFixed(1)}  distance ${s.distance.toFixed(1)}  decode ${s.decode.toFixed(1)}`);
   if (r.captureMedianMs !== null) lines.push(`  capture+preprocess: ${r.captureMedianMs.toFixed(1)}ms (SIMULATED ONLY, not in the median above)`);
-  lines.push(`  fences: ${r.fences}   bytes: ${(r.transferBytes / 1048576).toFixed(2)}MB   transfer time: ${r.transferMs.toFixed(1)}ms (${r.transferSharePct.toFixed(0)}% of the reconstruction)`);
+  lines.push(`  fences: ${r.fences}   bytes: ${(r.transferBytes / 1048576).toFixed(2)}MB   in transfer helpers: ${r.transferMs.toFixed(1)}ms (${r.transferSharePct.toFixed(0)}% -- UPPER BOUND, includes GPU compute waited on)`);
+  if (r.probe) {
+    let f = 0, b = 0, q = 0;
+    for (const g of r.probe) { f += g.fenceMs ?? 0; b += g.byteMs ?? (g.kind === 'readback' ? 0 : g.ms); q += g.queuedAheadMs ?? 0; }
+    lines.push(`  attributed: ${q.toFixed(1)}ms GPU compute queued ahead | ${f.toFixed(1)}ms fence latency | ${b.toFixed(1)}ms byte-proportional`);
+  }
   lines.push(`  pose: votes ${r.votes}, consistency ${r.consistency !== null ? (r.consistency * 100).toFixed(1) + '%' : 'n/a'}, distance ${r.distance !== null ? r.distance.toFixed(2) : 'n/a'}`);
   if (r.probe) {
     lines.push(`  --- probe (${r.probeNote}) ---`);

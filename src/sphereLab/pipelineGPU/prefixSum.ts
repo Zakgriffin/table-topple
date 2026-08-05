@@ -142,7 +142,7 @@ export async function exclusiveScanU32(values: Uint32Array): Promise<{ scan: Uin
   if (n === 0) return { scan: new Uint32Array(0), total: 0 };
   device.pushErrorScope('validation');
 
-  const inBuf = uploadUint32(device, values);
+  const inBuf = uploadUint32(device, values, 0, 'prefixSum:in');
   const outBuf = createStorageBuffer(device, n * 4);
   const totalBuf = createStorageBuffer(device, 4);
   const encoder = device.createCommandEncoder();
@@ -150,8 +150,8 @@ export async function exclusiveScanU32(values: Uint32Array): Promise<{ scan: Uin
   device.queue.submit([encoder.finish()]);
 
   const [scan, total] = await Promise.all([
-    readUint32(device, outBuf, n * 4),
-    readUint32(device, totalBuf, 4),
+    readUint32(device, outBuf, n * 4, 'prefixSum:out'),
+    readUint32(device, totalBuf, 4, 'prefixSum:total'),
   ]);
   for (const b of [inBuf, outBuf, totalBuf, ...temps]) b.destroy();
 

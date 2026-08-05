@@ -64,7 +64,7 @@ function getTorusBuffer(device: GPUDevice): GPUBuffer {
   cached?.buf.destroy();
   const flat = new Uint32Array(R * C);
   for (let r = 0; r < R; r++) for (let c = 0; c < C; c++) flat[r * C + c] = torus[r][c];
-  const buf = uploadUint32(device, flat);
+  const buf = uploadUint32(device, flat, 0, 'decode:torus');
   torusCache.set(device, { buf, r: R, c: C, sample: torus[0][0] });
   return buf;
 }
@@ -122,7 +122,7 @@ export async function buildAndTallyDecodeGPU(
 
   const { rows, cols } = layout;
   const cells = rows * cols;
-  const grayBuf = uploadFloat32(device, new Float32Array(gray));
+  const grayBuf = uploadFloat32(device, new Float32Array(gray), 0, 'decode:gray');
   const packedBuf = createStorageBuffer(device, cells * 4);
   const geomBuf = createStorageBuffer(device, cells * 16);
   const uniBuf = uploadUniform(device, buildUniforms(layout, w, h));
@@ -184,7 +184,7 @@ export async function buildAndTallyDecodeGPU(
     pass.dispatchWorkgroups(dispatchCount(rr), dispatchCount(cc));
     pass.end();
     device.queue.submit([encoder.finish()]);
-    const out = await readUint32(device, countsBuf, 8);
+    const out = await readUint32(device, countsBuf, 8, 'decode:counts');
     cuBuf.destroy(); countsBuf.destroy();
     return out;
   })();
@@ -206,8 +206,8 @@ export async function buildAndTallyDecodeGPU(
     const readGrid = async (): Promise<DecodeSampleGrid> => {
       if (released) throw new Error('buildAndTallyDecodeGPU: readGrid() called after release()');
       const [geom, packed] = await Promise.all([
-        readFloat32(device, geomBuf, cells * 16),
-        readUint32(device, packedBuf, cells * 4),
+        readFloat32(device, geomBuf, cells * 16, 'decode:gridGeom'),
+        readUint32(device, packedBuf, cells * 4, 'decode:gridPacked'),
       ]);
       const points: DecodeSamplePoint[][] = [];
       for (let i = 0; i < rows; i++) {

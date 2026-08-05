@@ -88,7 +88,7 @@ export async function computeWorldVotesGPU(
   const n = w * h;
 
   const uploadSpan = spanStart('CPU→GPU upload phase (gray + uniforms)');
-  const grayBuf = uploadFloat32(device, new Float32Array(gray));
+  const grayBuf = uploadFloat32(device, new Float32Array(gray), 0, 'voteGen:gray');
   const fxBuf = createStorageBuffer(device, n * 4);
   const fyBuf = createStorageBuffer(device, n * 4);
   const cxBuf = createStorageBuffer(device, n * 4);
@@ -136,7 +136,7 @@ export async function computeWorldVotesGPU(
   }
   spanEnd(dispatchSpan);
 
-  const raw = await readFloat32(device, voteBuf, n * 16); // readFloat32 self-spans (device.ts) -- see attachGPUKernelBreakdown's comment for why this is split from kernel time
+  const raw = await readFloat32(device, voteBuf, n * 16, 'voteGen:votes'); // readFloat32 self-spans (device.ts) -- see attachGPUKernelBreakdown's comment for why this is split from kernel time
   const votes: Vote[] = [];
   for (let i = 0; i < n; i++) {
     const o = i * 4;

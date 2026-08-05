@@ -101,13 +101,34 @@ struct U { n: u32, rhoHighSq: f32, minRegionSize: u32, pad: u32 }
 @group(0) @binding(4) var<storage, read> counts: array<u32>;
 @group(0) @binding(5) var<storage, read_write> regionOffsets: array<u32>;
 @group(0) @binding(6) var<storage, read_write> regionSizes: array<u32>;
+@group(0) @binding(7) var<storage, read> totalRegions: array<u32>;
+@group(0) @binding(8) var<storage, read_write> dispatchArgs: array<u32>;
 
 // Re-indexes the per-LABEL arrays into per-REGION ones. Everything upstream is
 // keyed by label (a pixel index, sparse); everything downstream wants dense
 // region ids, and this is the one place that translation happens.
+//
+// It ALSO writes the workgroup count for every later per-region dispatch, and
+// that is why the host no longer has to read the region count back. This pass is
+// the first one that runs after both prefix scans, so totalRegions is final by
+// the time any thread here observes it -- and since the pass already exists, the
+// dispatch args cost ZERO extra passes, which matters because plan item 12
+// measured time tracking pass count.
+//
+// Written by thread 0 BEFORE the two early-outs below, or it would be skipped
+// whenever label 0 happens to be undersized or ineligible.
+//
+// 64 is not arbitrary: it is the workgroup size of BOTH consumers (finalize
+// here, and lsdFit's fitRegion), so one triple serves both.
 @compute @workgroup_size(256)
 fn regionMeta(@builtin(global_invocation_id) gid: vec3<u32>) {
   let l = gid.x;
+  if (l == 0u) {
+    let rc = totalRegions[0];
+    dispatchArgs[0] = (rc + 63u) / 64u; // 0 regions -> 0 workgroups, which is legal and skips the dispatch
+    dispatchArgs[1] = 1u;
+    dispatchArgs[2] = 1u;
+  }
   if (l >= u.n) { return; }
   if (keptFlag[l] == 0u) { return; }
   let r = regionIndex[l];
@@ -143,8 +164,12 @@ fn scatter(@builtin(global_invocation_id) gid: vec3<u32>) {
 `;
 
 export const COLLECT_FINALIZE_WGSL = /* wgsl */ `
-struct U { regionCount: u32, pad0: u32, pad1: u32, pad2: u32 }
-@group(0) @binding(0) var<uniform> u: U;
+// binding 0 is the COUNTS BUFFER, not a uniform. It used to be a uniform the
+// host filled in after reading the region count back -- which was the readback
+// this stage existed to force. Reading it from storage is what lets the whole
+// collect run in one submit with nothing crossing the bus.
+// counts[0] = regionCount, counts[1] = memberCount.
+@group(0) @binding(0) var<storage, read> counts: array<u32>;
 @group(0) @binding(1) var<storage, read> fx: array<f32>;
 @group(0) @binding(2) var<storage, read> regionOffsets: array<u32>;
 @group(0) @binding(3) var<storage, read> regionSizes: array<u32>;
@@ -155,7 +180,9 @@ struct U { regionCount: u32, pad0: u32, pad1: u32, pad2: u32 }
 @compute @workgroup_size(64)
 fn finalize(@builtin(global_invocation_id) gid: vec3<u32>) {
   let r = gid.x;
-  if (r >= u.regionCount) { return; }
+  // Still needed even though the dispatch is now exactly sized: the workgroup
+  // count is a CEILING, so the last workgroup runs threads past the end.
+  if (r >= counts[0]) { return; }
   let off = regionOffsets[r];
   let size = regionSizes[r];
 

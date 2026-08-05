@@ -28,7 +28,7 @@
 // technique.
 export const LSD_FIT_WGSL = /* wgsl */ `
 struct Uniforms {
-  w: u32, h: u32, regionCount: u32, pad0: u32,
+  w: u32, h: u32, pad0: u32, pad1: u32,
   rhoSq: f32, toleranceRad: f32, logNTests: f32, logEpsilon: f32,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
@@ -43,6 +43,11 @@ struct Uniforms {
 @group(0) @binding(4) var<storage, read> memberIndices: array<u32>; // flat, CSR
 @group(0) @binding(5) var<storage, read> meanDirs: array<vec2<f32>>; // [regionCount], a DIRECTION not an angle
 @group(0) @binding(7) var<storage, read> memberSizes: array<u32>; // [regionCount]
+// [regionCount, memberCount], written on device by collect's scans. The bounds
+// check below reads counts[0] rather than u.regionCount, which is what lets the
+// host dispatch this INDIRECTLY -- it never learns the region count, so it
+// cannot put it in a uniform. u.regionCount is gone for that reason.
+@group(0) @binding(8) var<storage, read> counts: array<u32>;
 @group(0) @binding(6) var<storage, read_write> outBuf: array<f32>; // [regionCount * 10]: cx,cy,theta,length,width,nfaLog10,accepted(0/1),pad,n,k
 // n and k are emitted purely so pipelineGPU/lsdFitVerify.ts can tell a
 // disagreement in the COUNTS (which pixels each path decided were inside the
@@ -59,7 +64,9 @@ const BOUNDARY_EPS: f32 = 1e-3;
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let ri = gid.x;
-  if (ri >= u.regionCount) { return; }
+  // The indirect workgroup count is a CEILING over 64, so the last workgroup
+  // still runs threads past the last region.
+  if (ri >= counts[0]) { return; }
   let start = memberOffsets[ri];
   let end = start + memberSizes[ri];
   let o = ri * 10u;

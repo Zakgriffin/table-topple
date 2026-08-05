@@ -89,8 +89,33 @@ export interface RegionSetGPU {
   sizes: GPUBuffer;
   members: GPUBuffer;
   meanDirs: GPUBuffer; // vec2<f32> per region -- a direction, never an angle
-  regionCount: number;
-  memberCount: number;
+  // [regionCount, memberCount], on DEVICE. Bound by every consumer that needs a
+  // bounds check, so none of them needs the host to have read it.
+  counts: GPUBuffer;
+  // (ceil(regionCount/64), 1, 1) -- the workgroup count for a per-region
+  // dispatch at workgroup_size(64), which collect's finalize and lsdFit's
+  // fitRegion both are. Written on device by collect's regionMeta pass.
+  dispatchArgs: GPUBuffer;
+  // The provable ceiling on regionCount (maxRegionCount above), carried here
+  // because it is what any per-region buffer must be sized at once nobody reads
+  // the actual count back. The CPU route sets it to the exact count it already
+  // knows, so neither consumer has to ask which route built the set.
+  maxRegions: number;
+  // The same two numbers HOST-side, and null whenever the GPU collect produced
+  // this set -- which is the point of the whole arrangement: learning them costs
+  // a fence, so nothing on the pose path is allowed to want them casually.
+  // Non-null only when the CPU collect built the set and knew them for free.
+  // Anyone who genuinely needs them goes through regionCounts() and pays.
+  knownCounts: { regionCount: number; memberCount: number } | null;
+}
+
+// The provable ceiling on regions for an n-pixel field: a kept region holds at
+// least minRegionSize pixels, so there can be at most n/minRegionSize of them.
+// Exact rather than a policy guess, which is why buffers sized with it need no
+// overflow handling. Guarded at 1 because minRegionSize is a user-facing setting
+// and 0 would be a division by zero rather than an infinite bound.
+export function maxRegionCount(n: number, minRegionSize: number): number {
+  return Math.ceil(n / Math.max(1, minRegionSize));
 }
 
 export interface TransferEntry {
@@ -272,7 +297,12 @@ export class FieldResidency {
   provideRegionsGPU(rs: RegionSetGPU): void {
     this.assertUnwritten('regions', { cpu: this.regionsCPUValue, gpu: this.regionsGPUValue });
     this.regionsGPUValue = rs;
-    this.owned.push(rs.offsets, rs.sizes, rs.members, rs.meanDirs);
+    // EVERY buffer in the set, counts and dispatchArgs included. Missing those
+    // two leaked ~7KB per reconstruction and was invisible to every check
+    // except the allocation probe's created-vs-destroyed pair (78 vs 76), which
+    // is a decent argument for that probe reporting both numbers rather than
+    // just a total.
+    this.owned.push(rs.offsets, rs.sizes, rs.members, rs.meanDirs, rs.counts, rs.dispatchArgs);
   }
 
   hasRegionsCPU(): boolean { return this.regionsCPUValue != null; }
@@ -315,16 +345,51 @@ export class FieldResidency {
       sizes: uploadUint32(device, pad(sizes), 0, 'regions:sizes'),
       members: uploadUint32(device, pad(members), 0, 'regions:members'),
       meanDirs: uploadFloat32(device, pad(meanDirs), 0, 'regions:meanDirs'),
-      regionCount,
-      memberCount: total,
+      // Uploaded for the same reason the GPU collect writes them: consumers
+      // bind this rather than take a host number, so both routes present the
+      // same shape and lsdFit does not branch on which one built the set.
+      counts: uploadUint32(device, new Uint32Array([regionCount, total]), 0, 'regions:counts'),
+      dispatchArgs: uploadUint32(
+        device, new Uint32Array([Math.ceil(regionCount / 64), 1, 1]), GPUBufferUsage.INDIRECT, 'regions:dispatchArgs',
+      ),
+      // Known for free here: this set was BUILT from CPU arrays whose lengths
+      // the host already had. No fence was paid, so there is nothing to hide.
+      maxRegions: Math.max(regionCount, 1),
+      knownCounts: { regionCount, memberCount: total },
     };
     this.transfers.push({
       what: 'regions', direction: 'up',
       bytes: (regionCount * 4 + total) * 4,
     });
     this.regionsGPUValue = rs;
-    this.owned.push(rs.offsets, rs.sizes, rs.members, rs.meanDirs);
+    this.owned.push(rs.offsets, rs.sizes, rs.members, rs.meanDirs, rs.counts, rs.dispatchArgs);
     return rs;
+  }
+
+  // The region/member counts as HOST numbers, which on the GPU route costs a
+  // readback and a fence -- the exact one perf-TODO item 7 removed from the pose
+  // path. That is why it is an await rather than a field: the type makes you
+  // notice you are paying.
+  //
+  // Nothing on the pose path calls this. Its callers are regionsCPU() below
+  // (display and the harnesses) and lsdFit's rectangle readback, which is
+  // already fencing for the rectangles themselves and folds this into the same
+  // stall. Memoized, so a caller that needs both counts and members pays once.
+  private countsValue: { regionCount: number; memberCount: number } | null = null;
+  async regionCounts(): Promise<{ regionCount: number; memberCount: number }> {
+    if (this.countsValue) return this.countsValue;
+    const rs = this.regionsGPUValue;
+    if (rs?.knownCounts) return (this.countsValue = rs.knownCounts);
+    if (this.regionsCPUValue) {
+      let total = 0;
+      for (const r of this.regionsCPUValue) total += r.members.length;
+      return (this.countsValue = { regionCount: this.regionsCPUValue.length, memberCount: total });
+    }
+    if (!rs) throw new Error('FieldResidency: region counts read before regions were provided');
+    const device = this.device;
+    if (!device) throw new Error('FieldResidency: region counts are GPU-resident but there is no device');
+    const raw = await readUint32(device, rs.counts, 8, 'regions:counts');
+    return (this.countsValue = { regionCount: raw[0], memberCount: raw[1] });
   }
 
   async regionsCPU(): Promise<GrownRegion[]> {
@@ -334,7 +399,7 @@ export class FieldResidency {
     const device = this.device;
     if (!device) throw new Error('FieldResidency: regions are GPU-resident but there is no device');
 
-    const { regionCount, memberCount } = rs;
+    const { regionCount, memberCount } = await this.regionCounts();
     const regions: GrownRegion[] = [];
     if (regionCount > 0) {
       const [offRaw, sizeRaw, memRaw, meanRaw] = await Promise.all([

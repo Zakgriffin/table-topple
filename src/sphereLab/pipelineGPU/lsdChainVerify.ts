@@ -22,12 +22,39 @@ import { globalState } from '../state.ts';
 // per-stage harnesses and immediately visible here.
 //
 // So this runs the REAL entry point (createLsdChainResidency + runLsdChain, the
-// same two calls pipeline/poseCompute.ts makes) once per legal toggle
-// configuration and diffs every configuration against the all-CPU one.
+// same two calls pipeline/poseCompute.ts makes) in both configurations and diffs
+// production against the CPU reference.
+//
+// ── It used to sweep 12 configurations, and that is not a loss (2026-08-05) ──
+//
+// Four per-stage GPU toggles gave 12 legal combinations, and what the sweep
+// specifically tested was the RESIDENCY'S TRANSFER DECISIONS -- put stage 2 on
+// the GPU and stage 3 on the CPU, and check the labeling still arrives where the
+// CPU collect expects it. That is why its columns are crossings and bytes next
+// to the geometry deltas.
+//
+// Perf TODO item 6 collapsed those toggles into globalState.forceCPU, and with
+// them went the mixed configurations: fieldResidency stopped being a
+// transfer-decision engine and became a plain named-slot arena. So 11 of the 12
+// are now UNREACHABLE STATES rather than untested ones -- there is no longer a
+// way to run the chain half on each side, and therefore no such plumbing to get
+// wrong.
+//
+// What survives is the differential, and it matters MORE than it did: production
+// no longer runs the CPU implementations at all, so this is the only thing
+// standing between them and silent rot. If they drift, two things break at once
+// -- the no-WebGPU fallback ships broken, and the reference every future port is
+// verified against is wrong.
+//
+// STATE ITS BLIND SPOT rather than trusting a green run: a CPU-vs-GPU diff
+// cannot see an error the two paths SHARE. It catches porting mistakes, not
+// wrong shared formulas -- which is exactly how the level-line component order
+// survived two sessions. This is a regression guard on the reference
+// implementations, not a correctness proof of the pipeline.
 //
 // KNOWN AND EXPECTED, measured 2026-08-03 at 512x384 so you don't re-chase it:
-// the three configurations with gradient=GPU AND fit=GPU report a
-// maxNfaLog10Delta of ~1.4 while every other configuration reports 0 or ~1.7e-5.
+// production reports a maxNfaLog10Delta of ~1.4 (back then, the configurations
+// with gradient=GPU AND fit=GPU did; that is now simply "production").
 // It is EXACTLY ONE rectangle out of 2133 (index 684, a 17-member region,
 // 8.6x1.96px), and its geometry, member list and accept decision are all
 // identical -- only the NFA score moves, -5.92 -> -7.30.
@@ -53,26 +80,24 @@ import { globalState } from '../state.ts';
 // growRegionsVerify's borderlinePairs), so a capture with neighbour pairs
 // sitting on the tolerance boundary can legitimately split or merge a component
 // and shift every count downstream. Judge accordingly: with borderlinePairs 0,
-// anything nonzero below is a bug; with borderlinePairs nonzero, expect small
-// deltas confined to configurations that differ in useGPUGrowRegions, and treat
-// a delta between two configurations that share a grower setting as a bug
-// regardless.
+// anything nonzero below is a bug; with borderlinePairs nonzero, small deltas
+// are legitimate, since the two configurations differ in the grower by
+// construction.
 
-// The toggles this sweeps, in the order they appear in a config label.
-interface ChainToggles {
-  gradient: boolean;
-  grow: boolean;
-  collect: boolean;
-  fit: boolean;
-}
+// The two configurations this compares. What used to be here was a
+// ChainToggles record and a 12-configuration sweep over four per-stage GPU
+// toggles; those toggles collapsed into globalState.forceCPU (2026-08-05, perf
+// TODO item 6), and 11 of the 12 configurations became unreachable states
+// rather than untested ones. See verifyLsdChain's header.
+type ChainConfig = 'reference (forceCPU)' | 'production (GPU)';
 
 export interface ChainConfigReport {
-  config: string; // e.g. "gradient=GPU grow=GPU collect=CPU fit=GPU"
+  config: ChainConfig;
   n: number; // rectangles returned
   accepted: number;
   members: number; // total rawMembers across all rectangles
-  // Deltas against the all-CPU baseline. Every one of these should be 0 unless
-  // the grower legitimately diverged -- see the header.
+  // Deltas against the CPU reference. Every one of these should be 0 unless the
+  // grower legitimately diverged -- see the header.
   dN: number;
   dAccepted: number;
   dMembers: number;
@@ -82,10 +107,10 @@ export interface ChainConfigReport {
   maxCenterDelta: number; // px
   maxLengthDelta: number; // px
   maxNfaLog10Delta: number;
-  // What this configuration actually cost the bus, straight off the
-  // residency's own ledger. This is the readout the toggle UI is meant to grow
-  // (see the GPU parallelization plan's phase 3) -- it is free here because
-  // the residency records a transfer at the point it decides to make one.
+  // What this configuration actually cost the bus, straight off the residency's
+  // own ledger -- free here, because the residency records a transfer at the
+  // point it decides to make one. The production row is the number to watch:
+  // it should be 1 (gray up, nothing down).
   crossings: number;
   bytes: number;
   medianMs: number;
@@ -123,25 +148,8 @@ export async function awaitPageFocus(timeoutMs = 120000): Promise<number> {
   return Math.round(performance.now() - t0);
 }
 
-function label(t: ChainToggles): string {
-  const s = (b: boolean) => (b ? 'GPU' : 'CPU');
-  return `gradient=${s(t.gradient)} grow=${s(t.grow)} collect=${s(t.collect)} fit=${s(t.fit)}`;
-}
 
-// useGPUCollectRegions only means anything with useGPUGrowRegions on -- stage 3b
-// is dispatched from inside growRegionsCCLGPU, so with a CPU grower the flag is
-// dead and sweeping it would just run the same configuration twice.
-function legalConfigs(): ChainToggles[] {
-  const out: ChainToggles[] = [];
-  for (const gradient of [false, true]) {
-    for (const grow of [false, true]) {
-      for (const collect of grow ? [false, true] : [false]) {
-        for (const fit of [false, true]) out.push({ gradient, grow, collect, fit });
-      }
-    }
-  }
-  return out;
-}
+const CONFIGS: ChainConfig[] = ['reference (forceCPU)', 'production (GPU)'];
 
 // `members` is passed in rather than summed off rects[].rawMembers, and that is
 // load-bearing rather than cosmetic. The production fitter stopped filling
@@ -184,22 +192,14 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
     retryShrinkFraction: s.lsdRetryShrinkFraction,
   };
 
-  const saved = {
-    gradient: globalState.useGPUGradient,
-    grow: globalState.useGPUGrowRegions,
-    collect: globalState.useGPUCollectRegions,
-    fit: globalState.useGPULsdFit,
-  };
+  const savedForceCPU = globalState.forceCPU;
 
   // One run of the real chain under one toggle configuration, returning the
   // rectangles AND the residency's ledger. The residency is created and
   // destroyed inside, exactly as production does it, so a leak or a
   // double-destroy shows up here too.
-  const runOnce = async (t: ChainToggles) => {
-    globalState.useGPUGradient = t.gradient;
-    globalState.useGPUGrowRegions = t.grow;
-    globalState.useGPUCollectRegions = t.collect;
-    globalState.useGPULsdFit = t.fit;
+  const runOnce = async (t: ChainConfig) => {
+    globalState.forceCPU = t === 'reference (forceCPU)';
     const res = await createLsdChainResidency(gray, w, h);
     try {
       const t0 = performance.now();
@@ -224,8 +224,8 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
 
   try {
     const focusWaitMs = await awaitPageFocus();
-    const configs = legalConfigs();
-    const baseline = configs[0]; // all-CPU, and the source of truth every stage is verified against
+    const configs = CONFIGS;
+    const baseline = configs[0]; // the CPU reference, and the source of truth the GPU path is verified against
     const baseRun = await runOnce(baseline);
     const baseRects = baseRun.rects;
     const base = summarize(baseRects, baseRun.members);
@@ -237,7 +237,7 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
     const results = new Map<string, { rects: LsdRectangle[]; crossings: number; bytes: number; members: number } | string>();
     for (let rep = 0; rep < reps; rep++) {
       for (const t of configs) {
-        const key = label(t);
+        const key = t;
         try {
           const { rects, ms, summary, members } = await runOnce(t);
           times.set(key, [...(times.get(key) ?? []), ms]);
@@ -252,7 +252,7 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
 
     const reports: ChainConfigReport[] = [];
     for (const t of configs) {
-      const key = label(t);
+      const key = t;
       const got = results.get(key);
       if (typeof got === 'string' || got === undefined) {
         reports.push({
@@ -282,7 +282,7 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
 
     return {
       reps,
-      baseline: label(baseline),
+      baseline,
       configs: reports,
       worstDN: Math.max(...reports.map((r) => Math.abs(r.dN))),
       worstDAccepted: Math.max(...reports.map((r) => Math.abs(r.dAccepted))),
@@ -298,9 +298,6 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
     // Restoring these matters more than it looks: they are the live production
     // toggles, and leaving the sweep's last configuration behind would silently
     // reconfigure the app for every frame after the harness returns.
-    globalState.useGPUGradient = saved.gradient;
-    globalState.useGPUGrowRegions = saved.grow;
-    globalState.useGPUCollectRegions = saved.collect;
-    globalState.useGPULsdFit = saved.fit;
+    globalState.forceCPU = savedForceCPU;
   }
 }

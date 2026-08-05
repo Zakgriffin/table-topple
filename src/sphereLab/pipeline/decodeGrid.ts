@@ -399,7 +399,7 @@ export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampl
 // updates, mode switches, camera creation) that used to be perfectly fine
 // staying synchronous; now that those call sites (see modeRefresh.ts/
 // main.ts/ui/mode.ts) have all gone async too (see this session's chat --
-// buildProjectedTexture used to silently bypass globalState.useGPUProject
+// buildProjectedTexture used to silently bypass globalState.forceCPU
 // entirely, running a redundant CPU-only re-projection on every
 // reconstruction pass and every throttled preview tick), every caller can
 // safely go through computeProjectedBinsAndMarginalsAuto below instead of
@@ -415,11 +415,11 @@ export async function computeProjectedBinsAndMarginalsGPU(camera: Camera): Promi
 
 // Single dispatch point for every caller (axesReconstruction.ts's
 // recomputeStages, and modeRefresh.ts's buildProjectedTexture) --
-// centralizes the globalState.useGPUProject check once instead of
+// centralizes the globalState.forceCPU check once instead of
 // duplicating the GPU-with-CPU-fallback ternary at each call site.
 export async function computeProjectedBinsAndMarginalsAuto(camera: Camera): Promise<ProjectedSampleResult> {
-  const s = spanStart(globalState.useGPUProject ? 'projectBins (GPU stage 1 + CPU bucket)' : 'projectBins (CPU)');
-  const result = globalState.useGPUProject
+  const s = spanStart(globalState.forceCPU ? 'projectBins (CPU)' : 'projectBins (GPU stage 1 + CPU bucket)');
+  const result = !globalState.forceCPU
     ? (await computeProjectedBinsAndMarginalsGPU(camera)) ?? computeProjectedBinsAndMarginals(camera)
     : computeProjectedBinsAndMarginals(camera);
   spanEnd(s);
@@ -761,8 +761,10 @@ export async function runPositionDecode(
   camera.pendingDecodeGrid = null;
   // ── Fused GPU path: grid built on device, tally consumes it in place ────
   //
-  // Distinct from useGPUDecode (which only moves the TALLY, and still packs and
-  // uploads a CPU-built grid -- 298KB per call at a 270x276 lattice). Here the
+  // The fused path: grid built AND tallied on device. It supersedes the
+  // tally-only GPU route below, which now runs only as the fused path's own
+  // fallback (it packs and uploads a CPU-built grid -- 298KB per call at a
+  // 270x276 lattice). Here the
   // packed grid never crosses the bus in either direction on the pose path:
   // what comes back is the winner and two correctness counts, and the reference
   // cell's u/v are recomputed on the host in f64 rather than read back.
@@ -807,7 +809,7 @@ export async function runPositionDecode(
   // lastPositionDecode/lastDecodeCorrectness all cleared). Two places that must
   // agree on what "no decode this frame" means is a worse failure mode than one
   // extra decodeGridLayout call, which does no per-pixel work.
-  if (globalState.useGPUDecodeFused) {
+  if (!globalState.forceCPU) {
     const fusedSpan = spanStart('decode (fused GPU build+tally)');
     const layout = decodeGridLayout(camera, gray, vFovRad);
     const fused = layout ? await buildAndTallyDecodeGPU(layout, gray, w, h, sharedGray) : null;
@@ -891,8 +893,8 @@ export async function runPositionDecode(
   // one is currently a manual toggle rather than always-on (measured SLOWER
   // than CPU for typical grid sizes, expected to flip in the GPU's favor for
   // larger decode grids).
-  const tallySpan = spanStart(globalState.useGPUDecode ? 'tallyPositionVotes (GPU)' : 'tallyPositionVotes (CPU)');
-  const winner = globalState.useGPUDecode
+  const tallySpan = spanStart(globalState.forceCPU ? 'tallyPositionVotes (CPU)' : 'tallyPositionVotes (GPU)');
+  const winner = !globalState.forceCPU
     ? (await tallyPositionVotesGPU(grid)) ?? tallyPositionVotes(grid)
     : tallyPositionVotes(grid);
   spanEnd(tallySpan);

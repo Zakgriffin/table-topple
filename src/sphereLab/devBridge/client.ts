@@ -72,7 +72,7 @@ function buildCameraSettingsPayload(cam: PhysicalCamera) {
 // server.js's settingsSync routing (finds the one capture socket matching
 // captureId, sends directly) and mobileCapture.ts's own receiving end.
 // Called on: per-camera-settings slider changes (that one camera only, see
-// ui/cameraPanel.ts), global useGPU*/boardSize changes (every connected
+// ui/cameraPanel.ts), global forceCPU/boardSize changes (every connected
 // physical camera), and the first time a physical camera is seen in
 // main.ts's animate loop (camera.neverSyncedSettings) -- see this session's
 // on-device-pose-recovery plan.
@@ -81,12 +81,7 @@ export function pushSettingsSync(cam: PhysicalCamera) {
     type: 'settingsSync',
     captureId: cam.connectionId,
     globalState: {
-      useGPUFit: globalState.useGPUFit, useGPUGradient: globalState.useGPUGradient,
-      useGPULsdFit: globalState.useGPULsdFit, useGPUDecode: globalState.useGPUDecode,
-      useGPUGrowRegions: globalState.useGPUGrowRegions,
-      useGPUPeriodSweep: globalState.useGPUPeriodSweep,
-      useGPUCollectRegions: globalState.useGPUCollectRegions,
-      useGPUDecodeFused: globalState.useGPUDecodeFused,
+      forceCPU: globalState.forceCPU,
       boardSize: globalState.boardSize,
     },
     cameraSettings: buildCameraSettingsPayload(cam),

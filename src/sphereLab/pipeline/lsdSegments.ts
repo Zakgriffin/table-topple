@@ -51,7 +51,7 @@ import { computeGradient2x2Field } from './gradientField.ts';
 // round trip and measures slower (3.5ms CPU vs 8ms GPU). That inverts once
 // stage 2+3 is GPU-resident and the labeling never lands on CPU.
 // Stage 2+3 ALSO has a GPU port now (pipelineGPU/growRegions.ts, toggled by
-// globalState.useGPUGrowRegions, dispatched independently of the fit stage in
+// globalState.forceCPU, alongside the fit stage in
 // computeLsdRectanglesAuto). Like the JFA version it replaces, it was
 // architecturally GPU-ready by construction -- each round is two
 // frozen-buffer-in/fresh-buffer-out passes with no same-round cross-pixel
@@ -936,7 +936,7 @@ function fitRegionsCPU(
 // lastNoisedPreviewGray rather than reading the camera field the pose path
 // fills. That is true and it is not the point: its recomputation calls
 // computeLsdRectanglesFromField, which lands in THIS function whenever
-// useGPULsdFit is on -- which is the shipping setting. Deleting the readback
+// the GPU fitter is in use -- which is the shipping setting. Deleting the readback
 // outright would have blanked the rejected-region raster and thrown on
 // `rawMembers[0]` in the accepted-rectangle hue. Same function, two callers,
 // only one of which needs the data.
@@ -993,7 +993,7 @@ export function computeLsdRectangles(field: GradientField, settings: LsdSettings
   return fitRegionsCPU(regions, fx, fy, w, h, settings);
 }
 
-// CPU growing + GPU fitting, i.e. the useGPULsdFit half of the dispatch in
+// CPU growing + GPU fitting, i.e. the fit half of the dispatch in
 // isolation. Kept as a named entry point because it is the exact pairing
 // pipelineGPU/lsdFitVerify.ts's numbers were measured against.
 export async function computeLsdRectanglesGPU(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[] | null> {
@@ -1021,8 +1021,8 @@ export async function computeLsdRectanglesGPU(field: GradientField, settings: Ls
 // Single dispatch point every caller uses -- centralizes the globalState GPU
 // checks once instead of duplicating them at each call site.
 //
-// The two stages dispatch INDEPENDENTLY: useGPUGrowRegions picks stage 2+3,
-// useGPULsdFit picks stage 4+5's first pass, and either can fall back to CPU on
+// Both stages now follow the single globalState.forceCPU, and either still
+// falls back to CPU on
 // its own without disturbing the other. That independence is the point -- the
 // grower is the one stage whose GPU output is NOT bit-identical to its CPU
 // output (see pipelineGPU/growRegions.ts's header), so it has to stay
@@ -1056,7 +1056,7 @@ export async function computeLsdRectanglesAuto(
   const growArgs = [
     w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
   ] as const;
-  const grown = globalState.useGPUGrowRegions ? await growRegionsCCLGPU(res, ...growArgs) : null;
+  const grown = !globalState.forceCPU ? await growRegionsCCLGPU(res, ...growArgs) : null;
   if (!grown) {
     // Either the toggle is off or the GPU grower bailed; on both paths it
     // published nothing, so the CPU grower owns these slots. Asking the
@@ -1067,7 +1067,7 @@ export async function computeLsdRectanglesAuto(
     res.provideRegionsCPU(cpu.regions);
   }
 
-  if (globalState.useGPULsdFit) {
+  if (!globalState.forceCPU) {
     const gpu = await fitRegionsGPU(res, w, h, settings, wantMembers);
     if (gpu) return gpu;
   }
@@ -1076,10 +1076,10 @@ export async function computeLsdRectanglesAuto(
 
 // Whether any stage of the chain needs a device. No device is requested at all
 // when every stage is on CPU, so an all-CPU frame still never touches
-// navigator.gpu -- and useGPUGradient counts, because stage 1 can want a device
+// navigator.gpu -- and stage 1 counts, because it can want a device
 // when nothing downstream does.
 export function lsdChainWantsGPU(): boolean {
-  return globalState.useGPUGradient || globalState.useGPUGrowRegions || globalState.useGPULsdFit;
+  return !globalState.forceCPU;
 }
 
 // ── Stage 1: the 2x2 forward-difference gradient ──
@@ -1092,7 +1092,7 @@ export function lsdChainWantsGPU(): boolean {
 // uploaded gray and read fx/fy straight back, and then growRegionsCCLGPU
 // uploaded those same two arrays again a moment later.
 async function runGradient2x2Stage(res: FieldResidency, w: number, h: number): Promise<void> {
-  const useGPU = globalState.useGPUGradient && res.device !== null;
+  const useGPU = !globalState.forceCPU && res.device !== null;
   const s = spanStart(useGPU ? 'gradient2x2 (GPU)' : 'gradient2x2 (CPU)');
   if (!(useGPU && await computeGradient2x2FieldGPU(res, w, h))) {
     // gray is CPU-resident by construction (createLsdChainResidency put it
@@ -1149,8 +1149,8 @@ export async function runLsdChain(
 export async function computeLsdRectanglesFromField(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[]> {
   const { w, h, fx, fy } = field;
   // Not lsdChainWantsGPU(): stage 1 has already happened on CPU here, so
-  // useGPUGradient says nothing about whether this call needs a device.
-  const res = await FieldResidency.create(w * h, globalState.useGPUGrowRegions || globalState.useGPULsdFit);
+  // forceCPU's gradient branch says nothing about whether this call needs a device.
+  const res = await FieldResidency.create(w * h, !globalState.forceCPU);
   try {
     res.provideCPU('fx', fx);
     res.provideCPU('fy', fy);

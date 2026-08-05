@@ -23,7 +23,7 @@
 // but their COSTS stop being independent. A GPU stage with CPU neighbours on
 // both sides still pays 2 crossings; two adjacent GPU stages pay 2 between them
 // TOTAL, not 4. So savings are superadditive along a contiguous run, and a
-// stage that loses on its own (useGPULsdFit at 3.5ms CPU vs 8ms GPU, all of it
+// stage that loses on its own (the LSD fit at 3.5ms CPU vs 8ms GPU, all of it
 // upload) can flip to a win purely because its neighbour got switched on, with
 // its own compute unchanged.
 //
@@ -262,7 +262,7 @@ export class FieldResidency {
   // own members array, on GPU it is four buffers plus two counts. Converting is
   // a restructure, not a widening, so it cannot share the generic path above.
   // This is also the single most valuable seam in the chain -- it is the CSR
-  // build + readback that makes useGPULsdFit lose today.
+  // build + readback that made the GPU fit lose in isolation.
 
   provideRegionsCPU(regions: GrownRegion[]): void {
     this.assertUnwritten('regions', { cpu: this.regionsCPUValue, gpu: this.regionsGPUValue });

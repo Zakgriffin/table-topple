@@ -753,14 +753,11 @@ let knownBoardSize: number | null = null;
 
 function applySettingsSync(msg: any) {
   if (msg.globalState) {
-    globalState.useGPUFit = !!msg.globalState.useGPUFit;
-    globalState.useGPUGradient = !!msg.globalState.useGPUGradient;
-    globalState.useGPULsdFit = !!msg.globalState.useGPULsdFit;
-    globalState.useGPUGrowRegions = !!msg.globalState.useGPUGrowRegions;
-    globalState.useGPUPeriodSweep = !!msg.globalState.useGPUPeriodSweep;
-    globalState.useGPUCollectRegions = !!msg.globalState.useGPUCollectRegions;
-    globalState.useGPUDecodeFused = !!msg.globalState.useGPUDecodeFused;
-    globalState.useGPUDecode = !!msg.globalState.useGPUDecode;
+    // One flag where there were eight. An older desktop build sending the
+    // per-stage set leaves this undefined -> false -> the GPU path, which is
+    // what every one of those toggles defaulted to anyway, so a version skew
+    // lands on the shipping configuration rather than on all-CPU.
+    globalState.forceCPU = !!msg.globalState.forceCPU;
     const boardSize = msg.globalState.boardSize;
     if (typeof boardSize === 'number' && boardSize !== knownBoardSize) {
       knownBoardSize = boardSize;

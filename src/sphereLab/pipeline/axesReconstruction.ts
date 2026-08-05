@@ -114,15 +114,14 @@ export function applyPoseVisualizations(camera: Camera, isActive: boolean, extra
 
 // ── The LSD chain's bus-traffic readout ──────────────────────────────────
 //
-// What the CURRENT toggle configuration actually cost, under the toggles that
-// set it. The point is that this is not derivable by looking at the checkboxes:
-// savings along the chain are superadditive, so a stage with CPU neighbours on
-// both sides costs two crossings while two adjacent GPU stages cost two
-// BETWEEN THEM TOTAL. Flipping one checkbox can therefore change the traffic of
-// a stage you did not touch, and that is invisible until you can see the total
-// move. Sourced from FieldResidency's own ledger, which records a transfer at
-// the moment it decides to make one, so the number cannot drift from the
-// behaviour the way a hand-maintained estimate would.
+// What the chain actually cost the bus on the last frame. It used to answer a
+// question the nine per-stage toggles raised -- savings along the chain are
+// superadditive, so flipping one checkbox changed the traffic of stages you did
+// not touch -- and with one switch left it answers a simpler one: is the chain
+// still at ONE crossing (gray up, nothing down), or has something started
+// pulling data back down? Sourced from FieldResidency's own ledger, which
+// records a transfer at the moment it decides to make one, so the number cannot
+// drift from the behaviour the way a hand-maintained estimate would.
 //
 // Worth reading alongside the measurement that motivated it, and against it:
 // crossings stopped predicting wall clock once the grower moved to GPU (the top
@@ -446,7 +445,7 @@ export function runAxesReconstruction(camera: Camera) {
 // capture -- the recompute half of "every setting recomputes everything
 // downstream of it" for settings that don't invalidate the capture itself
 // (LSD/join-walk tuning, weightSharpenPower, gridPeriodPhaseGapLowerBound,
-// minGrazingCos, the useGPU* toggles). Guarded by the same axesCapturing
+// minGrazingCos, forceCPU). Guarded by the same axesCapturing
 // flag as runAxesReconstruction (reused, not a separate flag) so a rapid
 // slider drag naturally self-throttles: a call that arrives while one is
 // already in flight just no-ops, same as an overlapping "capture now"

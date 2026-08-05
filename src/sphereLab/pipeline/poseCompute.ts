@@ -128,7 +128,7 @@ async function computeCompositesAndVotes(
 // the LSD chain (stages 1-4, see runLsdChain) -> computeGradient2x2Composites ->
 // computeSegmentVotes -> fitPairOfPlanes[GPU] -> handedness assembly ->
 // computeGridPeriodPhase -> assemble RecoveredAxes -> runPositionDecode.
-// No `useGPU` parameter -- every GPU/CPU branch point reads the shared
+// No GPU/CPU parameter -- every branch point reads the shared
 // globalState singleton exactly as it does today; the phone gets its own
 // independent globalState module instance (separate JS realm, not shared
 // memory with the desktop), kept in sync by settingsSync (see
@@ -191,8 +191,8 @@ export async function computePoseFromCapture(
     } else {
       // Same fallback pattern as every other GPU sub-pipeline: fitPairOfPlanes
       // stays the source of truth, the GPU version is verified against it.
-      const fitOnlySpan = spanStart(globalState.useGPUFit ? 'fitPairOfPlanes (GPU)' : 'fitPairOfPlanes (CPU)');
-      quadricPair = globalState.useGPUFit
+      const fitOnlySpan = spanStart(globalState.forceCPU ? 'fitPairOfPlanes (CPU)' : 'fitPairOfPlanes (GPU)');
+      quadricPair = !globalState.forceCPU
         ? (await fitPairOfPlanesGPU(votes, state.settings.weightSharpenPower))
           ?? fitPairOfPlanes(votes, state.settings.weightSharpenPower)
         : fitPairOfPlanes(votes, state.settings.weightSharpenPower);

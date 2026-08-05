@@ -63,7 +63,7 @@ function getPipelines(device: GPUDevice): Pipelines {
 // total. Everything else it produces is left where the fitter can consume it:
 // the ~800KB regionId array is pure debug-overlay data that the production path
 // never looks at, and the CSR is stage 4's direct input. Both used to come down
-// unconditionally, which is most of why useGPUCollectRegions measured as a loss.
+// unconditionally, which is most of why the GPU collect once measured as a loss.
 //
 // Returns false if WebGPU is unavailable or a dispatch failed validation, in
 // which case NOTHING has been published and the caller is free to run the CPU

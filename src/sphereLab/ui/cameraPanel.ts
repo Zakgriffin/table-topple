@@ -20,7 +20,7 @@ import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, useGPUDecodeRow, physCameraDetailFields, physCaptureModeReadout, profilerStatus, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, profilerStatus, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -313,13 +313,16 @@ bindSlider('floorCellOutlineSubdiv', (v) => {
   rebuildFloorTexture();
   for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render too
 }, (v) => v.toFixed(0));
-// Global fields (this slider, and the four useGPU* checkboxes below except
-// useGPUProject -- see this session's on-device-pose-recovery plan) push to
-// EVERY connected physical camera's phone, not just the active one --
-// conceptually shared even though their recompute-trigger only targets
-// activeCamera(). useGPUProject is deliberately excluded: it only affects
-// computeProjectedBinsAndMarginalsAuto (display-only projection), which is
-// NOT part of the phone-portable pose pipeline (pipeline/poseCompute.ts).
+// Global fields (this slider, and forceCPU below) push to EVERY connected
+// physical camera's phone, not just the active one -- conceptually shared even
+// though their recompute-trigger only targets activeCamera().
+//
+// forceCPU is pushed WHOLESALE, where the nine toggles it replaced were not:
+// The display-projection toggle was deliberately excluded from the sync because it only affects
+// display-only projection, which is not part of the phone-portable pose
+// pipeline. Collapsing them makes that exclusion unexpressible -- one flag
+// cannot be half-synced -- so the phone now also switches its (unused) display
+// projection. Harmless, and worth one sentence rather than a second flag.
 function pushSettingsSyncToAllPhysical() {
   for (const cam of cameras.values()) if (isPhysical(cam)) pushSettingsSync(cam);
 }
@@ -344,70 +347,18 @@ bindSlider('boardSize', (v) => {
   for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render/re-decode against the new board
   pushSettingsSyncToAllPhysical();
 }, (v) => v.toFixed(0));
-// Global (not per-camera) toggles selecting the code path for the
-// gradient/fit/project/decode stages -- flipping one changes what the NEXT
-// recompute produces, so re-run it against whichever camera's on screen
-// immediately rather than waiting for the next unrelated capture/slider.
-bindCheckbox('useGPUFit', (v) => { globalState.useGPUFit = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); pushSettingsSyncToAllPhysical(); });
-bindCheckbox('useGPUDecode', (v) => { globalState.useGPUDecode = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); pushSettingsSyncToAllPhysical(); });
-bindCheckbox('useGPUProject', (v) => { globalState.useGPUProject = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); });
-bindCheckbox('useGPUGradient', (v) => { globalState.useGPUGradient = v; const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam); pushSettingsSyncToAllPhysical(); });
-// Wired like every other useGPU* toggle now. It used to be deliberately
-// unwired -- forced unchecked, no change handler -- because the GPU path was
-// pinned off for a CORRECTNESS reason (a mod-pi/directed NFA parity mismatch)
-// and bindCheckbox would have restored a stale `checked` from localStorage and
-// silently re-enabled a wrong path. That mismatch is resolved and the kernel is
-// verified identical to CPU (pipelineGPU/lsdFitVerify.ts), so this is now an
-// ordinary A/B toggle. It defaulted OFF for a while after that, on performance
-// grounds -- the GPU path was upload-bound and slower in isolation -- and now
-// defaults ON, because it stopped being upload-bound once its neighbours could
-// hand it their buffers. Its own compute never changed.
-bindCheckbox('useGPULsdFit', (v) => {
-  globalState.useGPULsdFit = v;
-  const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
-  pushSettingsSyncToAllPhysical();
-});
-// Dispatches independently of useGPULsdFit -- stage 2+3 vs stage 4+5, either
-// can be on GPU without the other. Defaults OFF for a correctness reason, not
-// a perf one (see state.ts): this is the one stage that cannot be bit-identical
-// to CPU. The debug round scrubber in overlays/lsdOverlay.ts stays on the CPU
-// grower regardless, since it needs the intermediate rounds this path skips.
-// Supersedes useGPUDecode's grid upload when on -- the packed grid is built on
-// device and the tally reads it in place, so it never crosses the bus. Output is
-// observably identical to the CPU route (verified: 0 bit diffs, matching winner
-// and consistency), so this is a pure perf toggle, not a behavioural one.
-bindCheckbox('useGPUDecodeFused', (v) => {
-  globalState.useGPUDecodeFused = v;
-  updateDecodeTallyActive();
-  const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
-  pushSettingsSyncToAllPhysical();
-});
-// Only meaningful with useGPUGrowRegions on -- it consumes that path's own
-// device buffers. It DOES win now, having been off for a long time on the
-// grounds that it merely traded a label readback for a CSR readback. What
-// changed is stage 1: with the gradient device-resident, the CPU collect needs
-// fx/fy pulled back down, so leaving this off costs three readbacks rather than
-// one. See state.ts for the numbers.
-bindCheckbox('useGPUCollectRegions', (v) => {
-  globalState.useGPUCollectRegions = v;
-  const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
-  pushSettingsSyncToAllPhysical();
-});
-// An ISLAND -- gridPeriodPhase.ts's coarse sweep shares no buffers with the LSD
-// chain, so this composes with nothing and can be flipped in isolation.
-bindCheckbox('useGPUPeriodSweep', (v) => {
-  globalState.useGPUPeriodSweep = v;
-  const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
-  pushSettingsSyncToAllPhysical();
-});
-bindCheckbox('useGPUGrowRegions', (v) => {
-  globalState.useGPUGrowRegions = v;
+// THE global GPU/CPU switch, replacing nine per-stage toggles -- see state.ts's
+// forceCPU for why they went. Flipping it changes what the NEXT recompute
+// produces, so re-run against whichever camera is on screen immediately rather
+// than waiting for the next unrelated capture or slider.
+bindCheckbox('forceCPU', (v) => {
+  globalState.forceCPU = v;
   const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
   pushSettingsSyncToAllPhysical();
 });
 // Doesn't affect any already-computed camera state, just how the NEXT
 // physical-camera frame gets scheduled -- no recomputeFromLastCapture call
-// needed (unlike the useGPU* toggles above).
+// needed (unlike forceCPU above).
 bindCheckbox('useCapturePipelining', (v) => { globalState.useCapturePipelining = v; });
 // Same story -- this only picks WHEN the display tail runs, never what it
 // computes, so there is nothing to recompute on a flip. Turning it off leaves
@@ -475,18 +426,6 @@ function applyProfilerToggle() {
 profilerCheckbox.checked = false;
 profilerCheckbox.addEventListener('change', applyProfilerToggle);
 applyProfilerToggle();
-// The fused decode path is tested FIRST in runPositionDecode and returns on
-// success, so while it is on, useGPUDecode selects between two tally
-// implementations that never run. Dimming says that, where the nesting alone
-// would suggest the opposite (a child usually needs its parent). Deliberately
-// only a visual state: the checkbox stays bound and clickable, because the way
-// you make it relevant again is to turn the OTHER one off, and a dead row would
-// hide that. Falls back gracefully -- if fused bails at runtime the tally
-// toggle does decide the fallback, which is a good reason not to lock it.
-function updateDecodeTallyActive() {
-  useGPUDecodeRow.classList.toggle('inactive', globalState.useGPUDecodeFused);
-}
-updateDecodeTallyActive();
 
 // Sits at the TOP of the GPU toggle block now (it applies to all of them), so
 // it can no longer say "the checkbox above".

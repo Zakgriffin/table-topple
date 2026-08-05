@@ -12,7 +12,7 @@ import { growRegionsCCLGPUToCPU } from './growRegions.ts';
 //   await verifyCollectRegions()
 //
 // Runs growRegionsCCLGPUToCPU TWICE against the same mag/theta -- once with
-// useGPUCollectRegions off, once on -- so the labeling is produced by the same
+// the collect on CPU, once on GPU -- so the labeling is produced by the same
 // GPU round loop both times and the ONLY difference is which collector turned
 // it into regions. That isolates this stage from the f32/f64 edge-predicate
 // question growRegionsVerify already covers.
@@ -58,16 +58,18 @@ export async function verifyCollectRegions(camera?: Camera | null): Promise<Coll
     w, h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
   ] as const;
 
-  const saved = globalState.useGPUCollectRegions;
-  try {
-    globalState.useGPUCollectRegions = false;
+  {
+    // Explicit per-call argument, not a globalState flip around the calls. Both
+    // runs use the GPU GROWER and differ only in the collect, which is what
+    // makes this a stage-3b check: the grower is not bit-identical to CPU, so
+    // moving it too would swamp the comparison with grower divergence. That is
+    // also why the global forceCPU could not replace this.
     const t0 = performance.now();
-    const cpu = await growRegionsCCLGPUToCPU(fx, fy, ...args);
+    const cpu = await growRegionsCCLGPUToCPU(fx, fy, ...args, false);
     const cpuMs = performance.now() - t0;
 
-    globalState.useGPUCollectRegions = true;
     const t1 = performance.now();
-    const gpu = await growRegionsCCLGPUToCPU(fx, fy, ...args);
+    const gpu = await growRegionsCCLGPUToCPU(fx, fy, ...args, true);
     const gpuMs = performance.now() - t1;
 
     if (!cpu || !gpu) return 'grower returned null (WebGPU unavailable, or a validation error -- check the console)';
@@ -108,7 +110,5 @@ export async function verifyCollectRegions(camera?: Camera | null): Promise<Coll
       sizeHistogramMatches: sizeSig(cpu.regions) === sizeSig(gpu.regions),
       cpuMs, gpuMs,
     };
-  } finally {
-    globalState.useGPUCollectRegions = saved;
   }
 }

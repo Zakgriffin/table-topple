@@ -7,7 +7,7 @@ import { fitAndTestRegionsGPU } from './lsdFit.ts';
 
 // ── Dev harness: is lsdFit.wgsl.ts's output still the CPU path's output? ──
 //
-// globalState.useGPULsdFit has been pinned false since the shader and
+// The GPU fitter was pinned off for a long time, since the shader and
 // pipeline/lsdSegments.ts's countRectanglePixels disagreed about whether the
 // NFA alignment test was directed or mod-PI. That disagreement is gone (both
 // are directed again -- see the level-line vector block's  own comment there), so the shader

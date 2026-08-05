@@ -24,7 +24,7 @@ import { updateDistortedPreview } from './preview.ts';
 // chat) because the projected-texture repaint can go through a real
 // (possibly GPU) re-projection when `precomputedProjection` isn't provided
 // -- buildProjectedTexture used to silently always recompute on CPU only,
-// bypassing globalState.useGPUProject entirely. `precomputedProjection` lets
+// bypassing globalState.forceCPU's projection branch entirely. `precomputedProjection` lets
 // axesReconstruction.ts's recomputeStages -- which, for the active camera,
 // has USUALLY already computed and even painted this exact result a few
 // lines earlier -- hand it over directly instead of paying for a second

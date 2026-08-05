@@ -78,7 +78,7 @@ export interface CameraBase {
   // reads this instead of taking a fresh capture, so settings that only
   // affect stages downstream of capture (LSD/join-walk tuning,
   // weightSharpenPower, gridPeriodPhaseGapLowerBound, minGrazingCos, the
-  // useGPU* toggles) can recompute without re-rendering/re-photographing.
+  // forceCPU) can recompute without re-rendering/re-photographing.
   // Deliberately a SEPARATE buffer from lastNoisedPreviewGray -- that one is
   // also written by the passive preview loop on its own throttled cycle
   // (see pipeline/preview.ts), which would otherwise risk this drifting

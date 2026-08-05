@@ -124,9 +124,6 @@ export const globalSettingsSectionEl = document.getElementById('globalSettingsSe
 export const gpuVotesStatus = document.getElementById('gpuVotesStatus') as HTMLDivElement;
 export const lsdChainTransfers = document.getElementById('lsdChainTransfers') as HTMLDivElement;
 export const profilerStatus = document.getElementById('profilerStatus') as HTMLDivElement;
-// The decode-tally ROW (the label, not the input) -- dimmed when the fused
-// decode path supersedes it. See cameraPanel.ts's updateDecodeTallyActive.
-export const useGPUDecodeRow = document.getElementById('useGPUDecodeRow') as HTMLLabelElement;
 export const cameraSettingsSectionsEl = document.getElementById('cameraSettingsSections') as HTMLDivElement;
 export const simCameraDetailFields = document.getElementById('simCameraDetailFields') as HTMLDivElement;
 export const physCameraDetailFields = document.getElementById('physCameraDetailFields') as HTMLDivElement;

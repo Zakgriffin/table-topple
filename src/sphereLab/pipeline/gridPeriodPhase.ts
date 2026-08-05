@@ -444,9 +444,9 @@ export async function computeGridPeriodPhase(
   // every one of that family's unit vectors equally and so cannot change its
   // resultant -- it would move the PHASE, which is exactly why the GPU never
   // computes phase and circularFit still runs on CPU for the chosen candidates.
-  const sweepSpan = spanStart(globalState.useGPUPeriodSweep ? 'period sweep (GPU)' : 'period sweep (CPU)');
+  const sweepSpan = spanStart(globalState.forceCPU ? 'period sweep (CPU)' : 'period sweep (GPU)');
   let scores: Float32Array | null = null;
-  if (globalState.useGPUPeriodSweep) {
+  if (!globalState.forceCPU) {
     const total = rowValues.length + colValues.length;
     const scaled = new Float32Array(total), weights = new Float32Array(total);
     let at = 0;

@@ -13,7 +13,7 @@ import { sweepResultantsGPU } from './periodSweep.ts';
 // Reads the candidate set (and the per-family values/weights) off the last
 // reconstruction's stored result, then scores it BOTH ways here -- the CPU side
 // is recomputed rather than taken from the stored scores, so the harness is
-// valid whether or not that capture ran with useGPUPeriodSweep on. `rowLines`/
+// valid whether or not that capture ran the GPU sweep. `rowLines`/
 // `colLines` are a 1:1 map of the sweep's own rowSamples/colSamples, so both
 // paths get byte-identical input.
 //

@@ -101,7 +101,7 @@ function buildUniforms(gr: number, gc: number, orient: number, tableSize: number
 // i.e. this is essentially FLAT in grid size while the CPU version is linear,
 // so it wins ~10x as soon as the grid is large and costs under a millisecond
 // when it isn't. Winners agreed exactly at both sizes. That is why
-// globalState.useGPUDecode defaults on.
+// this runs as the fused decode's fallback.
 //
 // An older version of this comment claimed ~40-70ms here vs ~0.4-1ms on CPU,
 // off a much smaller (~22x29) saved capture. Those numbers do not reproduce --

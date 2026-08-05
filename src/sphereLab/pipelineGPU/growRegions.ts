@@ -67,9 +67,9 @@ const ROUNDS_PER_BATCH = 8;
 
 // GPU-resident counterpart to pipeline/lsdSegments.ts's growRegionsCCL, for
 // the ROUND LOOP (stage 2+3's fixpoint iteration). Hysteresis survival and the
-// collect/relabel pass follow it, on GPU when globalState.useGPUCollectRegions
-// is set (pipelineGPU/collectRegions.ts, consuming label/mag/theta where they
-// already sit) and on CPU otherwise.
+// collect/relabel pass follow it, on GPU by default (pipelineGPU/
+// collectRegions.ts, consuming label/mag/theta where they already sit) and on
+// CPU when `collectOnGPU` says so -- see that parameter below.
 //
 // NOT bit-identical to the CPU path, and can't be. The edge predicate is
 // `cos(theta_i - theta_j) >= cosTol`, evaluated here in f32 and there in f64 --
@@ -94,9 +94,18 @@ const ROUNDS_PER_BATCH = 8;
 // caller falls back to the CPU version, which stays the source of truth. On
 // that path nothing has been published, so the fallback is free to publish its
 // own results into the same residency.
+//
+// `collectOnGPU` exists for ONE caller: collectRegionsVerify, which isolates
+// stage 3b by holding the grower on GPU and switching only the collect. The
+// global forceCPU cannot express that -- it would move the grower too, and the
+// grower is the one stage that is not bit-identical to its CPU twin, so the
+// comparison would become grower-noise instead of a collect check. A parameter
+// defaulting to the global keeps production on exactly one path while leaving
+// the harness able to say which stage it means.
 export async function growRegionsCCLGPU(
   res: FieldResidency, w: number, h: number,
   toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
+  collectOnGPU = !globalState.forceCPU,
 ): Promise<{ roundsRun: number; converged: boolean } | null> {
   const device = res.device;
   if (!device) return null;
@@ -228,7 +237,7 @@ export async function growRegionsCCLGPU(
   // collectRegionsFromLabels, shared verbatim with the pure-CPU path so the two
   // can never drift.
   let collected = false;
-  if (globalState.useGPUCollectRegions) {
+  if (collectOnGPU) {
     collected = await collectRegionsGPU(res, rhoHigh, minRegionSize);
   }
   if (!collected) {
@@ -252,12 +261,13 @@ export async function growRegionsCCLGPU(
 export async function growRegionsCCLGPUToCPU(
   fx: Float64Array, fy: Float64Array, w: number, h: number,
   toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
+  collectOnGPU = !globalState.forceCPU,
 ): Promise<{ regionId: Int32Array; regions: GrownRegion[]; roundsRun: number; converged: boolean } | null> {
   const res = await FieldResidency.create(w * h, true);
   try {
     res.provideCPU('fx', fx);
     res.provideCPU('fy', fy);
-    const grown = await growRegionsCCLGPU(res, w, h, toleranceDeg, rhoLow, rhoHigh, maxRounds, minRegionSize);
+    const grown = await growRegionsCCLGPU(res, w, h, toleranceDeg, rhoLow, rhoHigh, maxRounds, minRegionSize, collectOnGPU);
     if (!grown) return null;
     return { regionId: await res.cpuI32('regionId'), regions: await res.regionsCPU(), ...grown };
   } finally {

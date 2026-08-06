@@ -31,7 +31,7 @@ interface LsdFitResult {
 // disjoint-partition guarantee), so this is a plain one-thread-per-region
 // parallel map, no cross-region synchronization needed at all.
 //
-// VERIFIED against the CPU path (pipelineGPU/lsdFitVerify.ts, on a real
+// VERIFIED against the CPU path (harness/lsdFitVerify.ts, on a real
 // 2931-region capture): zero disagreements on n, k, or accept/reject, and a
 // max nfaLog10 delta of 7.7e-6 -- pure f32-vs-f64 rounding. Geometry agrees to
 // ~4e-5. The mod-π/directed parity problem that originally pinned this is gone

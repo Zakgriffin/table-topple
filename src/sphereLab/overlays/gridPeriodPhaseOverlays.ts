@@ -1,11 +1,11 @@
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { persistConfig } from '../config.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { getAnalysisVFovRad } from '../pipeline/capture.ts';
 import { projectedUVScale } from '../pipeline/decodeGrid.ts';
-import { circularFit, computePooledGaps, GnomonicPoint, GridPeriodPhaseResult, makeCellCentreDistinctness, PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
-import { DecodeCellDebug } from '../types.ts';
+import { circularFit, computePooledGaps, type GnomonicPoint, type GridPeriodPhaseResult, makeCellCentreDistinctness, type PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
+import { type DecodeCellDebug } from '../types.ts';
 import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleProductCurveBtn, toggleValueHistogramBtn } from '../ui/dom.ts';
 import { svgEl, svgText } from './svgUtil.ts';
 

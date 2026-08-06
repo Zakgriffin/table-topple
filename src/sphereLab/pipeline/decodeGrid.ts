@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { tallyPositionVotesGPU } from '../pipelineGPU/decodeTally.ts';
@@ -7,10 +7,10 @@ import { buildAndTallyDecodeGPU } from '../pipelineGPU/decodeGridBuild.ts';
 import { projectSamplesGPU } from '../pipelineGPU/projectSamples.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { C, ORDER, R, debruijnLookup, torus } from '../floorPattern.ts';
-import { DecodeCellDebug, DecodeSampleGrid, DecodeSamplePoint, GradientField, PositionDecodeResult, ProjectedBins, ProjectedSamplesDense, RecoveredAxes, VoteResult } from '../types.ts';
-import { Backend } from './backend.ts';
+import { type DecodeCellDebug, type DecodeSampleGrid, type DecodeSamplePoint, type GradientField, type PositionDecodeResult, type ProjectedBins, type ProjectedSamplesDense, type RecoveredAxes, type VoteResult } from '../types.ts';
+import { type Backend } from './backend.ts';
 import { computeGradientField } from './gradientField.ts';
-import { GridPeriodPhaseResult } from './gridPeriodPhase.ts';
+import { type GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 
 // Minimal shape projectImageCornersToPlane/projectedUVScale/
 // buildDecodeSampleGrid/runPositionDecode actually need -- narrowed off the

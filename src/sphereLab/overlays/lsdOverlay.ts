@@ -1,10 +1,10 @@
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { backendFromForceCPU } from '../pipeline/backend.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import {
-  computeEdgeNeighbors, computeLsdRectanglesFromField, growRegionsCCL, GrownRegion, LsdRectangle,
+  computeEdgeNeighbors, computeLsdRectanglesFromField, growRegionsCCL, type GrownRegion, type LsdRectangle,
 } from '../pipeline/lsdSegments.ts';
 import { globalState } from '../state.ts';
 import { computeThroughRect } from '../ui/layout.ts';

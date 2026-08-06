@@ -16,10 +16,12 @@
 // differential test expressible as its natural sentence: "the same settings, on
 // two backends". Fold the backend into the settings object and that harness has
 // to MUTATE settings between the two runs, which is exactly what
-// pipelineGPU/lsdChainVerify.ts does to the global today (it saves
-// globalState.forceCPU, writes it twice, and restores it in a finally). One
-// object that both the caller and the harness want to hold still, and one knob
-// the harness wants to sweep, are different things and should not share a type.
+// harness/lsdChainVerify.ts USED to do to the global (it saved
+// globalState.forceCPU, wrote it twice, and restored it in a finally, so a
+// throw between the two runs left the running app reconfigured). It now takes
+// the backend as an argument, which is what this type is for. One object that
+// both the caller and the harness want to hold still, and one knob the harness
+// wants to sweep, are different things and should not share a type.
 //
 // ── 'gpu' means PREFER, not REQUIRE ──
 //

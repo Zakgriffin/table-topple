@@ -6,7 +6,7 @@
 // (see that function's own comment), so no separate max constant is needed
 // here anymore.
 
-import { GradientField } from '../types.ts';
+import { type GradientField } from '../types.ts';
 
 export function paintTopGradientOverlay(color: readonly [number, number, number], field: GradientField, out: Uint8Array) {
   const { fx, fy } = field;

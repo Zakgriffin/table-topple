@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { activeCamera, isPhysical, isSimulated } from '../camera/store.ts';
 import { COL_DIR, ROW_DIR, SPHERE_RADIUS } from '../constants.ts';
 import { angleBetweenDegV } from '../math/geometry.ts';
@@ -10,11 +10,11 @@ import { globalState } from '../state.ts';
 import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
 import { backendFromForceCPU } from './backend.ts';
 import { captureDistortedGrayscale } from './capture.ts';
-import { computeProjectedBinsAuto, paintProjectedTexture, ProjectedSampleResult } from './decodeGrid.ts';
+import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
 import { computePoseFromCapture } from './poseCompute.ts';
-import { ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
+import { type ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
 // Shared pole-marker/gizmo/floor-overlay/readout tail -- called after EITHER
 // a real local reconstruction (recomputeStages below) or an already-computed

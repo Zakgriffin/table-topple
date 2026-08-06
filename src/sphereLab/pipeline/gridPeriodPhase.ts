@@ -3,8 +3,8 @@ import { cornerDir } from '../math/geometry.ts';
 import { C, R } from '../floorPattern.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { sweepResultantsGPU } from '../pipelineGPU/periodSweep.ts';
-import { CompositeLine } from '../types.ts';
-import { Backend } from './backend.ts';
+import { type CompositeLine } from '../types.ts';
+import { type Backend } from './backend.ts';
 
 // ── Grid period/phase recovery from composite lines (pure) ────────────────
 //

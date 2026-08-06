@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Camera, FrameMeta, PhysicalCamera, SimulatedCamera } from '../camera/model.ts';
+import { type Camera, type FrameMeta, type PhysicalCamera, type SimulatedCamera } from '../camera/model.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer, scene } from '../scene/renderer.ts';
@@ -8,9 +8,9 @@ import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
 import { backendFromForceCPU } from './backend.ts';
-import { CompositeLine } from '../types.ts';
+import { type CompositeLine } from '../types.ts';
 import { buildProjectedTexture, computeProjectedBinsAuto, paintProjectedTexture } from './decodeGrid.ts';
-import { GridPeriodPhaseResult } from './gridPeriodPhase.ts';
+import { type GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
 import { updateDistortedPreview } from './preview.ts';
 

@@ -5,7 +5,7 @@ import { refreshModeVisualizations } from '../pipeline/modeRefresh.ts';
 import { worldOrbit } from '../scene/viewerControls.ts';
 import { persistConfig } from '../config.ts';
 import { globalState } from '../state.ts';
-import { Mode } from '../types.ts';
+import { type Mode } from '../types.ts';
 import { arrowToggles, clearLsdSvgOverlay, contamToggles, insideHint, modeBtns, overlayPanel, overlayPanelToggle, panel, panelToggle, pipFrame, pipLabel, projectedToggles, setSectionHidden, throughCamCanvas } from './dom.ts';
 
 // ── Mode switching ───────────────────────────────────────────────────────

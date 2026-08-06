@@ -1,14 +1,16 @@
-import { activeCamera } from '../camera/store.ts';
-import { Camera } from '../camera/model.ts';
 import { circularFit } from '../pipeline/gridPeriodPhase.ts';
-import { sweepResultantsGPU } from './periodSweep.ts';
+import type { Backend } from '../pipeline/backend.ts';
+import type { HarnessInput } from './input.ts';
+import { runPoseOn } from './runPose.ts';
+import { sweepResultantsGPU } from '../pipelineGPU/periodSweep.ts';
 
 // ── Dev harness: does periodSweep.wgsl.ts's sweep match the CPU's? ────────
 //
 // Not part of any pipeline. Call it from the devtools console on a real
 // capture -- main.ts re-exports every module onto globalThis:
 //
-//   await verifyPeriodSweep()
+//   await verifyPeriodSweep(cameraInput())
+//   await verifyPeriodSweep(await fixtureInput('default'))
 //
 // Reads the candidate set (and the per-family values/weights) off the last
 // reconstruction's stored result, then scores it BOTH ways here -- the CPU side
@@ -64,11 +66,15 @@ function findPeakPeriods(samples: { period: number; score: number }[]): number[]
   return out;
 }
 
-export async function verifyPeriodSweep(camera?: Camera | null): Promise<PeriodSweepVerifyReport | string> {
-  camera = camera ?? activeCamera() ?? null;
-  if (!camera) return 'no active camera';
-  const gpp = camera.lastGridPeriodPhase;
-  if (!gpp) return 'no grid period/phase result yet -- run a capture first';
+// Runs a whole reconstruction first, because what this checks is a stage that
+// consumes every stage before it. It used to read lastGridPeriodPhase off
+// whatever the app had last displayed -- see runPose.ts for why that made the
+// answer un-re-derivable.
+export async function verifyPeriodSweep(
+  input: HarnessInput, backend: Backend = 'gpu',
+): Promise<PeriodSweepVerifyReport | string> {
+  const gpp = (await runPoseOn(input, backend)).lastGridPeriodPhase;
+  if (!gpp) return 'reconstruction produced no grid period/phase result on this input';
   const { coarseSamples } = gpp.debug;
   if (coarseSamples.length < 3) return 'too few coarse samples to compare';
   // rowLines/colLines are the same per-family samples the sweep folded, in the

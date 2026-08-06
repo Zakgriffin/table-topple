@@ -4,8 +4,8 @@ import { computeGradient2x2FieldGPU } from '../pipelineGPU/gradient2x2.ts';
 import { fitAndTestRegionsGPU } from '../pipelineGPU/lsdFit.ts';
 import { growRegionsCCLGPU } from '../pipelineGPU/growRegions.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
-import { GradientField } from '../types.ts';
-import { Backend } from './backend.ts';
+import { type GradientField } from '../types.ts';
+import { type Backend } from './backend.ts';
 import { computeGradient2x2Field } from './gradientField.ts';
 
 // ── LSD (Line Segment Detector, von Gioi/Jakubowicz/Morel/Randall 2010) ───
@@ -36,7 +36,7 @@ import { computeGradient2x2Field } from './gradientField.ts';
 // GPU-friendliness note: stage 4+5's FIRST NFA pass HAS a GPU port
 // (pipelineGPU/lsdFit.ts), and it is VERIFIED identical to this file's CPU
 // path -- zero disagreements on n, k or accept/reject across a 2931-region
-// capture, max nfaLog10 delta 7.7e-6 (see pipelineGPU/lsdFitVerify.ts, which
+// capture, max nfaLog10 delta 7.7e-6 (see harness/lsdFitVerify.ts, which
 // is how to re-check it after any change to either side). It defaults OFF
 // anyway, for a PERFORMANCE reason: fitAndTestRegionsGPU still uploads
 // mag/theta and the region CSR from CPU on every call, so it currently ADDS a
@@ -50,7 +50,7 @@ import { computeGradient2x2Field } from './gradientField.ts';
 // would have: the per-round segmented reduction over region sums is gone
 // entirely, leaving only the propagate step itself. It is the one stage that is
 // NOT bit-identical to its CPU counterpart and cannot be made so; see its own
-// header, and pipelineGPU/growRegionsVerify.ts for how to measure the exposure
+// header, and harness/growRegionsVerify.ts for how to measure the exposure
 // on a given capture.
 //
 // Stage 5 had a tighten-then-shrink retry loop on NFA rejection. It is gone,
@@ -762,7 +762,7 @@ export interface LsdSettings {
 // work, and the notes on fitRectangle for the one angle that survives.
 
 // Stage 4 + stage 5 for ONE region -- the fitter, used by
-// the CPU path for every region and by pipelineGPU/lsdFitVerify.ts as the
+// the CPU path for every region and by harness/lsdFitVerify.ts as the
 // per-region reference the GPU kernel is compared against. Exactly the scope
 // lsdFit.wgsl.ts implements, which is the point: there is nothing left for the
 // two paths to disagree about structurally.
@@ -852,7 +852,7 @@ function fitRegionsCPU(
 //     wantMembers stays false and the CSR never crosses.
 //   - display (computeLsdRectanglesFromField, i.e. the LSD debug overlay and the
 //     phone's sendDebugInfo pass): opts in, and pays for what it draws.
-//   - pipelineGPU/lsdChainVerify.ts wants the member TOTALS but not per
+//   - harness/lsdChainVerify.ts wants the member TOTALS but not per
 //     rectangle, so it leaves this false and asks the residency directly --
 //     after taking the transfer ledger, so its own readback is not charged to
 //     the configuration it is measuring.
@@ -1006,7 +1006,7 @@ async function runGradient2x2Stage(res: FieldResidency, w: number, h: number, ba
 // which wanted fx/fy back on the CPU -- is deleted; the residency now outlives
 // the rectangles for `gray`, so the fused decode can reuse it.) Anything that runs the chain should go through these two and nothing
 // else, so that a residency-plumbing mistake is visible to the dev harness
-// (pipelineGPU/lsdChainVerify.ts) rather than only to production.
+// (harness/lsdChainVerify.ts) rather than only to production.
 // `backend` decides whether a device is requested at all: an all-CPU chain never
 // touches navigator.gpu. Stage 1 counts toward that, because it can want a device
 // when nothing downstream does.

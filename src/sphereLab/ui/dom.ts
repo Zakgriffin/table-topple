@@ -1,5 +1,5 @@
 import { persistConfig } from '../config.ts';
-import { Mode } from '../types.ts';
+import { type Mode } from '../types.ts';
 
 export const canvas = document.getElementById('gl') as HTMLCanvasElement;
 export const saveConfigBtn = document.getElementById('saveConfigBtn') as HTMLButtonElement;

@@ -1,15 +1,15 @@
 import * as THREE from 'three';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
-import { FieldResidency, TransferSummary } from '../pipelineGPU/fieldResidency.ts';
+import { FieldResidency, type TransferSummary } from '../pipelineGPU/fieldResidency.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { spanDurationMs, spanEnd, spanStart } from '../profiling/profiler.ts';
-import { CompositeLine, DecodeCellDebug, DecodeSampleGrid, PositionDecodeResult, RecoveredAxes, Vote } from '../types.ts';
-import { Backend } from './backend.ts';
-import { PendingDecodeGrid, runPositionDecode } from './decodeGrid.ts';
-import { computeGridPeriodPhase, GridPeriodPhaseResult } from './gridPeriodPhase.ts';
+import { type CompositeLine, type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type RecoveredAxes, type Vote } from '../types.ts';
+import { type Backend } from './backend.ts';
+import { type PendingDecodeGrid, runPositionDecode } from './decodeGrid.ts';
+import { computeGridPeriodPhase, type GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { createLsdChainResidency } from './lsdSegments.ts';
-import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes, LsdCompositeSettings } from './votes.ts';
+import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes, type LsdCompositeSettings } from './votes.ts';
 
 // ── Shared pure pose-recovery orchestrator ────────────────────────────────
 //

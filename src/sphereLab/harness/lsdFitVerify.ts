@@ -1,9 +1,8 @@
-import { activeCamera } from '../camera/store.ts';
-import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import { countRectanglePixels, fitRegionOnce, growRegionsCCL, LsdRectangle } from '../pipeline/lsdSegments.ts';
-import { FieldResidency } from './fieldResidency.ts';
-import { fitAndTestRegionsGPU } from './lsdFit.ts';
+import { countRectanglePixels, fitRegionOnce, growRegionsCCL, type LsdRectangle } from '../pipeline/lsdSegments.ts';
+import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
+import { fitAndTestRegionsGPU } from '../pipelineGPU/lsdFit.ts';
+import type { HarnessInput } from './input.ts';
 
 // ── Dev harness: is lsdFit.wgsl.ts's output still the CPU path's output? ──
 //
@@ -16,7 +15,8 @@ import { fitAndTestRegionsGPU } from './lsdFit.ts';
 // Not part of any pipeline. Call it from the devtools console on a real
 // capture -- main.ts re-exports every module onto globalThis:
 //
-//   await verifyLsdFit()
+//   await verifyLsdFit(cameraInput())
+//   await verifyLsdFit(await fixtureInput('default'))
 //
 // Compares STAGE 4 + STAGE 5, which is now the whole fitter on both sides --
 // the retry loop is retired and the CPU reference is fitRegionOnce, so the two
@@ -53,13 +53,8 @@ function quantile(sorted: number[], q: number): number {
   return sorted[Math.min(sorted.length - 1, Math.max(0, Math.round(q * (sorted.length - 1))))];
 }
 
-export async function verifyLsdFit(camera?: Camera | null): Promise<LsdFitVerifyReport | string> {
-  camera = camera ?? activeCamera() ?? null;
-  if (!camera) return 'no active camera';
-  const gray = camera.lastNoisedPreviewGray;
-  if (!gray) return 'no capture yet -- run a capture first';
-  const w = camera.rtSize.w, h = camera.rtSize.h;
-  const s = camera.settings;
+export async function verifyLsdFit(input: HarnessInput): Promise<LsdFitVerifyReport | string> {
+  const { gray, w, h, settings: s } = input;
 
   const field = computeGradient2x2Field(gray, w, h);
   const { fx, fy } = field;

@@ -1,4 +1,4 @@
-import { collectRegionsFromLabels, GrownRegion } from '../pipeline/lsdSegments.ts';
+import { collectRegionsFromLabels, type GrownRegion } from '../pipeline/lsdSegments.ts';
 import {
   createStorageBuffer, dispatchCount, readUint32, uploadUniform,
 } from './device.ts';

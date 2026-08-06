@@ -1,4 +1,4 @@
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import { paintTopGradientOverlay, TOP_GRADIENT_COLOR } from '../pipeline/gradientHighlight.ts';

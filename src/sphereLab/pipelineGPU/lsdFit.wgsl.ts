@@ -49,7 +49,7 @@ struct Uniforms {
 // cannot put it in a uniform. u.regionCount is gone for that reason.
 @group(0) @binding(8) var<storage, read> counts: array<u32>;
 @group(0) @binding(6) var<storage, read_write> outBuf: array<f32>; // [regionCount * 10]: cx,cy,theta,length,width,nfaLog10,accepted(0/1),pad,n,k
-// n and k are emitted purely so pipelineGPU/lsdFitVerify.ts can tell a
+// n and k are emitted purely so harness/lsdFitVerify.ts can tell a
 // disagreement in the COUNTS (which pixels each path decided were inside the
 // rectangle / aligned) apart from a disagreement in the tail ARITHMETIC. They
 // cost nothing to carry and make the difference diagnosable instead of guessable.

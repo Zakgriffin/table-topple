@@ -1,5 +1,5 @@
-import { Camera } from '../camera/model.ts';
-import { Mode } from '../types.ts';
+import { type Camera } from '../camera/model.ts';
+import { type Mode } from '../types.ts';
 import { updateContaminationOverlays } from '../overlays/contaminationOverlays.ts';
 import { updateTopGradientOverlay } from '../overlays/gradientHighlightOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
@@ -7,7 +7,7 @@ import { lastHoverClientX, lastHoverClientY, updateHoverOverlays } from '../over
 import { updateLsdOverlay } from '../overlays/lsdOverlay.ts';
 import { globalState } from '../state.ts';
 import { backendFromForceCPU } from './backend.ts';
-import { buildProjectedTexture, ProjectedSampleResult } from './decodeGrid.ts';
+import { buildProjectedTexture, type ProjectedSampleResult } from './decodeGrid.ts';
 import { updateDistortedPreview } from './preview.ts';
 
 // Single source of truth for "make whichever visualizations `mode` actually

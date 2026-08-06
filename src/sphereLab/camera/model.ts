@@ -1,14 +1,14 @@
 import * as THREE from 'three';
-import { CompositeLine } from '../types.ts';
+import { type CompositeLine } from '../types.ts';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import type { PendingDecodeGrid } from '../pipeline/decodeGrid.ts';
-import { GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
-import { GrownRegion, LsdRectangle } from '../pipeline/lsdSegments.ts';
+import { type GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
+import { type GrownRegion, type LsdRectangle } from '../pipeline/lsdSegments.ts';
 import type { PoseComputeTiming } from '../pipeline/poseCompute.ts';
-import { TransferSummary } from '../pipelineGPU/fieldResidency.ts';
-import { DecodeCellDebug, DecodeSampleGrid, PositionDecodeResult, ProjectedBins, RecoveredAxes, Vote } from '../types.ts';
-import { ProfileSpan } from '../profiling/profiler.ts';
-import { PhysicalCameraSettings, SimulatedCameraSettings } from './settings.ts';
+import { type TransferSummary } from '../pipelineGPU/fieldResidency.ts';
+import { type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type ProjectedBins, type RecoveredAxes, type Vote } from '../types.ts';
+import { type ProfileSpan } from '../profiling/profiler.ts';
+import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './settings.ts';
 
 // requestVideoFrameCallback's metadata for one decoded video frame, captured
 // on the phone (mobileCapture.ts's onVideoFrame) and relayed with the frame

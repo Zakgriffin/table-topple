@@ -3,8 +3,8 @@ import { jacobiEigenSymmetric, smallestEigenvector } from '../../linalg.ts';
 import { cornerDir } from '../math/geometry.ts';
 import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
-import { CompositeLine, Vote } from '../types.ts';
-import { Backend } from './backend.ts';
+import { type CompositeLine, type Vote } from '../types.ts';
+import { type Backend } from './backend.ts';
 import { computeLsdRectangles, runLsdChain } from './lsdSegments.ts';
 
 

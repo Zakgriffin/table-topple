@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { renderer } from './renderer.ts';
 
 // ── Reusable full-screen quad renderers (shared infra, NOT per-camera) ───

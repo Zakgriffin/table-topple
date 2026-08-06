@@ -1,15 +1,15 @@
-import { activeCamera } from '../camera/store.ts';
-import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import { GrownRegion, growRegionsCCL } from '../pipeline/lsdSegments.ts';
-import { growRegionsCCLGPUToCPU } from './growRegions.ts';
+import { type GrownRegion, growRegionsCCL } from '../pipeline/lsdSegments.ts';
+import { growRegionsCCLGPUToCPU } from '../pipelineGPU/growRegions.ts';
+import type { HarnessInput } from './input.ts';
 
 // ── Dev harness: does growRegions.wgsl.ts's labeling agree with the CPU's? ──
 //
 // Not part of any pipeline. Call it from the devtools console on a real
 // capture -- main.ts re-exports every module onto globalThis:
 //
-//   await verifyGrowRegions()
+//   await verifyGrowRegions(cameraInput())
+//   await verifyGrowRegions(await fixtureInput('default'))
 //
 // Unlike verifyLsdFit, this CANNOT assert exact equality, and the report is
 // shaped around that. The edge predicate is `cos(theta_i - theta_j) >= cosTol`,
@@ -98,13 +98,8 @@ function countBorderlinePairs(
   return count;
 }
 
-export async function verifyGrowRegions(camera?: Camera | null): Promise<GrowRegionsVerifyReport | string> {
-  camera = camera ?? activeCamera() ?? null;
-  if (!camera) return 'no active camera';
-  const gray = camera.lastNoisedPreviewGray;
-  if (!gray) return 'no capture yet -- run a capture first';
-  const w = camera.rtSize.w, h = camera.rtSize.h;
-  const s = camera.settings;
+export async function verifyGrowRegions(input: HarnessInput): Promise<GrowRegionsVerifyReport | string> {
+  const { gray, w, h, settings: s } = input;
 
   // Both paths are handed the SAME mag/theta, so any difference below is the
   // round loop and not the gradient stage.

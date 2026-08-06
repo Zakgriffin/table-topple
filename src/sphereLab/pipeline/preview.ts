@@ -1,4 +1,4 @@
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';

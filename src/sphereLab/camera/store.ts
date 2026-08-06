@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Camera, PhysicalCamera, SimulatedCamera } from './model.ts';
+import { type Camera, type PhysicalCamera, type SimulatedCamera } from './model.ts';
 
 export const cameras = new Map<string, Camera>();
 export let activeCameraId = '';

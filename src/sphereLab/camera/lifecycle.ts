@@ -7,7 +7,7 @@ import { refreshCameraPanel, renderCameraTabs } from '../ui/cameraPanel.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { setMode } from '../ui/mode.ts';
 import { createSimulatedCamera, destroyCamera } from './factory.ts';
-import { Camera, PhysicalCamera } from './model.ts';
+import { type Camera, type PhysicalCamera } from './model.ts';
 import { activeCameraId, cameras, isSimulated, nextCameraColor, setActiveCameraId } from './store.ts';
 
 export function findPhysicalCameraByConnection(connectionId: string): PhysicalCamera | undefined {

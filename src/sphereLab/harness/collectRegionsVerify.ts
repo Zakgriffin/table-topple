@@ -1,14 +1,14 @@
-import { activeCamera } from '../camera/store.ts';
-import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import { GrownRegion } from '../pipeline/lsdSegments.ts';
-import { growRegionsCCLGPUToCPU } from './growRegions.ts';
+import type { HarnessInput } from './input.ts';
+import { type GrownRegion } from '../pipeline/lsdSegments.ts';
+import { growRegionsCCLGPUToCPU } from '../pipelineGPU/growRegions.ts';
 
 // ── Dev harness: does the GPU region collector match the CPU one? ────────
 //
 // Run from the devtools console on a real capture:
 //
-//   await verifyCollectRegions()
+//   await verifyCollectRegions(cameraInput())
+//   await verifyCollectRegions(await fixtureInput('default'))
 //
 // Runs growRegionsCCLGPUToCPU TWICE against the same mag/theta -- once with
 // the collect on CPU, once on GPU -- so the labeling is produced by the same
@@ -43,13 +43,8 @@ function sizeSig(regions: GrownRegion[]): string {
   return regions.map((r) => r.members.length).join(',');
 }
 
-export async function verifyCollectRegions(camera?: Camera | null): Promise<CollectRegionsVerifyReport | string> {
-  camera = camera ?? activeCamera() ?? null;
-  if (!camera) return 'no active camera';
-  const gray = camera.lastNoisedPreviewGray;
-  if (!gray) return 'no capture yet -- run a capture first';
-  const w = camera.rtSize.w, h = camera.rtSize.h;
-  const s = camera.settings;
+export async function verifyCollectRegions(input: HarnessInput): Promise<CollectRegionsVerifyReport | string> {
+  const { gray, w, h, settings: s } = input;
 
   const field = computeGradient2x2Field(gray, w, h);
   const { fx, fy } = field;

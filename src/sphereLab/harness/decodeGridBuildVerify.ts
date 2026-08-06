@@ -1,17 +1,19 @@
-import { activeCamera } from '../camera/store.ts';
-import { Camera } from '../camera/model.ts';
 import {
   buildCorrectnessArray, buildDecodeSampleGrid, decodeGridCellUV, decodeGridLayout,
   rotateGrid, rotatedZeroIndex, tallyPositionVotes,
 } from '../pipeline/decodeGrid.ts';
 import { getAnalysisVFovRad } from '../math/geometry.ts';
-import { buildAndTallyDecodeGPU } from './decodeGridBuild.ts';
+import { buildAndTallyDecodeGPU } from '../pipelineGPU/decodeGridBuild.ts';
+import type { Backend } from '../pipeline/backend.ts';
+import type { HarnessInput } from './input.ts';
+import { runPoseOn } from './runPose.ts';
 
 // ── Dev harness: does the fused GPU decode match the CPU pair? ───────────
 //
 // Not part of any pipeline. Run it from the devtools console on a real capture:
 //
-//   await verifyDecodeGridBuild()
+//   await verifyDecodeGridBuild(cameraInput())
+//   await verifyDecodeGridBuild(await fixtureInput('default'), 'cpu')
 //
 // Compares buildDecodeSampleGrid + tallyPositionVotes against
 // buildAndTallyDecodeGPU, cell by cell and then on the decisions that follow.
@@ -52,15 +54,22 @@ interface DecodeGridBuildVerifyReport {
   gpuMs: number;
 }
 
-export async function verifyDecodeGridBuild(camera?: Camera | null): Promise<DecodeGridBuildVerifyReport | string> {
-  camera = camera ?? activeCamera() ?? null;
-  if (!camera) return 'no active camera';
-  if (!camera.lastAxesCaptureGray) return 'no capture yet -- run a capture first';
-  const { gray, w, h } = camera.lastAxesCaptureGray;
+// Runs a whole reconstruction first: the fused decode consumes recovered axes
+// and a grid period/phase, so there is nothing to check without them. It used
+// to read those off whatever the app had last displayed -- see runPose.ts.
+//
+// `camera` below is that detached run's state, not a Camera. It only ever
+// needed the PoseCameraLike fields (aspect, two settings, the last* results),
+// which a PoseComputeState carries by construction.
+export async function verifyDecodeGridBuild(
+  input: HarnessInput, backend: Backend = 'gpu',
+): Promise<DecodeGridBuildVerifyReport | string> {
+  const { gray, w, h } = input;
+  const camera = await runPoseOn(input, backend);
   const vFovRad = getAnalysisVFovRad(camera);
 
   const layout = decodeGridLayout(camera, gray, vFovRad);
-  if (!layout) return 'no decode layout (needs recovered axes + grid period/phase) -- run a capture first';
+  if (!layout) return 'reconstruction produced no decode layout (no recovered axes or no grid period/phase) on this input';
 
   const cpuStart = performance.now();
   const cpuGrid = buildDecodeSampleGrid(camera, gray, w, h, vFovRad);

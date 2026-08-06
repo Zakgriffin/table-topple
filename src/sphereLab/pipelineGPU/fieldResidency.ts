@@ -45,7 +45,7 @@
 // `provide*` throws on a second write to the same slot rather than trusting the
 // caller to have meant it.
 
-import { GrownRegion } from '../pipeline/lsdSegments.ts';
+import { type GrownRegion } from '../pipeline/lsdSegments.ts';
 import {
   getGPUDevice, readFloat32, readUint32, recordTransfer, uploadFloat32, uploadUint32,
 } from './device.ts';

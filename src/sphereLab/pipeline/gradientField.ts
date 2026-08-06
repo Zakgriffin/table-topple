@@ -1,4 +1,4 @@
-import { GradientField } from '../types.ts';
+import { type GradientField } from '../types.ts';
 import { hsvToRgb } from './distortion.ts';
 
 // ── Value fields (no color) ─────────────────────────────────────────────

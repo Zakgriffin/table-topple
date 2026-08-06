@@ -1,14 +1,14 @@
-import { activeCamera } from '../camera/store.ts';
-import { Camera } from '../camera/model.ts';
-import { createLsdChainResidency, LsdRectangle, LsdSettings, runLsdChain } from '../pipeline/lsdSegments.ts';
-import { Backend } from '../pipeline/backend.ts';
+import { createLsdChainResidency, type LsdRectangle, type LsdSettings, runLsdChain } from '../pipeline/lsdSegments.ts';
+import { type Backend } from '../pipeline/backend.ts';
+import type { HarnessInput } from './input.ts';
 
 // ── Dev harness: does the LSD chain give the same answer at every toggle? ──
 //
 // Not part of any pipeline. Call it from the devtools console on a real
 // capture -- main.ts re-exports every module onto globalThis:
 //
-//   await verifyLsdChain()
+//   await verifyLsdChain(cameraInput())
+//   await verifyLsdChain(await fixtureInput('default'))
 //
 // This is the test that matters for pipelineGPU/fieldResidency.ts, and it
 // exists because the per-stage verify harnesses CANNOT catch what it catches.
@@ -171,13 +171,8 @@ function median(xs: number[]): number {
   return s.length === 0 ? 0 : s[Math.floor(s.length / 2)];
 }
 
-export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<LsdChainVerifyReport | string> {
-  camera = camera ?? activeCamera() ?? null;
-  if (!camera) return 'no active camera';
-  const gray = camera.lastNoisedPreviewGray;
-  if (!gray) return 'no capture yet -- run a capture first';
-  const w = camera.rtSize.w, h = camera.rtSize.h;
-  const s = camera.settings;
+export async function verifyLsdChain(input: HarnessInput, reps = 3): Promise<LsdChainVerifyReport> {
+  const { gray, w, h, settings: s } = input;
 
   const settings: LsdSettings = {
     toleranceDeg: s.lsdToleranceDeg,

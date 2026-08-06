@@ -1,4 +1,4 @@
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { throughCamCanvas, throughCamCtx } from '../ui/dom.ts';
 
 // ── Through-Cam's own 2D rendering path -- deliberately NOT the shared

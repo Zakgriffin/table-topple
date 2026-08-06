@@ -13,7 +13,16 @@ import { GRID_STEP } from './constants.ts';
 // from here, which is what actually makes those modules safe to import on a
 // page with no #gl canvas (e.g. mobile-capture.html) -- see this session's
 // on-device-pose-recovery plan.
-export const ORDER = parseInt(new URLSearchParams(location.search).get('order') ?? '5', 10);
+// The `?order=` override is a BROWSER affordance, so it is read only when
+// there is a browser. This module's stated purpose, two paragraphs up, is to be
+// importable with no DOM -- and an unguarded `location` at module scope broke
+// that for every importer of it, which is math/geometry.ts and therefore
+// votes.ts and gridPeriodPhase.ts too. It was the single reason those three
+// could not be imported into a headless test; see tests/README.md.
+export const ORDER = parseInt(
+  (typeof location === 'undefined' ? null : new URLSearchParams(location.search).get('order')) ?? '5',
+  10,
+);
 // Order 5's full R x C torus (~33.5M cells) has no known efficient
 // construction free of D4 rotation/reflection collisions, so it isn't used
 // directly -- ORDER5_CANDIDATE is a searched 256x256 sub-region with a low

@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { CIRCLE_SEGMENTS, DEBUG_LAYER, PATCH_RES, SPHERE_RADIUS } from '../constants.ts';
 import { colLineKs, rowLineKs } from '../math/geometry.ts';
 import { scene } from '../scene/renderer.ts';
-import { Camera, CameraBase, PhysicalCamera, SimulatedCamera } from './model.ts';
-import { CameraSettingsCommon } from './settings.ts';
+import { type Camera, type CameraBase, type PhysicalCamera, type SimulatedCamera } from './model.ts';
+import { type CameraSettingsCommon } from './settings.ts';
 import { createDefaultPhysicalSettings, createDefaultSimulatedSettings } from '../config.ts';
 import { bumpCameraSerial, cameras, isSimulated, nextCameraSerial } from './store.ts';
 

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { renderer, scene } from '../scene/renderer.ts';
 import { insideCam, viewerCam } from '../scene/viewerControls.ts';

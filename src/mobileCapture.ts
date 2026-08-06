@@ -32,8 +32,8 @@ import {
 } from './gameOverlay.ts';
 import { getAnalysisVFovRad } from './sphereLab/math/geometry.ts';
 import { computeGradient2x2Field } from './sphereLab/pipeline/gradientField.ts';
-import { computeLsdRectanglesFromField, LsdRectangle } from './sphereLab/pipeline/lsdSegments.ts';
-import { computePoseFromCapture, PoseComputeState } from './sphereLab/pipeline/poseCompute.ts';
+import { computeLsdRectanglesFromField, type LsdRectangle } from './sphereLab/pipeline/lsdSegments.ts';
+import { computePoseFromCapture, type PoseComputeState } from './sphereLab/pipeline/poseCompute.ts';
 // Shared with the desktop rather than restated here, so the wire shape and
 // the recorded shape cannot drift apart -- this page PRODUCES the value that
 // camera/model.ts types on the receiving end.

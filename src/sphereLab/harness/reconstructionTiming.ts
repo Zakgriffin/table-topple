@@ -1,23 +1,25 @@
-import { Camera } from '../camera/model.ts';
-import { activeCamera, isSimulated } from '../camera/store.ts';
-import { captureDistortedGrayscale } from '../pipeline/capture.ts';
-import { Backend } from '../pipeline/backend.ts';
-import { computePoseFromCapture, PoseComputeState } from '../pipeline/poseCompute.ts';
+import { type Backend } from '../pipeline/backend.ts';
+import { computePoseFromCapture, type PoseComputeState } from '../pipeline/poseCompute.ts';
+import { poseStateFor } from './input.ts';
+import type { HarnessInput } from './input.ts';
 import {
-  ProfileSpan, checkNesting, getRoots, profilerDevToolsMirror, profilerPutRoots, profilerSetDevToolsMirror,
-  profilerTakeRoots, spanDurationMs,
+  type ProfileSpan, checkNesting, profilerBeginSession, spanDurationMs,
 } from '../profiling/profiler.ts';
 import {
-  AllocationSample, allocationProbeResult, getGPUDevice, setAllocationProbe,
-  setTransferProbe, TransferSample, transferLedger, transferLedgerReset,
-} from './device.ts';
-import { GpuTimelineResult, gpuTimelineArm, gpuTimelineDisarm, gpuTimelineResolve } from './gpuTimeline.ts';
+  type AllocationSample, allocationProbeResult, getGPUDevice, setAllocationProbe,
+  setTransferProbe, type TransferSample, transferLedger, transferLedgerReset,
+} from '../pipelineGPU/device.ts';
+import { type GpuTimelineResult, gpuTimelineArm, gpuTimelineDisarm, gpuTimelineResolve } from '../pipelineGPU/gpuTimeline.ts';
 import { awaitPageFocus } from './lsdChainVerify.ts';
 
 // ── Dev harness: what does ONE WHOLE RECONSTRUCTION cost? ─────────────────
 //
-//   await timeReconstruction()          // 9 timed reps after an adaptive warm-up
-//   await timeReconstruction(null, 9)
+//   await timeReconstruction(cameraInput())            // 9 reps after an adaptive warm-up
+//   await timeReconstruction(await fixtureInput('default'), 9, 'cpu')
+//
+// The input is a REQUIRED argument. It used to default to activeCamera(), which
+// is exactly how a report ended up unable to say what it had measured -- see
+// harness/input.ts and harness/cameraInput.ts.
 //
 // This is the instrument the 2026-08-05 perf plan is blocked on, and it exists
 // because NOTHING else answers the question. verifyLsdChain covers stages 1-4
@@ -251,7 +253,10 @@ interface ReconstructionTimingReport {
   reps: number;
   w: number;
   h: number;
-  cameraKind: 'simulated' | 'physical';
+  // What was measured, by name -- 'fixture:default' or 'camera:<id>'. The
+  // report's whole claim to being re-derivable rests on this plus `backend`
+  // plus the fixture's own pinned config; see harness/input.ts.
+  input: string;
   // WHICH CONFIGURATION PRODUCED THESE NUMBERS. Recorded rather than assumed,
   // because the alternative is what voided every timing this project took before
   // 2026-08-06: the backend was an ambient global at measurement time, so a
@@ -280,7 +285,6 @@ interface ReconstructionTimingReport {
   poseMsAll: number[];
   // computePoseFromCapture's own per-stage breakdown, median over reps.
   stageMedianMs: { votes: number; fit: number; pose: number; distance: number; decode: number };
-  captureMedianMs: number | null; // simulated only; NOT included in poseMedianMs
 
   // ── the fence/byte accounting, from the probe-OFF reps ──
   fences: number; // readbacks per reconstruction -- the count the single-fence plan is trying to drive to 1
@@ -397,16 +401,6 @@ async function poseOnce(state: PoseComputeState, gray: Float64Array, w: number, 
   }
 }
 
-function freshState(camera: Camera): PoseComputeState {
-  return {
-    aspect: camera.aspect,
-    settings: camera.settings,
-    lastVoteComposites: null, lastVotes: null, lastQuadricPair: null, lastGridPeriodPhase: null,
-    lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
-    lastPositionDecode: null, lastChainTransfers: null, pendingDecodeGrid: null,
-  };
-}
-
 // One rep's span tree, flattened to (label, selfMs, depth) in pre-order.
 //
 // Sorted by start time at each level so the output reads top-to-bottom in the
@@ -507,34 +501,21 @@ function groupLedger(samples: readonly TransferSample[]): TransferGroup[] {
 }
 
 export async function timeReconstruction(
-  camera?: Camera | null, reps = 9, backend: Backend = 'gpu',
-): Promise<ReconstructionTimingReport | string> {
-  camera = camera ?? activeCamera() ?? null;
-  if (!camera) return 'no active camera';
-  const cap = camera.lastAxesCaptureGray;
-  if (!cap) return 'no capture yet -- run a capture first';
-  const { gray, w, h } = cap;
+  input: HarnessInput, reps = 9, backend: Backend = 'gpu',
+): Promise<ReconstructionTimingReport> {
+  const { gray, w, h } = input;
+  const freshState = () => poseStateFor(input);
 
-  // There is one profiler flag left and it gates the DevTools mirror only, so
-  // "configure the profiler for a timing run" has shrunk to turning that off.
-  // Spans record either way -- they are where both the stage timings and the
-  // votes breakdown come from, so switching them off would leave this harness
-  // with nothing to report.
+  // One session, and it owns the whole protocol: swap the caller's tree aside,
+  // force the DevTools mirror off for the duration, hand back a fresh tree per
+  // rep, and restore both at the end. This used to be four profiler primitives
+  // and a try/finally written out here, which meant this harness had to know
+  // that the tree and the mirror are module-level variables over there. See
+  // profiler.ts's ProfilerSession.
   //
-  // Saved and restored because a caller who had the mirror on gets it back, and
-  // reported in the result because their PREVIOUS numbers were taken with a
-  // performance.measure per span and are not comparable to these.
-  const profilerWas = profilerDevToolsMirror();
-  // Swapped aside, not cleared. Whoever ran a profiled capture before calling
-  // this still has their tree to print afterwards, and their DevTools recording
-  // keeps its measures -- the property applyProfilerToggle's comment protects.
-  const rootsWas = profilerTakeRoots();
-  // The mirror off for the duration: a performance.measure per span across ~25
-  // reps is main-thread work inside the window being timed, and nobody is
-  // watching a DevTools track during a harness run. Spans themselves are not
-  // optional any more and are not turned off here -- they are where the stage
-  // timings come from.
-  profilerSetDevToolsMirror(false);
+  // Spans themselves are NOT turned off -- they are where the stage timings and
+  // the votes breakdown come from.
+  const session = profilerBeginSession();
 
   try {
     const focusWaitMs = await awaitPageFocus();
@@ -565,7 +546,7 @@ export async function timeReconstruction(
       let improved = false;
       for (let i = 0; i < WARMUP_BATCH && warmupMs.length < WARMUP_MAX; i++) {
         const t = performance.now();
-        await poseOnce(freshState(camera), gray, w, h, backend);
+        await poseOnce(freshState(), gray, w, h, backend);
         const ms = performance.now() - t;
         warmupMs.push(ms);
         if (ms < best * (1 - WARMUP_IMPROVE)) { best = Math.min(best, ms); improved = true; }
@@ -576,27 +557,24 @@ export async function timeReconstruction(
 
     const poseMsAll: number[] = [];
     const stages = { votes: [] as number[], fit: [] as number[], pose: [] as number[], distance: [] as number[], decode: [] as number[] };
-    const captureMs: number[] = [];
     let last: PoseComputeState | null = null;
     let fences = 0, transferBytes = 0, transferMs = 0;
 
-    // Capture is timed in its OWN loop, BEFORE the pose reps, and its output is
-    // discarded. Interleaving the two (which this did first) was a real
-    // methodological bug, not a style choice: captureDistortedGrayscale renders
-    // the RT and runs ~36ms of supersampled CPU filtering, which evicts cache
-    // and leaves the GPU queue in a different state than the pose stage would
-    // otherwise see. The symptom was unmissable once warm-up was fixed -- the
-    // warm-up tail (no capture between reps) settled around 20ms while the timed
-    // reps (capture between reps) sat at 27.7ms, measuring the same code on the
-    // same input. Whichever of those is "right", they cannot both be, and the
-    // one contaminated by an unrelated 36ms of work is the wrong one.
-    if (isSimulated(camera)) {
-      for (let rep = 0; rep < reps; rep++) {
-        const t0 = performance.now();
-        captureDistortedGrayscale(camera);
-        captureMs.push(performance.now() - t0);
-      }
-    }
+    // The capture+preprocess loop that used to sit here is GONE with the switch
+    // to a HarnessInput. It timed captureDistortedGrayscale, which only a
+    // SIMULATED camera runs -- a physical capture reads a buffer and pays ~0 --
+    // and a fixture is a physical capture by construction, so there is nothing
+    // left for it to measure. It was never part of the headline number anyway
+    // (its own comment: folding it in "would make every measurement on this
+    // machine a measurement of the dev loop rather than of the pipeline").
+    //
+    // Worth keeping its one hard-won finding, because it is about METHOD and
+    // applies to whatever measures that stage next: it had to run in its OWN
+    // loop, before the pose reps, never interleaved. Interleaving put ~36ms of
+    // supersampled CPU filtering between reps, which evicted cache and left the
+    // GPU queue in a state the pose stage would not otherwise see -- the same
+    // code on the same input measured 20ms with a clean loop and 27.7ms
+    // interleaved.
 
     // Per-rep self times, keyed by label. Accumulated per rep rather than summed
     // across them so every row is a MEDIAN on the same footing as the stage
@@ -618,23 +596,25 @@ export async function timeReconstruction(
     const stallMsAll: number[] = [];
     let stallOf = new Map<string, number[]>();
 
+    // Discard everything the warm-up accumulated, so rep 0's tree is rep 0's.
+    session.takeRepTree();
+
     for (let rep = 0; rep < reps; rep++) {
-      const state = freshState(camera);
+      const state = freshState();
       transferLedgerReset();
-      // Take-and-discard, so `getRoots()` after the rep is exactly this rep's
-      // tree rather than every tree since the run began (including the warm-up's
-      // and the capture loop's). Taken rather than profilerReset()'d because
-      // reset also clears the User Timing buffer -- see profilerTakeRoots.
-      profilerTakeRoots();
       const t0 = performance.now();
       const timing = await poseOnce(state, gray, w, h, backend);
       poseMsAll.push(performance.now() - t0);
 
+      // Taken, not read: this rep's tree comes out and the next rep starts on a
+      // fresh one, so no rep can see another's spans. (The warm-up's trees are
+      // discarded by the take just before the loop.)
+      //
       // Walked from the `votes stage` span rather than from the roots, so the
       // table is exactly the stage being decomposed. Absent only if spans somehow
       // did not record, in which case the rows stay empty rather than reporting
       // zeros as though they were measurements.
-      const roots = getRoots();
+      const roots = session.takeRepTree();
       collectForeign(roots, foreign);
       const stage = findSpan(roots, 'votes stage');
       if (stage) {
@@ -729,7 +709,7 @@ export async function timeReconstruction(
     try {
       setTransferProbe(true);
       transferLedgerReset();
-      await poseOnce(freshState(camera), gray, w, h, backend);
+      await poseOnce(freshState(), gray, w, h, backend);
       probe = groupLedger(transferLedger());
     } finally {
       setTransferProbe(false);
@@ -749,7 +729,7 @@ export async function timeReconstruction(
     if (probeDevice) {
       try {
         setAllocationProbe(probeDevice, true);
-        await poseOnce(freshState(camera), gray, w, h, backend);
+        await poseOnce(freshState(), gray, w, h, backend);
       } finally {
         setAllocationProbe(probeDevice, false);
         allocation = allocationProbeResult();
@@ -765,7 +745,7 @@ export async function timeReconstruction(
     let gpuTimeline: GpuTimelineResult | null = null;
     if (probeDevice && gpuTimelineArm(probeDevice)) {
       try {
-        await poseOnce(freshState(camera), gray, w, h, backend);
+        await poseOnce(freshState(), gray, w, h, backend);
         gpuTimeline = await gpuTimelineResolve();
       } finally {
         gpuTimelineDisarm();
@@ -796,7 +776,7 @@ export async function timeReconstruction(
 
     return {
       reps, w, h,
-      cameraKind: isSimulated(camera) ? 'simulated' : 'physical',
+      input: input.label,
       backend,
       poseMedianMs,
       poseMsAll,
@@ -804,7 +784,6 @@ export async function timeReconstruction(
         votes: median(stages.votes), fit: median(stages.fit), pose: median(stages.pose),
         distance: median(stages.distance), decode: median(stages.decode),
       },
-      captureMedianMs: captureMs.length ? median(captureMs) : null,
       fences,
       transferBytes,
       transferMs,
@@ -834,7 +813,7 @@ export async function timeReconstruction(
       distance: last?.lastRecoveredAxes?.distance ?? null,
       warmupMs,
       warmedUp,
-      profilerWasOn: profilerWas,
+      profilerWasOn: session.mirrorWasOn,
       poseMinMs: Math.min(...poseMsAll),
       spreadPct: poseMedianMs > 0 ? (iqr(poseMsAll) / poseMedianMs) * 100 : 0,
       focusWaitMs,
@@ -846,8 +825,7 @@ export async function timeReconstruction(
     };
   } finally {
     // Restore, or the harness silently reconfigures the app it just measured.
-    profilerSetDevToolsMirror(profilerWas);
-    profilerPutRoots(rootsWas);
+    session.end();
     setTransferProbe(false);
   }
 }
@@ -867,13 +845,12 @@ export function formatReconstructionTiming(r: ReconstructionTimingReport | strin
   if (!r.warmedUp) warn.push(`!! never reached steady state in ${r.warmupMs.length} warm-up reps -- still speeding up, treat as an upper bound.`);
   if (r.spreadPct > 12) warn.push(`!! IQR spread ${r.spreadPct.toFixed(0)}% across reps -- this run cannot resolve a change smaller than that.`);
   lines.push(...warn);
-  lines.push(`reconstruction: ${r.poseMedianMs.toFixed(1)}ms median / ${r.poseMinMs.toFixed(1)}ms min of ${r.reps}  (${r.w}x${r.h}, ${r.cameraKind}, backend=${r.backend})`);
+  lines.push(`reconstruction: ${r.poseMedianMs.toFixed(1)}ms median / ${r.poseMinMs.toFixed(1)}ms min of ${r.reps}  (${r.w}x${r.h}, ${r.input}, backend=${r.backend})`);
   lines.push(`  compare changes on the MIN; quote the MEDIAN.`);
   lines.push(`  reps: ${r.poseMsAll.map((m) => m.toFixed(1)).join(', ')}   (IQR spread ${r.spreadPct.toFixed(0)}%)`);
   lines.push(`  warm-up (${r.warmupMs.length} reps, ${r.warmedUp ? 'settled' : 'NOT settled'}): ${r.warmupMs.map((m) => m.toFixed(1)).join(', ')}`);
   const s = r.stageMedianMs;
   lines.push(`  stages: votes ${s.votes.toFixed(1)}  fit ${s.fit.toFixed(1)}  pose ${s.pose.toFixed(1)}  distance ${s.distance.toFixed(1)}  decode ${s.decode.toFixed(1)}`);
-  if (r.captureMedianMs !== null) lines.push(`  capture+preprocess: ${r.captureMedianMs.toFixed(1)}ms (SIMULATED ONLY, not in the median above)`);
   lines.push(`  fences: ${r.fences}   bytes: ${(r.transferBytes / 1048576).toFixed(2)}MB   in transfer helpers: ${r.transferMs.toFixed(1)}ms (${r.transferSharePct.toFixed(0)}% -- UPPER BOUND, includes GPU compute waited on)`);
   if (r.probe) {
     let f = 0, b = 0, q = 0;

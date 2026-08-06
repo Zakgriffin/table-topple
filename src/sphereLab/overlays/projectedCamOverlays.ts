@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { isPhysical } from '../camera/store.ts';
 import { positionReadout, sampleLatticeCanvas, sampleLatticeCtx } from '../ui/dom.ts';
 

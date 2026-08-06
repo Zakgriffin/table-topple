@@ -1,7 +1,7 @@
 import { GRID_STEP } from '../constants.ts';
 import { C, R, torus } from '../floorPattern.ts';
-import { DecodeGridLayout } from '../pipeline/decodeGrid.ts';
-import { DecodeSampleGrid, DecodeSamplePoint, VoteResult } from '../types.ts';
+import { type DecodeGridLayout } from '../pipeline/decodeGrid.ts';
+import { type DecodeSampleGrid, type DecodeSamplePoint, type VoteResult } from '../types.ts';
 import { tallyFromDeviceGrid } from './decodeTally.ts';
 import {
   createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, readUint32,

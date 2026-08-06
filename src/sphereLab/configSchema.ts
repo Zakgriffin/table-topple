@@ -63,7 +63,7 @@ export const GlobalSettingsSchema = Type.Object({
   // no-op'd every submit while returning plausible garbage, and the
   // BOUNDARY_EPS bug that was real on BOTH sides. They are now REFERENCE
   // implementations rather than production branches, reachable through this
-  // single switch, and pipelineGPU/lsdChainVerify.ts's two-configuration
+  // single switch, and harness/lsdChainVerify.ts's two-configuration
   // differential is what keeps them from rotting unnoticed now that production
   // never runs them.
   //

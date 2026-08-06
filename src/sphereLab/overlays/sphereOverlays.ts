@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { Camera, SimulatedCamera } from '../camera/model.ts';
+import { type Camera, type SimulatedCamera } from '../camera/model.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { COL_DIR, PATCH_RES, ROW_DIR, SPHERE_RADIUS, euler } from '../constants.ts';
 import { colLineKs, cornerDir, greatCircleNormal, rowLineKs, slerpUnit, writeCirclePoints } from '../math/geometry.ts';

@@ -1,4 +1,4 @@
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { COL_DIR, MATH_QUAT, ROW_DIR } from '../constants.ts';
 import { getAnalysisVFovRad } from '../pipeline/capture.ts';

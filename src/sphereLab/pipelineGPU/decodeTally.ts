@@ -1,6 +1,6 @@
 import { ORDER, R, C, debruijnLookup } from '../floorPattern.ts';
 import { rotatedDims } from '../pipeline/decodeGrid.ts';
-import { DecodeSampleGrid, VoteResult } from '../types.ts';
+import { type DecodeSampleGrid, type VoteResult } from '../types.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { createStorageBuffer, dispatchCount, getGPUDevice, readUint32, uploadUint32, uploadUniform } from './device.ts';
 import { gpuTimelineSlot } from './gpuTimeline.ts';

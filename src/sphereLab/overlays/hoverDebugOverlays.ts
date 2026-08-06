@@ -1,4 +1,4 @@
-import { Camera } from '../camera/model.ts';
+import { type Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';

@@ -1,5 +1,5 @@
 import { addSimulatedCamera, removeCameraTab, selectGlobalTab } from '../camera/lifecycle.ts';
-import { PhysicalCamera } from '../camera/model.ts';
+import { type PhysicalCamera } from '../camera/model.ts';
 import { activeCamera, activeCameraId, cameras, isPhysical, isSimulated, setActiveCameraId } from '../camera/store.ts';
 import { pushSettingsSync, sendToDevBridge } from '../devBridge/client.ts';
 import { rebuildGridLineKs } from '../math/geometry.ts';
@@ -20,7 +20,7 @@ import { profilerReset, profilerSetDevToolsMirror } from '../profiling/profiler.
 import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
-import { FieldView } from '../types.ts';
+import { type FieldView } from '../types.ts';
 import { bindCheckbox, bindRadioGroup, bindSlider, loadConfigBtn, saveConfigBtn, configStatus, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 

@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { FrameMeta, PhysicalCamera } from '../camera/model.ts';
+import { type FrameMeta, type PhysicalCamera } from '../camera/model.ts';
 import { createPhysicalCamera } from '../camera/factory.ts';
 import { findPhysicalCameraByConnection, removeCameraTab } from '../camera/lifecycle.ts';
 import { activeCamera, cameras, isPhysical, nextCameraColor } from '../camera/store.ts';

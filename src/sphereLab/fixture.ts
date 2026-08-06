@@ -7,11 +7,6 @@ import { SphereLabConfigSchema } from './configSchema.ts';
 import type { SphereLabConfig } from './configSchema.ts';
 import { backendFromForceCPU } from './pipeline/backend.ts';
 import type { Backend } from './pipeline/backend.ts';
-// Type-only, and it has to stay that way: poseCompute.ts pulls in THREE and the
-// whole GPU half. `import type` is erased outright, both by tsc and by node's
-// type-stripping, so this file keeps its purity (see below) while still being
-// the one place that knows the shape a caller has to fill in.
-import type { PoseComputeState } from './pipeline/poseCompute.ts';
 
 // ── A fixture: a capture that carries the configuration it is to be run under ──
 //
@@ -175,30 +170,6 @@ export function fixtureSettings(fixture: Fixture): PhysicalCameraSettings {
 // pipeline/backend.ts). This is the default, nothing more.
 export function fixtureBackend(fixture: Fixture): Backend {
   return backendFromForceCPU(fixture.config.global.forceCPU);
-}
-
-// A blank PoseComputeState wired to this fixture, ready for
-// computePoseFromCapture to fill in. Twelve null fields that a caller would
-// otherwise hand-roll -- mobileCapture.ts already hand-rolls one, and two
-// copies is the limit before adding a field means hunting for the sites that
-// forgot it.
-//
-// `aspect` comes from the capture's own dimensions, which is what a physical
-// camera's aspect IS: capture.ts sets camera.aspect from rtSize, and rtSize is
-// resized to the incoming photo. Not read from the config's viewportW/H --
-// those describe a simulated camera's render target.
-export function fixturePoseState(fixture: Fixture): PoseComputeState {
-  return {
-    aspect: fixture.capture.w / fixture.capture.h,
-    settings: fixtureSettings(fixture),
-    lastVoteComposites: null, lastVotes: null, lastQuadricPair: null, lastGridPeriodPhase: null,
-    lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
-    lastPositionDecode: null, lastChainTransfers: null,
-    // Nothing here to drain a deferred handle in. A caller that wants the
-    // deferral has to opt in and own the result -- see poseCompute's
-    // deferDecodeGrid.
-    pendingDecodeGrid: null,
-  };
 }
 
 // Every leaf where two configs disagree, as `path: a -> b` lines. Used by

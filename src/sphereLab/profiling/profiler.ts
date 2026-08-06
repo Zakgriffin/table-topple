@@ -154,18 +154,63 @@ export function spanDurationMs(span: ProfileSpan | null): number {
 
 export function getRoots(): ProfileSpan[] { return roots; }
 
-// ── Swapping the tree aside, for a caller that records many trees in a row ──
+// ── A TIMING SESSION: one tree per rep, and the caller's own tree preserved ──
 //
-// profilerReset() is the wrong tool for that: it calls
-// performance.clearMeasures(), so a caller resetting per iteration deletes
-// earlier captures out of a DevTools recording in progress, and would also
-// destroy a tree the user had already recorded and not yet printed.
+// A harness that measures N reps needs a fresh tree per rep and must leave the
+// page exactly as it found it. It used to do that by hand, with four exported
+// primitives (take roots, put roots, read the mirror flag, set the mirror
+// flag) and a try/finally of its own -- which meant the harness had to know
+// that the tree is a module-level variable, that the stack is a second one, and
+// that the DevTools mirror is a separate flag with its own save/restore. That
+// is the module's internals, spelled out in a caller.
 //
-// pipelineGPU/reconstructionTiming.ts needs one tree per rep across ~25 reps,
-// so it takes the tree after each one and puts the user's own back when it is
-// done. Nothing is cleared, so both the User Timing track and whatever the user
-// had recorded survive a timing run.
-export function profilerTakeRoots(): ProfileSpan[] {
+// This is that whole protocol as one object. `roots`, `stack` and `mirrorOn`
+// are now private to this file again.
+//
+// profilerReset() is the wrong tool for per-rep clearing and always was: it
+// calls performance.clearMeasures(), so a caller resetting per iteration
+// deletes earlier captures out of a DevTools recording in progress, and would
+// also destroy a tree the user had already recorded and not yet printed.
+// Nothing here clears anything -- the caller's tree is swapped aside and put
+// back, so both the User Timing track and whatever they had recorded survive.
+export interface ProfilerSession {
+  // Whether the DevTools mirror was on when the session began. Worth reporting
+  // in a result: a caller's PREVIOUS numbers were taken with a
+  // performance.measure per span and are not comparable to the ones from
+  // inside a session, which forces it off.
+  readonly mirrorWasOn: boolean;
+  // This rep's tree, and a fresh one started. Call it after each rep.
+  takeRepTree(): ProfileSpan[];
+  // Restore the caller's tree and their mirror setting. Idempotent, so it is
+  // safe in a finally that may also be reached after an early return.
+  end(): void;
+}
+
+export function profilerBeginSession(): ProfilerSession {
+  const mirrorWasOn = mirrorOn;
+  // Swapped aside, not cleared: whoever ran a profiled capture before calling
+  // this still has their tree to print afterwards.
+  const callerRoots = takeRoots();
+  // A performance.measure per span across ~25 reps is main-thread work inside
+  // the window being timed, and nobody is watching a DevTools track during a
+  // harness run. Spans themselves are not optional and are NOT turned off --
+  // they are where the stage timings come from.
+  mirrorOn = false;
+  let ended = false;
+  return {
+    mirrorWasOn,
+    takeRepTree: () => takeRoots(),
+    end() {
+      if (ended) return;
+      ended = true;
+      mirrorOn = mirrorWasOn;
+      roots = callerRoots;
+      stack = [];
+    },
+  };
+}
+
+function takeRoots(): ProfileSpan[] {
   const taken = roots;
   roots = [];
   // The stack goes with it. A tree is only taken between operations, so a
@@ -175,8 +220,6 @@ export function profilerTakeRoots(): ProfileSpan[] {
   stack = [];
   return taken;
 }
-
-export function profilerPutRoots(rs: ProfileSpan[]): void { roots = rs; stack = []; }
 
 // ── Structural validation, because the tree lies in ordinary use ─────────
 //

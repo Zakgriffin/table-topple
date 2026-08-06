@@ -227,22 +227,20 @@ function pushSettingsIfPhysical() {
   const cam = activeCamera();
   if (cam && isPhysical(cam)) pushSettingsSync(cam);
 }
-export let realCaptureFovRerunTimer: number | undefined;
+// Recomputes immediately, exactly like every other per-camera slider here.
+// This used to debounce its rerun behind a 200ms timer (plus a
+// value-actually-changed guard to keep refreshCameraPanel's own re-sync from
+// re-arming it), which bought nothing: runAxesReconstruction already
+// self-throttles on camera.axesCapturing, so a fast drag drops overlapping
+// calls rather than queueing them -- the same reason no other slider needs a
+// timer.
 bindSlider('realCaptureFovDeg', (v) => {
   const cam = activeCamera();
   if (!cam || !isPhysical(cam)) return;
-  // refreshCameraPanel's own setNum re-syncs this exact slider to whatever
-  // the camera's CURRENT horizFovDeg already is every time the panel
-  // redraws (e.g. a plain tab switch) -- that dispatches this same 'input'
-  // event even though nothing changed, which used to unconditionally
-  // re-schedule a recompute below. Only worth doing on a genuine change.
-  const changed = v !== cam.settings.horizFovDeg;
   cam.settings.horizFovDeg = v;
   markCaptureDirty(cam);
   pushSettingsSync(cam);
-  if (!changed) return;
-  clearTimeout(realCaptureFovRerunTimer);
-  realCaptureFovRerunTimer = window.setTimeout(rerunOnRealCaptureSettingChange, 200);
+  rerunOnRealCaptureSettingChange();
 }, (v) => `${v.toFixed(0)}°`);
 // Tier 1 (invalidates the capture itself -- see this session's chat on
 // "every setting recomputes everything downstream of it"): markCaptureDirty

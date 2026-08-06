@@ -217,3 +217,36 @@ export type SimulatedCameraSettings = CameraSettingsCommon & SimulatedOnlySettin
 // no position or lens sliders. It only OVERRIDES a common setting (fieldView;
 // see config.ts's camera.physical section).
 export type PhysicalCameraSettings = CameraSettingsCommon;
+
+// ── config.camera -> a settings object ───────────────────────────────────
+//
+// The rule for turning the config file's three camera sections into the
+// settings a camera actually runs with. It lives HERE, in the pure module,
+// rather than in config.ts, because there are now two callers with nothing in
+// common: camera/factory.ts creating a live camera (through config.ts's
+// createDefault*Settings, which are these functions applied to the live
+// config), and fixture.ts rebuilding the settings a saved capture was
+// processed under -- outside a browser, with no live config to read.
+//
+// They take `config.camera` rather than the whole config so this file does not
+// have to import configSchema.ts, which imports this one.
+//
+// The parameter types are structural for the same reason: PhysicalOverrides
+// is declared over in configSchema.ts, and `{ fieldView: FieldView }` is its
+// whole contents. If that section ever grows a second key, this signature is
+// what fails to compile.
+export function physicalSettingsFrom(
+  camera: { common: CameraSettingsCommon; physical: { fieldView: FieldView } },
+): PhysicalCameraSettings {
+  // camera.physical overrides the common block: 'raw' rather than 'noised',
+  // because the simulated-distortion field views (noised/antialiased/
+  // downsampled) do not exist for a real photo and are hidden from the
+  // field-view list entirely for a physical camera (see refreshCameraPanel).
+  return { ...structuredClone(camera.common), ...structuredClone(camera.physical) };
+}
+
+export function simulatedSettingsFrom(
+  camera: { common: CameraSettingsCommon; simulated: SimulatedOnlySettings },
+): SimulatedCameraSettings {
+  return { ...structuredClone(camera.common), ...structuredClone(camera.simulated) };
+}

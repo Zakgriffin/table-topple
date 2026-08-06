@@ -148,7 +148,11 @@ async function main() {
   console.log(`Found camera ${cam.id} (captureMode: ${cam.captureMode}).`);
 
   await evalCode(`
-    window.__gapMod.prof.profilerSetEnabled(true);
+    // No profilerSetEnabled(true) here anymore -- that function is GONE (the
+    // 2026-08-06 instrument consolidation: spans always record, and the
+    // remaining flag, profilerSetDevToolsMirror, only gates the DevTools
+    // performance-timeline mirror). This script still called it, so its very
+    // first eval threw and every run since that consolidation failed here.
     window.__gapMod.prof.profilerReset();
     // pullMsHistory/encodeMsHistory/transitMsHistory/payloadBytesHistory
     // aren't part of the profiler's span tree, so profilerReset() alone

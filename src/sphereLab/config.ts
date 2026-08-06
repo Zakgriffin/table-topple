@@ -1,6 +1,6 @@
 import type { Static, TObject, TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
-import { CameraSettingsCommonSchema, SimulatedOnlySettingsSchema } from './camera/settings.ts';
+import { CameraSettingsCommonSchema, physicalSettingsFrom, simulatedSettingsFrom, SimulatedOnlySettingsSchema } from './camera/settings.ts';
 import type { CameraSettingsCommon, PhysicalCameraSettings, SimulatedCameraSettings } from './camera/settings.ts';
 import { GlobalSettingsSchema, PhoneSettingsSchema, PhysicalOverridesSchema, SphereLabConfigSchema } from './configSchema.ts';
 import type { SphereLabConfig } from './configSchema.ts';
@@ -189,16 +189,15 @@ function mirrorCameraIntoConfig(settings: CameraSettingsCommon | SimulatedCamera
   }
 }
 
+// The LIVE config's camera sections, built by the rule in camera/settings.ts.
+// The rule itself is over there because a fixture has to apply the same one to
+// a config that was snapshotted rather than fetched -- see fixture.ts.
 export function createDefaultSimulatedSettings(): SimulatedCameraSettings {
-  return { ...structuredClone(config.camera.common), ...structuredClone(config.camera.simulated) };
+  return simulatedSettingsFrom(config.camera);
 }
 
 export function createDefaultPhysicalSettings(): PhysicalCameraSettings {
-  // camera.physical overrides the common block: 'raw' rather than 'noised',
-  // because the simulated-distortion field views (noised/antialiased/
-  // downsampled) do not exist for a real photo and are hidden from the
-  // field-view list entirely for a physical camera (see refreshCameraPanel).
-  return { ...structuredClone(config.camera.common), ...structuredClone(config.camera.physical) };
+  return physicalSettingsFrom(config.camera);
 }
 
 // Hands the current config to the dev bridge, which writes it over

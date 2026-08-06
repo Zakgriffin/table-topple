@@ -22,13 +22,18 @@
 // gesture and the camera stream re-negotiates -- so "add a readout and
 // reload" was costing a physical trip to the phone per question asked.
 //
-// For real-capture testing: save-capture.mjs / restore-capture.mjs let a
-// page reload (e.g. to pick up a change eval can't hot-apply, like a new
-// module-scope function) be followed by a scripted restore of the last real
-// photo instead of re-taking one on the phone every time. Round-trips
-// through byte-rounded grayscale (not the original photo), so decode
-// results after a restore may differ by a tiny amount from before -- fine
-// for comparative testing, not pixel-exact.
+// For real-capture testing: `npm run fixture:save` / `npm run fixture:restore`
+// (save-fixture.mjs / restore-fixture.mjs) let a page reload -- e.g. to pick up
+// a change eval can't hot-apply, like a new module-scope function -- be
+// followed by a scripted restore of a saved photo instead of re-taking one on
+// the phone every time.
+//
+// The byte-rounding caveat that used to live here is GONE: a fixture stores
+// float64 samples, so a restored capture is bit-identical to what the page held
+// when it was saved, and a number measured against one is a number measured
+// against the other. A fixture also carries the CONFIG it is to be run under,
+// and restore refuses if the page has drifted from it -- see
+// src/sphereLab/fixture.ts.
 //
 // RACE CONDITION WARNING, learned the hard way: sphereLab.ts's eval handler
 // runs `eval(msg.code)` synchronously and replies immediately with whatever

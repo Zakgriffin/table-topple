@@ -51,7 +51,7 @@ import { CompositeLine } from '../types.ts';
 export interface GnomonicPoint { xRow: number; xCol: number }
 
 export interface GridLineSample {
-  root: number; // this line's merge-group root (pipeline/bucketFillJoin.ts) -- lets a caller map a sample back to its actual composite line/pixels
+  root: number; // this line's source rectangle index -- lets a caller map a sample back to its actual composite line/pixels. Was a merge-group root back when a join walk merged segments; that is gone and it is now one line per accepted rectangle.
   value: number; // rectified periodic coordinate -- dimensionless (a ratio of unit-vector dot products, effectively tan of an angle), NOT pixels or degrees. xCol for a row line, xRow for a column line (see gnomonic() below)
   weight: number; // projected arc length, same weighting fitPairOfPlanes already uses for its own votes
   index: number; // recovered integer row/column index: round((value - phase) / period)

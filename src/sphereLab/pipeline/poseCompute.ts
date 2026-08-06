@@ -22,7 +22,7 @@ import {
 // bare data object instead of a real Camera -- no THREE-scene objects, GPU
 // textures, or DOM required, so this is exactly what a phone-side caller
 // (mobileCapture.ts, see this session's on-device-pose-recovery plan) can
-// run standalone. computeProjectedBinsAndMarginalsAuto/paintProjectedTexture
+// run standalone. computeProjectedBinsAuto/paintProjectedTexture
 // are deliberately NOT included -- confirmed not on the critical path to a
 // pose (distance is already finalized by gridPeriodPhase before that stage
 // would run); they exist only to feed Projected-Cam/World-floor-decal

@@ -64,7 +64,7 @@ export interface CameraSettingsCommon {
   // they follow pan/zoom and can show a joint peak sitting outside the
   // bracket the integer-count search ever looked at.
   showDistinctnessCurve: boolean;
-  showProductCurve: boolean; // draw the join walk's own merged composite lines (pipeline/bucketFillJoin.ts's computeCompositeLines), fed by the segments above
+  showProductCurve: boolean; // draw the merged composite lines fed by the segments above (the join walk that produced them is deleted; see votes.ts's compositesFromLsdRectangles for what fills this now)
   lsdToleranceDeg: number; // tau -- the one angle tolerance growRegionsCCL's edge predicate, countRectanglePixels' NFA alignment count and the retry-1 refilter all test against. LSD default 22.5deg.
   // rho LOW -- hysteresis' participation floor: a pixel below this is
   // excluded entirely (from growth edges and from NFA alignment counts).

@@ -8,7 +8,7 @@ import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
 import { CompositeLine } from '../types.ts';
-import { buildProjectedTexture, computeProjectedBinsAndMarginalsAuto, paintProjectedTexture } from './decodeGrid.ts';
+import { buildProjectedTexture, computeProjectedBinsAuto, paintProjectedTexture } from './decodeGrid.ts';
 import { GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
 import { updateDistortedPreview } from './preview.ts';
@@ -418,7 +418,7 @@ export async function ingestRemotePose(
     // "Ship auxiliary pipeline intermediates" plan): with sendCapturedImage
     // off, msg.imageBytes is undefined and none of this runs at all.
     if (camera.lastRecoveredAxes) {
-      const projResult = await computeProjectedBinsAndMarginalsAuto(camera);
+      const projResult = await computeProjectedBinsAuto(camera);
       // Painting the texture is a real GPU upload -- same showProjected
       // gating recomputeStages uses, so it's skipped for a camera that
       // isn't actually being viewed in Projected-Cam/World-with-floor mode.

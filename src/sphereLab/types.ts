@@ -29,11 +29,6 @@ export interface ProjectedSamplesDense {
   u: Float32Array; v: Float32Array; cx: Float32Array; cy: Float32Array; valid: Uint8Array;
   minU: number; maxU: number; minV: number; maxV: number;
 }
-export interface Marginals {
-  colSum: Float64Array; rowSum: Float64Array; colSumCy: Float64Array; rowHueCx: Float64Array; rowSumCy: Float64Array;
-  colMag: Float64Array; rowMag: Float64Array;
-  colPeriod: number | null; rowPeriod: number | null; colPhase: number; rowPhase: number;
-}
 // Set by runAxesReconstruction on a successful capture; consumed by
 // buildProjectedTexture. distance is the average of the U/V estimates.
 export interface RecoveredAxes { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3; distance: number }

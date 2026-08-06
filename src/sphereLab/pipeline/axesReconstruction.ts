@@ -9,7 +9,7 @@ import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { globalState } from '../state.ts';
 import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
 import { captureDistortedGrayscale } from './capture.ts';
-import { computeProjectedBinsAndMarginalsAuto, paintProjectedTexture, ProjectedSampleResult } from './decodeGrid.ts';
+import { computeProjectedBinsAuto, paintProjectedTexture, ProjectedSampleResult } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
 import { computePoseFromCapture } from './poseCompute.ts';
@@ -236,7 +236,7 @@ async function runVisualTail(camera: Camera): Promise<void> {
   // time -- see modeRefresh.ts's own comment on precomputedProjection.
   let projResult: ProjectedSampleResult = null;
   if (camera.lastRecoveredAxes) {
-    projResult = await computeProjectedBinsAndMarginalsAuto(camera);
+    projResult = await computeProjectedBinsAuto(camera);
     if (showProjected) paintProjectedTexture(camera, projResult);
   }
   const projectMs = performance.now() - projectStart;
@@ -366,7 +366,7 @@ async function recomputeStages(camera: Camera) {
   // lastVotes/lastQuadricPair/lastGridPeriodPhase/lastRecoveredAxes/
   // lastDecodeGrid/lastDecodeRotated/lastDecodeCorrectness/lastPositionDecode
   // in place, exactly like this function's own inline stages used to.
-  // computeProjectedBinsAndMarginalsAuto/paintProjectedTexture (in
+  // computeProjectedBinsAuto/paintProjectedTexture (in
   // runVisualTail) are deliberately NOT part of that shared prefix --
   // confirmed not on the critical path to a pose (distance is already
   // finalized by gridPeriodPhase before that stage would run); they exist

@@ -8,10 +8,9 @@ import { projectSamplesGPU } from '../pipelineGPU/projectSamples.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { C, ORDER, R, debruijnLookup, torus } from '../floorPattern.ts';
 import { globalState } from '../state.ts';
-import { DecodeCellDebug, DecodeSampleGrid, DecodeSamplePoint, GradientField, Marginals, PositionDecodeResult, ProjectedBins, ProjectedSamplesDense, RecoveredAxes, VoteResult } from '../types.ts';
+import { DecodeCellDebug, DecodeSampleGrid, DecodeSamplePoint, GradientField, PositionDecodeResult, ProjectedBins, ProjectedSamplesDense, RecoveredAxes, VoteResult } from '../types.ts';
 import { computeGradientField } from './gradientField.ts';
 import { GridPeriodPhaseResult } from './gridPeriodPhase.ts';
-import { computeProjectedMarginals } from './positionLM.ts';
 
 // Minimal shape projectImageCornersToPlane/projectedUVScale/
 // buildDecodeSampleGrid/runPositionDecode actually need -- narrowed off the
@@ -329,28 +328,12 @@ function bucketSamples(camera: Camera, bucketW: number, bucketH: number, proj: P
   return { bins, sums, counts, gradCxSum, gradCySum };
 }
 
-export function castAndBucketProjectedSamples(camera: Camera, bucketW: number, bucketH: number): {
-  bins: ProjectedBins; sums: Float64Array; counts: Float64Array; gradCxSum: Float64Array; gradCySum: Float64Array;
-} | null {
-  const proj = projectSamplesCPU(camera);
-  if (!proj) return null;
-  return bucketSamples(camera, bucketW, bucketH, proj);
-}
-
-// GPU-resident counterpart -- only stage 1 (the ray-cast+project, see
-// pipelineGPU/projectSamples.ts) runs on GPU; stage 2 (bucketing) stays the
-// exact same CPU code as the fully-CPU path above, fed by the GPU's dense
-// output. Returns null if WebGPU isn't available; caller falls back to the
-// CPU version, which stays the source of truth.
-export async function castAndBucketProjectedSamplesGPU(camera: Camera, bucketW: number, bucketH: number): Promise<{
-  bins: ProjectedBins; sums: Float64Array; counts: Float64Array; gradCxSum: Float64Array; gradCySum: Float64Array;
-} | null> {
-  const proj = await projectSamplesGPU(camera);
-  if (!proj) return null;
-  return bucketSamples(camera, bucketW, bucketH, proj);
-}
-
-export type ProjectedSampleResult = ReturnType<typeof castAndBucketProjectedSamples>;
+// The bins a successful projection produces, or null when there was no
+// recovered pose to project against. Named off bucketSamples now that the
+// castAndBucketProjectedSamples wrappers are gone -- they existed only to pair
+// a projection with a bucketing, and their last callers were the retired
+// autocorrelation distance path.
+export type ProjectedSampleResult = ReturnType<typeof bucketSamples> | null;
 
 // Picks bucketW/bucketH so every bucket is a SQUARE in world (floor-plane)
 // units -- binWidthU === binWidthV -- rather than one bucket per screen
@@ -402,9 +385,9 @@ export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampl
 // buildProjectedTexture used to silently bypass globalState.forceCPU
 // entirely, running a redundant CPU-only re-projection on every
 // reconstruction pass and every throttled preview tick), every caller can
-// safely go through computeProjectedBinsAndMarginalsAuto below instead of
+// safely go through computeProjectedBinsAuto below instead of
 // picking CPU vs GPU itself.
-export async function computeProjectedBinsAndMarginalsGPU(camera: Camera): Promise<ProjectedSampleResult> {
+export async function computeProjectedBinsGPU(camera: Camera): Promise<ProjectedSampleResult> {
   const proj = camera.lastRecoveredAxes ? await projectSamplesGPU(camera) : null;
   if (!proj) { camera.lastProjectedBins = null; return null; }
   const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
@@ -417,10 +400,10 @@ export async function computeProjectedBinsAndMarginalsGPU(camera: Camera): Promi
 // recomputeStages, and modeRefresh.ts's buildProjectedTexture) --
 // centralizes the globalState.forceCPU check once instead of
 // duplicating the GPU-with-CPU-fallback ternary at each call site.
-export async function computeProjectedBinsAndMarginalsAuto(camera: Camera): Promise<ProjectedSampleResult> {
+export async function computeProjectedBinsAuto(camera: Camera): Promise<ProjectedSampleResult> {
   const s = spanStart(globalState.forceCPU ? 'projectBins (CPU)' : 'projectBins (GPU stage 1 + CPU bucket)');
   const result = !globalState.forceCPU
-    ? (await computeProjectedBinsAndMarginalsGPU(camera)) ?? computeProjectedBinsAndMarginals(camera)
+    ? (await computeProjectedBinsGPU(camera)) ?? computeProjectedBinsAndMarginals(camera)
     : computeProjectedBinsAndMarginals(camera);
   spanEnd(s);
   return result;
@@ -484,63 +467,9 @@ const projTextureSeq = new WeakMap<Camera, number>();
 export async function buildProjectedTexture(camera: Camera, precomputed?: { value: ProjectedSampleResult }): Promise<void> {
   const seq = (projTextureSeq.get(camera) ?? 0) + 1;
   projTextureSeq.set(camera, seq);
-  const result = precomputed ? precomputed.value : await computeProjectedBinsAndMarginalsAuto(camera);
+  const result = precomputed ? precomputed.value : await computeProjectedBinsAuto(camera);
   if (projTextureSeq.get(camera) !== seq) return; // a newer call started meanwhile -- its result wins instead
   paintProjectedTexture(camera, result);
-}
-
-// Re-buckets castAndBucketProjectedSamples' rays at a resolution sized to
-// keep a fixed target of buckets per grid cell -- see pre-Stage-A history.
-export function measurePeriodDistance(camera: Camera, currentDistance: number, extentU: number, extentV: number): { distanceU: number; distanceV: number } | null {
-  const TARGET_BUCKETS_PER_CELL = 20;
-  const MAX_REFINE_BUCKETS = 2048;
-  const refineW = Math.min(MAX_REFINE_BUCKETS, Math.max(camera.rtSize.w, Math.ceil(extentU / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
-  const refineH = Math.min(MAX_REFINE_BUCKETS, Math.max(camera.rtSize.h, Math.ceil(extentV / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
-  const refined = castAndBucketProjectedSamples(camera, refineW, refineH);
-  const refinedMarginals = refined ? computeProjectedMarginals(refineW, refineH, refined.counts, refined.gradCxSum, refined.gradCySum) : null;
-  if (!refined || !refinedMarginals || refinedMarginals.colPeriod === null || refinedMarginals.rowPeriod === null) return null;
-  return {
-    distanceU: currentDistance * (GRID_STEP / (refinedMarginals.colPeriod * refined.bins.binWidthU)),
-    distanceV: currentDistance * (GRID_STEP / (refinedMarginals.rowPeriod * refined.bins.binWidthV)),
-  };
-}
-
-// GPU-aware twin, same reasoning as computeProjectedBinsAndMarginalsGPU
-// above -- kept separate so measurePeriodDistance's other (synchronous)
-// callers are untouched.
-export async function measurePeriodDistanceGPU(camera: Camera, currentDistance: number, extentU: number, extentV: number): Promise<{ distanceU: number; distanceV: number } | null> {
-  const TARGET_BUCKETS_PER_CELL = 20;
-  const MAX_REFINE_BUCKETS = 2048;
-  const refineW = Math.min(MAX_REFINE_BUCKETS, Math.max(camera.rtSize.w, Math.ceil(extentU / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
-  const refineH = Math.min(MAX_REFINE_BUCKETS, Math.max(camera.rtSize.h, Math.ceil(extentV / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
-  const refined = await castAndBucketProjectedSamplesGPU(camera, refineW, refineH);
-  const refinedMarginals = refined ? computeProjectedMarginals(refineW, refineH, refined.counts, refined.gradCxSum, refined.gradCySum) : null;
-  if (!refined || !refinedMarginals || refinedMarginals.colPeriod === null || refinedMarginals.rowPeriod === null) return null;
-  return {
-    distanceU: currentDistance * (GRID_STEP / (refinedMarginals.colPeriod * refined.bins.binWidthU)),
-    distanceV: currentDistance * (GRID_STEP / (refinedMarginals.rowPeriod * refined.bins.binWidthV)),
-  };
-}
-
-// Own, axis-symmetric-bucket bins/marginals -- deliberately NOT
-// lastProjectedBins (the display pipeline's own state) -- see pre-Stage-A
-// history for why sharing that state caused a real bug.
-// Superseded by buildDecodeSampleGrid's own corner-projection + gridPeriodPhase
-// sourced bounds/phase (see this session's chat) -- left defined, unreferenced,
-// in case this autocorrelation-based approach is wanted again later.
-export function computeDecodeMarginals(camera: Camera): { bins: ProjectedBins; marginals: Marginals } | null {
-  if (!camera.lastRecoveredAxes || !camera.lastProjectedBins) return null;
-  const TARGET_BUCKETS_PER_CELL = 20;
-  const MAX_REFINE_BUCKETS = 2048;
-  const floor = Math.max(camera.rtSize.w, camera.rtSize.h);
-  const extentU = camera.lastProjectedBins.maxU - camera.lastProjectedBins.minU;
-  const extentV = camera.lastProjectedBins.maxV - camera.lastProjectedBins.minV;
-  const bucketW = Math.min(MAX_REFINE_BUCKETS, Math.max(floor, Math.ceil(extentU / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
-  const bucketH = Math.min(MAX_REFINE_BUCKETS, Math.max(floor, Math.ceil(extentV / GRID_STEP * TARGET_BUCKETS_PER_CELL)));
-  const result = castAndBucketProjectedSamples(camera, bucketW, bucketH);
-  if (!result) return null;
-  const marginals = computeProjectedMarginals(bucketW, bucketH, result.counts, result.gradCxSum, result.gradCySum);
-  return { bins: result.bins, marginals };
 }
 
 // Forward-projects the 4 image corners onto the recovered floor plane --

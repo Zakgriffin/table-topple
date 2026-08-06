@@ -119,7 +119,6 @@ import * as NS16 from './pipeline/decodeGrid.ts';
 import * as NS17 from './pipeline/distortion.ts';
 import * as NS18 from './pipeline/gradientField.ts';
 import * as NS19 from './pipeline/orientationLM.ts';
-import * as NS20 from './pipeline/positionLM.ts';
 import * as NS21 from './pipeline/preview.ts';
 import * as NS22 from './pipeline/tangentWalk.ts';
 import * as NS23 from './pipeline/votes.ts';
@@ -140,8 +139,6 @@ import * as NS40 from './pipelineGPU/voteBandSelect.ts';
 import * as NS41 from './pipelineGPU/projectSamples.ts';
 import * as NS42 from './overlays/gradientHighlightOverlays.ts';
 import * as NS43 from './pipeline/gradientHighlight.ts';
-import * as NS45 from './pipeline/bucketFillSegments.ts';
-import * as NS47 from './pipeline/bucketFillJoin.ts';
 import * as NS48 from './overlays/gridPeriodPhaseOverlays.ts';
 import * as NS49 from './pipeline/gridPeriodPhase.ts';
 import * as NS50 from './overlays/lsdOverlay.ts';
@@ -163,7 +160,7 @@ import * as NS65 from './pipelineGPU/reconstructionTiming.ts';
 Object.assign(
   globalThis,
   NS0, NS1, NS2, NS3, NS4, NS5, NS6, NS7, NS8, NS9, NS10, NS11, NS12, NS13, NS14, NS15, NS16, NS17,
-  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS45, NS47, NS48, NS49, NS50, NS51, NS52, NS53, NS54, NS55, NS56, NS57, NS58, NS59, NS60, NS61, NS62, NS63, NS64, NS65,
+  NS18, NS19, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS48, NS49, NS50, NS51, NS52, NS53, NS54, NS55, NS56, NS57, NS58, NS59, NS60, NS61, NS62, NS63, NS64, NS65,
   { THREE, activeCamera, cameras, isSimulated, isPhysical, globalState, euler, canvas, readout, savedControls,
     setMode, setPanelCollapsed, renderCameraTabs, refreshCameraPanel, renderViewport, layoutPip, resize,
     renderer, floorMesh, viewerCam, worldOrbit, insideCam, renderPreviewViewport, renderProjectedViewport,

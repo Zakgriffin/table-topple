@@ -147,12 +147,6 @@ export const CameraSettingsCommonSchema = Type.Object({
   showLevelLineArrow: Type.Boolean(),
   gradientArrowScale: Type.Number(),
 
-  tangentWalkMaxSteps: Type.Number(),
-  tangentWalkDeviationDeg: Type.Number(),
-  tangentWalkMagFraction: Type.Number(),
-  tangentWalkGraceSamples: Type.Number(),
-  tangentWalkAdaptive: Type.Boolean(),
-
   showRecoveredPoles: Type.Boolean(),
   showAxisVectors: Type.Boolean(),
   showTopCircles: Type.Boolean(),

@@ -90,12 +90,6 @@ export function resizeCaptureBuffers(camera: Camera, explicitSize?: { w: number;
   camera.topGradientTex.dispose();
   camera.topGradientTex.needsUpdate = true;
 
-  camera.tangentWalkPathData = new Uint8Array(w * h * 4);
-  camera.tangentWalkPathTex.image = { data: camera.tangentWalkPathData, width: w, height: h };
-  camera.tangentWalkPathTex.magFilter = THREE.NearestFilter;
-  camera.tangentWalkPathTex.dispose();
-  camera.tangentWalkPathTex.needsUpdate = true;
-
   camera.lsdRawRegionsData = new Uint8Array(w * h * 4);
   camera.lsdRawRegionsTex.image = { data: camera.lsdRawRegionsData, width: w, height: h };
   camera.lsdRawRegionsTex.magFilter = THREE.NearestFilter;

@@ -163,7 +163,6 @@ export interface CameraBase {
   trueContamData: Uint8Array; trueContamTex: THREE.DataTexture;
   reconContamData: Uint8Array; reconContamTex: THREE.DataTexture;
   topGradientData: Uint8Array; topGradientTex: THREE.DataTexture;
-  tangentWalkPathData: Uint8Array; tangentWalkPathTex: THREE.DataTexture;
   // Per-pixel raster overlays for pipeline/lsdSegments.ts's own debug views
   // (overlays/lsdOverlay.ts) -- same "flat Uint8Array + DataTexture + quad"
   // shape as trueContamData/reconContamData above, not the shared SVG

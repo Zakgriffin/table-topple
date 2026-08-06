@@ -76,9 +76,9 @@ export function computeGradientMagnitudeField(field: GradientField): Float64Arra
 // AXIAL (directed=false, the long-standing default, fieldView 'gradient2x2'):
 // theta is folded into [0, PI) before mapping to a full 0-360 hue sweep, so a
 // black-to-white edge and the white-to-black edge facing it get the SAME hue.
-// That matches every mod-PI consumer in the codebase (computeContaminationAlpha,
-// tangentWalk's guided walk) -- for them a line is a line regardless of which
-// side is darker.
+// That matches every mod-PI consumer in the codebase (computeContaminationAlpha
+// is the last one left) -- for it a line is a line regardless of which side is
+// darker.
 //
 // DIRECTED (directed=true, fieldView 'gradient2x2Directed'): theta maps over
 // its full [-PI, PI) range, so those two opposite-facing edges land exactly

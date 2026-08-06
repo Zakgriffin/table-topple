@@ -119,10 +119,6 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
   const topGradientTex = new THREE.DataTexture(topGradientData, rtSize.w, rtSize.h, THREE.RGBAFormat);
   topGradientTex.flipY = false;
 
-  const tangentWalkPathData = new Uint8Array(rtSize.w * rtSize.h * 4);
-  const tangentWalkPathTex = new THREE.DataTexture(tangentWalkPathData, rtSize.w, rtSize.h, THREE.RGBAFormat);
-  tangentWalkPathTex.flipY = false;
-
   const lsdRawRegionsData = new Uint8Array(rtSize.w * rtSize.h * 4);
   const lsdRawRegionsTex = new THREE.DataTexture(lsdRawRegionsData, rtSize.w, rtSize.h, THREE.RGBAFormat);
   lsdRawRegionsTex.flipY = false;
@@ -130,7 +126,7 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
   const lsdRejectedData = new Uint8Array(rtSize.w * rtSize.h * 4);
   const lsdRejectedTex = new THREE.DataTexture(lsdRejectedData, rtSize.w, rtSize.h, THREE.RGBAFormat);
   lsdRejectedTex.flipY = false;
-  // These 5 overlays (unlike trueContam/reconContam/topGradient, which paint
+  // These two overlays (unlike trueContam/reconContam/topGradient, which paint
   // one FIXED color everywhere and only vary alpha) paint a DIFFERENT color
   // per claimed pixel, next to unclaimed pixels left at RGB=0,alpha=0 --
   // under the default LinearFilter, GPU bilinear sampling blends RGB across
@@ -140,7 +136,6 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
   // fringe. NearestFilter (already used by scene/floor.ts's pattern texture
   // for the same "don't blur discrete per-cell data" reason) shows each
   // field pixel as one flat block instead.
-  tangentWalkPathTex.magFilter = THREE.NearestFilter;
   lsdRawRegionsTex.magFilter = THREE.NearestFilter;
   lsdRejectedTex.magFilter = THREE.NearestFilter;
 
@@ -205,7 +200,6 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
     gridPeriodPhaseViewMin: null, gridPeriodPhaseViewMax: null,
     distortedPreviewData, distortedPreviewTex, projectedPreviewData, projectedPreviewTex,
     trueContamData, trueContamTex, reconContamData, reconContamTex, topGradientData, topGradientTex,
-    tangentWalkPathData, tangentWalkPathTex,
     lsdRawRegionsData, lsdRawRegionsTex, lsdRejectedData, lsdRejectedTex,
     recoveredCamGizmo, recoveredCamAxes,
     recoveredRowPoleA, recoveredRowPoleB, recoveredColPoleA, recoveredColPoleB,
@@ -320,7 +314,6 @@ export function destroyCamera(camera: Camera) {
   camera.trueContamTex.dispose();
   camera.reconContamTex.dispose();
   camera.topGradientTex.dispose();
-  camera.tangentWalkPathTex.dispose();
   camera.lsdRawRegionsTex.dispose();
   camera.lsdRejectedTex.dispose();
   if (isSimulated(camera)) {

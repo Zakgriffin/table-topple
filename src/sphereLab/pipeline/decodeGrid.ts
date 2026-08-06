@@ -56,12 +56,12 @@ export interface PendingDecodeGrid {
   release(): void;
 }
 
-// castAndBucketProjectedSamples reruns this same full-frame gradient field
-// EVERY call (computeGradientField(gray, w, h, 1)), but camera.lastNoisedPreviewGray
-// never changes within one runAxesReconstruction invocation -- yet this
-// function gets called 3-6 times per reconstruction (once per
-// computeProjectedBinsAndMarginals/measurePeriodDistance call, see
-// axesReconstruction.ts). A plain oversight, not intentional recomputation
+// bucketSamples reruns this same full-frame gradient field EVERY call
+// (computeGradientField(gray, w, h, 1)), but camera.lastNoisedPreviewGray never
+// changes within one runAxesReconstruction invocation -- yet this function used
+// to get called 3-6 times per reconstruction, once per projection. (The
+// autocorrelation callers that made it 3-6 are deleted; one projection per
+// reconstruction remains.) A plain oversight, not intentional recomputation
 // -- cached per-camera (WeakMap, so multiple simultaneously-existing
 // cameras never collide), invalidated automatically whenever the gray
 // array reference or dimensions change (a new capture/reconstruction).
@@ -359,15 +359,17 @@ function squareCellBucketDims(camera: Camera, extentU: number, extentV: number):
 // screen (World view's recovered-pose overlay depends on an accurate
 // distance for every camera, not just the one being displayed), so this
 // always runs. Returns the raw result too, so a caller that also wants to
-// paint doesn't have to re-cast every ray a second time. No longer computes
-// marginals (autocorrelation) here -- see this session's chat: that was
-// display-only (the marginal-graph overlay, now removed) and decode gets its
-// own phase from gridPeriodPhase instead. Projects once (stage 1) so the
-// resulting extent can size a square-cell bucket grid (stage 2) BEFORE
-// bucketing -- can't use castAndBucketProjectedSamples' single-call
-// convenience here since that picks bucketW/bucketH before the extent
-// (which stage 1 alone produces) is known.
-export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampleResult {
+// paint doesn't have to re-cast every ray a second time.
+//
+// It was called computeProjectedBinsAndMarginals until the marginals it named
+// were deleted -- autocorrelation was display-only (the marginal-graph overlay,
+// since removed) and decode takes its phase from gridPeriodPhase. The name
+// outlived the work by long enough to be worth noting as a hazard.
+//
+// Projects once (stage 1) so the resulting extent can size a square-cell bucket
+// grid (stage 2) BEFORE bucketing, which is why it calls projectSamplesCPU and
+// bucketSamples separately rather than in one step.
+export function computeProjectedBinsCPU(camera: Camera): ProjectedSampleResult {
   const proj = camera.lastRecoveredAxes ? projectSamplesCPU(camera) : null;
   if (!proj) { camera.lastProjectedBins = null; return null; }
   const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
@@ -377,7 +379,7 @@ export function computeProjectedBinsAndMarginals(camera: Camera): ProjectedSampl
 }
 
 // GPU-aware twin, deliberately kept separate rather than folded into
-// computeProjectedBinsAndMarginals above -- that function has several
+// computeProjectedBinsCPU above -- that function has several
 // call sites outside the reconstruction pipeline (throttled preview
 // updates, mode switches, camera creation) that used to be perfectly fine
 // staying synchronous; now that those call sites (see modeRefresh.ts/
@@ -403,8 +405,8 @@ export async function computeProjectedBinsGPU(camera: Camera): Promise<Projected
 export async function computeProjectedBinsAuto(camera: Camera): Promise<ProjectedSampleResult> {
   const s = spanStart(globalState.forceCPU ? 'projectBins (CPU)' : 'projectBins (GPU stage 1 + CPU bucket)');
   const result = !globalState.forceCPU
-    ? (await computeProjectedBinsGPU(camera)) ?? computeProjectedBinsAndMarginals(camera)
-    : computeProjectedBinsAndMarginals(camera);
+    ? (await computeProjectedBinsGPU(camera)) ?? computeProjectedBinsCPU(camera)
+    : computeProjectedBinsCPU(camera);
   spanEnd(s);
   return result;
 }

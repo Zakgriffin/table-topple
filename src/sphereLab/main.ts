@@ -99,68 +99,54 @@ import { pushPoseSync, pushSettingsSync, sendToDevBridge } from './devBridge/cli
 // the rest is put somewhere it naturally falls back to. Attaching everything
 // to globalThis here restores that: a bare identifier direct eval can't
 // resolve lexically still falls through to the global scope, same as before.
-import * as NS0 from './camera/factory.ts';
-import * as NS1 from './camera/lifecycle.ts';
-import * as NS2 from './camera/model.ts';
-import * as NS3 from './camera/settings.ts';
-import * as NS4 from './camera/store.ts';
-import * as NS5 from './constants.ts';
-import * as NS6 from './devBridge/client.ts';
-import * as NS7 from './math/geometry.ts';
-import * as NS8 from './overlays/contaminationOverlays.ts';
-import * as NS9 from './overlays/hoverDebugOverlays.ts';
-import * as NS10 from './overlays/projectedCamOverlays.ts';
-import * as NS11 from './overlays/recoveredOverlays.ts';
-import * as NS12 from './overlays/sphereOverlays.ts';
-import * as NS13 from './pipeline/axesReconstruction.ts';
-import * as NS14 from './pipeline/capture.ts';
-import * as NS15 from './pipeline/contamination.ts';
-import * as NS16 from './pipeline/decodeGrid.ts';
-import * as NS17 from './pipeline/distortion.ts';
-import * as NS18 from './pipeline/gradientField.ts';
-import * as NS19 from './pipeline/orientationLM.ts';
-import * as NS21 from './pipeline/preview.ts';
-import * as NS22 from './pipeline/tangentWalk.ts';
-import * as NS23 from './pipeline/votes.ts';
-import * as NS24 from './scene/floor.ts';
-import * as NS25 from './scene/quadRenderers.ts';
-import * as NS26 from './scene/renderer.ts';
-import * as NS27 from './scene/viewerControls.ts';
-import * as NS28 from './state.ts';
-import * as NS30 from './ui/cameraPanel.ts';
-import * as NS31 from './ui/dom.ts';
-import * as NS32 from './ui/layout.ts';
-import * as NS33 from './ui/mode.ts';
-import * as NS34 from './pipelineGPU/device.ts';
-import * as NS37 from './profiling/profiler.ts';
-import * as NS38 from './pipelineGPU/fitPlanes.ts';
-import * as NS39 from './pipelineGPU/decodeTally.ts';
-import * as NS40 from './pipelineGPU/voteBandSelect.ts';
-import * as NS41 from './pipelineGPU/projectSamples.ts';
-import * as NS42 from './overlays/gradientHighlightOverlays.ts';
-import * as NS43 from './pipeline/gradientHighlight.ts';
-import * as NS48 from './overlays/gridPeriodPhaseOverlays.ts';
-import * as NS49 from './pipeline/gridPeriodPhase.ts';
-import * as NS50 from './overlays/lsdOverlay.ts';
-import * as NS51 from './pipeline/lsdSegments.ts';
-import * as NS52 from './scene/throughCam2D.ts';
-import * as NS53 from './pipelineGPU/lsdFitVerify.ts';
-import * as NS54 from './pipelineGPU/growRegions.ts';
-import * as NS55 from './pipelineGPU/growRegionsVerify.ts';
-import * as NS56 from './pipelineGPU/periodSweep.ts';
-import * as NS57 from './pipelineGPU/periodSweepVerify.ts';
-import * as NS58 from './pipelineGPU/decodeGridBuild.ts';
-import * as NS59 from './pipelineGPU/decodeGridBuildVerify.ts';
-import * as NS60 from './pipelineGPU/prefixSum.ts';
-import * as NS61 from './pipelineGPU/prefixSumVerify.ts';
-import * as NS62 from './pipelineGPU/collectRegions.ts';
-import * as NS63 from './pipelineGPU/collectRegionsVerify.ts';
-import * as NS64 from './pipelineGPU/lsdChainVerify.ts';
-import * as NS65 from './pipelineGPU/reconstructionTiming.ts';
+// ── Dev-console surface ──────────────────────────────────────────────────
+//
+// Every module's exports, flattened onto globalThis so the dev bridge can call
+// them by bare name (scripts/dev-bridge/feval.sh evals in devBridge/client.ts's
+// module scope, where these are the only things reachable).
+//
+// import.meta.glob rather than 66 hand-numbered `import * as NS0..NS65` lines,
+// and the reason is not just brevity:
+//
+//   - THE OLD FORM NAMED NOTHING USEFUL BUT BROKE EVERY AUDIT. Because each
+//     module was imported, every export it had appeared "used", so a
+//     find-the-dead-exports pass returned nothing. Two dead GPU modules and a
+//     whole retired distance path hid behind exactly that. A glob names no
+//     export at all, so "grep for this symbol outside its own file" becomes a
+//     valid deadness test again.
+//   - It had already drifted: the numbering had gaps where modules were
+//     deleted, and adding a module meant picking the next free integer.
+//   - Nothing has to be edited to expose a new module. That matters more than
+//     it sounds: editing any source file reloads the vite page, which destroys
+//     the capture and the warm-up state a measurement was taken against.
+//
+// The two exclusions are load-bearing, not tidiness: this file would otherwise
+// glob ITSELF into a circular import, and a .d.ts has no runtime module to
+// import at all.
+const DEV_MODULES = import.meta.glob(
+  ['./**/*.ts', '!./main.ts', '!./**/*.d.ts'],
+  { eager: true },
+) as Record<string, Record<string, unknown>>;
+// Collisions are REPORTED rather than silently resolved. Two modules exporting
+// the same name means a bare console call could reach either one, and which it
+// reaches depends on glob order -- the kind of thing that wastes an hour when a
+// number comes back wrong. The old form had the same hazard and no warning.
+{
+  const seen = new Map<string, string>();
+  const clashes: string[] = [];
+  for (const [path, mod] of Object.entries(DEV_MODULES)) {
+    for (const name of Object.keys(mod)) {
+      const prev = seen.get(name);
+      if (prev) clashes.push(`${name}: ${prev} vs ${path}`);
+      else seen.set(name, path);
+    }
+    Object.assign(globalThis, mod);
+  }
+  if (clashes.length) console.warn('[devConsole] name collisions on globalThis:\n  ' + clashes.join('\n  '));
+}
+// The locals -- module-scope bindings of THIS file, which no glob can reach.
 Object.assign(
   globalThis,
-  NS0, NS1, NS2, NS3, NS4, NS5, NS6, NS7, NS8, NS9, NS10, NS11, NS12, NS13, NS14, NS15, NS16, NS17,
-  NS18, NS19, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS48, NS49, NS50, NS51, NS52, NS53, NS54, NS55, NS56, NS57, NS58, NS59, NS60, NS61, NS62, NS63, NS64, NS65,
   { THREE, activeCamera, cameras, isSimulated, isPhysical, globalState, euler, canvas, readout, savedControls,
     setMode, setPanelCollapsed, renderCameraTabs, refreshCameraPanel, renderViewport, layoutPip, resize,
     renderer, floorMesh, viewerCam, worldOrbit, insideCam, renderPreviewViewport, renderProjectedViewport,

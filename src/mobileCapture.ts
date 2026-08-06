@@ -18,6 +18,7 @@ import * as THREE from 'three';
 import { toGrayscale } from './decode.ts';
 import { config, fetchConfigFile } from './sphereLab/config.ts';
 import { globalState } from './sphereLab/state.ts';
+import { backendFromForceCPU } from './sphereLab/pipeline/backend.ts';
 // Only the data-side rebuild is needed here now. The board's world EXTENT
 // (C/R/GRID_STEP) is read by gameOverlay.ts instead, which is the only thing
 // on this page that still draws anything at board scale.
@@ -2108,7 +2109,12 @@ async function captureComputeAndSendPose() {
       pendingDecodeGrid: null,
     };
     const t0 = performance.now();
-    const timing = await computePoseFromCapture(state, grayTopDown, cw, ch);
+    // The phone's globalState is THIS page's own module instance, kept in sync
+    // by settingsSync (see below) -- converted to a Backend right here so the
+    // pipeline itself never reads it. Same conversion the desktop does.
+    const timing = await computePoseFromCapture(
+      state, grayTopDown, cw, ch, backendFromForceCPU(globalState.forceCPU),
+    );
     const totalMs = performance.now() - t0;
     const pd = state.lastPositionDecode;
     recordPose({
@@ -2205,7 +2211,7 @@ async function captureComputeAndSendPose() {
           minRegionSize: cameraSettings.lsdMinRegionSize,
           nfaEpsilon: cameraSettings.lsdNfaEpsilon,
           nfaTestExponent: cameraSettings.lsdNfaTestExponent,
-        });
+        }, backendFromForceCPU(globalState.forceCPU));
         msg.debug = buildDebugPayload(state, lsdRects);
       }
       // Raw bytes now (poseResultWire.ts), not a base64 dataUrl -- toBlob's

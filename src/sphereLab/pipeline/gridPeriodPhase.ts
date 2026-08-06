@@ -2,9 +2,9 @@ import * as THREE from 'three';
 import { cornerDir } from '../math/geometry.ts';
 import { C, R } from '../floorPattern.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
-import { globalState } from '../state.ts';
 import { sweepResultantsGPU } from '../pipelineGPU/periodSweep.ts';
 import { CompositeLine } from '../types.ts';
+import { Backend } from './backend.ts';
 
 // ── Grid period/phase recovery from composite lines (pure) ────────────────
 //
@@ -243,6 +243,7 @@ export async function computeGridPeriodPhase(
   Drow: THREE.Vector3, Dcol: THREE.Vector3, Dnormal: THREE.Vector3,
   cellPitch: number | null,
   minGrazingCos: number,
+  backend: Backend,
 ): Promise<GridPeriodPhaseResult | null> {
   // `composites` comes from pipeline/votes.ts's computeGradient2x2Composites
   // -- the SAME composite lines (same root numbering) computeSegmentVotes
@@ -435,9 +436,9 @@ export async function computeGridPeriodPhase(
   // every one of that family's unit vectors equally and so cannot change its
   // resultant -- it would move the PHASE, which is exactly why the GPU never
   // computes phase and circularFit still runs on CPU for the chosen candidates.
-  const sweepSpan = spanStart(globalState.forceCPU ? 'period sweep (CPU)' : 'period sweep (GPU)');
+  const sweepSpan = spanStart(backend === 'cpu' ? 'period sweep (CPU)' : 'period sweep (GPU)');
   let scores: Float32Array | null = null;
-  if (!globalState.forceCPU) {
+  if (backend === 'gpu') {
     const total = rowValues.length + colValues.length;
     const scaled = new Float32Array(total), weights = new Float32Array(total);
     let at = 0;

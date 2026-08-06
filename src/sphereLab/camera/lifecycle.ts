@@ -1,4 +1,5 @@
 import { markCaptureDirty, renderCamRT } from '../pipeline/capture.ts';
+import { backendFromForceCPU } from '../pipeline/backend.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
@@ -21,7 +22,7 @@ export function findPhysicalCameraByConnection(connectionId: string): PhysicalCa
 function primeCameraForDisplay(camera: Camera) {
   if (isSimulated(camera)) renderCamRT(camera); // populate camRT before reading it back below, so the preview isn't blank for the first frame or two
   updateDistortedPreview(camera);
-  if (globalState.mode === 'projected') buildProjectedTexture(camera);
+  if (globalState.mode === 'projected') buildProjectedTexture(camera, backendFromForceCPU(globalState.forceCPU));
   markCaptureDirty(camera);
   layoutPip(camera);
 }

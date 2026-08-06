@@ -12,6 +12,7 @@ import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { recomputeFromLastCapture, runAxesReconstruction, updateChainTransfersReadout } from '../pipeline/axesReconstruction.ts';
 import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
+import { backendFromForceCPU } from '../pipeline/backend.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { isWebGPUSupported } from '../pipelineGPU/device.ts';
@@ -240,7 +241,7 @@ export function refreshCameraPanel() {
   updateLsdAvailability();
 
   updateDistortedPreview(cam);
-  if (globalState.mode === 'projected') buildProjectedTexture(cam);
+  if (globalState.mode === 'projected') buildProjectedTexture(cam, backendFromForceCPU(globalState.forceCPU));
   markCaptureDirty(cam);
   layoutPip(cam);
   drawGridPeriodPhasePlot(cam);

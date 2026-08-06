@@ -1,10 +1,12 @@
 import { Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
+import { backendFromForceCPU } from '../pipeline/backend.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import {
   computeEdgeNeighbors, computeLsdRectanglesFromField, growRegionsCCL, GrownRegion, LsdRectangle,
 } from '../pipeline/lsdSegments.ts';
+import { globalState } from '../state.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import {
   growthCandidateGroup, lsdReadout, lsdRectanglesGroup, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn,
@@ -263,6 +265,13 @@ export async function updateLsdOverlay(camera: Camera) {
   }
 
   const seq = ++lsdOverlaySeq;
+  // NOTE (library-extraction step 4): this whole function is one of the four
+  // display-side recomputations -- it rebuilds the gradient field above and runs
+  // a SECOND complete LSD chain here, because the pose path's residency is
+  // destroyed before display can reach it. The backend is threaded through
+  // rather than read ambiently so that when this is replaced by a request for
+  // the pose run's own intermediates, the two are provably running the same
+  // configuration.
   const rects = await computeLsdRectanglesFromField(field, {
     toleranceDeg: settings.lsdToleranceDeg,
     rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
@@ -271,7 +280,7 @@ export async function updateLsdOverlay(camera: Camera) {
     minRegionSize: settings.lsdMinRegionSize,
     nfaEpsilon: settings.lsdNfaEpsilon,
     nfaTestExponent: settings.lsdNfaTestExponent,
-  });
+  }, backendFromForceCPU(globalState.forceCPU));
   if (seq !== lsdOverlaySeq) return; // a newer call started while this one was in flight -- its result wins instead
   camera.lastLsdRectangles = rects;
 

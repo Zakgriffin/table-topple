@@ -6,7 +6,6 @@ import { GROW_REGIONS_WGSL } from './growRegions.wgsl.ts';
 import { collectRegionsGPU } from './collectRegions.ts';
 import { FieldResidency } from './fieldResidency.ts';
 import { gpuTimelineSlot } from './gpuTimeline.ts';
-import { globalState } from '../state.ts';
 
 interface GrowPipelines {
   bindGroupLayout: GPUBindGroupLayout;
@@ -97,16 +96,20 @@ const ROUNDS_PER_BATCH = 8;
 // own results into the same residency.
 //
 // `collectOnGPU` exists for ONE caller: collectRegionsVerify, which isolates
-// stage 3b by holding the grower on GPU and switching only the collect. The
-// global forceCPU cannot express that -- it would move the grower too, and the
+// stage 3b by holding the grower on GPU and switching only the collect. A single
+// backend choice cannot express that -- it would move the grower too, and the
 // grower is the one stage that is not bit-identical to its CPU twin, so the
-// comparison would become grower-noise instead of a collect check. A parameter
-// defaulting to the global keeps production on exactly one path while leaving
-// the harness able to say which stage it means.
+// comparison would become grower-noise instead of a collect check.
+//
+// REQUIRED, not defaulted. It used to default to `!globalState.forceCPU`, which
+// meant the one parameter whose whole purpose is to let a caller be explicit
+// about a stage silently read a global when nobody passed it -- so production and
+// the harness disagreed about where the value came from. Every caller states it
+// now; see pipeline/backend.ts.
 export async function growRegionsCCLGPU(
   res: FieldResidency, w: number, h: number,
   toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
-  collectOnGPU = !globalState.forceCPU,
+  collectOnGPU: boolean,
 ): Promise<{ roundsRun: number; converged: boolean } | null> {
   const device = res.device;
   if (!device) return null;
@@ -262,7 +265,7 @@ export async function growRegionsCCLGPU(
 export async function growRegionsCCLGPUToCPU(
   fx: Float64Array, fy: Float64Array, w: number, h: number,
   toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
-  collectOnGPU = !globalState.forceCPU,
+  collectOnGPU: boolean,
 ): Promise<{ regionId: Int32Array; regions: GrownRegion[]; roundsRun: number; converged: boolean } | null> {
   const res = await FieldResidency.create(w * h, true);
   try {

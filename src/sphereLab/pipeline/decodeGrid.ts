@@ -7,8 +7,8 @@ import { buildAndTallyDecodeGPU } from '../pipelineGPU/decodeGridBuild.ts';
 import { projectSamplesGPU } from '../pipelineGPU/projectSamples.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { C, ORDER, R, debruijnLookup, torus } from '../floorPattern.ts';
-import { globalState } from '../state.ts';
 import { DecodeCellDebug, DecodeSampleGrid, DecodeSamplePoint, GradientField, PositionDecodeResult, ProjectedBins, ProjectedSamplesDense, RecoveredAxes, VoteResult } from '../types.ts';
+import { Backend } from './backend.ts';
 import { computeGradientField } from './gradientField.ts';
 import { GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 
@@ -384,7 +384,7 @@ function computeProjectedBinsCPU(camera: Camera): ProjectedSampleResult {
 // updates, mode switches, camera creation) that used to be perfectly fine
 // staying synchronous; now that those call sites (see modeRefresh.ts/
 // main.ts/ui/mode.ts) have all gone async too (see this session's chat --
-// buildProjectedTexture used to silently bypass globalState.forceCPU
+// buildProjectedTexture used to silently bypass the backend choice
 // entirely, running a redundant CPU-only re-projection on every
 // reconstruction pass and every throttled preview tick), every caller can
 // safely go through computeProjectedBinsAuto below instead of
@@ -400,11 +400,11 @@ async function computeProjectedBinsGPU(camera: Camera): Promise<ProjectedSampleR
 
 // Single dispatch point for every caller (axesReconstruction.ts's
 // recomputeStages, and modeRefresh.ts's buildProjectedTexture) --
-// centralizes the globalState.forceCPU check once instead of
-// duplicating the GPU-with-CPU-fallback ternary at each call site.
-export async function computeProjectedBinsAuto(camera: Camera): Promise<ProjectedSampleResult> {
-  const s = spanStart(globalState.forceCPU ? 'projectBins (CPU)' : 'projectBins (GPU stage 1 + CPU bucket)');
-  const result = !globalState.forceCPU
+// centralizes the backend check once instead of duplicating the
+// GPU-with-CPU-fallback ternary at each call site.
+export async function computeProjectedBinsAuto(camera: Camera, backend: Backend): Promise<ProjectedSampleResult> {
+  const s = spanStart(backend === 'cpu' ? 'projectBins (CPU)' : 'projectBins (GPU stage 1 + CPU bucket)');
+  const result = backend === 'gpu'
     ? (await computeProjectedBinsGPU(camera)) ?? computeProjectedBinsCPU(camera)
     : computeProjectedBinsCPU(camera);
   spanEnd(s);
@@ -466,10 +466,12 @@ export function paintProjectedTexture(camera: Camera, result: ProjectedSampleRes
 // camera's own recovered-floor decal, not just the active one) -- a shared
 // counter would let one camera's call wrongly invalidate another's.
 const projTextureSeq = new WeakMap<Camera, number>();
-export async function buildProjectedTexture(camera: Camera, precomputed?: { value: ProjectedSampleResult }): Promise<void> {
+export async function buildProjectedTexture(
+  camera: Camera, backend: Backend, precomputed?: { value: ProjectedSampleResult },
+): Promise<void> {
   const seq = (projTextureSeq.get(camera) ?? 0) + 1;
   projTextureSeq.set(camera, seq);
-  const result = precomputed ? precomputed.value : await computeProjectedBinsAuto(camera);
+  const result = precomputed ? precomputed.value : await computeProjectedBinsAuto(camera, backend);
   if (projTextureSeq.get(camera) !== seq) return; // a newer call started meanwhile -- its result wins instead
   paintProjectedTexture(camera, result);
 }
@@ -679,7 +681,8 @@ export async function runPositionDecode(
   // The LSD chain's device-resident gray, when the chain ran on GPU and its
   // residency is still alive. Purely an optimization -- null means decode
   // uploads its own copy exactly as it always did.
-  sharedGray?: GPUBuffer | null,
+  sharedGray: GPUBuffer | null,
+  backend: Backend,
   // When set, the fused path's grid readback is parked on
   // camera.pendingDecodeGrid instead of awaited here. Only a caller with a drain
   // to resolve it in should pass true -- see PendingDecodeGrid.
@@ -740,7 +743,7 @@ export async function runPositionDecode(
   // lastPositionDecode/lastDecodeCorrectness all cleared). Two places that must
   // agree on what "no decode this frame" means is a worse failure mode than one
   // extra decodeGridLayout call, which does no per-pixel work.
-  if (!globalState.forceCPU) {
+  if (backend === 'gpu') {
     const fusedSpan = spanStart('decode (fused GPU build+tally)');
     const layout = decodeGridLayout(camera, gray, vFovRad);
     const fused = layout ? await buildAndTallyDecodeGPU(layout, gray, w, h, sharedGray) : null;
@@ -824,8 +827,8 @@ export async function runPositionDecode(
   // one is currently a manual toggle rather than always-on (measured SLOWER
   // than CPU for typical grid sizes, expected to flip in the GPU's favor for
   // larger decode grids).
-  const tallySpan = spanStart(globalState.forceCPU ? 'tallyPositionVotes (CPU)' : 'tallyPositionVotes (GPU)');
-  const winner = !globalState.forceCPU
+  const tallySpan = spanStart(backend === 'cpu' ? 'tallyPositionVotes (CPU)' : 'tallyPositionVotes (GPU)');
+  const winner = backend === 'gpu'
     ? (await tallyPositionVotesGPU(grid)) ?? tallyPositionVotes(grid)
     : tallyPositionVotes(grid);
   spanEnd(tallySpan);

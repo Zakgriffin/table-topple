@@ -1,6 +1,7 @@
 import { Camera } from '../camera/model.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { captureDistortedGrayscale } from '../pipeline/capture.ts';
+import { Backend } from '../pipeline/backend.ts';
 import { computePoseFromCapture, PoseComputeState } from '../pipeline/poseCompute.ts';
 import {
   ProfileSpan, checkNesting, getRoots, profilerDevToolsMirror, profilerPutRoots, profilerSetDevToolsMirror,
@@ -251,6 +252,13 @@ interface ReconstructionTimingReport {
   w: number;
   h: number;
   cameraKind: 'simulated' | 'physical';
+  // WHICH CONFIGURATION PRODUCED THESE NUMBERS. Recorded rather than assumed,
+  // because the alternative is what voided every timing this project took before
+  // 2026-08-06: the backend was an ambient global at measurement time, so a
+  // report could not say what it had measured and the numbers were not
+  // re-derivable afterwards. A measurement that does not carry its inputs is not
+  // a measurement.
+  backend: Backend;
 
   // ── the headline ──
   //
@@ -380,9 +388,9 @@ function median(xs: number[]): number {
 // Released rather than resolved, since nothing here paints: releasing frees the
 // device buffers without performing the transfer, which is the whole point. A
 // rep that leaked instead would hold ~0.45MB per rep across the sweep.
-async function poseOnce(state: PoseComputeState, gray: Float64Array, w: number, h: number) {
+async function poseOnce(state: PoseComputeState, gray: Float64Array, w: number, h: number, backend: Backend) {
   try {
-    return await computePoseFromCapture(state, gray, w, h, true);
+    return await computePoseFromCapture(state, gray, w, h, backend, true);
   } finally {
     state.pendingDecodeGrid?.release();
     state.pendingDecodeGrid = null;
@@ -499,7 +507,7 @@ function groupLedger(samples: readonly TransferSample[]): TransferGroup[] {
 }
 
 export async function timeReconstruction(
-  camera?: Camera | null, reps = 9,
+  camera?: Camera | null, reps = 9, backend: Backend = 'gpu',
 ): Promise<ReconstructionTimingReport | string> {
   camera = camera ?? activeCamera() ?? null;
   if (!camera) return 'no active camera';
@@ -557,7 +565,7 @@ export async function timeReconstruction(
       let improved = false;
       for (let i = 0; i < WARMUP_BATCH && warmupMs.length < WARMUP_MAX; i++) {
         const t = performance.now();
-        await poseOnce(freshState(camera), gray, w, h);
+        await poseOnce(freshState(camera), gray, w, h, backend);
         const ms = performance.now() - t;
         warmupMs.push(ms);
         if (ms < best * (1 - WARMUP_IMPROVE)) { best = Math.min(best, ms); improved = true; }
@@ -619,7 +627,7 @@ export async function timeReconstruction(
       // reset also clears the User Timing buffer -- see profilerTakeRoots.
       profilerTakeRoots();
       const t0 = performance.now();
-      const timing = await poseOnce(state, gray, w, h);
+      const timing = await poseOnce(state, gray, w, h, backend);
       poseMsAll.push(performance.now() - t0);
 
       // Walked from the `votes stage` span rather than from the roots, so the
@@ -721,7 +729,7 @@ export async function timeReconstruction(
     try {
       setTransferProbe(true);
       transferLedgerReset();
-      await poseOnce(freshState(camera), gray, w, h);
+      await poseOnce(freshState(camera), gray, w, h, backend);
       probe = groupLedger(transferLedger());
     } finally {
       setTransferProbe(false);
@@ -741,7 +749,7 @@ export async function timeReconstruction(
     if (probeDevice) {
       try {
         setAllocationProbe(probeDevice, true);
-        await poseOnce(freshState(camera), gray, w, h);
+        await poseOnce(freshState(camera), gray, w, h, backend);
       } finally {
         setAllocationProbe(probeDevice, false);
         allocation = allocationProbeResult();
@@ -757,7 +765,7 @@ export async function timeReconstruction(
     let gpuTimeline: GpuTimelineResult | null = null;
     if (probeDevice && gpuTimelineArm(probeDevice)) {
       try {
-        await poseOnce(freshState(camera), gray, w, h);
+        await poseOnce(freshState(camera), gray, w, h, backend);
         gpuTimeline = await gpuTimelineResolve();
       } finally {
         gpuTimelineDisarm();
@@ -789,6 +797,7 @@ export async function timeReconstruction(
     return {
       reps, w, h,
       cameraKind: isSimulated(camera) ? 'simulated' : 'physical',
+      backend,
       poseMedianMs,
       poseMsAll,
       stageMedianMs: {
@@ -858,7 +867,7 @@ export function formatReconstructionTiming(r: ReconstructionTimingReport | strin
   if (!r.warmedUp) warn.push(`!! never reached steady state in ${r.warmupMs.length} warm-up reps -- still speeding up, treat as an upper bound.`);
   if (r.spreadPct > 12) warn.push(`!! IQR spread ${r.spreadPct.toFixed(0)}% across reps -- this run cannot resolve a change smaller than that.`);
   lines.push(...warn);
-  lines.push(`reconstruction: ${r.poseMedianMs.toFixed(1)}ms median / ${r.poseMinMs.toFixed(1)}ms min of ${r.reps}  (${r.w}x${r.h}, ${r.cameraKind})`);
+  lines.push(`reconstruction: ${r.poseMedianMs.toFixed(1)}ms median / ${r.poseMinMs.toFixed(1)}ms min of ${r.reps}  (${r.w}x${r.h}, ${r.cameraKind}, backend=${r.backend})`);
   lines.push(`  compare changes on the MIN; quote the MEDIAN.`);
   lines.push(`  reps: ${r.poseMsAll.map((m) => m.toFixed(1)).join(', ')}   (IQR spread ${r.spreadPct.toFixed(0)}%)`);
   lines.push(`  warm-up (${r.warmupMs.length} reps, ${r.warmedUp ? 'settled' : 'NOT settled'}): ${r.warmupMs.map((m) => m.toFixed(1)).join(', ')}`);

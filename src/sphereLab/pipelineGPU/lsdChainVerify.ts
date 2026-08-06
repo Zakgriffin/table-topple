@@ -1,7 +1,7 @@
 import { activeCamera } from '../camera/store.ts';
 import { Camera } from '../camera/model.ts';
 import { createLsdChainResidency, LsdRectangle, LsdSettings, runLsdChain } from '../pipeline/lsdSegments.ts';
-import { globalState } from '../state.ts';
+import { Backend } from '../pipeline/backend.ts';
 
 // ── Dev harness: does the LSD chain give the same answer at every toggle? ──
 //
@@ -189,18 +189,23 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
     nfaTestExponent: s.lsdNfaTestExponent,
   };
 
-  const savedForceCPU = globalState.forceCPU;
-
-  // One run of the real chain under one toggle configuration, returning the
-  // rectangles AND the residency's ledger. The residency is created and
-  // destroyed inside, exactly as production does it, so a leak or a
-  // double-destroy shows up here too.
+  // One run of the real chain under one backend, returning the rectangles AND
+  // the residency's ledger. The residency is created and destroyed inside,
+  // exactly as production does it, so a leak or a double-destroy shows up here
+  // too.
+  //
+  // The backend is an ARGUMENT now. This harness used to save
+  // globalState.forceCPU, write it before each run, and restore it in a finally
+  // -- which meant the differential could only be expressed by mutating the
+  // running app's configuration, and a throw between the two runs left the app
+  // on whatever the last run had set. The sweep is "same settings, two
+  // backends", and that is now literally what the code says.
   const runOnce = async (t: ChainConfig) => {
-    globalState.forceCPU = t === 'reference (forceCPU)';
-    const res = await createLsdChainResidency(gray, w, h);
+    const backend: Backend = t === 'reference (forceCPU)' ? 'cpu' : 'gpu';
+    const res = await createLsdChainResidency(gray, w, h, backend);
     try {
       const t0 = performance.now();
-      const rects = await runLsdChain(res, w, h, settings);
+      const rects = await runLsdChain(res, w, h, settings, backend);
       const ms = performance.now() - t0;
       // ORDER MATTERS: the ledger is taken BEFORE the member readback below, so
       // `crossings`/`bytes` still describe what the CHAIN cost rather than what
@@ -219,82 +224,75 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
     }
   };
 
-  try {
-    const focusWaitMs = await awaitPageFocus();
-    const configs = CONFIGS;
-    const baseline = configs[0]; // the CPU reference, and the source of truth the GPU path is verified against
-    const baseRun = await runOnce(baseline);
-    const baseRects = baseRun.rects;
-    const base = summarize(baseRects, baseRun.members);
+  const focusWaitMs = await awaitPageFocus();
+  const configs = CONFIGS;
+  const baseline = configs[0]; // the CPU reference, and the source of truth the GPU path is verified against
+  const baseRun = await runOnce(baseline);
+  const baseRects = baseRun.rects;
+  const base = summarize(baseRects, baseRun.members);
 
-    // Interleaved (config-inner, rep-outer) rather than reps-inner, so a JIT
-    // tier change or thermal drift shows up as spread across every
-    // configuration instead of as a fake win for whichever one ran last.
-    const times = new Map<string, number[]>();
-    const results = new Map<string, { rects: LsdRectangle[]; crossings: number; bytes: number; members: number } | string>();
-    for (let rep = 0; rep < reps; rep++) {
-      for (const t of configs) {
-        const key = t;
-        try {
-          const { rects, ms, summary, members } = await runOnce(t);
-          times.set(key, [...(times.get(key) ?? []), ms]);
-          results.set(key, { rects, crossings: summary.crossings, bytes: summary.bytes, members });
-        } catch (e) {
-          // Keep sweeping: which OTHER configurations also fail is the most
-          // useful thing to know about a residency bug.
-          results.set(key, e instanceof Error ? e.message : String(e));
-        }
-      }
-    }
-
-    const reports: ChainConfigReport[] = [];
+  // Interleaved (config-inner, rep-outer) rather than reps-inner, so a JIT
+  // tier change or thermal drift shows up as spread across every
+  // configuration instead of as a fake win for whichever one ran last.
+  const times = new Map<string, number[]>();
+  const results = new Map<string, { rects: LsdRectangle[]; crossings: number; bytes: number; members: number } | string>();
+  for (let rep = 0; rep < reps; rep++) {
     for (const t of configs) {
       const key = t;
-      const got = results.get(key);
-      if (typeof got === 'string' || got === undefined) {
-        reports.push({
-          config: key, n: 0, accepted: 0, members: 0, dN: 0, dAccepted: 0, dMembers: 0,
-          maxCenterDelta: 0, maxLengthDelta: 0, maxNfaLog10Delta: 0,
-          crossings: 0, bytes: 0, medianMs: 0, error: got ?? 'never ran',
-        });
-        continue;
+      try {
+        const { rects, ms, summary, members } = await runOnce(t);
+        times.set(key, [...(times.get(key) ?? []), ms]);
+        results.set(key, { rects, crossings: summary.crossings, bytes: summary.bytes, members });
+      } catch (e) {
+        // Keep sweeping: which OTHER configurations also fail is the most
+        // useful thing to know about a residency bug.
+        results.set(key, e instanceof Error ? e.message : String(e));
       }
-      const sum = summarize(got.rects, got.members);
-      let maxCenterDelta = 0, maxLengthDelta = 0, maxNfaLog10Delta = 0;
-      const pairs = Math.min(got.rects.length, baseRects.length);
-      for (let i = 0; i < pairs; i++) {
-        const a = got.rects[i], b = baseRects[i];
-        maxCenterDelta = Math.max(maxCenterDelta, Math.hypot(a.cx - b.cx, a.cy - b.cy));
-        maxLengthDelta = Math.max(maxLengthDelta, Math.abs(a.length - b.length));
-        maxNfaLog10Delta = Math.max(maxNfaLog10Delta, Math.abs(a.nfaLog10 - b.nfaLog10));
-      }
-      reports.push({
-        config: key, ...sum,
-        dN: sum.n - base.n, dAccepted: sum.accepted - base.accepted, dMembers: sum.members - base.members,
-        maxCenterDelta, maxLengthDelta, maxNfaLog10Delta,
-        crossings: got.crossings, bytes: got.bytes,
-        medianMs: median(times.get(key) ?? []), error: null,
-      });
     }
-
-    return {
-      reps,
-      baseline,
-      configs: reports,
-      worstDN: Math.max(...reports.map((r) => Math.abs(r.dN))),
-      worstDAccepted: Math.max(...reports.map((r) => Math.abs(r.dAccepted))),
-      worstDMembers: Math.max(...reports.map((r) => Math.abs(r.dMembers))),
-      errors: reports.filter((r) => r.error !== null).length,
-      focusWaitMs,
-      // Checked at the END, not just the start: focus can be lost mid-sweep,
-      // and if it was, every medianMs above is garbage even though every
-      // correctness number remains valid (they are deterministic).
-      focusedThroughout: document.hasFocus() && document.visibilityState === 'visible',
-    };
-  } finally {
-    // Restoring these matters more than it looks: they are the live production
-    // toggles, and leaving the sweep's last configuration behind would silently
-    // reconfigure the app for every frame after the harness returns.
-    globalState.forceCPU = savedForceCPU;
   }
+
+  const reports: ChainConfigReport[] = [];
+  for (const t of configs) {
+    const key = t;
+    const got = results.get(key);
+    if (typeof got === 'string' || got === undefined) {
+      reports.push({
+        config: key, n: 0, accepted: 0, members: 0, dN: 0, dAccepted: 0, dMembers: 0,
+        maxCenterDelta: 0, maxLengthDelta: 0, maxNfaLog10Delta: 0,
+        crossings: 0, bytes: 0, medianMs: 0, error: got ?? 'never ran',
+      });
+      continue;
+    }
+    const sum = summarize(got.rects, got.members);
+    let maxCenterDelta = 0, maxLengthDelta = 0, maxNfaLog10Delta = 0;
+    const pairs = Math.min(got.rects.length, baseRects.length);
+    for (let i = 0; i < pairs; i++) {
+      const a = got.rects[i], b = baseRects[i];
+      maxCenterDelta = Math.max(maxCenterDelta, Math.hypot(a.cx - b.cx, a.cy - b.cy));
+      maxLengthDelta = Math.max(maxLengthDelta, Math.abs(a.length - b.length));
+      maxNfaLog10Delta = Math.max(maxNfaLog10Delta, Math.abs(a.nfaLog10 - b.nfaLog10));
+    }
+    reports.push({
+      config: key, ...sum,
+      dN: sum.n - base.n, dAccepted: sum.accepted - base.accepted, dMembers: sum.members - base.members,
+      maxCenterDelta, maxLengthDelta, maxNfaLog10Delta,
+      crossings: got.crossings, bytes: got.bytes,
+      medianMs: median(times.get(key) ?? []), error: null,
+    });
+  }
+
+  return {
+    reps,
+    baseline,
+    configs: reports,
+    worstDN: Math.max(...reports.map((r) => Math.abs(r.dN))),
+    worstDAccepted: Math.max(...reports.map((r) => Math.abs(r.dAccepted))),
+    worstDMembers: Math.max(...reports.map((r) => Math.abs(r.dMembers))),
+    errors: reports.filter((r) => r.error !== null).length,
+    focusWaitMs,
+    // Checked at the END, not just the start: focus can be lost mid-sweep,
+    // and if it was, every medianMs above is garbage even though every
+    // correctness number remains valid (they are deterministic).
+    focusedThroughout: document.hasFocus() && document.visibilityState === 'visible',
+  };
 }

@@ -7,6 +7,7 @@ import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
+import { backendFromForceCPU } from './backend.ts';
 import { CompositeLine } from '../types.ts';
 import { buildProjectedTexture, computeProjectedBinsAuto, paintProjectedTexture } from './decodeGrid.ts';
 import { GridPeriodPhaseResult } from './gridPeriodPhase.ts';
@@ -239,7 +240,7 @@ export async function ingestRealCapture(
   spanEnd(rootSpan);
 
   updateDistortedPreview(camera);
-  if (globalState.mode === 'projected' && camera === activeCamera()) buildProjectedTexture(camera);
+  if (globalState.mode === 'projected' && camera === activeCamera()) buildProjectedTexture(camera, backendFromForceCPU(globalState.forceCPU));
   runAxesReconstruction(camera);
 }
 
@@ -413,7 +414,7 @@ export async function ingestRemotePose(
     // "Ship auxiliary pipeline intermediates" plan): with sendCapturedImage
     // off, msg.imageBytes is undefined and none of this runs at all.
     if (camera.lastRecoveredAxes) {
-      const projResult = await computeProjectedBinsAuto(camera);
+      const projResult = await computeProjectedBinsAuto(camera, backendFromForceCPU(globalState.forceCPU));
       // Painting the texture is a real GPU upload -- same showProjected
       // gating recomputeStages uses, so it's skipped for a camera that
       // isn't actually being viewed in Projected-Cam/World-with-floor mode.

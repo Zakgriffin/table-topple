@@ -5,6 +5,8 @@ import { updateTopGradientOverlay } from '../overlays/gradientHighlightOverlays.
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { lastHoverClientX, lastHoverClientY, updateHoverOverlays } from '../overlays/hoverDebugOverlays.ts';
 import { updateLsdOverlay } from '../overlays/lsdOverlay.ts';
+import { globalState } from '../state.ts';
+import { backendFromForceCPU } from './backend.ts';
 import { buildProjectedTexture, ProjectedSampleResult } from './decodeGrid.ts';
 import { updateDistortedPreview } from './preview.ts';
 
@@ -45,10 +47,10 @@ export async function refreshModeVisualizations(
     // it's plotting -- self-gates on lastGridPeriodPhase existing internally.
     drawGridPeriodPhasePlot(camera);
   } else if (mode === 'projected') {
-    await buildProjectedTexture(camera, precomputedProjection);
+    await buildProjectedTexture(camera, backendFromForceCPU(globalState.forceCPU), precomputedProjection);
   } else if (mode === 'world') {
     // The recovered-floor decal reuses projectedPreviewTex -- only worth
     // repainting if that overlay is actually the reason it'd be visible.
-    if (camera.settings.showRecoveredFloor) await buildProjectedTexture(camera, precomputedProjection);
+    if (camera.settings.showRecoveredFloor) await buildProjectedTexture(camera, backendFromForceCPU(globalState.forceCPU), precomputedProjection);
   }
 }

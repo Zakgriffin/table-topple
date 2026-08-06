@@ -4,8 +4,8 @@ import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { FieldResidency, TransferSummary } from '../pipelineGPU/fieldResidency.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { spanDurationMs, spanEnd, spanStart } from '../profiling/profiler.ts';
-import { globalState } from '../state.ts';
 import { CompositeLine, DecodeCellDebug, DecodeSampleGrid, PositionDecodeResult, RecoveredAxes, Vote } from '../types.ts';
+import { Backend } from './backend.ts';
 import { PendingDecodeGrid, runPositionDecode } from './decodeGrid.ts';
 import { computeGridPeriodPhase, GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { createLsdChainResidency } from './lsdSegments.ts';
@@ -77,6 +77,7 @@ export interface PoseComputeTiming {
 // checking against the transfer ledger rather than asserting.
 async function computeCompositesAndVotes(
   state: PoseComputeState, res: FieldResidency, gray: Float64Array, w: number, h: number, vFovRad: number,
+  backend: Backend,
 ): Promise<{ voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[] }> {
   {
     // Composite lines (one per accepted LSD rectangle, over the 2x2 gradient
@@ -87,7 +88,7 @@ async function computeCompositesAndVotes(
     // lines by row/col family" debug overlay, which reads
     // state.lastVoteComposites back off the camera afterward).
     const compositesSpan = spanStart('composites (2x2 gradient field)');
-    const voteComposites = await computeGradient2x2Composites(state.settings, res, w, h);
+    const voteComposites = await computeGradient2x2Composites(state.settings, res, w, h, backend);
     spanEnd(compositesSpan);
 
     // Contains no await, so this span's duration is host CPU and is marked
@@ -107,11 +108,13 @@ async function computeCompositesAndVotes(
 // the LSD chain (stages 1-4, see runLsdChain) -> computeGradient2x2Composites ->
 // computeSegmentVotes -> fitPairOfPlanes[GPU] -> handedness assembly ->
 // computeGridPeriodPhase -> assemble RecoveredAxes -> runPositionDecode.
-// No GPU/CPU parameter -- every branch point reads the shared
-// globalState singleton exactly as it does today; the phone gets its own
-// independent globalState module instance (separate JS realm, not shared
-// memory with the desktop), kept in sync by settingsSync (see
-// mobileCapture.ts), so this needs no parameter threading at all.
+//
+// `backend` is now a PARAMETER at every branch point rather than a
+// globalState.forceCPU read inside each one. It used to be argued that no
+// parameter was needed because the phone gets its own globalState module
+// instance kept in sync by settingsSync -- true, but it made the choice ambient,
+// so a pose, a timing, or a verify delta did not carry the configuration that
+// produced it and could not be re-derived. See pipeline/backend.ts.
 //
 // `deferDecodeGrid` moves the decode grid's 0.45MB readback off the pose path
 // and onto state.pendingDecodeGrid for the caller to drain. It is a PARAMETER
@@ -123,7 +126,7 @@ async function computeCompositesAndVotes(
 // the pose path and the readback is no longer on it. A globalState flag would
 // have silently deferred on the phone, where nothing would ever resolve it.
 export async function computePoseFromCapture(
-  state: PoseComputeState, gray: Float64Array, w: number, h: number,
+  state: PoseComputeState, gray: Float64Array, w: number, h: number, backend: Backend,
   deferDecodeGrid = false,
 ): Promise<PoseComputeTiming> {
   const vFovRad = getAnalysisVFovRad(state);
@@ -141,10 +144,10 @@ export async function computePoseFromCapture(
   // what makes it safe to hand a raw GPUBuffer to runPositionDecode: nothing
   // outlives this call.
   const residencySpan = spanStart('residency create (gray up)');
-  const res = await createLsdChainResidency(gray, w, h);
+  const res = await createLsdChainResidency(gray, w, h, backend);
   spanEnd(residencySpan);
   try {
-    const { voteComposites, votes } = await computeCompositesAndVotes(state, res, gray, w, h, vFovRad);
+    const { voteComposites, votes } = await computeCompositesAndVotes(state, res, gray, w, h, vFovRad, backend);
     state.lastVoteComposites = voteComposites;
     state.lastVotes = votes;
     spanEnd(stageSpan);
@@ -158,9 +161,9 @@ export async function computePoseFromCapture(
     // With one implementation left the outer span covered exactly the same
     // interval as this one, i.e. a guaranteed-zero self time in the harness'
     // span tree. `fitMs` reads this span directly now.
-    const fitSpan = spanStart(globalState.forceCPU ? 'fitPairOfPlanes (CPU)' : 'fitPairOfPlanes (GPU)');
+    const fitSpan = spanStart(backend === 'cpu' ? 'fitPairOfPlanes (CPU)' : 'fitPairOfPlanes (GPU)');
     const quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null =
-      !globalState.forceCPU
+      backend === 'gpu'
         ? (await fitPairOfPlanesGPU(votes)) ?? fitPairOfPlanes(votes)
         : fitPairOfPlanes(votes);
     spanEnd(fitSpan);
@@ -194,7 +197,7 @@ export async function computePoseFromCapture(
       ? await computeGridPeriodPhase(
           voteComposites, gray, w, h, MATH_QUAT, vFovRad, state.aspect,
           rowDirRecovered, colDirRecovered, quadricPair.Dnormal, GRID_STEP,
-          state.settings.minGrazingCos,
+          state.settings.minGrazingCos, backend,
         )
       : null;
     state.lastGridPeriodPhase = gpp;
@@ -209,7 +212,7 @@ export async function computePoseFromCapture(
     // no device on an all-CPU chain, and `gray` is only device-resident if some
     // stage put it there. Null just means decode uploads its own, as before.
     const sharedGray = res.device && res.hasGPU('gray') ? res.gpu('gray') : null;
-    await runPositionDecode(state, gray, w, h, vFovRad, sharedGray, deferDecodeGrid);
+    await runPositionDecode(state, gray, w, h, vFovRad, sharedGray, backend, deferDecodeGrid);
     spanEnd(decodeSpan);
 
     // Read off the span objects held above, not off a parallel set of

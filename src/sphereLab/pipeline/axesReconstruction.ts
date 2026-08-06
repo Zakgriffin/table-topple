@@ -8,6 +8,7 @@ import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo, updateRecoveredFlo
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { globalState } from '../state.ts';
 import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
+import { backendFromForceCPU } from './backend.ts';
 import { captureDistortedGrayscale } from './capture.ts';
 import { computeProjectedBinsAuto, paintProjectedTexture, ProjectedSampleResult } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
@@ -237,7 +238,7 @@ async function runVisualTail(camera: Camera): Promise<void> {
   // time -- see modeRefresh.ts's own comment on precomputedProjection.
   let projResult: ProjectedSampleResult = null;
   if (camera.lastRecoveredAxes) {
-    projResult = await computeProjectedBinsAuto(camera);
+    projResult = await computeProjectedBinsAuto(camera, backendFromForceCPU(globalState.forceCPU));
     if (showProjected) paintProjectedTexture(camera, projResult);
   }
   const projectMs = performance.now() - projectStart;
@@ -374,7 +375,9 @@ async function recomputeStages(camera: Camera) {
   // global because computePoseFromCapture's other two callers have no drain to
   // defer into (mobileCapture reads lastDecodeGrid synchronously, and the
   // timing harness releases the handle without resolving it).
-  camera.lastPoseTiming = await computePoseFromCapture(camera, gray, w, h, true);
+  camera.lastPoseTiming = await computePoseFromCapture(
+    camera, gray, w, h, backendFromForceCPU(globalState.forceCPU), true,
+  );
   camera.axesComputed = !!camera.lastQuadricPair;
 
   // The pose is final here; everything past this point is display. Deferred,

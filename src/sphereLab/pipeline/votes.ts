@@ -4,6 +4,7 @@ import { cornerDir } from '../math/geometry.ts';
 import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { CompositeLine, Vote } from '../types.ts';
+import { Backend } from './backend.ts';
 import { computeLsdRectangles, runLsdChain } from './lsdSegments.ts';
 
 
@@ -49,7 +50,7 @@ export interface LsdCompositeSettings {
 // gradient no longer has to land on the CPU just to be passed along.
 export async function computeGradient2x2Composites(
   settings: LsdCompositeSettings,
-  res: FieldResidency, w: number, h: number,
+  res: FieldResidency, w: number, h: number, backend: Backend,
 ): Promise<{ root: number; line: CompositeLine }[]> {
   const rects = await runLsdChain(res, w, h, {
     toleranceDeg: settings.lsdToleranceDeg,
@@ -59,7 +60,7 @@ export async function computeGradient2x2Composites(
     minRegionSize: settings.lsdMinRegionSize,
     nfaEpsilon: settings.lsdNfaEpsilon,
     nfaTestExponent: settings.lsdNfaTestExponent,
-  });
+  }, backend);
   // Its own span inside this function's: it walks all ~5200 rectangles and keeps
   // ~893, and until it was split out that walk was indistinguishable from the
   // chain that produced them. Contains no await, so its duration is host CPU.

@@ -119,7 +119,19 @@ export async function verifyGrowRegions(camera?: Camera | null): Promise<GrowReg
   const cpuMs = performance.now() - cpuStart;
 
   const gpuStart = performance.now();
-  const gpu = await growRegionsCCLGPUToCPU(fx, fy, ...args);
+  // collectOnGPU: FALSE, so both sides collect on CPU and the only difference
+  // left is the round loop -- which is what this harness's own header claims it
+  // isolates.
+  //
+  // It did not, until this argument became explicit. The parameter used to
+  // default to `!globalState.forceCPU`, so on the production configuration
+  // (forceCPU off) this call collected on GPU while `growRegionsCCL` above
+  // collected on CPU: the comparison was (CPU grow + CPU collect) vs (GPU grow +
+  // GPU collect), conflating the two stages it exists to tell apart. Worse, it
+  // silently changed SHAPE with a UI checkbox -- turn forceCPU on and the same
+  // function suddenly compared like against like. That is the ambient-config
+  // failure in miniature: the harness could not state what it was measuring.
+  const gpu = await growRegionsCCLGPUToCPU(fx, fy, ...args, false);
   const gpuMs = performance.now() - gpuStart;
   // Null means either no WebGPU at all or a validation error the grower's own
   // error scope caught -- in the latter case it has already logged the message.

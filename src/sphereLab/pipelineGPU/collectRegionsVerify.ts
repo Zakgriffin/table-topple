@@ -2,7 +2,6 @@ import { activeCamera } from '../camera/store.ts';
 import { Camera } from '../camera/model.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import { GrownRegion } from '../pipeline/lsdSegments.ts';
-import { globalState } from '../state.ts';
 import { growRegionsCCLGPUToCPU } from './growRegions.ts';
 
 // ── Dev harness: does the GPU region collector match the CPU one? ────────
@@ -27,7 +26,7 @@ import { growRegionsCCLGPUToCPU } from './growRegions.ts';
 //   - regionId identical for every pixel
 // The one thing that legitimately differs is meanAngle: the GPU sums cos/sin in
 // f32. Reported as a delta rather than an equality.
-export interface CollectRegionsVerifyReport {
+interface CollectRegionsVerifyReport {
   cpuRegions: number;
   gpuRegions: number;
   countMatches: boolean;

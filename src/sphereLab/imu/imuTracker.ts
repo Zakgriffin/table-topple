@@ -27,7 +27,7 @@ import { BOARD_UNITS_PER_METRE } from '../constants.ts';
 // That split is why they are separately switchable below: the gate is usable
 // on day one, prediction only once the transform is verified.
 
-export interface ImuTrackerConfig {
+interface ImuTrackerConfig {
   // Subtracted from every sample. Measure by averaging a static window --
   // vision can detect "not moving" for free.
   gyroBiasDegPerSec: THREE.Vector3;
@@ -110,13 +110,13 @@ export function defaultImuTrackerConfig(): ImuTrackerConfig {
   };
 }
 
-export interface ImuSampleIn {
+interface ImuSampleIn {
   t: number;                                       // phone clock, epoch ms
   rotationRate: { alpha: number; beta: number; gamma: number } | null; // deg/s
   acceleration: { x: number; y: number; z: number } | null;            // m/s^2
 }
 
-export interface AnchorResult {
+interface AnchorResult {
   accepted: boolean;
   reason: 'ok' | 'flip-rejected' | 'first-fix' | 'no-imu';
   visionDeltaDeg: number;
@@ -294,7 +294,7 @@ function smallRotationQuat(omega: THREE.Vector3, dt: number): THREE.Quaternion {
   return new THREE.Quaternion().setFromAxisAngle(omega.clone().normalize(), theta);
 }
 
-export function quatAngle(a: THREE.Quaternion, b: THREE.Quaternion): number {
+function quatAngle(a: THREE.Quaternion, b: THREE.Quaternion): number {
   const dot = Math.min(1, Math.abs(a.x * b.x + a.y * b.y + a.z * b.z + a.w * b.w));
   return 2 * Math.acos(dot);
 }

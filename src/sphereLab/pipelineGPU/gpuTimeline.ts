@@ -81,7 +81,6 @@ interface Armed {
 
 let armed: Armed | null = null;
 
-export function gpuTimelineActive(): boolean { return armed !== null; }
 
 // `pairCap` is generous rather than computed, because the pass count is
 // data-dependent (growRegions runs however many rounds it takes to converge) and
@@ -119,7 +118,7 @@ export function gpuTimelineSlot(label: string): GPUComputePassDescriptor | undef
   return { timestampWrites: { querySet: armed.querySet, beginningOfPassWriteIndex: i * 2, endOfPassWriteIndex: i * 2 + 1 } };
 }
 
-export interface GpuTimelineEntry {
+interface GpuTimelineEntry {
   label: string;
   count: number;   // how many passes carried this label
   totalMs: number;

@@ -26,7 +26,7 @@ import { growRegionsCCLGPUToCPU } from './growRegions.ts';
 // zero disagreement below is structural, not luck; if it is nonzero, expect
 // roughly that many split/merge events and judge by whether the region
 // population is materially the same.
-export interface GrowRegionsVerifyReport {
+interface GrowRegionsVerifyReport {
   cpuRegions: number;
   gpuRegions: number;
   cpuLabeledPixels: number; // pixels surviving hysteresis, i.e. belonging to some region

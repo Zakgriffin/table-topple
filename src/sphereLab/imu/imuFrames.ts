@@ -31,7 +31,7 @@ import * as THREE from 'three';
 // frame has an extra screen rotation baked in that no amount of reasoning
 // about sensor axes will reveal. Hence pickBestConvention below.
 
-export interface FrameContext {
+interface FrameContext {
   screenAngle: number;   // screen.orientation.angle, degrees: 0 / 90 / 180 / 270
   facing: 'environment' | 'user';
 }
@@ -59,7 +59,7 @@ export function defaultDeviceToCamera(ctx: FrameContext): THREE.Quaternion {
 // their sensors at 37 degrees), so SEARCHING this finite set is both more
 // robust than a least-squares fit and incapable of returning a non-physical
 // answer. No SVD, no local minima, no sign ambiguity.
-export function octahedralRotations(): THREE.Quaternion[] {
+function octahedralRotations(): THREE.Quaternion[] {
   const out: THREE.Quaternion[] = [];
   const axes = [0, 1, 2];
   const perms = [[0, 1, 2], [0, 2, 1], [1, 0, 2], [1, 2, 0], [2, 0, 1], [2, 1, 0]];

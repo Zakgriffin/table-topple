@@ -14,8 +14,8 @@ import { scene } from './renderer.ts';
 // THREE-side construction (texture/mesh/grid-line geometry) on top.
 export { ORDER, R, C, torus, debruijnLookup, HALF_C, HALF_R } from '../floorPattern.ts';
 
-export const patternCanvas = document.createElement('canvas');
-export const pctx = patternCanvas.getContext('2d')!;
+const patternCanvas = document.createElement('canvas');
+const pctx = patternCanvas.getContext('2d')!;
 
 // Cell subdivision, directly driven by globalState.floorCellOutlineSubdiv (0:
 // off, exactly today's 1-texture-pixel-per-cell flat color) -- BORDER is
@@ -23,7 +23,7 @@ export const pctx = patternCanvas.getContext('2d')!;
 // of the cell's own color. At subdiv 1-2, BORDER(1) alone already covers the
 // whole cell (no room left for an inner square), so the cell renders as
 // solid opposite-color -- a real, continuous endpoint of the same formula.
-export const FLOOR_OUTLINE_BORDER = 1;
+const FLOOR_OUTLINE_BORDER = 1;
 
 export function rebuildFloorTexture() {
   const subdiv = globalState.floorCellOutlineSubdiv;
@@ -55,7 +55,7 @@ export function rebuildFloorTexture() {
   floorTex.needsUpdate = true;
 }
 
-export const floorTex = new THREE.CanvasTexture(patternCanvas);
+const floorTex = new THREE.CanvasTexture(patternCanvas);
 floorTex.wrapS = THREE.RepeatWrapping;
 floorTex.wrapT = THREE.RepeatWrapping;
 floorTex.magFilter = THREE.NearestFilter;
@@ -63,7 +63,7 @@ floorTex.colorSpace = THREE.SRGBColorSpace;
 floorTex.repeat.set(1, 1); // exactly one instance of the torus, not tiled
 rebuildFloorTexture(); // paint the initial pattern now that floorTex/patternCanvas both exist
 
-export const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.95 });
+const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.95 });
 export const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(C * GRID_STEP, R * GRID_STEP), floorMat);
 floorMesh.rotation.x = -Math.PI / 2;
 scene.add(floorMesh);
@@ -86,8 +86,8 @@ function buildGridLines(axis: 'row' | 'col', color: number): THREE.LineSegments 
   geo.setAttribute('position', new THREE.Float32BufferAttribute(computeGridLinePoints(axis), 3));
   return new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color, transparent: true, opacity: 0.35 }));
 }
-export const rowGridLines = buildGridLines('row', 0xff5555);
-export const colGridLines = buildGridLines('col', 0x5599ff);
+const rowGridLines = buildGridLines('row', 0xff5555);
+const colGridLines = buildGridLines('col', 0x5599ff);
 scene.add(rowGridLines, colGridLines);
 for (const o of [rowGridLines, colGridLines]) o.layers.set(DEBUG_LAYER);
 

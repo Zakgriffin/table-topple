@@ -51,7 +51,7 @@ export function setPanelCollapsed(collapsed: boolean) {
 panelToggle.addEventListener('click', () => setPanelCollapsed(!panel.classList.contains('collapsed')));
 setPanelCollapsed(savedControls['panelCollapsed'] === '1');
 
-export function setOverlayPanelCollapsed(collapsed: boolean) {
+function setOverlayPanelCollapsed(collapsed: boolean) {
   overlayPanel.classList.toggle('collapsed', collapsed);
   overlayPanelToggle.classList.toggle('collapsed', collapsed);
   overlayPanelToggle.textContent = collapsed ? '‹' : '›';

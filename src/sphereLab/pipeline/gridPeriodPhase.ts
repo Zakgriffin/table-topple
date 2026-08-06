@@ -50,7 +50,7 @@ import { CompositeLine } from '../types.ts';
 
 export interface GnomonicPoint { xRow: number; xCol: number }
 
-export interface GridLineSample {
+interface GridLineSample {
   root: number; // this line's source rectangle index -- lets a caller map a sample back to its actual composite line/pixels. Was a merge-group root back when a join walk merged segments; that is gone and it is now one line per accepted rectangle.
   value: number; // rectified periodic coordinate -- dimensionless (a ratio of unit-vector dot products, effectively tan of an angle), NOT pixels or degrees. xCol for a row line, xRow for a column line (see gnomonic() below)
   weight: number; // projected arc length, same weighting fitPairOfPlanes already uses for its own votes
@@ -60,13 +60,6 @@ export interface GridLineSample {
 
 export interface PeriodSearchSample { period: number; score: number }
 
-// `rank` is each gap's two composite lines' averaged position within their
-// family's own value-sorted order, 0..1 -- the SAME rank convention
-// overlays/hoverDebugOverlays.ts's drawVoteFamilyLines colors composite
-// lines by (rank*255 in the blue or red channel), so a caller can color a
-// gap tick to match the two lines' own colors instead of a flat family
-// color, letting a tick be traced back to which pair of lines formed it.
-export interface NeighborGapSample { gap: number; rank: number }
 
 export interface GridPeriodPhaseResult {
   period: number;
@@ -180,7 +173,7 @@ export function computePooledGaps(rowLines: readonly GridLineSample[], colLines:
 // That second caller is why this is exported at all: the debug curves adapt to
 // pan/zoom, so they cannot be precomputed in the pipeline -- the view range
 // isn't known until draw time, and it changes on every wheel event.
-export interface CellCentreDistinctnessInputs {
+interface CellCentreDistinctnessInputs {
   gray: Float64Array; w: number; h: number;
   quat: THREE.Quaternion; vFovRad: number; aspect: number;
   Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3;

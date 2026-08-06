@@ -184,7 +184,7 @@ export interface SimulatedCameraSettings extends CameraSettingsCommon {
 export interface PhysicalCameraSettings extends CameraSettingsCommon {
 }
 
-export function createDefaultCommonSettings(): CameraSettingsCommon {
+function createDefaultCommonSettings(): CameraSettingsCommon {
   return {
     showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: savedNum('recoveredFloorOpacity', 0.9),
     showTrueContamination: false, showReconstructedContamination: false, hideField: false,

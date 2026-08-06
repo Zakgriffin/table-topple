@@ -25,7 +25,7 @@ import { buildAndTallyDecodeGPU } from './decodeGridBuild.ts';
 // why the report separates `bitDiffs` (tolerable, expect a few) from
 // `winnerAgrees` (must be true) and `validDiffs` (a validity disagreement is a
 // geometry/threshold problem, not a rounding one).
-export interface DecodeGridBuildVerifyReport {
+interface DecodeGridBuildVerifyReport {
   dims: { rows: number; cols: number };
   cells: number;
   // Per-cell agreement between the two grids.

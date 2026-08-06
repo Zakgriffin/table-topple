@@ -15,7 +15,7 @@
 // That's what lets devBridge/client.ts tell the two binary-frame shapes
 // apart with zero server.js involvement (server.js's relay is already
 // content-agnostic either way).
-export const POSE_RESULT_IMAGE_TAG = 1;
+const POSE_RESULT_IMAGE_TAG = 1;
 
 const HEADER_LEN_BYTES = 4;
 const PREFIX_BYTES = 1 + HEADER_LEN_BYTES;

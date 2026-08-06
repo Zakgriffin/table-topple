@@ -22,7 +22,7 @@ import { exclusiveScanU32, SCAN_BLOCK } from './prefixSum.ts';
 // exercise u32 accumulation.
 const SIZES = [1, 2, 255, 256, 257, 511, 512, 513, 65535, 65536, 65537, 196608];
 
-export interface PrefixSumCase {
+interface PrefixSumCase {
   n: number;
   ok: boolean;
   firstBadIndex: number; // -1 when the scan matched
@@ -35,7 +35,7 @@ export interface PrefixSumCase {
   ms: number;
 }
 
-export interface PrefixSumVerifyReport {
+interface PrefixSumVerifyReport {
   allOk: boolean;
   failures: number;
   cases: PrefixSumCase[];

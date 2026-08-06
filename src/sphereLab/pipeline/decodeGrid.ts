@@ -79,7 +79,7 @@ function getCachedSrcGradientField(camera: Camera, gray: Float64Array, w: number
 export function rotatedDims(rows: number, cols: number, o: number): [number, number] {
   return (o === 1 || o === 3) ? [cols, rows] : [rows, cols];
 }
-export function readRotated(grid: DecodeSampleGrid, o: number, a: number, b: number): DecodeSamplePoint {
+function readRotated(grid: DecodeSampleGrid, o: number, a: number, b: number): DecodeSamplePoint {
   const { rows: gr, cols: gc, points } = grid;
   if (o === 1) return points[gr - 1 - b][a];
   if (o === 2) return points[gr - 1 - a][gc - 1 - b];
@@ -196,7 +196,7 @@ export function tallyPositionVotes(grid: DecodeSampleGrid): VoteResult | null {
 // the separate, earlier bug this same closed form replaced (walking
 // outward from one fixed grid index for ANY valid neighbor, which could
 // fail outright if that index landed on an invalid quad edge).
-export function solveRecoveredCamQuat(Drow: THREE.Vector3, Dcol: THREE.Vector3, orientation: number): THREE.Quaternion {
+function solveRecoveredCamQuat(Drow: THREE.Vector3, Dcol: THREE.Vector3, orientation: number): THREE.Quaternion {
   let rowMath = Dcol.clone(), colMath = Drow.clone();
   for (let step = 0; step < orientation; step++) {
     const nextRow = colMath, nextCol = rowMath.negate();
@@ -369,7 +369,7 @@ function squareCellBucketDims(camera: Camera, extentU: number, extentV: number):
 // Projects once (stage 1) so the resulting extent can size a square-cell bucket
 // grid (stage 2) BEFORE bucketing, which is why it calls projectSamplesCPU and
 // bucketSamples separately rather than in one step.
-export function computeProjectedBinsCPU(camera: Camera): ProjectedSampleResult {
+function computeProjectedBinsCPU(camera: Camera): ProjectedSampleResult {
   const proj = camera.lastRecoveredAxes ? projectSamplesCPU(camera) : null;
   if (!proj) { camera.lastProjectedBins = null; return null; }
   const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
@@ -389,7 +389,7 @@ export function computeProjectedBinsCPU(camera: Camera): ProjectedSampleResult {
 // reconstruction pass and every throttled preview tick), every caller can
 // safely go through computeProjectedBinsAuto below instead of
 // picking CPU vs GPU itself.
-export async function computeProjectedBinsGPU(camera: Camera): Promise<ProjectedSampleResult> {
+async function computeProjectedBinsGPU(camera: Camera): Promise<ProjectedSampleResult> {
   const proj = camera.lastRecoveredAxes ? await projectSamplesGPU(camera) : null;
   if (!proj) { camera.lastProjectedBins = null; return null; }
   const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
@@ -521,7 +521,7 @@ export function projectImageCornersToPlane(camera: PoseCameraLike): { u: number;
 // quadrilateral, so this reduces to the same min/max the 4 corners gave --
 // no behavior change there. Returns null only when almost nothing projects
 // (a genuinely degenerate, near-horizon-only view).
-export function projectedUVBounds(camera: PoseCameraLike): { minU: number; maxU: number; minV: number; maxV: number } | null {
+function projectedUVBounds(camera: PoseCameraLike): { minU: number; maxU: number; minV: number; maxV: number } | null {
   if (!camera.lastRecoveredAxes) return null;
   const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
   const vFovRad = getAnalysisVFovRad(camera);

@@ -1,4 +1,3 @@
-import * as THREE from 'three';
 import { GradientField } from '../types.ts';
 import { hsvToRgb, separableBoxBlur } from './distortion.ts';
 
@@ -150,13 +149,6 @@ export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array, d
   }
 }
 
-export function paintScalarFieldAsGray(field: Float64Array, out: Uint8Array) {
-  for (let i = 0; i < field.length; i++) {
-    const v = Math.round(THREE.MathUtils.clamp(field[i], 0, 1) * 255);
-    const o = i * 4;
-    out[o] = v; out[o + 1] = v; out[o + 2] = v; out[o + 3] = 255;
-  }
-}
 
 export function fillGrayscalePreview(gray: Float64Array, out: Uint8Array) {
   for (let i = 0; i < gray.length; i++) {

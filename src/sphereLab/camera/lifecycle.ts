@@ -18,7 +18,7 @@ export function findPhysicalCameraByConnection(connectionId: string): PhysicalCa
 
 // Brings a freshly-created-or-reactivated camera's capture pipeline up to
 // date -- the same handful of calls every camera-creation path needs.
-export function primeCameraForDisplay(camera: Camera) {
+function primeCameraForDisplay(camera: Camera) {
   if (isSimulated(camera)) renderCamRT(camera); // populate camRT before reading it back below, so the preview isn't blank for the first frame or two
   updateDistortedPreview(camera);
   if (globalState.mode === 'projected') buildProjectedTexture(camera);

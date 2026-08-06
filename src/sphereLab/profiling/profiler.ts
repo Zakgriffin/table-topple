@@ -190,7 +190,7 @@ export function profilerPutRoots(rs: ProfileSpan[]): void { roots = rs; stack = 
 // wrong has to say so itself rather than leaving a reader to spot it, which is
 // the same reason the harness asserts on negative self times instead of
 // rendering them.
-export interface NestingViolation { parent: string; child: string; parentMs: number; childMs: number }
+interface NestingViolation { parent: string; child: string; parentMs: number; childMs: number }
 
 export function checkNesting(spans: readonly ProfileSpan[] = roots): NestingViolation[] {
   const out: NestingViolation[] = [];

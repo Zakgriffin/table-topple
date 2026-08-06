@@ -1,57 +1,11 @@
 import * as THREE from 'three';
-import { CameraSettingsCommon } from '../camera/settings.ts';
 import { jacobiEigenSymmetric, smallestEigenvector } from '../../linalg.ts';
-import { cornerDir } from '../math/geometry.ts';
+import { cornerDir, fourFoldResidual } from '../math/geometry.ts';
 import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { CompositeLine, GradientField, Vote } from '../types.ts';
-import { computeEffectiveGradientField, computeGradientAgreementField, computeGradientField } from './gradientField.ts';
 import { computeLsdRectangles, runLsdChain } from './lsdSegments.ts';
-import { fourFoldResidual } from './orientationLM.ts';
-import { guidedTangentDirectionForWalk } from './tangentWalk.ts';
 
-// gray is expected to already be captureDistortedGrayscale's output.
-export function computeWorldVotes(
-  settings: CameraSettingsCommon,
-  gray: Float64Array, w: number, h: number,
-  gradientRadius: number, agreementRadius: number,
-  quat: THREE.Quaternion, vFovRad: number, aspect: number,
-): Vote[] {
-  const votes: Vote[] = [];
-  const toNDC = (px: number, py: number): [number, number] => [(px / w) * 2 - 1, 1 - (py / h) * 2];
-  const gradSpan = spanStart('gradientField');
-  const field = computeGradientField(gray, w, h, gradientRadius);
-  spanEnd(gradSpan);
-  const agreeSpan = spanStart('agreementField');
-  const agreement = computeGradientAgreementField(field, agreementRadius);
-  spanEnd(agreeSpan);
-  const effSpan = spanStart('effectiveField');
-  const effective = computeEffectiveGradientField(field, agreement);
-  spanEnd(effSpan);
-  const { fx, fy, r } = effective;
-  const walkSpan = spanStart('walk+vote loop');
-  for (let y = r; y < h - r; y++) {
-    for (let x = r; x < w - r; x++) {
-      const i = y * w + x;
-      if (fx[i] === 0 && fy[i] === 0) continue;
-      const walked = guidedTangentDirectionForWalk(settings, fx, fy, w, h, x, y, fx[i], fy[i]);
-      let theta = Math.atan2(walked.fy, walked.fx);
-      if (theta < 0) theta += Math.PI;
-      if (theta >= Math.PI) theta -= Math.PI;
-      const tdx = -Math.sin(theta), tdy = Math.cos(theta);
-      const [u1, v1] = toNDC(x, y);
-      const [u2, v2] = toNDC(x + tdx, y + tdy);
-      const ray1 = cornerDir(u1, v1, quat, vFovRad, aspect);
-      const ray2 = cornerDir(u2, v2, quat, vFovRad, aspect);
-      const n = ray1.clone().cross(ray2);
-      if (n.lengthSq() < 1e-12) continue;
-      n.normalize();
-      votes.push({ n, weight: Math.hypot(walked.fx, walked.fy) });
-    }
-  }
-  spanEnd(walkSpan);
-  return votes;
-}
 
 // Alternative to computeWorldVotes above: one vote per pixel, cast straight
 // off computeGradient2x2Field's own per-pixel direction -- no tangent walk,
@@ -262,14 +216,6 @@ export function computeSegmentVotes(
   return votes;
 }
 
-// The TRUE [minPercent, maxPercent) band by magnitude rank, out of every vote.
-export function votesInMagnitudeBand(votes: Vote[], minPercent: number, maxPercent: number): Vote[] {
-  const sorted = Array.from(votes).sort((a, b) => b.weight - a.weight);
-  const lo = Math.round(sorted.length * (minPercent / 100));
-  const hi = Math.round(sorted.length * (maxPercent / 100));
-  if (hi <= lo) return [];
-  return sorted.slice(lo, hi);
-}
 
 // Shared by fitPairOfPlanes and refineOrientationIRLS below: accumulates
 // the weighted 6x6 ATA scatter matrix ("pair of planes through the origin")
@@ -325,7 +271,7 @@ export function fitPairOfPlanes(votes: Vote[], power: number): { Drow: THREE.Vec
 
 // Iteratively reweighted least squares on top of fitPairOfPlanes: after the
 // same single-shot fit above, every vote's angular residual against the
-// CURRENT poles (fourFoldResidual, from orientationLM.ts -- exactly 0 when
+// CURRENT poles (fourFoldResidual, from math/geometry.ts -- exactly 0 when
 // a vote's normal sits on either pole, +-1 at the worst 45-degree-off
 // corner case) folds multiplicatively into its weight for the next refit.
 // A vote that's genuinely row/col-aligned has its residual shrink toward 0

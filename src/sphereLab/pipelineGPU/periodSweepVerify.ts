@@ -22,7 +22,7 @@ import { sweepResultantsGPU } from './periodSweep.ts';
 // whether the two paths pick out the same peaks -- which is why the report
 // leads with peak agreement and with the argmax period, and treats the raw
 // score deltas as context for those.
-export interface PeriodSweepVerifyReport {
+interface PeriodSweepVerifyReport {
   // Whether the STORED scores matched the recomputed CPU ones -- i.e. whether
   // the capture ran on the CPU path. Purely informational: the comparison below
   // uses the recomputed CPU scores either way, so false does not weaken it.

@@ -9,7 +9,7 @@ import { computeGradient2x2Field, computeTriangleFold, fillGrayscalePreview, pai
 // grayscale, paints whichever of the direction/scalar field views is
 // currently selected (no-op for 'raw'/'antialiased'/'downsampled'/'noised',
 // handled by each capture path's own display branch before this runs).
-export function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
+function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const settings = camera.settings;
   if (settings.fieldView === 'triangleFold') {

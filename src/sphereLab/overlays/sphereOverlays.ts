@@ -5,8 +5,8 @@ import { COL_DIR, PATCH_RES, ROW_DIR, SPHERE_RADIUS, euler } from '../constants.
 import { colLineKs, cornerDir, greatCircleNormal, rowLineKs, slerpUnit, writeCirclePoints } from '../math/geometry.ts';
 import { readout } from '../ui/dom.ts';
 
-export const DEBUG_CIRCLE_SEGMENTS = 48;
-export const AXIS_VECTOR_LENGTH = 0.7;
+const DEBUG_CIRCLE_SEGMENTS = 48;
+const AXIS_VECTOR_LENGTH = 0.7;
 
 export function updateGradientCirclesDebug(camera: Camera) {
   // Builds circle-segment geometry for every vote (no percentile cutoff

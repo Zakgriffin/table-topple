@@ -104,7 +104,6 @@ let probeEnabled = false;
 export function transferLedgerReset(): void { ledger = []; }
 export function transferLedger(): readonly TransferSample[] { return ledger; }
 export function setTransferProbe(on: boolean): void { probeEnabled = on; }
-export function transferProbeEnabled(): boolean { return probeEnabled; }
 
 // `label` defaults to UNLABELLED rather than to a type name so an unlabelled
 // call site is visible AS a defect in the readout instead of quietly merging
@@ -342,7 +341,7 @@ export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLengt
   return result;
 }
 
-export const WORKGROUP_SIZE = 8; // 8x8 = 64 threads/workgroup, a safe default across desktop and mobile GPUs
+const WORKGROUP_SIZE = 8; // 8x8 = 64 threads/workgroup, a safe default across desktop and mobile GPUs
 export function dispatchCount(dim: number): number {
   return Math.ceil(dim / WORKGROUP_SIZE);
 }

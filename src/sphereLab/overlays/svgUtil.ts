@@ -5,7 +5,7 @@
 // rectangle/composite-line drawing, and overlays/hoverDebugOverlays.ts's
 // gradient/level-line arrows.
 
-export const SVG_NS = 'http://www.w3.org/2000/svg';
+const SVG_NS = 'http://www.w3.org/2000/svg';
 
 export function svgEl<K extends keyof SVGElementTagNameMap>(tag: K, attrs: Record<string, string | number>): SVGElementTagNameMap[K] {
   const el = document.createElementNS(SVG_NS, tag) as SVGElementTagNameMap[K];

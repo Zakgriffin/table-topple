@@ -4,7 +4,7 @@ import { activeCamera, activeCameraId, cameras, isPhysical, isSimulated, setActi
 import { pushSettingsSync, sendToDevBridge } from '../devBridge/client.ts';
 import { rebuildGridLineKs } from '../math/geometry.ts';
 import { updateContaminationAvailability } from '../overlays/contaminationOverlays.ts';
-import { updateTopGradientAvailability, updateTopGradientOverlay } from '../overlays/gradientHighlightOverlays.ts';
+import { updateTopGradientAvailability } from '../overlays/gradientHighlightOverlays.ts';
 import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, updateHoverOverlays } from '../overlays/hoverDebugOverlays.ts';
 import { updateLsdAvailability, updateLsdOverlay } from '../overlays/lsdOverlay.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
@@ -215,7 +215,7 @@ export function refreshCameraPanel() {
 }
 
 
-export function rerunOnRealCaptureSettingChange() {
+function rerunOnRealCaptureSettingChange() {
   const cam = activeCamera();
   // computeMode === 'desktop' guard: this trigger's whole purpose is "redo
   // the DESKTOP's own reconstruction" -- never correct to fire automatically
@@ -268,7 +268,7 @@ bindSlider('camPitch', (v) => { const cam = activeCamera(); if (cam && isSimulat
 bindSlider('camFov', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.horizFovDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
 
 export let syncingViewportAspect = false;
-export function clampViewport(v: number, lo: number, hi: number): number {
+function clampViewport(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, Math.round(v)));
 }
 bindSlider('viewportW', (v) => {

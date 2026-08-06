@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
-import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
+import { cornerDir, getAnalysisVFovRad, fourFoldResidual } from '../math/geometry.ts';
 import { FieldResidency, TransferSummary } from '../pipelineGPU/fieldResidency.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
 import { spanDurationMs, spanEnd, spanStart } from '../profiling/profiler.ts';
@@ -9,7 +9,6 @@ import { CompositeLine, DecodeCellDebug, DecodeSampleGrid, GradientField, Positi
 import { PendingDecodeGrid, runPositionDecode } from './decodeGrid.ts';
 import { computeGridPeriodPhase, GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { createLsdChainResidency } from './lsdSegments.ts';
-import { fourFoldResidual } from './orientationLM.ts';
 import {
   computeGradient2x2Composites, computePixelVotes2x2, computeSegmentVotes, fitPairOfPlanes, refineOrientationIRLS,
   LsdCompositeSettings,

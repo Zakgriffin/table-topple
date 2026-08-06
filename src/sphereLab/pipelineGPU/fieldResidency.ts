@@ -47,7 +47,7 @@
 
 import { GrownRegion } from '../pipeline/lsdSegments.ts';
 import {
-  createStorageBuffer, getGPUDevice, readFloat32, readUint32, recordTransfer, uploadFloat32, uploadUint32,
+  getGPUDevice, readFloat32, readUint32, recordTransfer, uploadFloat32, uploadUint32,
 } from './device.ts';
 
 // The per-pixel scalar fields of the chain. Each is exactly `n` elements.
@@ -58,7 +58,7 @@ import {
 // are stage 1/2 intermediates. Region data proper is NOT here -- its CPU and
 // GPU forms are structurally different rather than the same numbers at two
 // precisions, so it gets its own slot below.
-export type FieldName = 'gray' | 'fx' | 'fy' | 'label' | 'regionId';
+type FieldName = 'gray' | 'fx' | 'fy' | 'label' | 'regionId';
 
 // How a field is stored on each side. 'f32' fields are Float64Array on CPU and
 // f32 on GPU -- the widening is lossy in the same 1e-7 class lsdFit and the
@@ -84,7 +84,7 @@ interface Slot {
 // per-region and `members` is the concatenation; because regions are laid out
 // contiguously, offsets[i] + sizes[i] == offsets[i+1], so this carries the same
 // information as lsdFit's regionCount+1 offsets array in a different shape.
-export interface RegionSetGPU {
+interface RegionSetGPU {
   offsets: GPUBuffer;
   sizes: GPUBuffer;
   members: GPUBuffer;
@@ -118,7 +118,7 @@ export function maxRegionCount(n: number, minRegionSize: number): number {
   return Math.ceil(n / Math.max(1, minRegionSize));
 }
 
-export interface TransferEntry {
+interface TransferEntry {
   what: string;
   direction: 'up' | 'down';
   bytes: number;

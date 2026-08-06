@@ -6,6 +6,7 @@
         "target": "ESNext",
         "moduleResolution": "bundler",
         "allowImportingTsExtensions": true,
-        "noEmit": true
+        "noEmit": true,
+        "noUnusedLocals": true
     }
 }

@@ -84,7 +84,7 @@ function buildUniforms(layout: DecodeGridLayout, w: number, h: number): ArrayBuf
   return buf;
 }
 
-export interface FusedDecodeResult {
+interface FusedDecodeResult {
   winner: VoteResult;
   correctCount: number;
   wrongCount: number;

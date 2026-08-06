@@ -63,7 +63,6 @@
 
 import * as THREE from 'three';
 import { activeCamera, cameras, isSimulated, isPhysical } from './camera/store.ts';
-import type { Camera, SimulatedCamera } from './camera/model.ts';
 import { globalState } from './state.ts';
 import { euler } from './constants.ts';
 import { canvas, readout, savedControls } from './ui/dom.ts';
@@ -91,19 +90,14 @@ import { drawSampleLattice } from './overlays/projectedCamOverlays.ts';
 import { drawGridPeriodPhaseProjected } from './overlays/gridPeriodPhaseOverlays.ts';
 import { pushPoseSync, pushSettingsSync, sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
 
-// Every module's exports, purely so devBridge/client.ts's `eval(msg.code)`
-// can still see the whole app as one flat scope -- back when this was a
-// single file, an eval'd snippet like `activeCamera().settings` just worked
-// because everything was already in the same top-level scope; split across
-// modules, direct eval only sees devBridge/client.ts's own imports unless
-// the rest is put somewhere it naturally falls back to. Attaching everything
-// to globalThis here restores that: a bare identifier direct eval can't
-// resolve lexically still falls through to the global scope, same as before.
 // ── Dev-console surface ──────────────────────────────────────────────────
 //
 // Every module's exports, flattened onto globalThis so the dev bridge can call
-// them by bare name (scripts/dev-bridge/feval.sh evals in devBridge/client.ts's
-// module scope, where these are the only things reachable).
+// them by bare name. Back when this app was one file, an eval'd snippet like
+// `activeCamera().settings` just worked, because everything shared one top-level
+// scope. Split across modules, devBridge/client.ts's direct eval sees only its
+// OWN imports -- so the rest has to sit somewhere a bare identifier naturally
+// falls back to, and that is globalThis.
 //
 // import.meta.glob rather than 66 hand-numbered `import * as NS0..NS65` lines,
 // and the reason is not just brevity:

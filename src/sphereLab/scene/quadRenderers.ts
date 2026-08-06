@@ -14,8 +14,8 @@ import { renderer } from './renderer.ts';
 // -- the PIP preview box below is the one remaining Through-Cam-adjacent
 // use of this machinery, since it's a small overlay INSIDE an already-3D-
 // view-mode frame, not a mode of its own.
-export const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
-export function makeQuadRenderer(matOpts: THREE.MeshBasicMaterialParameters) {
+const quadCam = new THREE.OrthographicCamera(-1, 1, 1, -1, 0, 1);
+function makeQuadRenderer(matOpts: THREE.MeshBasicMaterialParameters) {
   const mat = new THREE.MeshBasicMaterial(matOpts);
   const scene = new THREE.Scene();
   const geometry = new THREE.PlaneGeometry(2, 2);
@@ -34,10 +34,9 @@ function rotatedQuadUVs(steps: number): [number, number][] {
   for (let s = 0; s < ((steps % 4) + 4) % 4; s++) uv = CW_FROM.map((i) => uv[i]) as [number, number][];
   return uv;
 }
-export const previewQuad = makeQuadRenderer({});
-export const projectedQuad = makeQuadRenderer({});
-export const tangentWalkPathQuad = makeQuadRenderer({ transparent: true, depthTest: false, depthWrite: false });
-export function renderQuad(q: { mat: THREE.MeshBasicMaterial; scene: THREE.Scene }, tex: THREE.Texture, x: number, y: number, w: number, h: number) {
+const previewQuad = makeQuadRenderer({});
+const projectedQuad = makeQuadRenderer({});
+function renderQuad(q: { mat: THREE.MeshBasicMaterial; scene: THREE.Scene }, tex: THREE.Texture, x: number, y: number, w: number, h: number) {
   q.mat.map = tex;
   renderer.setViewport(x, y, w, h);
   renderer.setScissor(x, y, w, h);
@@ -64,4 +63,3 @@ export function renderProjectedViewport(camera: Camera, x: number, y: number, w:
   uvAttr.needsUpdate = true;
   renderQuad(projectedQuad, camera.projectedPreviewTex, x, y, w, h);
 }
-export function renderTangentWalkPathOverlay(camera: Camera, x: number, y: number, w: number, h: number) { renderQuad(tangentWalkPathQuad, camera.tangentWalkPathTex, x, y, w, h); }

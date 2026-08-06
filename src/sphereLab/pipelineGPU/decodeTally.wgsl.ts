@@ -21,7 +21,7 @@
 // uploaded as parallel keys[]/values[] arrays; lookupTorus below mirrors
 // that construction exactly (same hash function, same linear probing).
 
-export const HASH_HELPERS_WGSL = /* wgsl */ `
+const HASH_HELPERS_WGSL = /* wgsl */ `
 // 32-bit finisher (murmur3 fmix32) -- integer-only, so this produces the
 // IDENTICAL result in JS (via Math.imul) and WGSL (u32 multiply already
 // wraps mod 2^32 by spec), which is required for the table decodeTally.ts

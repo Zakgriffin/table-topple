@@ -56,20 +56,3 @@ export interface DecodeSampleGrid { rows: number; cols: number; zeroI: number; z
 export interface DecodeCellDebug { bit: number; correct: boolean }
 export interface VoteResult { orientation: number; anchorRow: number; anchorCol: number; votes: number; totalWindows: number }
 export interface OrientationFit { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 }
-export interface PositionFit extends OrientationFit { worldX0: number; worldZ0: number; distance: number }
-export interface PhotometricSample { px: number; py: number; observed: number }
-// Per-pixel local Jacobian of the gradient FIELD (i.e. a discrete Hessian of
-// the image), split into its symmetric part's closed-form eigen-decomposition
-// -- e1/lambda1 is the dominant (larger |eigenvalue|) eigenvector, which for
-// a clean single edge sits almost exactly along the gradient; e2/lambda2 is
-// the subordinate one, almost exactly along the edge tangent -- plus the
-// antisymmetric part's scalar (asym), which is exactly zero for an ideal
-// edge and grows where the local 1-edge model breaks down (corners/
-// junctions), independent of the eigenvalue-ratio signal. See
-// pipeline/localJacobian.ts for the derivation.
-export interface JacobianField {
-  e1x: Float64Array; e1y: Float64Array; lambda1: Float64Array;
-  e2x: Float64Array; e2y: Float64Array; lambda2: Float64Array;
-  asym: Float64Array;
-  w: number; h: number; r: number;
-}

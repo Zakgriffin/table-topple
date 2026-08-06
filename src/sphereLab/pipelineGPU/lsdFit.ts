@@ -15,7 +15,7 @@ function getPipeline(device: GPUDevice): GPUComputePipeline {
   return p;
 }
 
-export interface LsdFitResult {
+interface LsdFitResult {
   cx: number; cy: number; theta: number; length: number; width: number;
   nfaLog10: number; accepted: boolean;
   // The kernel's own NFA counts -- pixels inside the rectangle footprint, and

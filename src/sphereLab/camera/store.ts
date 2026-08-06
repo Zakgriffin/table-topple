@@ -20,7 +20,7 @@ export function bumpCameraSerial() { nextCameraSerial++; }
 // defeats the entire point). Falls back to a random, well-saturated HSL hue
 // once the fixed palette runs out, rather than capping how many cameras can
 // exist.
-export const CAMERA_COLOR_PALETTE = [0xffcc44, 0x33dd55, 0xff5588, 0x55ccff, 0xcc88ff, 0xff8833, 0x33ffcc, 0xdd4444];
+const CAMERA_COLOR_PALETTE = [0xffcc44, 0x33dd55, 0xff5588, 0x55ccff, 0xcc88ff, 0xff8833, 0x33ffcc, 0xdd4444];
 export function nextCameraColor(): THREE.Color {
   const idx = nextCameraSerial - 1;
   if (idx < CAMERA_COLOR_PALETTE.length) return new THREE.Color(CAMERA_COLOR_PALETTE[idx]);

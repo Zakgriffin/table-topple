@@ -91,7 +91,7 @@ import { globalState } from '../state.ts';
 // rather than untested ones. See verifyLsdChain's header.
 type ChainConfig = 'reference (forceCPU)' | 'production (GPU)';
 
-export interface ChainConfigReport {
+interface ChainConfigReport {
   config: ChainConfig;
   n: number; // rectangles returned
   accepted: number;
@@ -117,7 +117,7 @@ export interface ChainConfigReport {
   error: string | null; // a throw is itself a result worth reporting, not a reason to abandon the sweep
 }
 
-export interface LsdChainVerifyReport {
+interface LsdChainVerifyReport {
   reps: number;
   baseline: string;
   configs: ChainConfigReport[];

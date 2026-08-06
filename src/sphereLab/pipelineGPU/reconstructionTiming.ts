@@ -74,7 +74,7 @@ import { awaitPageFocus } from './lsdChainVerify.ts';
 // nearer the middle of their cells and fewer bits flip. So if a PERF change ever
 // moves this number, that is a real pose regression hiding inside a speedup.
 
-export interface TransferGroup {
+interface TransferGroup {
   what: string;
   kind: TransferSample['kind'];
   dir: 'up' | 'down';
@@ -129,7 +129,7 @@ export interface TransferGroup {
 // Which spans are which is declared at the span (ProfileSpan.sync), not by a
 // list of names here. This module used to carry that list, covering four spans
 // defined in four other modules, and it could not be right about one of them.
-export interface SpanRow {
+interface SpanRow {
   label: string;
   medianMs: number; // median over reps of this label's SELF time
   count: number;    // spans carrying this label per reconstruction
@@ -157,7 +157,7 @@ const FOREIGN_SPANS = [
   'idle (waiting for next frame)', 'ingest (decode+preprocess)', 'image decode',
 ];
 
-export interface VotesBreakdown {
+interface VotesBreakdown {
   rows: SpanRow[]; // tree order (pre-order, by start time), not sorted by cost
   syncMs: number;  // sum of the sync rows -- real host CPU work
   asyncMs: number; // sum of the awaiting rows -- fence + kernel + rAF, mixed; a sum only
@@ -219,7 +219,7 @@ export interface VotesBreakdown {
 // costs its wall time, not the sum of its members.
 interface StallGroup { members: string[]; ms: number }
 
-export interface CrossingRow {
+interface CrossingRow {
   what: string;
   kind: TransferSample['kind'];
   dir: 'up' | 'down';
@@ -236,7 +236,7 @@ export interface CrossingRow {
   stalls: number[];
 }
 
-export interface CrossingReport {
+interface CrossingReport {
   rows: CrossingRow[]; // ledger order, i.e. pipeline order
   readbacks: number;
   stalls: number;      // distinct stall groups -- concurrent readbacks count ONCE
@@ -246,7 +246,7 @@ export interface CrossingReport {
   stallMs: number;
 }
 
-export interface ReconstructionTimingReport {
+interface ReconstructionTimingReport {
   reps: number;
   w: number;
   h: number;

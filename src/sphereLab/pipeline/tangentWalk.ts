@@ -1,13 +1,12 @@
 import * as THREE from 'three';
 import { CameraSettingsCommon } from '../camera/settings.ts';
-import { GradientField } from '../types.ts';
 
 // ── Guided tangent walk ──────────────────────────────────────────────────
 //
 // Fixed-direction walk: seeded once from the seed pixel's own gradient, not
 // adaptively re-steered. Every tunable comes from `settings` (the active
 // camera's own CameraSettingsCommon) now, instead of a module-level `state`.
-export function guidedTangentDirection(
+function guidedTangentDirection(
   settings: CameraSettingsCommon,
   fx: Float64Array, fy: Float64Array, w: number, h: number,
   x: number, y: number, seedFx: number, seedFy: number,
@@ -58,7 +57,7 @@ export function guidedTangentDirection(
 // Adaptive variant -- re-steers at every step using the CURRENT running-
 // average direction instead of always sampling along a fixed straight line
 // from the seed. settings.tangentWalkAdaptive toggles between the two.
-export function guidedTangentDirectionAdaptive(
+function guidedTangentDirectionAdaptive(
   settings: CameraSettingsCommon,
   fx: Float64Array, fy: Float64Array, w: number, h: number,
   x: number, y: number, seedFx: number, seedFy: number,
@@ -123,16 +122,3 @@ export function guidedTangentDirectionForWalk(
     : guidedTangentDirection(settings, fx, fy, w, h, x, y, seedFx, seedFy);
 }
 
-export function computeWalkedGradientField(settings: CameraSettingsCommon, field: GradientField): GradientField {
-  const { fx, fy, w, h, r } = field;
-  const walkedFx = new Float64Array(fx.length), walkedFy = new Float64Array(fy.length);
-  for (let y = r; y < h - r; y++) {
-    for (let x = r; x < w - r; x++) {
-      const i = y * w + x;
-      if (fx[i] === 0 && fy[i] === 0) continue;
-      const walked = guidedTangentDirectionForWalk(settings, fx, fy, w, h, x, y, fx[i], fy[i]);
-      walkedFx[i] = walked.fx; walkedFy[i] = walked.fy;
-    }
-  }
-  return { fx: walkedFx, fy: walkedFy, w, h, r };
-}

@@ -277,7 +277,7 @@ async function runVisualTail(camera: Camera): Promise<void> {
 // Posts to the mailbox. Deliberately NOT gated on useDeferredVisuals: the
 // flag decides who CALLS this, and a slot left full when the flag is switched
 // off mid-session still has to get drained rather than sit stale forever.
-export function markVisualsDirty(camera: Camera): void {
+function markVisualsDirty(camera: Camera): void {
   camera.visualsDirty = true;
 }
 

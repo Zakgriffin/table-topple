@@ -29,7 +29,7 @@ import { fitAndTestRegionsGPU } from './lsdFit.ts';
 // GPU-rejected region on CPU (which would have masked rejection disagreements
 // as agreement); it no longer does, but calling the kernel directly is still
 // what keeps this a test of the kernel rather than of the wrapper.
-export interface LsdFitVerifyReport {
+interface LsdFitVerifyReport {
   regions: number;
   regionSizes: { min: number; median: number; p95: number; max: number; singletons: number };
   acceptedCpu: number;

@@ -14,7 +14,7 @@ import { bumpCameraSerial, cameras, isSimulated, nextCameraSerial } from './stor
 // (the tab bar's "+" button) and initDevBridge's realCapture handler (a
 // phone connecting) both call these.
 
-export function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Color, settings: CameraSettingsCommon) {
+function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Color, settings: CameraSettingsCommon) {
   const aspect = rtSize.w / rtSize.h;
 
   // Recovered/decoded pose gizmo: TRANSLUCENT in the camera's own color --

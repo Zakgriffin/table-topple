@@ -20,7 +20,7 @@ export const GRID_STEP = 1; // world units per pattern cell
 // which is the actual working distance. A wrong scale here does not break the
 // pose pipeline at all -- it only mis-scales IMU-predicted translation, which
 // is exactly the kind of error that looks like bad filter tuning.
-export const CELL_SIZE_METRES = 0.005;
+const CELL_SIZE_METRES = 0.005;
 export const BOARD_UNITS_PER_METRE = GRID_STEP / CELL_SIZE_METRES; // 200
 export const VIS_HALF_EXTENT = 20; // cap on how many grid lines get a reference line / great circle drawn (perf + clutter, independent of the floor's true size)
 export const CIRCLE_SEGMENTS = 96;

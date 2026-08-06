@@ -168,7 +168,7 @@ function findValidTorusSequence(order: number, N: number, R: number, C: number):
   throw new Error(`Could not find a maximal-length, torus-valid LFSR for order ${order} (N=${N}).`);
 }
 
-export interface DebruijnTorus {
+interface DebruijnTorus {
   order: number;
   N: number;
   R: number;
@@ -199,7 +199,7 @@ export function generateTorus(order: number): DebruijnTorus {
 // never tile/repeat this floor past its own extent — windowKey's modular
 // wrap only ever gets exercised within the crop, same as generateTorus's own
 // single, non-tiled full torus.
-export interface TorusCandidate { taps: number[]; r0: number; c0: number; cropSize: number }
+interface TorusCandidate { taps: number[]; r0: number; c0: number; cropSize: number }
 
 // Found by scripts/search-order5-torus.ts, checkpointed in
 // scripts/best-order5-candidate.json — reflCount=338 rotCount=314 bothCount=0
@@ -246,22 +246,6 @@ export function buildTorusFromCandidate(order: number, { taps, r0, c0, cropSize 
   return { order, N, R: cropSize, C: cropSize, taps, torus };
 }
 
-// Builds a direct-indexed lookup table: window key -> packed (row * C + col).
-// Every key is guaranteed unique (by construction, re-verified above for
-// tractable sizes), so this is a simple one-pass fill, no collision handling.
-// Unfilled entries (should be none, aside from window-key 0 which never
-// occurs since m-sequences never contain the all-zero window) are left as -1.
-// Only practical up to about order 4 (N=16, 2^16=65536 entries, 256KB) — see
-// buildLookupTableSparse for orders where 2^N is too large to index densely.
-export function buildLookupTable({ torus, R, C, order, N }: DebruijnTorus): Int32Array {
-  const table = new Int32Array(2 ** N).fill(-1);
-  for (let r = 0; r < R; r++) {
-    for (let c = 0; c < C; c++) {
-      table[windowKey(torus, R, C, r, c, order)] = r * C + c;
-    }
-  }
-  return table;
-}
 
 // Same lookup, but as a Map rather than a direct-indexed array — for order 5,
 // keys range over 2^25 (a dense Int32Array there would be a fixed ~134MB

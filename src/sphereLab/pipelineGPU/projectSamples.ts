@@ -10,7 +10,7 @@ import { GRADIENT_WGSL, PROJECT_SAMPLES_WGSL } from './projectSamples.wgsl.ts';
 // Stage 2 (bucket accumulation) deliberately stays on CPU for now -- it's a
 // scatter-add of FLOAT sums (color, gradient covector) into a data-dependent
 // bucket per sample, and WGSL has no atomic<f32> (only atomic<u32>/
-// atomic<i32>, which is why decodeTally's and voteBandSelect's histograms
+// atomic<i32>, which is why decodeTally's histogram
 // worked cleanly -- they're pure counting). Doing this on GPU would need
 // fixed-point atomic<i32> accumulation, a real design commitment (picking a
 // scale factor that doesn't overflow/lose precision for this data's range)

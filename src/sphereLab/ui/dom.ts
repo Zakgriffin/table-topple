@@ -56,7 +56,7 @@ export const modeBtns: Record<Mode, HTMLButtonElement> = {
 
 // Persist every slider/checkbox under one localStorage key so a dev-server
 // restart or a revisit doesn't reset the scene back to defaults.
-export const STORAGE_KEY = 'sphereLab.controls';
+const STORAGE_KEY = 'sphereLab.controls';
 export let savedControls: Record<string, string> = {};
 try { savedControls = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}'); } catch { savedControls = {}; }
 export function persistControl(id: string, value: string) {

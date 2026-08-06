@@ -32,7 +32,7 @@ export function updatePositionReadoutText(camera: Camera) {
   positionReadout.textContent = decodeLines;
 }
 
-export function hideSampleLattice() {
+function hideSampleLattice() {
   sampleLatticeCanvas.style.display = 'none';
 }
 

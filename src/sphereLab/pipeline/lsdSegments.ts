@@ -300,7 +300,7 @@ function roundHardCap(w: number, h: number): number { return w + h + 64; }
 // Directed, so a plain SIGNED dot: cos(θi - θj) >= cos(τ). No abs(), which is
 // what keeps the two antiparallel edges of a thin stripe from fusing -- see
 // the level-line vector block (lsdSegments.ts).
-export function levelLinesCompatible(
+function levelLinesCompatible(
   cosA: number, sinA: number, cosB: number, sinB: number, cosTol: number,
 ): boolean {
   return cosA * cosB + sinA * sinB >= cosTol;
@@ -524,7 +524,7 @@ export function growRegionsCCL(
 
 // ── Stage 4: magnitude-weighted PCA rectangle fit ─────────────────────────
 
-export interface RectangleCandidate { cx: number; cy: number; theta: number; length: number; width: number }
+interface RectangleCandidate { cx: number; cy: number; theta: number; length: number; width: number }
 
 // The rectangle's angle comes from PCA on the region's own PIXEL
 // COORDINATES (weighted by gradient magnitude) -- the standard image-
@@ -745,7 +745,7 @@ export interface LsdRectangle {
 // thousand per frame and nothing ever writes through it -- and a single identity
 // makes "this rectangle has no members because nobody asked for them" greppable,
 // which `new Int32Array(0)` scattered at four call sites would not be.
-export const NO_MEMBERS = new Int32Array(0);
+const NO_MEMBERS = new Int32Array(0);
 
 export interface LsdSettings {
   toleranceDeg: number;
@@ -800,90 +800,6 @@ export function fitRegionOnce(
   };
 }
 
-// ── RETIRED-NOTE: NOT CALLED FROM ANYWHERE ───────────────────────────────
-// Stage 5's original accept/RETRY loop (tighten tau, then shrink the region by
-// dropping its farthest-from-center members). fitRegionOnce above replaced it
-// as the live fitter; this is kept as reference, not deleted, alongside
-// growRegionsJFA at the bottom of this file.
-//
-// Retired deliberately rather than because it was wrong. It was the last thing
-// forcing mag/theta to stay available on CPU during the GPU path -- every
-// GPU-rejected region fell through to here for a CPU re-attempt -- which is
-// exactly the dependency that has to go for stages 1-4 to become one
-// GPU-resident run. Retry 1 (angle refilter) would have ported easily; retry 2+
-// needs a per-region partial sort (drop the farthest fraction), which is a
-// genuinely harder GPU problem than anything else in this file. With the live
-// path running attempt-0-only, the GPU's rejected candidates are simply used as
-// returned, and nothing re-derives them on CPU.
-//
-// Its three settings (lsdMaxRetries/lsdRetryToleranceFactor/
-// lsdRetryShrinkFraction) still exist and their sliders are disabled, not
-// removed -- see camera/settings.ts.
-export function fitRegionWithRetries(
-  region: GrownRegion, fx: Float64Array, fy: Float64Array, w: number, h: number,
-  settings: LsdSettings, logNTests: number, logEpsilon: number,
-): LsdRectangle | null {
-  let members = region.members;
-  let toleranceDeg = settings.toleranceDeg;
-  let retries = 0;
-  let accepted = false;
-  let rect: RectangleCandidate | null = null;
-  let nfaLog10 = Infinity;
-
-  for (;;) {
-    if (members.length < 2) break; // degenerate -- no meaningful axis, leave as rejected
-    rect = fitRectangle(members, fx, fy, w, region.meanUx, region.meanUy);
-    const toleranceRad = THREE.MathUtils.degToRad(toleranceDeg);
-    const p = toleranceRad / Math.PI;
-    const { n: rn, k: rk } = countRectanglePixels(rect, fx, fy, w, h, settings.rhoNoiseThreshold, toleranceRad);
-    const logNfa = logNTests + logBinomialTail(rn, rk, p);
-    nfaLog10 = logNfa / Math.LN10;
-    if (logNfa < logEpsilon) { accepted = true; break; }
-    if (retries >= settings.maxRetries) break;
-    retries++;
-    if (retries === 1) {
-      // Retighten first (LSD's own first move): a simplified stand-in for
-      // re-growing the region from its seed under a stricter tolerance --
-      // re-filters the CURRENT members down to those still within the
-      // new, tighter tolerance of the region's own (fixed) mean angle,
-      // rather than a full re-grow from scratch. Same intent (shrink to
-      // the self-consistent "core" of the region) with far less
-      // machinery than repeating stage 3 per retry. Signed (not abs) cos-dot,
-      // matching levelLinesCompatible's growth test and countRectanglePixels'
-      // alignment count -- see the level-line vector block on why every
-      // orientation comparison in this file is directed.
-      toleranceDeg *= settings.retryToleranceFactor;
-      const cosTol = Math.cos(THREE.MathUtils.degToRad(toleranceDeg));
-      const kept: number[] = [];
-      for (let mi = 0; mi < members.length; mi++) {
-        const i = members[mi];
-        const m = Math.hypot(fx[i], fy[i]);
-        if ((-fy[i] * region.meanUx + fx[i] * region.meanUy) / m >= cosTol) kept.push(i);
-      }
-      members = Int32Array.from(kept);
-    } else {
-      // Subsequent retries: drop the farthest-from-center fraction of
-      // members -- LSD's own "reduce region radius," aimed at cutting
-      // away a spuriously-attached side branch (e.g. two near-parallel
-      // lines the growth pass glued together) rather than tightening
-      // angle further.
-      const { cx, cy } = rect;
-      const withDist: { i: number; d: number }[] = [];
-      for (let mi = 0; mi < members.length; mi++) {
-        const i = members[mi];
-        const x = (i % w) - cx, y = ((i / w) | 0) - cy;
-        withDist.push({ i, d: x * x + y * y });
-      }
-      withDist.sort((a, b) => a.d - b.d);
-      const keep = Math.max(2, Math.round(members.length * (1 - settings.retryShrinkFraction)));
-      members = Int32Array.from(withDist.slice(0, keep).map((e) => e.i));
-    }
-  }
-
-  if (!rect) return null;
-  const lineScore = nfaLog10ToLineScore(nfaLog10, logEpsilon);
-  return { cx: rect.cx, cy: rect.cy, theta: rect.theta, length: rect.length, width: rect.width, accepted, retries, nfaLog10, lineScore, rawMembers: region.members };
-}
 
 // The two NFA log terms, derived once per call from the settings + image size
 // so the stage-4 helpers below can't drift in how they compute them.
@@ -1002,30 +918,6 @@ export function computeLsdRectangles(field: GradientField, settings: LsdSettings
   return fitRegionsCPU(regions, fx, fy, w, h, settings);
 }
 
-// CPU growing + GPU fitting, i.e. the fit half of the dispatch in
-// isolation. Kept as a named entry point because it is the exact pairing
-// pipelineGPU/lsdFitVerify.ts's numbers were measured against.
-export async function computeLsdRectanglesGPU(field: GradientField, settings: LsdSettings): Promise<LsdRectangle[] | null> {
-  const { w, h, fx, fy } = field;
-  const res = await FieldResidency.create(w * h, true);
-  try {
-    res.provideCPU('fx', fx);
-    res.provideCPU('fy', fy);
-    const { regionId, regions } = growRegionsCCL(
-      fx, fy, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
-    );
-    res.provideCPU('regionId', regionId);
-    res.provideRegionsCPU(regions);
-    // wantMembers TRUE, and it is free here: the grower above ran on CPU and
-    // provideRegionsCPU already put the regions in the residency, so
-    // regionsCPU() hands them straight back with no readback. Keeping it on
-    // means this harness entry point still produces the exact rectangle shape
-    // lsdFitVerify's recorded numbers were taken against.
-    return await fitRegionsGPU(res, w, h, settings, true);
-  } finally {
-    res.destroy();
-  }
-}
 
 // Single dispatch point every caller uses -- centralizes the globalState GPU
 // checks once instead of duplicating them at each call site.
@@ -1059,7 +951,7 @@ export async function computeLsdRectanglesGPU(field: GradientField, settings: Ls
 // fitter ignores the flag entirely: it is holding the regions already, so its
 // members are free either way, and that is what keeps the two fitters
 // comparable under the verify sweep.
-export async function computeLsdRectanglesAuto(
+async function computeLsdRectanglesAuto(
   res: FieldResidency, w: number, h: number, settings: LsdSettings, wantMembers = false,
 ): Promise<LsdRectangle[]> {
   const growArgs = [
@@ -1100,7 +992,7 @@ export async function computeLsdRectanglesAuto(
 // when every stage is on CPU, so an all-CPU frame still never touches
 // navigator.gpu -- and stage 1 counts, because it can want a device
 // when nothing downstream does.
-export function lsdChainWantsGPU(): boolean {
+function lsdChainWantsGPU(): boolean {
   return !globalState.forceCPU;
 }
 

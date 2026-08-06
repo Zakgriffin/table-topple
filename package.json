@@ -6,7 +6,8 @@
         "dev": "vite --host",
         "dev:bridge": "node scripts/dev-bridge/server.js",
         "generate:torus": "node scripts/generate-debruijn-torus.ts",
-        "print:board": "node scripts/print-debruijn-board.ts"
+        "print:board": "node scripts/print-debruijn-board.ts",
+        "check:config": "node scripts/check-config.mjs"
     },
     "devDependencies": {
         "@types/node": "^26.0.1",
@@ -19,6 +20,7 @@
         "ws": "^8.21.0"
     },
     "dependencies": {
+        "@sinclair/typebox": "^0.34.52",
         "jsqr": "^1.4.0",
         "three": "^0.185.0"
     }

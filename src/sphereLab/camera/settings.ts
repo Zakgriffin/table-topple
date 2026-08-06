@@ -1,43 +1,86 @@
-import { FieldView } from '../types.ts';
+import { Type } from '@sinclair/typebox';
+import type { Static } from '@sinclair/typebox';
 
 // ── Per-camera settings: the SHAPE only ──────────────────────────────────
 //
 // Everything that used to live in the single module-level `state` object,
 // split into what's common to both camera types and what's type-specific.
 //
-// There are no default VALUES here anymore -- every one of them lives in
+// There are no default VALUES here -- every one of them lives in
 // sphere-lab.config.json, and config.ts is what turns that file into a
-// settings object (createDefaultSimulatedSettings/createDefaultPhysicalSettings
-// moved there with them). This file deliberately imports nothing but types, so
-// that config.ts can import it without a cycle.
+// settings object. This file deliberately imports nothing but TypeBox and has
+// no side effects at all, so config.ts can import it without a cycle and
+// scripts/check-config.mjs can import it outside a browser.
+//
+// ── Why TypeBox schemas rather than plain interfaces ─────────────────────
+//
+// One declaration doing three jobs. `Static<typeof X>` derives the TypeScript
+// type, so there is no second list of field names to keep in step -- which is
+// exactly what the `satisfies Record<keyof T, true>` key manifests here used
+// to be for. Those manifests could only check that a key was PRESENT in the
+// config file; these check its TYPE, which is the failure that actually
+// reaches a GPU uniform. A string where a number belongs is a present key.
+//
+// additionalProperties: false on every section is deliberate. A renamed or
+// deleted setting leaves its old key behind in the JSON, and silently ignoring
+// it is how a config file drifts into being half documentation. Loud instead.
+const strict = { additionalProperties: false } as const;
 
-export interface CameraSettingsCommon {
-  showSphere: boolean; showCircles: boolean; showPoles: boolean; showFrustum: boolean; showPatch: boolean;
-  showGizmoBody: boolean; showRecoveredFloor: boolean; recoveredFloorOpacity: number;
-  showTrueContamination: boolean; showReconstructedContamination: boolean;
-  hideField: boolean;
-  showTopGradient: boolean;
+// The field-view radio group's legal values, and the source of the FieldView
+// type -- which used to be a hand-maintained union in types.ts that had to be
+// kept in step with this list by eye. The radio options in sphere-lab.html are
+// still a third copy: markup is beyond what a schema can reach.
+export const FieldViewSchema = Type.Union([
+  Type.Literal('raw'),
+  Type.Literal('antialiased'),
+  Type.Literal('downsampled'),
+  Type.Literal('noised'),
+  Type.Literal('gradient2x2'),
+  Type.Literal('gradient2x2Directed'),
+]);
+export type FieldView = Static<typeof FieldViewSchema>;
+
+export const CameraSettingsCommonSchema = Type.Object({
+  showSphere: Type.Boolean(),
+  showCircles: Type.Boolean(),
+  showPoles: Type.Boolean(),
+  showFrustum: Type.Boolean(),
+  showPatch: Type.Boolean(),
+  showGizmoBody: Type.Boolean(),
+  showRecoveredFloor: Type.Boolean(),
+  recoveredFloorOpacity: Type.Number(),
+  showTrueContamination: Type.Boolean(),
+  showReconstructedContamination: Type.Boolean(),
+  hideField: Type.Boolean(),
+  showTopGradient: Type.Boolean(),
+
   // ── From-scratch traditional LSD pipeline (pipeline/lsdSegments.ts) --
   // the PRODUCTION composite-line source: pipeline/votes.ts's
   // computeGradient2x2Composites turns each accepted rectangle straight into
   // one line. None of these are gated behind a show/hide toggle --
   // they're tuning knobs for a live feature, not just a debug view.
-  showLsdSegments: boolean;
-  showLsdRejected: boolean; // also draw candidates that failed NFA validation (dashed red), not just accepted rectangles
+  showLsdSegments: Type.Boolean(),
+  // also draw candidates that failed NFA validation (dashed red), not just
+  // accepted rectangles
+  showLsdRejected: Type.Boolean(),
   // Scatters each drawn rectangle's OWN stage-3 raw region membership
   // (LsdRectangle.rawMembers -- the actual flood-filled pixels, before any
   // retry tightened/shrank it) as small dots, so the raw growing result can
   // be compared directly against the fitted rectangle it produced.
-  showLsdRawRegions: boolean;
-  showLsdComposite: boolean;
+  showLsdRawRegions: Type.Boolean(),
+  // draw the merged composite lines fed by the segments above (the join walk
+  // that produced them is deleted; see votes.ts's compositesFromLsdRectangles
+  // for what fills this now)
+  showLsdComposite: Type.Boolean(),
+
   // The two histograms in the grid period/phase debug plot
   // (overlays/gridPeriodPhaseOverlays.ts). Both are DRAWING-ONLY -- neither
   // feeds the period search, which reads the O(n) line values directly via
   // circularFit. Toggling one off skips computing its data entirely, which
   // matters for the gap histogram: computePooledGaps is O(n^2) in the
   // detected line count and exists only for this plot.
-  showGapHistogram: boolean;
-  showValueHistogram: boolean;
+  showGapHistogram: Type.Boolean(),
+  showValueHistogram: Type.Boolean(),
   // The two debug curves in the period/phase plot, each independently
   // toggleable: cellCentreDistinctness on its own, and its product with the
   // resultant -- the conjunction the search's two-stage filter is
@@ -45,13 +88,17 @@ export interface CameraSettingsCommon {
   // range (see overlays/gridPeriodPhaseOverlays.ts), not in the pipeline, so
   // they follow pan/zoom and can show a joint peak sitting outside the
   // bracket the integer-count search ever looked at.
-  showDistinctnessCurve: boolean;
-  showProductCurve: boolean; // draw the merged composite lines fed by the segments above (the join walk that produced them is deleted; see votes.ts's compositesFromLsdRectangles for what fills this now)
-  lsdToleranceDeg: number; // tau -- the one angle tolerance growRegionsCCL's edge predicate, countRectanglePixels' NFA alignment count and the retry-1 refilter all test against. LSD default 22.5deg.
+  showDistinctnessCurve: Type.Boolean(),
+  showProductCurve: Type.Boolean(),
+
+  // tau -- the one angle tolerance growRegionsCCL's edge predicate,
+  // countRectanglePixels' NFA alignment count and the retry-1 refilter all
+  // test against. LSD default 22.5deg.
+  lsdToleranceDeg: Type.Number(),
   // rho LOW -- hysteresis' participation floor: a pixel below this is
   // excluded entirely (from growth edges and from NFA alignment counts).
   // Scale is [0,1], matching computeGradient2x2Field's own normalized output.
-  lsdRhoNoiseThreshold: number;
+  lsdRhoNoiseThreshold: Type.Number(),
   // rho HIGH -- hysteresis' survival bar: a grown component is discarded
   // unless at least one of its members exceeds this. Canny's two-threshold
   // idea, and what replaces the magnitude-priority ORDERING that the old
@@ -59,29 +106,30 @@ export interface CameraSettingsCommon {
   // ridge (a symmetric edge predicate has no notion of "wins"). Set at or
   // below lsdRhoNoiseThreshold to degrade to plain single-threshold
   // behavior. See pipeline/lsdSegments.ts's growRegionsCCL.
-  lsdRhoHighThreshold: number;
+  lsdRhoHighThreshold: Type.Number(),
   // DEBUG SCRUBBER ONLY (0 = run to the fixpoint, the real algorithm): caps
   // how many hook+compress rounds growRegionsCCL runs so the overlay can
   // watch components coalesce. Unlike the lsdGrowSteps it replaces, this
   // cannot change the converged answer -- connected components are a
   // fixpoint, not an iteration budget -- only how far along you're looking.
-  lsdCclSteps: number;
+  lsdCclSteps: Type.Number(),
+  // epsilon -- accept a candidate rectangle iff NFA < this (LSD default 1:
+  // expect <1 false detection per image)
+  lsdNfaEpsilon: Type.Number(),
+  // N_tests = N^exponent, N = max(image w,h) -- LSD's own estimate of "how
+  // many rectangles could plausibly have been tested" (~5 degrees of freedom:
+  // 2 position, 1 angle, 2 size)
+  lsdNfaTestExponent: Type.Number(),
   // Minimum member count for a grown component to become a region at all --
-  // applied in collectRegionsFromLabels, so BOTH the CPU and GPU growers get it
-  // and neither ever materializes the region. 2 is the behavior-preserving
+  // applied in collectRegionsFromLabels, so BOTH the CPU and GPU growers get
+  // it and neither ever materializes the region. 2 is the behavior-preserving
   // floor: the rectangle fit needs two members to have an axis at all, so a
   // singleton could only ever be fitted and discarded. Measured on a real
-  // capture, that alone is 1149 of 2931 regions -- ~40% of the fit stage's work,
-  // for zero change in output. Above 2 it becomes a real (output-changing)
-  // tuning knob: a floor on how much evidence a line segment needs.
-  lsdMinRegionSize: number;
-  lsdNfaEpsilon: number; // epsilon -- accept a candidate rectangle iff NFA < this (LSD default 1: expect <1 false detection per image)
-  lsdNfaTestExponent: number; // N_tests = N^exponent, N = max(image w,h) -- LSD's own estimate of "how many rectangles could plausibly have been tested" (~5 degrees of freedom: 2 position, 1 angle, 2 size)
-  // ── RETIRED (see pipeline/lsdSegments.ts's fitRegionWithRetries) ─────────
-  // Stage 5's retry loop is no longer referenced by any live path -- the fitter
-  // is attempt-0-only now. These three stay defined so the retired function
-  // still typechecks and so persisted values survive, but nothing reads them
-  // and their sliders are disabled.
+  // capture, that alone is 1149 of 2931 regions -- ~40% of the fit stage's
+  // work, for zero change in output. Above 2 it becomes a real
+  // (output-changing) tuning knob: a floor on how much evidence a line
+  // segment needs.
+  lsdMinRegionSize: Type.Number(),
   // The last survivor of the join walk's four parameters -- the other three
   // (join steps, merge similarity, max travel) went with the walk itself.
   //
@@ -90,40 +138,52 @@ export interface CameraSettingsCommon {
   // rectangle is fitted; this compares the FITTED rectangle's long-axis extent
   // and runs after NFA acceptance, in compositesFromLsdRectangles. A fat
   // 8-pixel blob passes the first and fails this one.
-  lsdMinLengthPx: number;
+  lsdMinLengthPx: Type.Number(),
+
   // showLevelLineArrow: the gradient rotated -90deg (LSD's own level-line
-  // convention, see pipeline/lsdSegments.ts's level-line vector block) -- was named
-  // "perpendicular" before, renamed to match that shared terminology.
-  showGradientArrow: boolean; showLevelLineArrow: boolean; gradientArrowScale: number;
-  tangentWalkMaxSteps: number; tangentWalkDeviationDeg: number; tangentWalkMagFraction: number; tangentWalkGraceSamples: number;
-  tangentWalkAdaptive: boolean;
-  showRecoveredPoles: boolean;
-  showAxisVectors: boolean;
-  showTopCircles: boolean;
-  topCirclesLineWidth: number;
+  // convention, see pipeline/lsdSegments.ts's level-line vector block) -- was
+  // named "perpendicular" before, renamed to match that shared terminology.
+  showGradientArrow: Type.Boolean(),
+  showLevelLineArrow: Type.Boolean(),
+  gradientArrowScale: Type.Number(),
+
+  tangentWalkMaxSteps: Type.Number(),
+  tangentWalkDeviationDeg: Type.Number(),
+  tangentWalkMagFraction: Type.Number(),
+  tangentWalkGraceSamples: Type.Number(),
+  tangentWalkAdaptive: Type.Boolean(),
+
+  showRecoveredPoles: Type.Boolean(),
+  showAxisVectors: Type.Boolean(),
+  showTopCircles: Type.Boolean(),
+  topCirclesLineWidth: Type.Number(),
+
   // Grazing-angle cutoff (cosine) shared by projectSamplesCPU (forward:
   // screen pixel -> floor point) and buildDecodeSampleGrid (reverse: floor
   // point -> screen pixel) -- see pipeline/decodeGrid.ts's own comment.
   // Higher = stricter (excludes more of the near-horizon view).
-  minGrazingCos: number;
-  gridPeriodPhaseBinCount: number;
+  minGrazingCos: Type.Number(),
+  gridPeriodPhaseBinCount: Type.Number(),
   // Below this, a red/blue neighbor gap (gridPeriodPhaseOverlays.ts's
   // per-family median lines) is excluded from the median -- filters out the
   // same near-duplicate-line noise gaps pipeline/gridPeriodPhase.ts's own
   // seed-period mode search is built to shrug off, which would otherwise
   // drag a small-sample median toward ~0 instead of the true spacing.
-  gridPeriodPhaseGapLowerBound: number;
-  showCompositeLineFamilies: boolean;
-  showSampleLattice: boolean;
+  gridPeriodPhaseGapLowerBound: Type.Number(),
+  showCompositeLineFamilies: Type.Boolean(),
+  showSampleLattice: Type.Boolean(),
   // Purely a display-time rotation of the Projected-Cam view (WebGL texture
   // + debug overlay) by camera.lastPositionDecode.orientation * 90 degrees,
   // so "up" matches the pattern's true cardinal orientation instead of
   // whichever of the 4 the raw sample buffer happened to land in -- doesn't
   // touch the decode pipeline itself, see main.ts's projected-mode branch.
-  useTrueCardinalOrientation: boolean;
-  fieldView: FieldView;
-  axesAutoCapture: boolean; axesCaptureIntervalMs: number;
-  viewportW: number; viewportH: number; aspectLocked: boolean;
+  useTrueCardinalOrientation: Type.Boolean(),
+  fieldView: FieldViewSchema,
+  axesAutoCapture: Type.Boolean(),
+  axesCaptureIntervalMs: Type.Number(),
+  viewportW: Type.Number(),
+  viewportH: Type.Number(),
+  aspectLocked: Type.Boolean(),
   // HORIZONTAL field of view, in degrees -- shared by both camera types
   // (see getAnalysisVFovRad, the one place that turns this into the
   // vertical FOV every ray-casting call site actually needs, via whatever
@@ -136,54 +196,30 @@ export interface CameraSettingsCommon {
   // physical camera already had to (there's no focal-length spec sheet for
   // a real phone lens to convert from), sidesteps the whole issue and
   // means both camera types now go through the exact same formula.
-  horizFovDeg: number;
-}
-export interface SimulatedCameraSettings extends CameraSettingsCommon {
-  camX: number; camY: number; camZ: number;
-  camYawDeg: number; camPitchDeg: number;
-  simNoise: number; simBlur: number; captureSupersample: number;
-}
-export interface PhysicalCameraSettings extends CameraSettingsCommon {
-}
+  horizFovDeg: Type.Number(),
+}, strict);
 
+// Only the fields a simulated camera ADDS. Its own schema rather than a
+// composite with the common one, because the config file stores them as two
+// separate sections and these are exactly one section's contents.
+export const SimulatedOnlySettingsSchema = Type.Object({
+  camX: Type.Number(),
+  camY: Type.Number(),
+  camZ: Type.Number(),
+  camYawDeg: Type.Number(),
+  camPitchDeg: Type.Number(),
+  simNoise: Type.Number(),
+  simBlur: Type.Number(),
+  captureSupersample: Type.Number(),
+}, strict);
 
-// ── Key manifests ────────────────────────────────────────────────────────
-//
-// The runtime spelling of the two interfaces above, which TypeScript's own
-// types cannot provide (they are erased). config.ts needs them twice over: to
-// VALIDATE that sphere-lab.config.json actually carries every setting -- there
-// is no literal fallback left anywhere, so a missing key has to be a loud
-// startup failure rather than a silent undefined -- and to COPY a camera's
-// settings back into the config object when one changes.
-//
-// `satisfies Record<keyof T, true>` is what keeps these honest: adding a field
-// to either interface without adding it here is a compile error, not a
-// setting that silently stops being saved.
-export const COMMON_KEYS = {
-  showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true,
-  showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: true,
-  showTrueContamination: true, showReconstructedContamination: true,
-  hideField: true, showTopGradient: true,
-  showLsdSegments: true, showLsdRejected: true, showLsdRawRegions: true, showLsdComposite: true,
-  showGapHistogram: true, showValueHistogram: true, showDistinctnessCurve: true, showProductCurve: true,
-  lsdToleranceDeg: true, lsdRhoNoiseThreshold: true, lsdRhoHighThreshold: true, lsdCclSteps: true,
-  lsdNfaEpsilon: true, lsdNfaTestExponent: true, lsdMinRegionSize: true, lsdMinLengthPx: true,
-  showGradientArrow: true, showLevelLineArrow: true, gradientArrowScale: true,
-  tangentWalkMaxSteps: true, tangentWalkDeviationDeg: true, tangentWalkMagFraction: true,
-  tangentWalkGraceSamples: true, tangentWalkAdaptive: true,
-  showRecoveredPoles: true, showAxisVectors: true, showTopCircles: true, topCirclesLineWidth: true,
-  minGrazingCos: true, gridPeriodPhaseBinCount: true, gridPeriodPhaseGapLowerBound: true,
-  showCompositeLineFamilies: true, showSampleLattice: true,
-  useTrueCardinalOrientation: true, fieldView: true,
-  axesAutoCapture: true, axesCaptureIntervalMs: true,
-  viewportW: true, viewportH: true, aspectLocked: true, horizFovDeg: true,
-} satisfies Record<keyof CameraSettingsCommon, true>;
+export type CameraSettingsCommon = Static<typeof CameraSettingsCommonSchema>;
+export type SimulatedOnlySettings = Static<typeof SimulatedOnlySettingsSchema>;
 
-// Only the fields a simulated camera adds -- the common ones are merged in
-// separately, so listing them again here would be a second place to forget.
-export const SIM_ONLY_KEYS = {
-  camX: true, camY: true, camZ: true, camYawDeg: true, camPitchDeg: true,
-  simNoise: true, simBlur: true, captureSupersample: true,
-} satisfies Record<Exclude<keyof SimulatedCameraSettings, keyof CameraSettingsCommon>, true>;
-
-export type SimulatedOnlySettings = Pick<SimulatedCameraSettings, keyof typeof SIM_ONLY_KEYS>;
+// An intersection rather than `interface extends`, because both halves are
+// derived types now. Structurally identical for every consumer.
+export type SimulatedCameraSettings = CameraSettingsCommon & SimulatedOnlySettings;
+// A physical camera adds nothing of its own -- it is a real phone, so it has
+// no position or lens sliders. It only OVERRIDES a common setting (fieldView;
+// see config.ts's camera.physical section).
+export type PhysicalCameraSettings = CameraSettingsCommon;

@@ -1,6 +1,6 @@
 {
   "global": {
-    "mode": "through",
+    "mode": "world",
     "panelCollapsed": false,
     "overlayPanelCollapsed": false,
     "showFloor": true,

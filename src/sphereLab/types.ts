@@ -1,7 +1,13 @@
 import * as THREE from 'three';
 
-export type Mode = 'world' | 'through' | 'inside' | 'projected';
-export type FieldView = 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient2x2' | 'gradient2x2Directed';
+// Both of these are DERIVED from the config schemas rather than declared
+// here, and re-exported so the dozen existing importers keep their import
+// path. Each used to be a hand-written union that had to be kept in step with
+// the schema (and with sphere-lab.html's radio/button lists) by eye; now a
+// config file naming a field view or a mode that does not exist is a
+// validation error rather than a silently accepted string.
+export type { Mode } from './configSchema.ts';
+export type { FieldView } from './camera/settings.ts';
 
 // ── Shared result/field types (referenced by the Camera interfaces below) ─
 

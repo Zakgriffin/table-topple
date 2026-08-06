@@ -1,5 +1,9 @@
-import { CameraSettingsCommon, COMMON_KEYS, PhysicalCameraSettings, SIM_ONLY_KEYS, SimulatedCameraSettings, SimulatedOnlySettings } from './camera/settings.ts';
-import { Mode } from './types.ts';
+import type { Static, TObject, TSchema } from '@sinclair/typebox';
+import { Value } from '@sinclair/typebox/value';
+import { CameraSettingsCommonSchema, SimulatedOnlySettingsSchema } from './camera/settings.ts';
+import type { CameraSettingsCommon, PhysicalCameraSettings, SimulatedCameraSettings } from './camera/settings.ts';
+import { GlobalSettingsSchema, PhoneSettingsSchema, PhysicalOverridesSchema, SphereLabConfigSchema } from './configSchema.ts';
+import type { SphereLabConfig } from './configSchema.ts';
 
 // ── One config object, one file on disk ──────────────────────────────────
 //
@@ -21,96 +25,10 @@ import { Mode } from './types.ts';
 // The disk file is the DEFAULTS and is only rewritten when you ask for it (the
 // "save config to disk" button -> the dev bridge). localStorage is the live
 // overlay on top. So: edit freely, and promote what is worth keeping.
-
-export interface GlobalSettings {
-  // The 3D canvas has exactly one current view regardless of camera
-  // count/selection, so this is global rather than per-camera.
-  mode: Mode;
-  // UI chrome, persisted for the same reason every slider is: reopening the
-  // page should not undo how you left the workspace.
-  panelCollapsed: boolean;
-  overlayPanelCollapsed: boolean;
-  // The floor is one shared object, not owned by any camera.
-  showFloor: boolean;
-  floorCellOutlineSubdiv: number;
-  // The De Bruijn floor pattern's board size (cells per side) -- overrides
-  // debruijn.ts's ORDER5_CANDIDATE.cropSize at runtime via scene/floor.ts's
-  // rebuildFloorPattern. 144 so that one pattern cell is one board-game cell
-  // (BOARD_CELLS in src/game/constants.ts) and the AR overlay's board lands on
-  // the physical one 1:1 rather than at some scale factor.
-  boardSize: number;
-  // ── The one GPU/CPU switch, replacing nine per-stage ones (2026-08-05) ──
-  //
-  // There used to be a `useGPU*` toggle per stage: gradient, growRegions,
-  // collectRegions, lsdFit, fit, periodSweep, decode, decodeFused, project. All
-  // nine defaulted true. They were the INSTRUMENT that produced every measured
-  // number on record, and the answer they produced was "everything is GPU" --
-  // at which point a runtime switch for a choice nobody makes at runtime is
-  // pure carrying cost. Nine independent booleans is 2^9 of nominal correctness
-  // surface, and every new stage doubled it.
-  //
-  // They also structurally blocked the endgame: you cannot record a fixed
-  // command list, or fuse the pipeline into one submit, if any stage might run
-  // on the CPU this frame. And they made FieldResidency a transfer-DECISION
-  // engine (which side is each stage on, and what must therefore cross?) rather
-  // than a plain named-slot arena.
-  //
-  // What is NOT deleted is the CPU implementations. They earned their keep
-  // twice over -- they caught the `layout:'auto'` binding prune that silently
-  // no-op'd every submit while returning plausible garbage, and the
-  // BOUNDARY_EPS bug that was real on BOTH sides. They are now REFERENCE
-  // implementations rather than production branches, reachable through this
-  // single switch, and pipelineGPU/lsdChainVerify.ts's two-configuration
-  // differential is what keeps them from rotting unnoticed now that production
-  // never runs them.
-  //
-  // Note this is NOT the no-WebGPU fallback and does not need to be: every GPU
-  // stage already falls back on its own when there is no device or a dispatch
-  // fails validation, and that path is independent of this flag (the flag gates
-  // ENTRY, a `return null/false` gates FALLBACK). This exists for harnesses and
-  // for answering "is the GPU lying to me" by hand.
-  forceCPU: boolean;
-}
-
-// The phone page's own debug toggles (mobile-capture.html). Not part of
-// PoseComputeState.settings -- those are pushed down per-camera by
-// devBridge/client.ts's settingsSync and are already covered by
-// camera.common -- these are the switches that only mean anything on the
-// device: whether it computes its own pose, what it ships back, and the IMU.
-export interface PhoneSettings {
-  computeOnDevice: boolean;
-  sendDebugInfo: boolean;
-  sendCapturedImage: boolean;
-  imuEnabled: boolean;
-  imuCorrection: boolean;
-}
-
-export interface SphereLabConfig {
-  global: GlobalSettings;
-  camera: {
-    common: CameraSettingsCommon;
-    simulated: SimulatedOnlySettings;
-    // A physical camera is a real phone: it has no position/lens sliders of
-    // its own, only a handful of common settings that mean something
-    // different for a photo than for a render. Typed as an explicit Pick
-    // rather than Partial<CameraSettingsCommon> so that "which settings does
-    // a physical camera override" stays a listed fact.
-    physical: Pick<CameraSettingsCommon, 'fieldView'>;
-  };
-  phone: PhoneSettings;
-}
-
-const GLOBAL_KEYS = {
-  mode: true, panelCollapsed: true, overlayPanelCollapsed: true,
-  showFloor: true, floorCellOutlineSubdiv: true, boardSize: true, forceCPU: true,
-} satisfies Record<keyof GlobalSettings, true>;
-
-const PHONE_KEYS = {
-  computeOnDevice: true, sendDebugInfo: true, sendCapturedImage: true,
-  imuEnabled: true, imuCorrection: true,
-} satisfies Record<keyof PhoneSettings, true>;
-
-const PHYSICAL_KEYS = { fieldView: true } satisfies Record<keyof SphereLabConfig['camera']['physical'], true>;
+//
+// This module is only the LOADING half. The shape lives in configSchema.ts and
+// camera/settings.ts, which are pure so `npm run check:config` can validate the
+// file from the command line rather than at boot.
 
 // Fetched, not imported. A static `import config from '../sphere-lab.config.json'`
 // would put the file in vite's module graph, so saving it would trigger an HMR
@@ -126,40 +44,59 @@ const PHYSICAL_KEYS = { fieldView: true } satisfies Record<keyof SphereLabConfig
 const CONFIG_URL = '/sphere-lab.config.json';
 const STORAGE_KEY = 'sphereLab.config';
 
-// Missing keys are a hard failure, by design. Every literal default is gone,
-// so there is nothing sensible to substitute -- a silent `undefined` would
+// ── Two different trust levels, two different reactions ─────────────────
+//
+// THE FILE is validated whole, and a failure throws. It is a human-edited
+// artifact under version control, so "this is wrong" is actionable and the
+// only safe response is to refuse to boot: every literal default is gone, so
+// there is nothing sensible to substitute, and a bad value would otherwise
 // travel a long way (into a camera's settings, down the websocket to a phone,
 // into a GPU uniform) before surfacing as something that looks like a
 // reconstruction bug rather than a config one.
-function requireKeys(section: unknown, keys: Record<string, true>, path: string): void {
-  if (typeof section !== 'object' || section === null) throw new Error(`config: ${path} is missing or not an object`);
-  const missing = Object.keys(keys).filter((k) => !(k in (section as Record<string, unknown>)));
-  if (missing.length > 0) throw new Error(`config: ${path} is missing ${missing.length} key(s): ${missing.join(', ')}`);
+//
+// THE localStorage OVERLAY is validated per key, and a failure is dropped with
+// a warning. It is machine-written, possibly by an OLDER build of this page
+// whose schema differed, and it is not something anyone can open and fix --
+// throwing would brick the page with no way back in short of clearing site
+// data by hand. Falling back to the file's value is always available and
+// always valid, because the file was just validated.
+function describe(schema: TSchema, value: unknown, path: string): string {
+  const first = [...Value.Errors(schema, value)][0];
+  const at = first ? `${path}${first.path}` : path;
+  return first ? `${at}: ${first.message} (got ${JSON.stringify(first.value)})` : `${at}: invalid`;
 }
 
 function validate(raw: unknown): SphereLabConfig {
-  if (typeof raw !== 'object' || raw === null) throw new Error('config: root is not an object');
-  const c = raw as SphereLabConfig;
-  requireKeys(c.global, GLOBAL_KEYS, 'global');
-  requireKeys(c.camera?.common, COMMON_KEYS, 'camera.common');
-  requireKeys(c.camera?.simulated, SIM_ONLY_KEYS, 'camera.simulated');
-  requireKeys(c.camera?.physical, PHYSICAL_KEYS, 'camera.physical');
-  requireKeys(c.phone, PHONE_KEYS, 'phone');
-  return c;
+  if (Value.Check(SphereLabConfigSchema, raw)) return raw;
+  // Every error, not just the first: a stale config file after a rename tends
+  // to have one problem per renamed setting, and fixing them one boot at a
+  // time is miserable.
+  const errors = [...Value.Errors(SphereLabConfigSchema, raw)]
+    .map((e) => `  ${e.path || '/'}: ${e.message} (got ${JSON.stringify(e.value)})`);
+  throw new Error(`config: ${CONFIG_URL} is invalid\n${errors.join('\n')}`);
 }
 
-// The localStorage overlay is merged one section at a time, per key. A whole-
-// section replace would mean a config.json that GAINS a setting never reaches
-// any browser that has saved that section before -- the new key would be
-// absent from the stored copy and would clobber the file's value with
-// undefined, which validate() has already run and would not catch.
-function overlay<T extends object>(base: T, saved: unknown): T {
-  if (typeof saved !== 'object' || saved === null) return base;
-  for (const k of Object.keys(base) as (keyof T)[]) {
-    const v = (saved as Record<string, unknown>)[k as string];
-    if (v !== undefined) base[k] = v as T[keyof T];
+// Merged one section at a time, per key. A whole-section replace would mean a
+// config.json that GAINS a setting never reaches any browser that has saved
+// that section before -- the new key would be absent from the stored copy and
+// would clobber the file's freshly validated value with undefined.
+//
+// The per-key schema lookup is also what closes the hole this used to have:
+// validation ran on the file and the overlay was applied AFTER it, so the
+// least trustworthy input in the system was the one input never checked.
+// (It could never add or remove a key -- this loop walks the BASE's keys --
+// so the only thing it could ever have smuggled in was a wrong type, which is
+// exactly what a presence check could not see.)
+function overlay<T extends TObject>(base: Static<T>, saved: unknown, schema: T, path: string): void {
+  if (typeof saved !== 'object' || saved === null) return;
+  const target = base as Record<string, unknown>;
+  for (const k of Object.keys(target)) {
+    const v = (saved as Record<string, unknown>)[k];
+    if (v === undefined) continue;
+    const keySchema = schema.properties[k];
+    if (Value.Check(keySchema, v)) target[k] = v;
+    else console.warn(`config: ignoring saved ${describe(keySchema, v, `${path}.${k}`)} — using ${JSON.stringify(target[k])} from ${CONFIG_URL}`);
   }
-  return base;
 }
 
 async function load(): Promise<SphereLabConfig> {
@@ -169,12 +106,12 @@ async function load(): Promise<SphereLabConfig> {
 
   let saved: Record<string, unknown> = {};
   try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}'); } catch { saved = {}; }
-  overlay(disk.global, saved.global);
   const savedCamera = saved.camera as Record<string, unknown> | undefined;
-  overlay(disk.camera.common, savedCamera?.common);
-  overlay(disk.camera.simulated, savedCamera?.simulated);
-  overlay(disk.camera.physical, savedCamera?.physical);
-  overlay(disk.phone, saved.phone);
+  overlay(disk.global, saved.global, GlobalSettingsSchema, 'global');
+  overlay(disk.camera.common, savedCamera?.common, CameraSettingsCommonSchema, 'camera.common');
+  overlay(disk.camera.simulated, savedCamera?.simulated, SimulatedOnlySettingsSchema, 'camera.simulated');
+  overlay(disk.camera.physical, savedCamera?.physical, PhysicalOverridesSchema, 'camera.physical');
+  overlay(disk.phone, saved.phone, PhoneSettingsSchema, 'phone');
   return disk;
 }
 
@@ -217,16 +154,21 @@ export function persistConfig(): void {
 // in camera/settings.ts are what make that list provably complete.
 function mirrorCameraIntoConfig(settings: CameraSettingsCommon | SimulatedCameraSettings): void {
   const isSim = 'camX' in settings;
-  for (const k of Object.keys(COMMON_KEYS) as (keyof CameraSettingsCommon)[]) {
+  const src = settings as Record<string, unknown>;
+  // Object.keys of the SCHEMA, not of the settings object: a camera carries
+  // exactly these fields today, but reading the schema is what keeps this
+  // honest if one ever picks up a stray property, and it is the same list the
+  // validator uses.
+  for (const k of Object.keys(CameraSettingsCommonSchema.properties)) {
     // fieldView is the one common setting a physical camera keeps separately
-    // (see SphereLabConfig.camera.physical) -- letting a phone's 'raw' land in
-    // the common block would make it the next SIMULATED camera's field view.
+    // (see camera.physical) -- letting a phone's 'raw' land in the common
+    // block would make it the next SIMULATED camera's field view.
     if (k === 'fieldView' && !isSim) continue;
-    (config.camera.common as unknown as Record<string, unknown>)[k] = settings[k];
+    (config.camera.common as unknown as Record<string, unknown>)[k] = src[k];
   }
   if (isSim) {
-    for (const k of Object.keys(SIM_ONLY_KEYS) as (keyof SimulatedOnlySettings)[]) {
-      (config.camera.simulated as unknown as Record<string, unknown>)[k] = settings[k];
+    for (const k of Object.keys(SimulatedOnlySettingsSchema.properties)) {
+      (config.camera.simulated as unknown as Record<string, unknown>)[k] = src[k];
     }
   } else {
     config.camera.physical.fieldView = settings.fieldView;

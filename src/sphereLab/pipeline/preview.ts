@@ -3,7 +3,7 @@ import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
-import { computeGradient2x2Field, fillGrayscalePreview, paintVectorFieldAsColor } from './gradientField.ts';
+import { agreementMagnitudes, computeGradient2x2Field, fillGrayscalePreview, gradientMagnitudes, paintRhoBands, paintVectorFieldAsColor } from './gradientField.ts';
 
 // Shared tail for both capture sources: given a final analysis-resolution
 // grayscale, paints whichever of the direction/scalar field views is
@@ -24,6 +24,18 @@ function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
     // the axial view are genuinely different lines to it.
     paintVectorFieldAsColor(field, camera.distortedPreviewData, settings.fieldView === 'gradient2x2Directed');
     camera.distortedPreviewTex.needsUpdate = true;
+  } else if (settings.fieldView === 'rhoMagnitude' || settings.fieldView === 'rhoAgreement') {
+    // The A/B for "which field should drive LSD". Both painted by the SAME
+    // band function against the SAME live rho sliders, and both on the
+    // absolute scale rho is thresholded against -- so flipping between these
+    // two radios changes exactly one thing (radius 0 vs 1) and any difference
+    // on screen is that aggregation and nothing else.
+    const field = computeGradient2x2Field(gray, w, h);
+    const mag = settings.fieldView === 'rhoAgreement'
+      ? agreementMagnitudes(field, 1, true)
+      : gradientMagnitudes(field);
+    paintRhoBands(mag, settings.lsdRhoNoiseThreshold, settings.lsdRhoHighThreshold, camera.distortedPreviewData);
+    camera.distortedPreviewTex.needsUpdate = true;
   }
 }
 
@@ -42,7 +54,7 @@ function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
 // view that always recomputes the gray anyway). Now that they render over any
 // view, the omissions became reachable -- see updateLsdOverlay's own comment.
 function overlaysNeedGray(settings: Camera['settings']): boolean {
-  return settings.showTrueContamination || settings.showReconstructedContamination
+  return settings.showTrueContamination || settings.showReconstructedContamination || settings.showMagnitudeContamination
     || settings.showTopGradient
     || settings.showLsdSegments || settings.showLsdRejected || settings.showLsdRawRegions
     || settings.showGradientArrow || settings.showLevelLineArrow;

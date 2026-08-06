@@ -47,4 +47,6 @@ export function paintContaminationOverlay(alpha: Float64Array, color: readonly [
 
 export const TRUE_CONTAM_COLOR = [230, 40, 40] as const;
 export const RECON_CONTAM_COLOR = [235, 150, 20] as const;
+// Magnitude-weighted variant -- same reconstructed axes as RECON, different weight.
+export const MAG_CONTAM_COLOR = [40, 200, 235] as const;
 

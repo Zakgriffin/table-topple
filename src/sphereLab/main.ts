@@ -75,7 +75,7 @@ import { floorMesh } from './scene/floor.ts';
 import { viewerCam, worldOrbit, insideCam, insideYaw, insidePitch } from './scene/viewerControls.ts';
 import { renderPreviewViewport, renderProjectedViewport } from './scene/quadRenderers.ts';
 import {
-  resizeThroughCamCanvas, drawThroughCamPreview, drawThroughCamTrueContam, drawThroughCamReconContam,
+  resizeThroughCamCanvas, drawThroughCamPreview, drawThroughCamTrueContam, drawThroughCamReconContam, drawThroughCamMagContam,
   drawThroughCamTopGradient, drawThroughCamLsdRawRegions, drawThroughCamLsdRejected,
 } from './scene/throughCam2D.ts';
 import { getAnalysisVFovRad, ingestRealCapture, ingestRemotePose, markCaptureDirty, resizeCaptureBuffers, renderCamRT } from './pipeline/capture.ts';
@@ -296,6 +296,7 @@ function animate() {
       drawThroughCamPreview(active);
       if (active.settings.showTrueContamination) drawThroughCamTrueContam(active);
       if (active.settings.showReconstructedContamination) drawThroughCamReconContam(active);
+      if (active.settings.showMagnitudeContamination) drawThroughCamMagContam(active);
       if (active.settings.showTopGradient) drawThroughCamTopGradient(active);
       if (active.settings.showLsdRawRegions) drawThroughCamLsdRawRegions(active);
       if (active.settings.showLsdRejected) drawThroughCamLsdRejected(active);

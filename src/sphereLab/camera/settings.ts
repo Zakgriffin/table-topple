@@ -31,7 +31,10 @@ function savedNum(id: string, fallback: number): number {
 export interface CameraSettingsCommon {
   showSphere: boolean; showCircles: boolean; showPoles: boolean; showFrustum: boolean; showPatch: boolean;
   showGizmoBody: boolean; showRecoveredFloor: boolean; recoveredFloorOpacity: number;
-  showTrueContamination: boolean; showReconstructedContamination: boolean; hideField: boolean;
+  showTrueContamination: boolean; showReconstructedContamination: boolean;
+  // Same reconstructed axes as the one above, weighted by raw 2x2 gradient
+  // magnitude instead of the agreement field -- see contaminationOverlays.ts.
+  showMagnitudeContamination: boolean; hideField: boolean;
   showTopGradient: boolean;
   // ── From-scratch traditional LSD pipeline (pipeline/lsdSegments.ts) --
   // the PRODUCTION composite-line source: pipeline/votes.ts's
@@ -181,7 +184,8 @@ export interface PhysicalCameraSettings extends CameraSettingsCommon {
 function createDefaultCommonSettings(): CameraSettingsCommon {
   return {
     showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: savedNum('recoveredFloorOpacity', 0.9),
-    showTrueContamination: false, showReconstructedContamination: false, hideField: false,
+    showTrueContamination: false, showReconstructedContamination: false,
+    showMagnitudeContamination: false, hideField: false,
     showTopGradient: false,
     showLsdSegments: savedBool('toggleLsdSegments', false),
     showLsdRejected: savedBool('toggleLsdRejected', false),

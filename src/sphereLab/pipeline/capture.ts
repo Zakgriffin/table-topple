@@ -76,6 +76,11 @@ export function resizeCaptureBuffers(camera: Camera, explicitSize?: { w: number;
   camera.reconContamTex.dispose();
   camera.reconContamTex.needsUpdate = true;
 
+  camera.magContamData = new Uint8Array(w * h * 4);
+  camera.magContamTex.image = { data: camera.magContamData, width: w, height: h };
+  camera.magContamTex.dispose();
+  camera.magContamTex.needsUpdate = true;
+
   // These overlay buffers (top-gradient, tangent-walk-path, LSD raw-regions/
   // rejected) were missing from this function entirely -- their Uint8Array
   // stayed allocated at whatever size they were created at while

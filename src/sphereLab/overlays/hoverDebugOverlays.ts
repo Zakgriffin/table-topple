@@ -4,7 +4,7 @@ import { hsvToRgb } from '../pipeline/distortion.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
-import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, persistControl, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, persistControl, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleMagContamBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
 import { updateTopGradientOverlay } from './gradientHighlightOverlays.ts';
@@ -226,6 +226,13 @@ toggleReconContamBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showReconstructedContamination = !cam.settings.showReconstructedContamination;
   toggleReconContamBtn.classList.toggle('active', cam.settings.showReconstructedContamination);
+  updateDistortedPreview(cam);
+  updateContaminationOverlays(cam);
+});
+toggleMagContamBtn.addEventListener('click', () => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.showMagnitudeContamination = !cam.settings.showMagnitudeContamination;
+  toggleMagContamBtn.classList.toggle('active', cam.settings.showMagnitudeContamination);
   updateDistortedPreview(cam);
   updateContaminationOverlays(cam);
 });

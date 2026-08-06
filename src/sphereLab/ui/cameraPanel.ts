@@ -19,7 +19,7 @@ import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleMagContamBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -182,6 +182,7 @@ export function refreshCameraPanel() {
   toggleHideFieldBtn.classList.toggle('active', cam.settings.hideField);
   toggleTrueContamBtn.classList.toggle('active', cam.settings.showTrueContamination);
   toggleReconContamBtn.classList.toggle('active', cam.settings.showReconstructedContamination);
+  toggleMagContamBtn.classList.toggle('active', cam.settings.showMagnitudeContamination);
   toggleTrueCardinalOrientationBtn.classList.toggle('active', cam.settings.useTrueCardinalOrientation);
   toggleSampleLatticeBtn.classList.toggle('active', cam.settings.showSampleLattice);
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
@@ -443,8 +444,11 @@ function refreshLsd() {
 // pipeline/votes.ts's computeGradient2x2Composites), so recomputeFromLastCapture
 // is also needed here or camera.lastVoteComposites/lastGridPeriodPhase go stale.
 bindSlider('lsdToleranceDeg', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdToleranceDeg = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => `${v.toFixed(1)}°`);
-bindSlider('lsdRhoNoiseThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
-bindSlider('lsdRhoHighThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoHighThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
+// updateDistortedPreview as well as refreshLsd: the rhoMagnitude/rhoAgreement
+// field views paint their bands FROM these two values, and refreshLsd only
+// redraws the LSD overlay, so without this the bands would lag the slider.
+bindSlider('lsdRhoNoiseThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); updateDistortedPreview(cam); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
+bindSlider('lsdRhoHighThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoHighThreshold = v; refreshLsd(); updateDistortedPreview(cam); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
 // 0 is the REAL algorithm (run growRegionsCCL to its fixpoint), not "off" --
 // labelled "auto" rather than "0" so the slider's own left end doesn't read as
 // a disabled/no-growth state the way the grow-steps slider it replaces did.

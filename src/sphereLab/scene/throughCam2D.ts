@@ -81,6 +81,7 @@ function drawLayer(camera: Camera, data: Uint8Array) {
 export function drawThroughCamPreview(camera: Camera) { drawLayer(camera, camera.distortedPreviewData); }
 export function drawThroughCamTrueContam(camera: Camera) { drawLayer(camera, camera.trueContamData); }
 export function drawThroughCamReconContam(camera: Camera) { drawLayer(camera, camera.reconContamData); }
+export function drawThroughCamMagContam(camera: Camera) { drawLayer(camera, camera.magContamData); }
 export function drawThroughCamTopGradient(camera: Camera) { drawLayer(camera, camera.topGradientData); }
 export function drawThroughCamLsdRawRegions(camera: Camera) { drawLayer(camera, camera.lsdRawRegionsData); }
 export function drawThroughCamLsdRejected(camera: Camera) { drawLayer(camera, camera.lsdRejectedData); }

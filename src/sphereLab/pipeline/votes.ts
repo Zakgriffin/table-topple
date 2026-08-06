@@ -71,10 +71,11 @@ export interface LsdCompositeSettings {
 // It used to run a JOIN WALK between those two steps, merging collinear
 // rectangles into composites; that is retired, see compositesFromLsdRectangles.
 // Deliberately NOT the radius-driven gradient field x local-agreement
-// "effective" field this used to run through (computeGradientField/
-// computeGradientAgreementField/computeEffectiveGradientField, still
-// defined in ./gradientField.ts for computeWorldVotes and other debug
-// views, just not called from here) -- see this session's chat for why.
+// "effective" field this used to run through (computeGradientField /
+// computeGradientAgreementField / computeEffectiveGradientField, all still
+// defined in ./gradientField.ts) -- see this session's chat for why. The
+// agreement half is live for the contamination debug overlays, which is the
+// only caller left; the effective field has none.
 // Pulled out as its own function (and called exactly ONCE per
 // reconstruction pass, see pipeline/axesReconstruction.ts) so every
 // downstream consumer -- vote casting here, row/col family classification

@@ -163,6 +163,7 @@ export interface CameraBase {
   projectedPreviewData: Uint8Array; projectedPreviewTex: THREE.DataTexture;
   trueContamData: Uint8Array; trueContamTex: THREE.DataTexture;
   reconContamData: Uint8Array; reconContamTex: THREE.DataTexture;
+  magContamData: Uint8Array; magContamTex: THREE.DataTexture;
   topGradientData: Uint8Array; topGradientTex: THREE.DataTexture;
   tangentWalkPathData: Uint8Array; tangentWalkPathTex: THREE.DataTexture;
   // Per-pixel raster overlays for pipeline/lsdSegments.ts's own debug views

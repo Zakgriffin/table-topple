@@ -10,6 +10,7 @@ import { renderer } from '../scene/renderer.ts';
 import { globalState } from '../state.ts';
 import { renderCameraTabs, refreshCameraPanel } from '../ui/cameraPanel.ts';
 import { throughCamCanvas } from '../ui/dom.ts';
+import { nowMs } from '../clock.ts';
 
 // Desktop-side cap on the relayed IMU ring, matching mobileCapture.ts's own
 // IMU_RING_CAPACITY -- ~40s at the ~60Hz browsers actually deliver. Both ends
@@ -199,7 +200,7 @@ export function pushPoseSync(cam: PhysicalCamera) {
         pendingRealCaptureMeta.delete(captureId);
         const cam = findOrCreatePhysicalCamera(captureId);
         if (cam && meta) {
-          const now = Date.now();
+          const now = nowMs();
           const blob = new Blob([rest], { type: 'image/jpeg' });
           // Mailbox, not a queue -- see the (former) realCapture JSON
           // handler's own comment on why: always overwrite with the
@@ -243,12 +244,12 @@ export function pushPoseSync(cam: PhysicalCamera) {
         // -- just holds the timing fields until the binary frame carrying
         // this same captureId arrives right behind it, which is what
         // actually builds cam.pendingCapture. msg.sentAt/pulledAt/encodedAt
-        // (Date.now() on the phone, see mobileCapture.ts) fall back to
+        // (nowMs() on the phone, see sphereLab/clock.ts) fall back to
         // "now" for an old/unpatched phone client so the derived durations
         // degrade to ~0 instead of NaN.
         if (msg.captureId) {
           findOrCreatePhysicalCamera(msg.captureId); // auto-create the tab even if the binary frame never arrives
-          const now = Date.now();
+          const now = nowMs();
           // drawnAt/frameMeta stay UNDEFINED rather than falling back to
           // `now` the way the three above do. The fallbacks exist so derived
           // DURATIONS degrade to ~0 instead of NaN; but a capture timestamp

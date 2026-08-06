@@ -8,6 +8,29 @@ import basicSsl from '@vitejs/plugin-basic-ssl';
 export default defineConfig({
   plugins: [basicSsl()],
   server: {
+    // CROSS-ORIGIN ISOLATION, and it is here for the CLOCK. Chrome coarsens
+    // performance.now() to 100us by default and to 5us when the context is
+    // cross-origin isolated -- a 20x sharper clock for every number the perf
+    // harnesses report. It is not a micro-optimization of the measurement: at
+    // 100us, pipelineGPU/device.ts's allocation probe sums 78 sub-resolution
+    // deltas and rounds every one of them to zero, which is how it reported
+    // 0.60ms one session and 0.00ms the next for identical work.
+    //
+    // A header rather than a Chrome flag on purpose. Flags live in one
+    // developer's browser, drift silently (chrome://flags' "Enable
+    // benchmarking" auto-resets after 3 restarts while still appearing on),
+    // and cannot be reviewed. This applies to every machine and every session
+    // and is visible in the diff.
+    //
+    // require-corp blocks cross-origin subresources that do not opt in.
+    // Nothing here loads any -- three.js and everything else is bundled by
+    // vite, and the dev-bridge WebSocket rides the same-origin proxy below
+    // (WebSockets are not subject to COEP regardless). If that ever changes
+    // the failure is loud, and the fix is deleting these two lines.
+    headers: {
+      'Cross-Origin-Opener-Policy': 'same-origin',
+      'Cross-Origin-Embedder-Policy': 'require-corp',
+    },
     proxy: {
       // Proxies the dev-bridge relay's websocket through this same HTTPS
       // origin -- mobile-capture.html is loaded over https (required for

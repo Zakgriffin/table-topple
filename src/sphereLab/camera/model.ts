@@ -292,8 +292,10 @@ export interface PhysicalCamera extends CameraBase {
   // always overwritten with the newest arrived frame, never queued, so a
   // desktop that falls behind naturally drops stale frames instead of
   // working through a backlog. sentAt/pulledAt/encodedAt/receivedAt are all
-  // Date.now() (wall-clock, cross-device -- NOT performance.now(), which
-  // has an unrelated per-process epoch on the phone vs the desktop) so
+  // nowMs() (sphereLab/clock.ts) -- epoch ms, so they stay comparable across
+  // the phone and the desktop the way bare performance.now() could not, but
+  // also sub-millisecond and monotonic, which Date.now() was not. These four
+  // were the last Date.now() holdouts and are what that module unified. So
   // ingestRealCapture can split "pull the video frame onto a canvas" from
   // "JPEG encode" from "actual network transit" on pop, instead of lumping
   // them into one number and guessing which one dominated a given slow

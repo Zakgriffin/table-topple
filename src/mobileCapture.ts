@@ -44,6 +44,7 @@ import {
   type RotationPair,
 } from './sphereLab/imu/imuFrames.ts';
 import { packPoseResultWithImage } from './sphereLab/devBridge/poseResultWire.ts';
+import { nowMs } from './sphereLab/clock.ts';
 
 const video = document.getElementById('v') as HTMLVideoElement;
 const captureCanvas = document.getElementById('captureCanvas') as HTMLCanvasElement;
@@ -811,21 +812,17 @@ let nominalFrameRate: number | null = null;
 let lastMediaTime: number | null = null;
 let frameIntervalsMs: number[] = [];
 
-// ── The frame clock, for IMU fusion ──────────────────────────────────────
-//
-// EVERY new timestamp in this file (IMU samples, frame capture times) is
-// stamped with this, NOT Date.now(). Both are epoch milliseconds so they stay
-// directly comparable to the existing sentAt/pulledAt/encodedAt fields, but
-// this one is (a) sub-millisecond and (b) MONOTONIC -- it can't jump if the
-// OS adjusts the wall clock mid-session. Integrating an accelerometer across
-// a clock step would inject a fictitious velocity that never decays, so
-// monotonicity is not a nicety here.
-function nowMs(): number { return performance.timeOrigin + performance.now(); }
+// The frame clock, and now everything else's clock too -- see sphereLab/clock.ts.
+// This used to be defined here, with a header explaining that every NEW
+// timestamp in this file used it rather than Date.now() while the older
+// sentAt/pulledAt/encodedAt stamps kept Date.now(). That split is gone: those
+// three now use this as well, so the file has one clock rather than a rule about
+// which to reach for.
 
 // The most recent decoded video frame's own timing, republished by the rVFC
 // callback below and attached to whatever realCapture goes out next.
 //
-// WHY THIS EXISTS: captureAndSendFrame stamps `sentAt = Date.now()` at DRAW
+// WHY THIS EXISTS: captureAndSendFrame stamps `sentAt` at DRAW
 // time, which is not when the photons landed -- between them sit the sensor's
 // exposure, the camera stack's processing, and however long the frame sat in
 // the video element before the send gate let a capture through. Feeding a
@@ -1883,14 +1880,14 @@ function captureAndSendFrame() {
   if (!currentStream || video.videoWidth === 0 || video.videoHeight === 0 || sendEncodeInFlight) return;
   // Stamped here, before anything below -- the earliest point once the
   // send gate has already let this call through.
-  const sentAt = Date.now();
+  const sentAt = nowMs();
   // Full-resolution draw happens HERE, on demand -- unlike the visible
   // captureCanvas (kept cheap/screen-capped by videoLoop's continuous
   // redraw), sendCanvas only gets drawn into when an actual capture is
   // happening, so paying the full-native-resolution drawImage cost here is
   // fine: it runs at most once per send, not every rAF tick.
   drawFullResFrameToSendCanvas();
-  const pulledAt = Date.now();
+  const pulledAt = nowMs();
   // High-resolution monotonic twin of pulledAt (see nowMs) -- pulledAt stays
   // as-is so the existing latency readouts keep the exact number they've
   // always had.
@@ -1911,12 +1908,12 @@ function captureAndSendFrame() {
     // split "JPEG encode, phone-side CPU" from "actual network transit"
     // instead of lumping both into one number and guessing which one a
     // given slow sample was.
-    const encodedAt = Date.now();
+    const encodedAt = nowMs();
     if (!ws || ws.readyState !== WebSocket.OPEN) { setRelayStatus('not connected -- capture NOT sent', true); return; }
     // Metadata first, image bytes second -- devBridge/client.ts pairs a
     // realCapture JSON message with whichever binary frame arrives next
     // for that same captureId, so send order here matters.
-    // frameMeta rides along beside the three existing Date.now() stamps
+    // frameMeta rides along beside the three existing sentAt/pulledAt/encodedAt stamps
     // rather than replacing them -- those feed the latency readouts already
     // in place, and the project's own measurement notes are emphatic about
     // not invalidating a working instrument to add a new one. This is the

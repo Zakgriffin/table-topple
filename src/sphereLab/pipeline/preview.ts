@@ -3,7 +3,7 @@ import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
-import { computeGradient2x2Field, computeTriangleFold, fillGrayscalePreview, paintVectorFieldAsColor } from './gradientField.ts';
+import { computeGradient2x2Field, fillGrayscalePreview, paintVectorFieldAsColor } from './gradientField.ts';
 
 // Shared tail for both capture sources: given a final analysis-resolution
 // grayscale, paints whichever of the direction/scalar field views is
@@ -12,11 +12,7 @@ import { computeGradient2x2Field, computeTriangleFold, fillGrayscalePreview, pai
 function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const settings = camera.settings;
-  if (settings.fieldView === 'triangleFold') {
-    const folded = computeTriangleFold(gray);
-    fillGrayscalePreview(folded, camera.distortedPreviewData);
-    camera.distortedPreviewTex.needsUpdate = true;
-  } else if (settings.fieldView === 'gradient2x2' || settings.fieldView === 'gradient2x2Directed') {
+  if (settings.fieldView === 'gradient2x2' || settings.fieldView === 'gradient2x2Directed') {
     const field = computeGradient2x2Field(gray, w, h);
     // Axial vs directed hue is purely a PAINTING choice -- same field either
     // way. 'gradient2x2' folds theta into [0, PI) so a black-to-white edge

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 
 export type Mode = 'world' | 'through' | 'inside' | 'projected';
-export type FieldView = 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'triangleFold' | 'gradient2x2' | 'gradient2x2Directed';
+export type FieldView = 'raw' | 'antialiased' | 'downsampled' | 'noised' | 'gradient2x2' | 'gradient2x2Directed';
 
 // ── Shared result/field types (referenced by the Camera interfaces below) ─
 

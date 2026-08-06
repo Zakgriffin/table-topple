@@ -19,7 +19,7 @@ import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -121,7 +121,7 @@ export function refreshCameraPanel() {
   setSectionHidden(physCameraDetailFields, isSimulated(cam));
   setSectionHidden(simDistortionSection, !isSimulated(cam));
   setSectionHidden(simOnlyFieldViews, !isSimulated(cam));
-  fieldViewRawLabel.textContent = isSimulated(cam) ? 'raw (no blur, no noise)' : 'capture';
+  fieldViewRawLabel.textContent = isSimulated(cam) ? 'raw' : 'capture';
 
   const setNum = (id: string, v: number) => {
     const el = document.getElementById(id) as HTMLInputElement | null;
@@ -151,7 +151,6 @@ export function refreshCameraPanel() {
   setBool('showPoles', cam.settings.showPoles); setBool('showFrustum', cam.settings.showFrustum);
   setBool('showPatch', cam.settings.showPatch); setBool('showGizmoBody', cam.settings.showGizmoBody);
   setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setNum('recoveredFloorOpacity', cam.settings.recoveredFloorOpacity);
-  setBool('showSampleLattice', cam.settings.showSampleLattice);
   setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
   setNum('gridPeriodPhaseGapLowerBound', cam.settings.gridPeriodPhaseGapLowerBound);
 
@@ -184,6 +183,7 @@ export function refreshCameraPanel() {
   toggleTrueContamBtn.classList.toggle('active', cam.settings.showTrueContamination);
   toggleReconContamBtn.classList.toggle('active', cam.settings.showReconstructedContamination);
   toggleTrueCardinalOrientationBtn.classList.toggle('active', cam.settings.useTrueCardinalOrientation);
+  toggleSampleLatticeBtn.classList.toggle('active', cam.settings.showSampleLattice);
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
   toggleLevelLineArrowBtn.classList.toggle('active', cam.settings.showLevelLineArrow);
   toggleTopGradientBtn.classList.toggle('active', cam.settings.showTopGradient);
@@ -398,7 +398,6 @@ gpuVotesStatus.textContent = isWebGPUSupported()
 bindCheckbox('showGizmoBody', (v) => { const cam = activeCamera(); if (cam) cam.settings.showGizmoBody = v; });
 bindCheckbox('showRecoveredFloor', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredFloor = v; });
 bindSlider('recoveredFloorOpacity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.recoveredFloorOpacity = v; cam.recoveredFloorOverlayMat.opacity = v; } }, (v) => v.toFixed(2));
-bindCheckbox('showSampleLattice', (v) => { const cam = activeCamera(); if (cam) cam.settings.showSampleLattice = v; });
 bindSlider('gridPeriodPhaseBinCount', (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.gridPeriodPhaseBinCount = v;

@@ -238,7 +238,9 @@ function createDefaultCommonSettings(): CameraSettingsCommon {
     // this field's name -- same persistence convention every other button-
     // driven boolean here uses (e.g. showLsdSegments/toggleLsdSegments).
     showCompositeLineFamilies: savedBool('toggleCompositeLineFamilies', false),
-    showSampleLattice: savedBool('showSampleLattice', true),
+    // Same button-id convention as the two above -- it moved from a left-panel
+    // checkbox to the Projected-view overlay group, so its key moved with it.
+    showSampleLattice: savedBool('toggleSampleLattice', true),
     useTrueCardinalOrientation: false,
     fieldView: 'noised',
     axesAutoCapture: false, axesCaptureIntervalMs: 500,

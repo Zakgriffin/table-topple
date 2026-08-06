@@ -45,6 +45,7 @@ export const toggleLevelLineArrowBtn = document.getElementById('toggleLevelLineA
 export const arrowToggles = document.getElementById('arrowToggles') as HTMLDivElement;
 export const projectedToggles = document.getElementById('projectedToggles') as HTMLDivElement;
 export const toggleTrueCardinalOrientationBtn = document.getElementById('toggleTrueCardinalOrientation') as HTMLButtonElement;
+export const toggleSampleLatticeBtn = document.getElementById('toggleSampleLattice') as HTMLButtonElement;
 export const simDistortionSection = document.getElementById('simDistortionSection') as HTMLDivElement;
 
 export const modeBtns: Record<Mode, HTMLButtonElement> = {

@@ -258,6 +258,7 @@
   <div id="projectedToggles" class="section">
     <h2>Projected view</h2>
     <button id="toggleTrueCardinalOrientation">use true cardinal orientation</button>
+    <button id="toggleSampleLattice">sample lattice (from grid period/phase)</button>
   </div>
 </div>
 <div id="insideHint">drag to look around &middot; scroll to zoom &middot; you are standing at the camera's optical center</div>
@@ -334,29 +335,27 @@
 
   <div class="section">
     <h2>field view</h2>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewRaw" value="raw"> <span id="fieldViewRawLabel">raw (no blur, no noise)</span></label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewTriangleFold" value="triangleFold"> triangle-folded brightness (keeps low half exactly, folds top half back down to 0)</label>
+    <label class="chk"><input type="radio" name="fieldView" id="fieldViewRaw" value="raw"> <span id="fieldViewRawLabel">raw</span></label>
     <div id="simOnlyFieldViews">
-      <label class="chk"><input type="radio" name="fieldView" id="fieldViewAntialiased" value="antialiased"> antialiased (sensor AA filter, no lens blur yet)</label>
-      <label class="chk"><input type="radio" name="fieldView" id="fieldViewDownsampled" value="downsampled"> downsampled (+lens blur, no noise yet)</label>
-      <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised" checked> noised (final image the algorithm sees)</label>
+      <label class="chk"><input type="radio" name="fieldView" id="fieldViewAntialiased" value="antialiased"> antialiased</label>
+      <label class="chk"><input type="radio" name="fieldView" id="fieldViewDownsampled" value="downsampled"> downsampled</label>
+      <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised" checked> noised</label>
     </div>
     <div class="fieldViewDivider">&darr; 2D filter pipeline starts here &darr;</div>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewGradient2x2" value="gradient2x2"> gradient field (2x2 window, hue=direction mod 180&deg;, sat=magnitude)</label>
-    <label class="chk"><input type="radio" name="fieldView" id="fieldViewGradient2x2Directed" value="gradient2x2Directed"> gradient field, DIRECTED (hue=full 360&deg; direction -- opposing edges get opposite hues, matching what LSD growing actually sees)</label>
+    <label class="chk" title="hue = full 360&deg; direction, so opposing edges get opposite hues -- what LSD region growing actually sees"><input type="radio" name="fieldView" id="fieldViewGradient2x2Directed" value="gradient2x2Directed"> gradient field (directed)</label>
+    <label class="chk" title="hue = direction mod 180&deg;, saturation = magnitude"><input type="radio" name="fieldView" id="fieldViewGradient2x2" value="gradient2x2"> gradient field (undirected)</label>
   </div>
 
   <div class="section">
-    <h2>sphere overlays</h2>
+    <h2>camera overlays</h2>
+    <label class="chk"><input type="checkbox" id="showGizmoBody" checked> camera box</label>
+    <label class="chk"><input type="checkbox" id="showFrustum" checked> frustum outline</label>
+    <label class="chk"><input type="checkbox" id="showPatch" checked> live viewport image patch</label>
     <label class="chk"><input type="checkbox" id="showSphere" checked> sphere shell</label>
     <label class="chk"><input type="checkbox" id="showCircles"> grid-line great circles</label>
     <label class="chk"><input type="checkbox" id="showPoles" checked> vanishing-point poles</label>
-    <label class="chk"><input type="checkbox" id="showFrustum" checked> frustum outline</label>
-    <label class="chk"><input type="checkbox" id="showPatch" checked> live viewport image patch</label>
-    <label class="chk"><input type="checkbox" id="showGizmoBody" checked> camera box</label>
     <label class="chk"><input type="checkbox" id="showRecoveredFloor" checked> recovered floor overlay (decoded position)</label>
     <div class="row"><span class="label">recovered floor opacity</span><input type="range" id="recoveredFloorOpacity" min="0" max="1" step="0.01" value="0.9"><span class="val" id="recoveredFloorOpacityVal"></span></div>
-    <label class="chk"><input type="checkbox" id="showSampleLattice" checked> sample lattice (from grid period/phase, projected cam)</label>
   </div>
 
   <div class="section">

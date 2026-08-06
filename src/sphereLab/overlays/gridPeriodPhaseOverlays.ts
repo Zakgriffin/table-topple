@@ -1,11 +1,12 @@
 import { Camera } from '../camera/model.ts';
+import { persistConfig } from '../config.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { getAnalysisVFovRad } from '../pipeline/capture.ts';
 import { projectedUVScale } from '../pipeline/decodeGrid.ts';
 import { circularFit, computePooledGaps, GnomonicPoint, GridPeriodPhaseResult, makeCellCentreDistinctness, PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
 import { DecodeCellDebug } from '../types.ts';
-import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx, persistControl, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleProductCurveBtn, toggleValueHistogramBtn } from '../ui/dom.ts';
+import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleProductCurveBtn, toggleValueHistogramBtn } from '../ui/dom.ts';
 import { svgEl, svgText } from './svgUtil.ts';
 
 // ── Grid period/phase debug visualizations (pipeline/gridPeriodPhase.ts) ──
@@ -284,25 +285,26 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
 
 // The two histogram toggles. Registered here rather than in ui/cameraPanel.ts
 // because they affect NOTHING but this plot -- no recompute, no capture, no
-// other overlay -- so a plain redraw is the entire reaction. Persistence key
-// matches the BUTTON's own id, the same convention every other button-driven
-// boolean in camera/settings.ts uses.
-function bindHistogramToggle(btn: HTMLButtonElement, id: string, get: (c: Camera) => boolean, set: (c: Camera, v: boolean) => void) {
+// other overlay -- so a plain redraw is the entire reaction. These used to
+// carry a persistence id of their own (the button's element id); persistence
+// is a property of the SETTING now, so mirroring the camera into the config is
+// all any of them has to do.
+function bindHistogramToggle(btn: HTMLButtonElement, get: (c: Camera) => boolean, set: (c: Camera, v: boolean) => void) {
   btn.addEventListener('click', () => {
     const cam = activeCamera(); if (!cam) return;
     set(cam, !get(cam));
     btn.classList.toggle('active', get(cam));
-    persistControl(id, get(cam) ? '1' : '0');
+    persistConfig();
     drawGridPeriodPhasePlot(cam);
   });
 }
-bindHistogramToggle(toggleGapHistogramBtn, 'toggleGapHistogram',
+bindHistogramToggle(toggleGapHistogramBtn,
   (c) => c.settings.showGapHistogram, (c, v) => { c.settings.showGapHistogram = v; });
-bindHistogramToggle(toggleValueHistogramBtn, 'toggleValueHistogram',
+bindHistogramToggle(toggleValueHistogramBtn,
   (c) => c.settings.showValueHistogram, (c, v) => { c.settings.showValueHistogram = v; });
-bindHistogramToggle(toggleDistinctnessCurveBtn, 'toggleDistinctnessCurve',
+bindHistogramToggle(toggleDistinctnessCurveBtn,
   (c) => c.settings.showDistinctnessCurve, (c, v) => { c.settings.showDistinctnessCurve = v; });
-bindHistogramToggle(toggleProductCurveBtn, 'toggleProductCurve',
+bindHistogramToggle(toggleProductCurveBtn,
   (c) => c.settings.showProductCurve, (c, v) => { c.settings.showProductCurve = v; });
 
 // ── Interactive pan/zoom -- wheel to zoom (centered on the cursor), drag to

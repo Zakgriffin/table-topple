@@ -3,15 +3,16 @@ import { clearArrowOverlays } from '../overlays/hoverDebugOverlays.ts';
 import { hideGridPeriodPhaseProjected } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { refreshModeVisualizations } from '../pipeline/modeRefresh.ts';
 import { worldOrbit } from '../scene/viewerControls.ts';
+import { persistConfig } from '../config.ts';
 import { globalState } from '../state.ts';
 import { Mode } from '../types.ts';
-import { arrowToggles, clearLsdSvgOverlay, contamToggles, insideHint, modeBtns, overlayPanel, overlayPanelToggle, panel, panelToggle, persistControl, pipFrame, pipLabel, projectedToggles, savedControls, setSectionHidden, throughCamCanvas } from './dom.ts';
+import { arrowToggles, clearLsdSvgOverlay, contamToggles, insideHint, modeBtns, overlayPanel, overlayPanelToggle, panel, panelToggle, pipFrame, pipLabel, projectedToggles, setSectionHidden, throughCamCanvas } from './dom.ts';
 
 // ── Mode switching ───────────────────────────────────────────────────────
 
 export function setMode(m: Mode) {
   globalState.mode = m;
-  persistControl('mode', m);
+  persistConfig();
   for (const k of Object.keys(modeBtns) as Mode[]) modeBtns[k].classList.toggle('active', k === m);
   worldOrbit.enabled = m === 'world';
   insideHint.style.display = m === 'inside' ? 'block' : 'none';
@@ -46,16 +47,18 @@ export function setPanelCollapsed(collapsed: boolean) {
   panel.classList.toggle('collapsed', collapsed);
   panelToggle.classList.toggle('collapsed', collapsed);
   panelToggle.textContent = collapsed ? '›' : '‹';
-  persistControl('panelCollapsed', collapsed ? '1' : '0');
+  globalState.panelCollapsed = collapsed;
+  persistConfig();
 }
 panelToggle.addEventListener('click', () => setPanelCollapsed(!panel.classList.contains('collapsed')));
-setPanelCollapsed(savedControls['panelCollapsed'] === '1');
+setPanelCollapsed(globalState.panelCollapsed);
 
 function setOverlayPanelCollapsed(collapsed: boolean) {
   overlayPanel.classList.toggle('collapsed', collapsed);
   overlayPanelToggle.classList.toggle('collapsed', collapsed);
   overlayPanelToggle.textContent = collapsed ? '‹' : '›';
-  persistControl('overlayPanelCollapsed', collapsed ? '1' : '0');
+  globalState.overlayPanelCollapsed = collapsed;
+  persistConfig();
 }
 overlayPanelToggle.addEventListener('click', () => setOverlayPanelCollapsed(!overlayPanel.classList.contains('collapsed')));
-setOverlayPanelCollapsed(savedControls['overlayPanelCollapsed'] === '1');
+setOverlayPanelCollapsed(globalState.overlayPanelCollapsed);

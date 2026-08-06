@@ -4,8 +4,9 @@ import { hsvToRgb } from '../pipeline/distortion.ts';
 import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
-import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, persistControl, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { computeThroughRect } from '../ui/layout.ts';
+import { persistConfig } from '../config.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
 import { updateTopGradientOverlay } from './gradientHighlightOverlays.ts';
 import { hashSeedIndexToHueDeg, repaintLsdRawRegionsHighlight, updateLsdOverlay } from './lsdOverlay.ts';
@@ -245,35 +246,35 @@ toggleLsdSegmentsBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showLsdSegments = !cam.settings.showLsdSegments;
   toggleLsdSegmentsBtn.classList.toggle('active', cam.settings.showLsdSegments);
-  persistControl('toggleLsdSegments', cam.settings.showLsdSegments ? '1' : '0');
+  persistConfig();
   updateLsdOverlay(cam);
 });
 toggleLsdRejectedBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showLsdRejected = !cam.settings.showLsdRejected;
   toggleLsdRejectedBtn.classList.toggle('active', cam.settings.showLsdRejected);
-  persistControl('toggleLsdRejected', cam.settings.showLsdRejected ? '1' : '0');
+  persistConfig();
   updateLsdOverlay(cam); // may be the first of the 3 toggles turned on
 });
 toggleLsdRawRegionsBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showLsdRawRegions = !cam.settings.showLsdRawRegions;
   toggleLsdRawRegionsBtn.classList.toggle('active', cam.settings.showLsdRawRegions);
-  persistControl('toggleLsdRawRegions', cam.settings.showLsdRawRegions ? '1' : '0');
+  persistConfig();
   updateLsdOverlay(cam);
 });
 toggleLsdCompositeBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showLsdComposite = !cam.settings.showLsdComposite;
   toggleLsdCompositeBtn.classList.toggle('active', cam.settings.showLsdComposite);
-  persistControl('toggleLsdComposite', cam.settings.showLsdComposite ? '1' : '0');
+  persistConfig();
   drawCompositeLines(cam);
 });
 toggleCompositeLineFamiliesBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showCompositeLineFamilies = !cam.settings.showCompositeLineFamilies;
   toggleCompositeLineFamiliesBtn.classList.toggle('active', cam.settings.showCompositeLineFamilies);
-  persistControl('toggleCompositeLineFamilies', cam.settings.showCompositeLineFamilies ? '1' : '0');
+  persistConfig();
   drawCompositeLines(cam); // recolors the SAME lines, doesn't recompute them
 });
 toggleGradientArrowBtn.addEventListener('click', () => {
@@ -304,7 +305,7 @@ toggleSampleLatticeBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showSampleLattice = !cam.settings.showSampleLattice;
   toggleSampleLatticeBtn.classList.toggle('active', cam.settings.showSampleLattice);
-  persistControl('toggleSampleLattice', cam.settings.showSampleLattice ? '1' : '0');
+  persistConfig();
 });
 
 

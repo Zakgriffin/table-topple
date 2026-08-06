@@ -1,6 +1,9 @@
+import { persistConfig } from '../config.ts';
 import { Mode } from '../types.ts';
 
 export const canvas = document.getElementById('gl') as HTMLCanvasElement;
+export const saveConfigBtn = document.getElementById('saveConfigBtn') as HTMLButtonElement;
+export const saveConfigStatus = document.getElementById('saveConfigStatus') as HTMLDivElement;
 export const throughCamCanvas = document.getElementById('throughCamCanvas') as HTMLCanvasElement;
 export const throughCamCtx = throughCamCanvas.getContext('2d')!;
 export const panel = document.getElementById('panel') as HTMLDivElement;
@@ -55,47 +58,55 @@ export const modeBtns: Record<Mode, HTMLButtonElement> = {
   projected: document.getElementById('modeProjected') as HTMLButtonElement,
 };
 
-// Persist every slider/checkbox under one localStorage key so a dev-server
-// restart or a revisit doesn't reset the scene back to defaults.
-const STORAGE_KEY = 'sphereLab.controls';
-export let savedControls: Record<string, string> = {};
-try { savedControls = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}'); } catch { savedControls = {}; }
-export function persistControl(id: string, value: string) {
-  savedControls[id] = value;
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(savedControls));
-}
+// ── Control binding ──────────────────────────────────────────────────────
+//
+// Every binder takes its INITIAL VALUE as an argument rather than reading one
+// from the DOM. The controls in sphere-lab.html carry no `value=`/`checked`
+// attribute anymore -- config.ts owns every default -- so `input.value` on a
+// range with no attribute is not "the default", it is the HTML spec's
+// midpoint of min and max, which is nobody's intended setting.
+//
+// Passing it at the call site rather than looking it up by element id is also
+// what let the id -> setting mapping stop being a guess. It never held: the
+// LSD overlay booleans persisted under their BUTTON's id (`toggleLsdSegments`)
+// while the setting was `showLsdSegments`, `camFov`/`realCaptureFovDeg` are two
+// controls for one `horizFovDeg`, and `camYaw` is `camYawDeg`. Now the binding
+// names the field it drives, right next to the callback that writes it.
+//
+// Persistence is no longer per-control either. Each change writes the WHOLE
+// config object (see config.ts's persistConfig), because a control's value is
+// only ever a view onto a field in it.
 
-export function bindSlider(id: string, onChange: (v: number) => void, fmt: (v: number) => string = (v) => v.toFixed(1)) {
+export function bindSlider(id: string, initial: number, onChange: (v: number) => void, fmt: (v: number) => string = (v) => v.toFixed(1)) {
   const input = document.getElementById(id) as HTMLInputElement;
   const val = document.getElementById(id + 'Val') as HTMLSpanElement;
-  if (savedControls[id] !== undefined) input.value = savedControls[id];
-  const apply = () => { const v = parseFloat(input.value); val.textContent = fmt(v); onChange(v); persistControl(id, input.value); };
+  input.value = String(initial);
+  const apply = () => { const v = parseFloat(input.value); val.textContent = fmt(v); onChange(v); persistConfig(); };
   input.addEventListener('input', apply);
   apply();
 }
 
-export function bindCheckbox(id: string, onChange: (v: boolean) => void) {
+export function bindCheckbox(id: string, initial: boolean, onChange: (v: boolean) => void) {
   const input = document.getElementById(id) as HTMLInputElement;
-  if (savedControls[id] !== undefined) input.checked = savedControls[id] === '1';
-  const apply = () => { onChange(input.checked); persistControl(id, input.checked ? '1' : '0'); };
+  input.checked = initial;
+  const apply = () => { onChange(input.checked); persistConfig(); };
   input.addEventListener('change', apply);
   apply();
 }
 
-export function bindRadioGroup(name: string, onChange: (v: string) => void) {
+export function bindRadioGroup(name: string, initial: string, onChange: (v: string) => void) {
   const inputs = Array.from(document.getElementsByName(name)) as HTMLInputElement[];
-  // Only honor a saved value if it still matches one of the CURRENT options --
-  // otherwise a renamed/removed option value (e.g. an old 'normal' after this
-  // group's options changed) would leave every input unchecked instead of
-  // falling back to the HTML's own default `checked` attribute.
-  if (savedControls[name] !== undefined && inputs.some((inp) => inp.value === savedControls[name])) {
-    for (const inp of inputs) inp.checked = inp.value === savedControls[name];
-  }
+  // A stored value that no longer matches any option (a renamed or deleted
+  // field view, say) would leave every radio unchecked -- and there is no
+  // `checked` attribute in the HTML to fall back to anymore -- so fall back to
+  // the first option, which is at least a real one.
+  const chosen = inputs.some((inp) => inp.value === initial) ? initial : inputs[0]?.value;
+  for (const inp of inputs) inp.checked = inp.value === chosen;
   const apply = () => {
     const checked = inputs.find((inp) => inp.checked);
     if (!checked) return;
     onChange(checked.value);
-    persistControl(name, checked.value);
+    persistConfig();
   };
   for (const inp of inputs) inp.addEventListener('change', apply);
   apply();

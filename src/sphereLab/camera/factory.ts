@@ -3,7 +3,8 @@ import { CIRCLE_SEGMENTS, DEBUG_LAYER, PATCH_RES, SPHERE_RADIUS } from '../const
 import { colLineKs, rowLineKs } from '../math/geometry.ts';
 import { scene } from '../scene/renderer.ts';
 import { Camera, CameraBase, PhysicalCamera, SimulatedCamera } from './model.ts';
-import { CameraSettingsCommon, createDefaultPhysicalSettings, createDefaultSimulatedSettings } from './settings.ts';
+import { CameraSettingsCommon } from './settings.ts';
+import { createDefaultPhysicalSettings, createDefaultSimulatedSettings } from '../config.ts';
 import { bumpCameraSerial, cameras, isSimulated, nextCameraSerial } from './store.ts';
 
 // ── Camera factories ─────────────────────────────────────────────────────

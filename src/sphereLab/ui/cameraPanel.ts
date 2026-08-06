@@ -3,6 +3,7 @@ import { PhysicalCamera } from '../camera/model.ts';
 import { activeCamera, activeCameraId, cameras, isPhysical, isSimulated, setActiveCameraId } from '../camera/store.ts';
 import { pushSettingsSync, sendToDevBridge } from '../devBridge/client.ts';
 import { rebuildGridLineKs } from '../math/geometry.ts';
+import { config, configAsJson, registerActiveCameraSettingsSource } from '../config.ts';
 import { updateContaminationAvailability } from '../overlays/contaminationOverlays.ts';
 import { updateTopGradientAvailability } from '../overlays/gradientHighlightOverlays.ts';
 import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, updateHoverOverlays } from '../overlays/hoverDebugOverlays.ts';
@@ -19,8 +20,25 @@ import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, saveConfigBtn, saveConfigStatus, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
+
+// Tells config.ts which camera's settings persistConfig should capture before
+// it writes -- see registerActiveCameraSettingsSource for why it is pushed down
+// rather than imported. Registered before the bindings below, since each of
+// those applies once at bind time and persists as it goes.
+registerActiveCameraSettingsSource(() => activeCamera()?.settings ?? null);
+
+// Promotes the live config (disk defaults + this browser's localStorage
+// overlay) back onto sphere-lab.config.json, through the dev bridge -- a
+// browser page cannot write to the project directory itself. Deliberately
+// explicit rather than a write-through on every slider: the file is the
+// reviewable default, and a config that churned on every drag would be
+// impossible to read a diff of.
+saveConfigBtn.addEventListener('click', () => {
+  saveConfigStatus.textContent = 'saving…';
+  sendToDevBridge({ type: 'saveConfig', json: configAsJson() });
+});
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
 // called after anything that adds/removes/renames a camera or changes which
@@ -234,7 +252,7 @@ function pushSettingsIfPhysical() {
 // self-throttles on camera.axesCapturing, so a fast drag drops overlapping
 // calls rather than queueing them -- the same reason no other slider needs a
 // timer.
-bindSlider('realCaptureFovDeg', (v) => {
+bindSlider('realCaptureFovDeg', config.camera.common.horizFovDeg, (v) => {
   const cam = activeCamera();
   if (!cam || !isPhysical(cam)) return;
   cam.settings.horizFovDeg = v;
@@ -248,18 +266,18 @@ bindSlider('realCaptureFovDeg', (v) => {
 // recompute -- it self-throttles via camera.axesCapturing, so a fast drag
 // just drops overlapping calls rather than queueing them, same as an
 // overlapping "capture now" click.
-bindSlider('camX', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camX = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
-bindSlider('camY', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camY = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
-bindSlider('camZ', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camZ = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
-bindSlider('camYaw', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camYawDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
-bindSlider('camPitch', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camPitchDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
-bindSlider('camFov', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.horizFovDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
+bindSlider('camX', config.camera.simulated.camX, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camX = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
+bindSlider('camY', config.camera.simulated.camY, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camY = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
+bindSlider('camZ', config.camera.simulated.camZ, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camZ = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
+bindSlider('camYaw', config.camera.simulated.camYawDeg, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camYawDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
+bindSlider('camPitch', config.camera.simulated.camPitchDeg, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camPitchDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
+bindSlider('camFov', config.camera.common.horizFovDeg, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.horizFovDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
 
 export let syncingViewportAspect = false;
 function clampViewport(v: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, Math.round(v)));
 }
-bindSlider('viewportW', (v) => {
+bindSlider('viewportW', config.camera.common.viewportW, (v) => {
   const cam = activeCamera(); if (!cam) return;
   const oldAspect = cam.settings.viewportW / cam.settings.viewportH;
   cam.settings.viewportW = v;
@@ -273,7 +291,7 @@ bindSlider('viewportW', (v) => {
   resizeCaptureBuffers(cam);
   runAxesReconstruction(cam);
 }, (v) => v.toFixed(0));
-bindSlider('viewportH', (v) => {
+bindSlider('viewportH', config.camera.common.viewportH, (v) => {
   const cam = activeCamera(); if (!cam) return;
   const oldAspect = cam.settings.viewportW / cam.settings.viewportH;
   cam.settings.viewportH = v;
@@ -287,15 +305,15 @@ bindSlider('viewportH', (v) => {
   resizeCaptureBuffers(cam);
   runAxesReconstruction(cam);
 }, (v) => v.toFixed(0));
-bindCheckbox('aspectLocked', (v) => { const cam = activeCamera(); if (cam) cam.settings.aspectLocked = v; });
+bindCheckbox('aspectLocked', config.camera.common.aspectLocked, (v) => { const cam = activeCamera(); if (cam) cam.settings.aspectLocked = v; });
 
-bindCheckbox('showSphere', (v) => { const cam = activeCamera(); if (cam) cam.settings.showSphere = v; });
-bindCheckbox('showCircles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showCircles = v; });
-bindCheckbox('showPoles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showPoles = v; });
-bindCheckbox('showFrustum', (v) => { const cam = activeCamera(); if (cam) cam.settings.showFrustum = v; });
-bindCheckbox('showPatch', (v) => { const cam = activeCamera(); if (cam) cam.settings.showPatch = v; });
-bindCheckbox('showFloor', (v) => { globalState.showFloor = v; });
-bindSlider('floorCellOutlineSubdiv', (v) => {
+bindCheckbox('showSphere', config.camera.common.showSphere, (v) => { const cam = activeCamera(); if (cam) cam.settings.showSphere = v; });
+bindCheckbox('showCircles', config.camera.common.showCircles, (v) => { const cam = activeCamera(); if (cam) cam.settings.showCircles = v; });
+bindCheckbox('showPoles', config.camera.common.showPoles, (v) => { const cam = activeCamera(); if (cam) cam.settings.showPoles = v; });
+bindCheckbox('showFrustum', config.camera.common.showFrustum, (v) => { const cam = activeCamera(); if (cam) cam.settings.showFrustum = v; });
+bindCheckbox('showPatch', config.camera.common.showPatch, (v) => { const cam = activeCamera(); if (cam) cam.settings.showPatch = v; });
+bindCheckbox('showFloor', config.global.showFloor, (v) => { globalState.showFloor = v; });
+bindSlider('floorCellOutlineSubdiv', config.global.floorCellOutlineSubdiv, (v) => {
   globalState.floorCellOutlineSubdiv = v;
   rebuildFloorTexture();
   for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render too
@@ -313,19 +331,7 @@ bindSlider('floorCellOutlineSubdiv', (v) => {
 function pushSettingsSyncToAllPhysical() {
   for (const cam of cameras.values()) if (isPhysical(cam)) pushSettingsSync(cam);
 }
-// One-time migration off the old 256 default, and it has to run BEFORE the
-// binding below. bindSlider restores whatever was last persisted (dom.ts's
-// savedControls, localStorage), which on any browser that has opened this page
-// before would silently override the new 144 default the moment it loads --
-// and a stale 256 doesn't just mis-size the desktop floor, pushSettingsSync
-// below sends it straight down to the phone, where it re-crops the decode
-// table and pulls the AR board off the printed one.
-//
-// Only the EXACT old default is dropped, so a board size somebody actually
-// chose is left alone. Safe to delete once no browser is still carrying a 256.
-if (savedControls.boardSize === '256') delete savedControls.boardSize;
-
-bindSlider('boardSize', (v) => {
+bindSlider('boardSize', config.global.boardSize, (v) => {
   globalState.boardSize = v;
   rebuildFloorPattern(v); // re-crops the torus, rebuilds the decode lookup table, resizes the floor mesh/texture/reference lines
   rebuildGridLineKs(); // reads HALF_R/HALF_C, which rebuildFloorPattern just updated -- must run after it
@@ -337,7 +343,7 @@ bindSlider('boardSize', (v) => {
 // forceCPU for why they went. Flipping it changes what the NEXT recompute
 // produces, so re-run against whichever camera is on screen immediately rather
 // than waiting for the next unrelated capture or slider.
-bindCheckbox('forceCPU', (v) => {
+bindCheckbox('forceCPU', config.global.forceCPU, (v) => {
   globalState.forceCPU = v;
   const cam = activeCamera(); if (cam) recomputeFromLastCapture(cam);
   pushSettingsSyncToAllPhysical();
@@ -389,26 +395,26 @@ applyProfilerToggle();
 gpuVotesStatus.textContent = isWebGPUSupported()
   ? 'WebGPU is available in this browser.'
   : 'WebGPU is not available in this browser -- every toggle below will silently fall back to the CPU pipeline.';
-bindCheckbox('showGizmoBody', (v) => { const cam = activeCamera(); if (cam) cam.settings.showGizmoBody = v; });
-bindCheckbox('showRecoveredFloor', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredFloor = v; });
-bindSlider('recoveredFloorOpacity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.recoveredFloorOpacity = v; cam.recoveredFloorOverlayMat.opacity = v; } }, (v) => v.toFixed(2));
-bindSlider('gridPeriodPhaseBinCount', (v) => {
+bindCheckbox('showGizmoBody', config.camera.common.showGizmoBody, (v) => { const cam = activeCamera(); if (cam) cam.settings.showGizmoBody = v; });
+bindCheckbox('showRecoveredFloor', config.camera.common.showRecoveredFloor, (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredFloor = v; });
+bindSlider('recoveredFloorOpacity', config.camera.common.recoveredFloorOpacity, (v) => { const cam = activeCamera(); if (cam) { cam.settings.recoveredFloorOpacity = v; cam.recoveredFloorOverlayMat.opacity = v; } }, (v) => v.toFixed(2));
+bindSlider('gridPeriodPhaseBinCount', config.camera.common.gridPeriodPhaseBinCount, (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.gridPeriodPhaseBinCount = v;
   drawGridPeriodPhasePlot(cam);
 }, (v) => v.toFixed(0));
 
-bindSlider('gridPeriodPhaseGapLowerBound', (v) => {
+bindSlider('gridPeriodPhaseGapLowerBound', config.camera.common.gridPeriodPhaseGapLowerBound, (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.gridPeriodPhaseGapLowerBound = v;
   drawGridPeriodPhasePlot(cam);
   recomputeFromLastCapture(cam); // feeds computeGridPeriodPhase (stage 7) directly
   pushSettingsIfPhysical();
 }, (v) => v.toFixed(4));
-bindSlider('simNoise', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
-bindSlider('simBlur', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simBlur = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
-bindSlider('captureSupersample', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.captureSupersample = v; resizeCaptureBuffers(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}x`);
-bindRadioGroup('fieldView', (v) => {
+bindSlider('simNoise', config.camera.simulated.simNoise, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
+bindSlider('simBlur', config.camera.simulated.simBlur, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simBlur = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
+bindSlider('captureSupersample', config.camera.simulated.captureSupersample, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.captureSupersample = v; resizeCaptureBuffers(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}x`);
+bindRadioGroup('fieldView', config.camera.common.fieldView, (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.fieldView = v as FieldView;
   markCaptureDirty(cam);
@@ -421,7 +427,7 @@ updateContaminationAvailability();
 updateGradientArrowAvailability();
 updateTopGradientAvailability();
 updateLsdAvailability();
-bindSlider('gradientArrowScale', (v) => { const cam = activeCamera(); if (cam) cam.settings.gradientArrowScale = v; updateHoverOverlays(lastHoverClientX, lastHoverClientY); }, (v) => v.toFixed(1));
+bindSlider('gradientArrowScale', config.camera.common.gradientArrowScale, (v) => { const cam = activeCamera(); if (cam) cam.settings.gradientArrowScale = v; updateHoverOverlays(lastHoverClientX, lastHoverClientY); }, (v) => v.toFixed(1));
 // The from-scratch traditional LSD pipeline (pipeline/lsdSegments.ts) --
 // this DOES have a live debug overlay (the accepted/rejected/raw-region
 // views), so every stage-2..5 change here recomputes and redraws it
@@ -435,35 +441,35 @@ function refreshLsd() {
 // the PRODUCTION composite lines these same settings feed (stage 3, see
 // pipeline/votes.ts's computeGradient2x2Composites), so recomputeFromLastCapture
 // is also needed here or camera.lastVoteComposites/lastGridPeriodPhase go stale.
-bindSlider('lsdToleranceDeg', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdToleranceDeg = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => `${v.toFixed(1)}°`);
-bindSlider('lsdRhoNoiseThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
-bindSlider('lsdRhoHighThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoHighThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
+bindSlider('lsdToleranceDeg', config.camera.common.lsdToleranceDeg, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdToleranceDeg = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => `${v.toFixed(1)}°`);
+bindSlider('lsdRhoNoiseThreshold', config.camera.common.lsdRhoNoiseThreshold, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
+bindSlider('lsdRhoHighThreshold', config.camera.common.lsdRhoHighThreshold, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoHighThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
 // 0 is the REAL algorithm (run growRegionsCCL to its fixpoint), not "off" --
 // labelled "auto" rather than "0" so the slider's own left end doesn't read as
 // a disabled/no-growth state the way the grow-steps slider it replaces did.
-bindSlider('lsdCclSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdCclSteps = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => (v === 0 ? 'auto' : v.toFixed(0)));
-bindSlider('lsdMinRegionSize', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinRegionSize = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
-bindSlider('lsdNfaEpsilon', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaEpsilon = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
-bindSlider('lsdNfaTestExponent', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaTestExponent = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
+bindSlider('lsdCclSteps', config.camera.common.lsdCclSteps, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdCclSteps = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => (v === 0 ? 'auto' : v.toFixed(0)));
+bindSlider('lsdMinRegionSize', config.camera.common.lsdMinRegionSize, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinRegionSize = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
+bindSlider('lsdNfaEpsilon', config.camera.common.lsdNfaEpsilon, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaEpsilon = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
+bindSlider('lsdNfaTestExponent', config.camera.common.lsdNfaTestExponent, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaTestExponent = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
 // Feeds pipeline/votes.ts's computeGradient2x2Composites (production)
 // directly, not a live debug
 // overlay, so recomputeFromLastCapture (not a repaint call) is what picks
 // up the new value -- reusing the last capture rather than waiting for the
 // next unrelated "capture now"/axesAutoCapture tick.
-bindSlider('lsdMinLengthPx', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinLengthPx = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
-bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
+bindSlider('lsdMinLengthPx', config.camera.common.lsdMinLengthPx, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinLengthPx = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
+bindCheckbox('showRecoveredPoles', config.camera.common.showRecoveredPoles, (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
 // Turning either on refreshes immediately -- updateGradientCirclesDebug now
 // skips its work while both are off (see its own comment), so the geometry
 // sitting there when you flip one on could otherwise be stale until the
 // next capture.
-bindCheckbox('showAxisVectors', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showAxisVectors = v; if (v) updateGradientCirclesDebug(cam); } });
-bindCheckbox('showTopCircles', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showTopCircles = v; if (v) updateGradientCirclesDebug(cam); } });
-bindSlider('topCirclesLineWidth', (v) => { const cam = activeCamera(); if (cam) { cam.settings.topCirclesLineWidth = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
+bindCheckbox('showAxisVectors', config.camera.common.showAxisVectors, (v) => { const cam = activeCamera(); if (cam) { cam.settings.showAxisVectors = v; if (v) updateGradientCirclesDebug(cam); } });
+bindCheckbox('showTopCircles', config.camera.common.showTopCircles, (v) => { const cam = activeCamera(); if (cam) { cam.settings.showTopCircles = v; if (v) updateGradientCirclesDebug(cam); } });
+bindSlider('topCirclesLineWidth', config.camera.common.topCirclesLineWidth, (v) => { const cam = activeCamera(); if (cam) { cam.settings.topCirclesLineWidth = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
 // Feeds projectSamplesCPU/buildDecodeSampleGrid (stages 9+10) -- recompute
 // from the last capture rather than waiting for the next unrelated one.
-bindSlider('minGrazingCos', (v) => { const cam = activeCamera(); if (cam) { cam.settings.minGrazingCos = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
-bindCheckbox('axesAutoCapture', (v) => { const cam = activeCamera(); if (cam) cam.settings.axesAutoCapture = v; });
-bindSlider('axesCaptureInterval', (v) => { const cam = activeCamera(); if (cam) cam.settings.axesCaptureIntervalMs = v; }, (v) => `${v.toFixed(0)}`);
+bindSlider('minGrazingCos', config.camera.common.minGrazingCos, (v) => { const cam = activeCamera(); if (cam) { cam.settings.minGrazingCos = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
+bindCheckbox('axesAutoCapture', config.camera.common.axesAutoCapture, (v) => { const cam = activeCamera(); if (cam) cam.settings.axesAutoCapture = v; });
+bindSlider('axesCaptureInterval', config.camera.common.axesCaptureIntervalMs, (v) => { const cam = activeCamera(); if (cam) cam.settings.axesCaptureIntervalMs = v; }, (v) => `${v.toFixed(0)}`);
 
 captureAxesBtn.addEventListener('click', () => { const cam = activeCamera(); if (cam) runAxesReconstruction(cam); });
 

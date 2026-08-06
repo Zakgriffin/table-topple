@@ -30,6 +30,10 @@ import { randomUUID } from 'crypto';
 
 const PORT = 8787;
 const FRAME_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'latest-frame.png');
+// The one config file (see src/sphereLab/config.ts). Two levels up from
+// scripts/dev-bridge/ -- the browser cannot write to the project directory
+// itself, so promoting the live config onto disk has to come through here.
+const CONFIG_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'sphere-lab.config.json');
 // randomUUID()'s canonical string form is always exactly this many ASCII
 // chars (8-4-4-4-12 hex digits + 4 hyphens) -- a fixed-width prefix means a
 // receiving browser tab (devBridge/client.ts) can slice a binary
@@ -183,6 +187,23 @@ wss.on('connection', (ws) => {
     // here is the only work needed -- the 'close' handler below fires the
     // captureDisconnected broadcast every capture-socket close already goes
     // through, kick or not.
+    // Browser tab -> disk: the "save config to disk" button. `json` is the
+    // already-serialized config, so what lands on disk is byte-for-byte what
+    // the page is holding rather than this process's idea of how to format it.
+    // Replies to the SENDING tab only -- other tabs have their own live
+    // localStorage overlay and would be wrong to claim they just saved.
+    if (msg.type === 'saveConfig' && typeof msg.json === 'string') {
+      try {
+        writeFileSync(CONFIG_PATH, msg.json);
+        console.log(`[bridge] wrote ${CONFIG_PATH} (${msg.json.length} bytes)`);
+        send(ws, { type: 'configSaved', ok: true, path: CONFIG_PATH });
+      } catch (err) {
+        console.error('[bridge] config write failed:', err);
+        send(ws, { type: 'configSaved', ok: false, error: String(err && err.message ? err.message : err) });
+      }
+      return;
+    }
+
     if (msg.type === 'kickCapture' && msg.captureId) {
       for (const [capWs, id] of captureSockets) {
         if (id === msg.captureId) { capWs.close(); break; }

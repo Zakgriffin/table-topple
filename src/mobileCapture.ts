@@ -16,6 +16,7 @@
 
 import * as THREE from 'three';
 import { toGrayscale } from './decode.ts';
+import { config } from './sphereLab/config.ts';
 import { globalState } from './sphereLab/state.ts';
 // Only the data-side rebuild is needed here now. The board's world EXTENT
 // (C/R/GRID_STEP) is read by gameOverlay.ts instead, which is the only thing
@@ -71,6 +72,14 @@ const arCanvas = document.getElementById('arCanvas') as HTMLCanvasElement;
 const arOverlayCheckbox = document.getElementById('arOverlayEnabled') as HTMLInputElement;
 const imuCheckbox = document.getElementById('imuEnabled') as HTMLInputElement;
 const imuCorrectionCheckbox = document.getElementById('imuCorrection') as HTMLInputElement;
+// mobile-capture.html carries no `checked` attributes -- config.phone owns
+// these five defaults, the same way config.camera owns every desktop control
+// (see sphereLab/config.ts). Seeded here, once, before anything reads them.
+computeOnDeviceCheckbox.checked = config.phone.computeOnDevice;
+sendDebugInfoCheckbox.checked = config.phone.sendDebugInfo;
+sendCapturedImageCheckbox.checked = config.phone.sendCapturedImage;
+imuCheckbox.checked = config.phone.imuEnabled;
+imuCorrectionCheckbox.checked = config.phone.imuCorrection;
 const imuReadoutEl = document.getElementById('imuReadout')!;
 
 // ── Hiding the page's own UI ─────────────────────────────────────────────
@@ -735,12 +744,7 @@ fpsSlider.addEventListener('input', () => {
 // normal use, because the desktop's on-connect settingsSync overwrites all of
 // it within a second of the phone connecting, and only shows up in the narrow
 // window before that push lands.
-let cameraSettings: PoseComputeState['settings'] = {
-  horizFovDeg: 65, gridPeriodPhaseGapLowerBound: 0.005, minGrazingCos: 0.1,
-  lsdToleranceDeg: 9.5, lsdRhoNoiseThreshold: 0.132, lsdRhoHighThreshold: 0, lsdCclSteps: 0, lsdNfaEpsilon: 1,
-  lsdMinRegionSize: 2, lsdNfaTestExponent: 5,
-  lsdMinLengthPx: 3,
-};
+let cameraSettings: PoseComputeState['settings'] = { ...config.camera.common };
 // Tracks the last boardSize a settingsSync actually applied, so
 // rebuildFloorPatternData (which rebuilds the whole De Bruijn lookup table --
 // not cheap) only runs when boardSize genuinely changed, not on every
@@ -1176,6 +1180,13 @@ imuCheckbox.addEventListener('change', () => {
   if (imuCheckbox.checked) void startImu();
   else stopImu();
 });
+// A config.phone.imuEnabled of true seeds the box checked (see the seeding
+// block up by the element lookups), and a checked box that is not actually
+// recording would be a lie -- so honour it here, where startImu is in scope.
+// Note iOS gates the motion permission behind a user gesture, so this can
+// legitimately fail at load; startImu owns reporting that, exactly as it does
+// when the box is ticked by hand.
+if (imuCheckbox.checked) void startImu();
 
 // ── IMU correction ───────────────────────────────────────────────────────
 //
@@ -1191,7 +1202,7 @@ imuCheckbox.addEventListener('change', () => {
 // neither of which is verified yet, and both fail silently rather than
 // loudly. Orientation prediction and the gate are safe to run today.
 const imuTracker = new ImuTracker(defaultImuTrackerConfig());
-let useImuCorrection = false;
+let useImuCorrection = config.phone.imuCorrection;
 // The last pose the tracker ACCEPTED, so the frame-convention pairs below
 // measure vision rotation across the same span the gyro integrated over. Using
 // the last pose RECEIVED instead would silently include rejected flips.
@@ -1624,7 +1635,7 @@ modeVideoBtn.addEventListener('click', () => setCaptureMode('video'));
 // computePoseFromCapture) and sends only the recovered pose, no image
 // bytes. Still respects captureMode: single taps one compute+send cycle,
 // video runs devicePoseLoop continuously.
-let computeOnDevice = false;
+let computeOnDevice = config.phone.computeOnDevice;
 function setComputeMode(onDevice: boolean) {
   computeOnDevice = onDevice;
   poseReadoutEl.classList.toggle('visible', onDevice);
@@ -1649,8 +1660,8 @@ computeOnDeviceCheckbox.addEventListener('change', () => setComputeMode(computeO
 // the desktop-compute streaming path always pays); sendDebugInfo pays for
 // extra serialization of pipeline intermediates -- neither happens at all
 // unless explicitly turned on.
-let sendDebugInfo = false;
-let sendCapturedImage = false;
+let sendDebugInfo = config.phone.sendDebugInfo;
+let sendCapturedImage = config.phone.sendCapturedImage;
 sendDebugInfoCheckbox.addEventListener('change', () => { sendDebugInfo = sendDebugInfoCheckbox.checked; });
 sendCapturedImageCheckbox.addEventListener('change', () => { sendCapturedImage = sendCapturedImageCheckbox.checked; });
 

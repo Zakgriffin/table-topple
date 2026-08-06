@@ -8,6 +8,7 @@ import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import { tryUnpackPoseResultWithImage } from './poseResultWire.ts';
 import { renderer } from '../scene/renderer.ts';
 import { globalState } from '../state.ts';
+import { saveConfigStatus } from '../ui/dom.ts';
 import { renderCameraTabs, refreshCameraPanel } from '../ui/cameraPanel.ts';
 import { throughCamCanvas } from '../ui/dom.ts';
 import { nowMs } from '../clock.ts';
@@ -340,6 +341,10 @@ export function pushPoseSync(cam: PhysicalCamera) {
             totalReceived: (cam.lastImuMeta?.totalReceived ?? 0) + msg.samples.length,
           };
         }
+      } else if (msg.type === 'configSaved') {
+        saveConfigStatus.textContent = msg.ok
+          ? `saved to ${String(msg.path).split('/').pop()}`
+          : `save failed: ${msg.error}`;
       } else if (msg.type === 'captureDisconnected' && msg.captureId) {
         // The phone behind some physical camera(s) disconnected -- naturally
         // or via this tab's own kick button (see renderCameraTabs). Removes

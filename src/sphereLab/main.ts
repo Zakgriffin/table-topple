@@ -63,9 +63,10 @@
 
 import * as THREE from 'three';
 import { activeCamera, cameras, isSimulated, isPhysical } from './camera/store.ts';
+import { config } from './config.ts';
 import { globalState } from './state.ts';
 import { euler } from './constants.ts';
-import { canvas, readout, savedControls } from './ui/dom.ts';
+import { canvas, readout } from './ui/dom.ts';
 import { setMode, setPanelCollapsed } from './ui/mode.ts';
 import { renderCameraTabs, refreshCameraPanel } from './ui/cameraPanel.ts';
 import { renderViewport, layoutPip, resize, computeThroughRect } from './ui/layout.ts';
@@ -141,7 +142,7 @@ const DEV_MODULES = import.meta.glob(
 // The locals -- module-scope bindings of THIS file, which no glob can reach.
 Object.assign(
   globalThis,
-  { THREE, activeCamera, cameras, isSimulated, isPhysical, globalState, euler, canvas, readout, savedControls,
+  { THREE, activeCamera, cameras, isSimulated, isPhysical, globalState, euler, canvas, readout, config,
     setMode, setPanelCollapsed, renderCameraTabs, refreshCameraPanel, renderViewport, layoutPip, resize,
     renderer, floorMesh, viewerCam, worldOrbit, insideCam, renderPreviewViewport, renderProjectedViewport,
     getAnalysisVFovRad, markCaptureDirty, resizeCaptureBuffers,
@@ -345,11 +346,11 @@ function animate() {
   }
 }
 
-// Same persistence as every slider/checkbox -- only honor a saved value if
-// it's still a real Mode.
+// config.global.mode is typed Mode, but it arrives from a JSON file a human
+// edits -- so it is checked against the real list rather than trusted, the
+// same way the field-view radio group falls back to a real option.
 const VALID_MODES: Mode[] = ['world', 'through', 'inside', 'projected'];
-const savedMode = savedControls['mode'];
-setMode(VALID_MODES.includes(savedMode as Mode) ? (savedMode as Mode) : 'through');
+setMode(VALID_MODES.includes(globalState.mode) ? globalState.mode : 'through');
 
 // No default camera (see this file's header) -- activeCameraId is already
 // '' at this point, so this just paints the tab bar (Global tab only, "+")

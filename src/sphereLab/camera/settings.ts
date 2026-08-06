@@ -1,32 +1,15 @@
-import { savedControls } from '../ui/dom.ts';
 import { FieldView } from '../types.ts';
 
-// bindSlider/bindCheckbox (ui/dom.ts) already WRITE every control's value to
-// localStorage on change, keyed by the DOM element's own id -- but per-
-// camera settings are otherwise pure hardcoded defaults below, so nothing
-// ever reads that back in and a fresh camera (including after a reload,
-// since cameras themselves aren't persisted -- see main.ts's header) always
-// started from scratch regardless of what was saved. These two helpers read
-// a saved value back in, by the SAME id bindSlider/bindCheckbox persist
-// under, falling back to the literal default when nothing's been saved yet
-// (first-ever load) or the value doesn't parse.
-function savedBool(id: string, fallback: boolean): boolean {
-  const v = savedControls[id];
-  return v === undefined ? fallback : v === '1';
-}
-function savedNum(id: string, fallback: number): number {
-  const v = savedControls[id];
-  if (v === undefined) return fallback;
-  const n = parseFloat(v);
-  return Number.isFinite(n) ? n : fallback;
-}
-
-// ── Per-camera settings ──────────────────────────────────────────────────
+// ── Per-camera settings: the SHAPE only ──────────────────────────────────
 //
 // Everything that used to live in the single module-level `state` object,
 // split into what's common to both camera types and what's type-specific.
-// See createDefaultCameraSettings below for the actual default values
-// (mirrors this file's pre-Stage-A `state` initializer exactly).
+//
+// There are no default VALUES here anymore -- every one of them lives in
+// sphere-lab.config.json, and config.ts is what turns that file into a
+// settings object (createDefaultSimulatedSettings/createDefaultPhysicalSettings
+// moved there with them). This file deliberately imports nothing but types, so
+// that config.ts can import it without a cycle.
 
 export interface CameraSettingsCommon {
   showSphere: boolean; showCircles: boolean; showPoles: boolean; showFrustum: boolean; showPatch: boolean;
@@ -163,90 +146,44 @@ export interface SimulatedCameraSettings extends CameraSettingsCommon {
 export interface PhysicalCameraSettings extends CameraSettingsCommon {
 }
 
-function createDefaultCommonSettings(): CameraSettingsCommon {
-  return {
-    showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: savedNum('recoveredFloorOpacity', 0.9),
-    showTrueContamination: false, showReconstructedContamination: false,
-    hideField: false,
-    showTopGradient: false,
-    showLsdSegments: savedBool('toggleLsdSegments', false),
-    showLsdRejected: savedBool('toggleLsdRejected', false),
-    showLsdRawRegions: savedBool('toggleLsdRawRegions', false),
-    showLsdComposite: savedBool('toggleLsdComposite', false),
-    // All four plot series default OFF. Gap used to default ON (it was
-    // unconditional before these toggles existed), but it was turned off in
-    // practice and the working default was rebaselined from the live UI on
-    // 2026-08-05 -- see this file's header note.
-    showGapHistogram: savedBool('toggleGapHistogram', false),
-    showValueHistogram: savedBool('toggleValueHistogram', false),
-    showDistinctnessCurve: savedBool('toggleDistinctnessCurve', false),
-    showProductCurve: savedBool('toggleProductCurve', false),
-    lsdToleranceDeg: savedNum('lsdToleranceDeg', 9.5),
-    // Rebaselined from the live UI 2026-08-05. Was 4/255 (~0.0157), which
-    // preserved the pre-normalization default exactly once
-    // computeGradient2x2Field's output started topping out at 1 instead of 255
-    // -- that lineage is over; this is a tuned value.
-    lsdRhoNoiseThreshold: savedNum('lsdRhoNoiseThreshold', 0.132),
-    // ZERO, rebaselined from the live UI 2026-08-05 -- which makes hysteresis
-    // DEGENERATE by construction: every pixel clearing the noise floor also
-    // clears the high bar, so the survival path never discriminates. Was 12/255
-    // (3x the low bar). Worth knowing because it is exactly the condition that
-    // made an earlier hysteresis verification VACUOUS (see the perf TODO's
-    // cleanup list) -- any check of the high threshold against this default
-    // proves nothing.
-    lsdRhoHighThreshold: savedNum('lsdRhoHighThreshold', 0),
-    lsdCclSteps: savedNum('lsdCclSteps', 0), // 0 = run to fixpoint (the real algorithm); 1+ scrubs rounds
-    lsdNfaEpsilon: savedNum('lsdNfaEpsilon', 1),
-    lsdNfaTestExponent: savedNum('lsdNfaTestExponent', 5),
-    lsdMinRegionSize: savedNum('lsdMinRegionSize', 2),
-    lsdMinLengthPx: savedNum('lsdMinLengthPx', 3),
-    // 10*255 preserves the pre-normalization arrow length exactly, now that
-    // computeGradient2x2Field's own output (the only field this arrow ever
-    // draws -- overlays/hoverDebugOverlays.ts derives it per-hover from
-    // lastNoisedPreviewGray) tops out at 1 instead of 255.
-    showGradientArrow: false, showLevelLineArrow: false, gradientArrowScale: 10 * 255,
-    // See the pre-Stage-A history for the full derivation of these tangent-walk
-    // defaults (guided tangent walk, simNoise=8 stability etc.) -- unchanged.
-    tangentWalkMaxSteps: 76, tangentWalkDeviationDeg: 45, tangentWalkMagFraction: 0, tangentWalkGraceSamples: 50,
-    tangentWalkAdaptive: false,
-    showRecoveredPoles: true,
-    showAxisVectors: false,
-    showTopCircles: true,
-    topCirclesLineWidth: savedNum('topCirclesLineWidth', 1),
-    minGrazingCos: savedNum('minGrazingCos', 0.1),
-    gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 150),
-    gridPeriodPhaseGapLowerBound: savedNum('gridPeriodPhaseGapLowerBound', 0.005),
-    // Key matches the BUTTON's own id (toggleCompositeLineFamilies), not
-    // this field's name -- same persistence convention every other button-
-    // driven boolean here uses (e.g. showLsdSegments/toggleLsdSegments).
-    showCompositeLineFamilies: savedBool('toggleCompositeLineFamilies', false),
-    // Same button-id convention as the two above -- it moved from a left-panel
-    // checkbox to the Projected-view overlay group, so its key moved with it.
-    showSampleLattice: savedBool('toggleSampleLattice', true),
-    useTrueCardinalOrientation: false,
-    fieldView: 'noised',
-    axesAutoCapture: false, axesCaptureIntervalMs: 500,
-    viewportW: 480, viewportH: 640, aspectLocked: false,
-    horizFovDeg: 65,
-  };
-}
-export function createDefaultSimulatedSettings(): SimulatedCameraSettings {
-  return {
-    ...createDefaultCommonSettings(),
-    camX: 0, camY: 16.5, camZ: 8,
-    camYawDeg: -43, camPitchDeg: -32,
-    simNoise: 2, simBlur: 0, captureSupersample: 2,
-  };
-}
-export function createDefaultPhysicalSettings(): PhysicalCameraSettings {
-  return {
-    ...createDefaultCommonSettings(),
-    // Overrides the common default of 'noised' -- that (and antialiased/
-    // downsampled, the other simulated-distortion-pipeline stages) don't
-    // exist for a real photo, and are hidden from the field-view list
-    // entirely for a physical camera (see refreshCameraPanel) -- 'raw'
-    // (labeled "capture" in that case) is the only one of the four that
-    // still means something.
-    fieldView: 'raw',
-  };
-}
+
+// ── Key manifests ────────────────────────────────────────────────────────
+//
+// The runtime spelling of the two interfaces above, which TypeScript's own
+// types cannot provide (they are erased). config.ts needs them twice over: to
+// VALIDATE that sphere-lab.config.json actually carries every setting -- there
+// is no literal fallback left anywhere, so a missing key has to be a loud
+// startup failure rather than a silent undefined -- and to COPY a camera's
+// settings back into the config object when one changes.
+//
+// `satisfies Record<keyof T, true>` is what keeps these honest: adding a field
+// to either interface without adding it here is a compile error, not a
+// setting that silently stops being saved.
+export const COMMON_KEYS = {
+  showSphere: true, showCircles: true, showPoles: true, showFrustum: true, showPatch: true,
+  showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: true,
+  showTrueContamination: true, showReconstructedContamination: true,
+  hideField: true, showTopGradient: true,
+  showLsdSegments: true, showLsdRejected: true, showLsdRawRegions: true, showLsdComposite: true,
+  showGapHistogram: true, showValueHistogram: true, showDistinctnessCurve: true, showProductCurve: true,
+  lsdToleranceDeg: true, lsdRhoNoiseThreshold: true, lsdRhoHighThreshold: true, lsdCclSteps: true,
+  lsdNfaEpsilon: true, lsdNfaTestExponent: true, lsdMinRegionSize: true, lsdMinLengthPx: true,
+  showGradientArrow: true, showLevelLineArrow: true, gradientArrowScale: true,
+  tangentWalkMaxSteps: true, tangentWalkDeviationDeg: true, tangentWalkMagFraction: true,
+  tangentWalkGraceSamples: true, tangentWalkAdaptive: true,
+  showRecoveredPoles: true, showAxisVectors: true, showTopCircles: true, topCirclesLineWidth: true,
+  minGrazingCos: true, gridPeriodPhaseBinCount: true, gridPeriodPhaseGapLowerBound: true,
+  showCompositeLineFamilies: true, showSampleLattice: true,
+  useTrueCardinalOrientation: true, fieldView: true,
+  axesAutoCapture: true, axesCaptureIntervalMs: true,
+  viewportW: true, viewportH: true, aspectLocked: true, horizFovDeg: true,
+} satisfies Record<keyof CameraSettingsCommon, true>;
+
+// Only the fields a simulated camera adds -- the common ones are merged in
+// separately, so listing them again here would be a second place to forget.
+export const SIM_ONLY_KEYS = {
+  camX: true, camY: true, camZ: true, camYawDeg: true, camPitchDeg: true,
+  simNoise: true, simBlur: true, captureSupersample: true,
+} satisfies Record<Exclude<keyof SimulatedCameraSettings, keyof CameraSettingsCommon>, true>;
+
+export type SimulatedOnlySettings = Pick<SimulatedCameraSettings, keyof typeof SIM_ONLY_KEYS>;

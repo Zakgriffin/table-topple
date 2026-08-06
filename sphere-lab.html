@@ -229,14 +229,14 @@
       <button id="toggleLsdRejected">show rejected candidates</button>
       <button id="toggleLsdRawRegions">raw region pixels (pre-fit)</button>
       <div id="lsdReadout" class="hint"></div>
-      <div class="row"><span class="label">tau (angle tol.)</span><input type="range" id="lsdToleranceDeg" min="1" max="90" step="0.5" value="9.5"><span class="val" id="lsdToleranceDegVal"></span></div>
-      <div class="row"><span class="label">rho low (edge floor)</span><input type="range" id="lsdRhoNoiseThreshold" min="0" max="0.2" step="0.002" value="0.132"><span class="val" id="lsdRhoNoiseThresholdVal"></span></div>
-      <div class="row"><span class="label">rho high (survival)</span><input type="range" id="lsdRhoHighThreshold" min="0" max="0.4" step="0.002" value="0"><span class="val" id="lsdRhoHighThresholdVal"></span></div>
-      <div class="row"><span class="label">CCL steps</span><input type="range" id="lsdCclSteps" min="0" max="60" step="1" value="0"><span class="val" id="lsdCclStepsVal"></span></div>
-      <div class="row"><span class="label">min region size</span><input type="range" id="lsdMinRegionSize" min="1" max="20" step="1" value="2"><span class="val" id="lsdMinRegionSizeVal"></span></div>
-      <div class="row"><span class="label">min length (px)</span><input type="range" id="lsdMinLengthPx" min="0" max="100" step="1" value="3"><span class="val" id="lsdMinLengthPxVal"></span></div>
-      <div class="row"><span class="label">NFA epsilon</span><input type="range" id="lsdNfaEpsilon" min="0.01" max="10" step="0.01" value="1"><span class="val" id="lsdNfaEpsilonVal"></span></div>
-      <div class="row"><span class="label">N_tests exponent</span><input type="range" id="lsdNfaTestExponent" min="1" max="8" step="1" value="5"><span class="val" id="lsdNfaTestExponentVal"></span></div>
+      <div class="row"><span class="label">tau (angle tol.)</span><input type="range" id="lsdToleranceDeg" min="1" max="90" step="0.5"><span class="val" id="lsdToleranceDegVal"></span></div>
+      <div class="row"><span class="label">rho low (edge floor)</span><input type="range" id="lsdRhoNoiseThreshold" min="0" max="0.2" step="0.002"><span class="val" id="lsdRhoNoiseThresholdVal"></span></div>
+      <div class="row"><span class="label">rho high (survival)</span><input type="range" id="lsdRhoHighThreshold" min="0" max="0.4" step="0.002"><span class="val" id="lsdRhoHighThresholdVal"></span></div>
+      <div class="row"><span class="label">CCL steps</span><input type="range" id="lsdCclSteps" min="0" max="60" step="1"><span class="val" id="lsdCclStepsVal"></span></div>
+      <div class="row"><span class="label">min region size</span><input type="range" id="lsdMinRegionSize" min="1" max="20" step="1"><span class="val" id="lsdMinRegionSizeVal"></span></div>
+      <div class="row"><span class="label">min length (px)</span><input type="range" id="lsdMinLengthPx" min="0" max="100" step="1"><span class="val" id="lsdMinLengthPxVal"></span></div>
+      <div class="row"><span class="label">NFA epsilon</span><input type="range" id="lsdNfaEpsilon" min="0.01" max="10" step="0.01"><span class="val" id="lsdNfaEpsilonVal"></span></div>
+      <div class="row"><span class="label">N_tests exponent</span><input type="range" id="lsdNfaTestExponent" min="1" max="8" step="1"><span class="val" id="lsdNfaTestExponentVal"></span></div>
 
       <button id="toggleLsdComposite">composite lines</button>
       <button id="toggleCompositeLineFamilies">color by row/col family</button>
@@ -245,15 +245,15 @@
       <button id="toggleValueHistogram">value histogram (white, line positions)</button>
       <button id="toggleDistinctnessCurve">distinctness curve (blue)</button>
       <button id="toggleProductCurve">resultant x distinctness (violet)</button>
-      <div class="row"><span class="label">bucket count</span><input type="range" id="gridPeriodPhaseBinCount" min="5" max="150" step="1" value="150"><span class="val" id="gridPeriodPhaseBinCountVal"></span></div>
-      <div class="row"><span class="label">gap lower bound</span><input type="range" id="gridPeriodPhaseGapLowerBound" min="0" max="0.05" step="0.0005" value="0.005"><span class="val" id="gridPeriodPhaseGapLowerBoundVal"></span></div>
+      <div class="row"><span class="label">bucket count</span><input type="range" id="gridPeriodPhaseBinCount" min="5" max="150" step="1"><span class="val" id="gridPeriodPhaseBinCountVal"></span></div>
+      <div class="row"><span class="label">gap lower bound</span><input type="range" id="gridPeriodPhaseGapLowerBound" min="0" max="0.05" step="0.0005"><span class="val" id="gridPeriodPhaseGapLowerBoundVal"></span></div>
     </div>
   </div>
   <div id="arrowToggles" class="section">
     <h2>Gradient arrows (hover)</h2>
     <button id="toggleGradientArrow">gradient arrow</button>
     <button id="toggleLevelLineArrow">level line arrow</button>
-    <div class="row"><span class="label">arrow scale</span><input type="range" id="gradientArrowScale" min="25" max="2550" step="25" value="2550"><span class="val" id="gradientArrowScaleVal"></span></div>
+    <div class="row"><span class="label">arrow scale</span><input type="range" id="gradientArrowScale" min="25" max="2550" step="25"><span class="val" id="gradientArrowScaleVal"></span></div>
   </div>
   <div id="projectedToggles" class="section">
     <h2>Projected view</h2>
@@ -278,9 +278,9 @@
 
   <div class="section" id="globalSettingsSection">
     <h2>global</h2>
-    <label class="chk"><input type="checkbox" id="showFloor" checked> floor</label>
-    <div class="row"><span class="label">cell outline</span><input type="range" id="floorCellOutlineSubdiv" min="0" max="20" step="1" value="0"><span class="val" id="floorCellOutlineSubdivVal"></span></div>
-    <div class="row"><span class="label">De Bruijn board size</span><input type="range" id="boardSize" min="0" max="512" step="1" value="144"><span class="val" id="boardSizeVal"></span></div>
+    <label class="chk"><input type="checkbox" id="showFloor"> floor</label>
+    <div class="row"><span class="label">cell outline</span><input type="range" id="floorCellOutlineSubdiv" min="0" max="20" step="1"><span class="val" id="floorCellOutlineSubdivVal"></span></div>
+    <div class="row"><span class="label">De Bruijn board size</span><input type="range" id="boardSize" min="0" max="512" step="1"><span class="val" id="boardSizeVal"></span></div>
     <div class="hint" id="gpuVotesStatus"></div>
 
     <!-- ONE switch, replacing nine per-stage ones. Those toggles were the
@@ -291,6 +291,14 @@
     <div class="subhead">GPU</div>
     <label class="chk" title="Runs the CPU reference implementations for every stage instead of the GPU ones. For checking whether a GPU stage is lying -- the shipping path is unchecked. Note the no-WebGPU fallback is separate and automatic: each stage falls back on its own if there is no device or a dispatch fails validation."><input type="checkbox" id="forceCPU"> force CPU reference path</label>
     <div class="hint" id="lsdChainTransfers" style="margin-bottom:0;"></div>
+
+    <!-- Every value in this panel lives in sphere-lab.config.json. Editing a
+         control changes localStorage (the live overlay); this button promotes
+         the whole current object back onto the file, through the dev bridge.
+         Needs `npm run dev:bridge` running -- the readout says so if not. -->
+    <div class="subhead">config</div>
+    <button id="saveConfigBtn">save config to disk</button>
+    <div class="hint" id="saveConfigStatus" style="margin-bottom:0;"></div>
 
     <!-- Deliberately last, and deliberately NOT persisted across reloads (see
          ui/cameraPanel.ts's bind) -- this one changes what the pipeline COSTS,
@@ -304,18 +312,18 @@
   <div class="section" id="cameraDetailsSection">
     <h2>camera details</h2>
     <div id="simCameraDetailFields">
-      <div class="row"><span class="label">X</span><input type="range" id="camX" min="-200" max="200" step="0.1" value="0"><span class="val" id="camXVal"></span></div>
-      <div class="row"><span class="label">height</span><input type="range" id="camY" min="0.5" max="200" step="0.1" value="16.5"><span class="val" id="camYVal"></span></div>
-      <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-200" max="200" step="0.1" value="8"><span class="val" id="camZVal"></span></div>
-      <div class="row"><span class="label">yaw</span><input type="range" id="camYaw" min="-180" max="180" step="1" value="-43"><span class="val" id="camYawVal"></span></div>
-      <div class="row"><span class="label">pitch</span><input type="range" id="camPitch" min="-89" max="89" step="1" value="-32"><span class="val" id="camPitchVal"></span></div>
-      <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="camFov" min="20" max="150" step="1" value="65"><span class="val" id="camFovVal"></span></div>
-      <div class="row"><span class="label">viewport W</span><input type="range" id="viewportW" min="128" max="2000" step="32" value="480"><span class="val" id="viewportWVal"></span></div>
-      <div class="row"><span class="label">viewport H</span><input type="range" id="viewportH" min="96" max="2000" step="24" value="640"><span class="val" id="viewportHVal"></span></div>
+      <div class="row"><span class="label">X</span><input type="range" id="camX" min="-200" max="200" step="0.1"><span class="val" id="camXVal"></span></div>
+      <div class="row"><span class="label">height</span><input type="range" id="camY" min="0.5" max="200" step="0.1"><span class="val" id="camYVal"></span></div>
+      <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-200" max="200" step="0.1"><span class="val" id="camZVal"></span></div>
+      <div class="row"><span class="label">yaw</span><input type="range" id="camYaw" min="-180" max="180" step="1"><span class="val" id="camYawVal"></span></div>
+      <div class="row"><span class="label">pitch</span><input type="range" id="camPitch" min="-89" max="89" step="1"><span class="val" id="camPitchVal"></span></div>
+      <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="camFov" min="20" max="150" step="1"><span class="val" id="camFovVal"></span></div>
+      <div class="row"><span class="label">viewport W</span><input type="range" id="viewportW" min="128" max="2000" step="32"><span class="val" id="viewportWVal"></span></div>
+      <div class="row"><span class="label">viewport H</span><input type="range" id="viewportH" min="96" max="2000" step="24"><span class="val" id="viewportHVal"></span></div>
       <label class="chk"><input type="checkbox" id="aspectLocked"> aspect lock</label>
     </div>
     <div id="physCameraDetailFields">
-      <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="realCaptureFovDeg" min="20" max="150" step="1" value="65"><span class="val" id="realCaptureFovDegVal"></span></div>
+      <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="realCaptureFovDeg" min="20" max="150" step="1"><span class="val" id="realCaptureFovDegVal"></span></div>
       <!-- Read-only: set on the phone (mobile-capture.html's video/single toggle), Sphere Lab only displays it -->
       <div class="row"><span class="label">capture mode</span><span id="physCaptureModeReadout" class="val">single</span></div>
     </div>
@@ -323,9 +331,9 @@
 
   <div class="section" id="simDistortionSection">
     <h2>simulated capture distortion</h2>
-    <div class="row"><span class="label">pixel noise &sigma;</span><input type="range" id="simNoise" min="0" max="40" step="1" value="2"><span class="val" id="simNoiseVal"></span></div>
-    <div class="row"><span class="label">blur radius</span><input type="range" id="simBlur" min="0" max="4" step="1" value="0"><span class="val" id="simBlurVal"></span></div>
-    <div class="row"><span class="label">supersample</span><input type="range" id="captureSupersample" min="1" max="4" step="1" value="2"><span class="val" id="captureSupersampleVal"></span></div>
+    <div class="row"><span class="label">pixel noise &sigma;</span><input type="range" id="simNoise" min="0" max="40" step="1"><span class="val" id="simNoiseVal"></span></div>
+    <div class="row"><span class="label">blur radius</span><input type="range" id="simBlur" min="0" max="4" step="1"><span class="val" id="simBlurVal"></span></div>
+    <div class="row"><span class="label">supersample</span><input type="range" id="captureSupersample" min="1" max="4" step="1"><span class="val" id="captureSupersampleVal"></span></div>
   </div>
 
   <div class="section">
@@ -334,7 +342,7 @@
     <div id="simOnlyFieldViews">
       <label class="chk"><input type="radio" name="fieldView" id="fieldViewAntialiased" value="antialiased"> antialiased</label>
       <label class="chk"><input type="radio" name="fieldView" id="fieldViewDownsampled" value="downsampled"> downsampled</label>
-      <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised" checked> noised</label>
+      <label class="chk"><input type="radio" name="fieldView" id="fieldViewNoised" value="noised"> noised</label>
     </div>
     <div class="fieldViewDivider">&darr; 2D filter pipeline starts here &darr;</div>
     <label class="chk" title="hue = full 360&deg; direction, so opposing edges get opposite hues -- what LSD region growing actually sees"><input type="radio" name="fieldView" id="fieldViewGradient2x2Directed" value="gradient2x2Directed"> gradient field (directed)</label>
@@ -343,26 +351,26 @@
 
   <div class="section">
     <h2>camera overlays</h2>
-    <label class="chk"><input type="checkbox" id="showGizmoBody" checked> camera box</label>
-    <label class="chk"><input type="checkbox" id="showFrustum" checked> frustum outline</label>
-    <label class="chk"><input type="checkbox" id="showPatch" checked> live viewport image patch</label>
-    <label class="chk"><input type="checkbox" id="showSphere" checked> sphere shell</label>
+    <label class="chk"><input type="checkbox" id="showGizmoBody"> camera box</label>
+    <label class="chk"><input type="checkbox" id="showFrustum"> frustum outline</label>
+    <label class="chk"><input type="checkbox" id="showPatch"> live viewport image patch</label>
+    <label class="chk"><input type="checkbox" id="showSphere"> sphere shell</label>
     <label class="chk"><input type="checkbox" id="showCircles"> grid-line great circles</label>
-    <label class="chk"><input type="checkbox" id="showPoles" checked> vanishing-point poles</label>
-    <label class="chk"><input type="checkbox" id="showRecoveredFloor" checked> recovered floor overlay (decoded position)</label>
-    <div class="row"><span class="label">recovered floor opacity</span><input type="range" id="recoveredFloorOpacity" min="0" max="1" step="0.01" value="0.9"><span class="val" id="recoveredFloorOpacityVal"></span></div>
+    <label class="chk"><input type="checkbox" id="showPoles"> vanishing-point poles</label>
+    <label class="chk"><input type="checkbox" id="showRecoveredFloor"> recovered floor overlay (decoded position)</label>
+    <div class="row"><span class="label">recovered floor opacity</span><input type="range" id="recoveredFloorOpacity" min="0" max="1" step="0.01"><span class="val" id="recoveredFloorOpacityVal"></span></div>
   </div>
 
   <div class="section">
     <h2>axes reconstruction</h2>
-    <label class="chk"><input type="checkbox" id="showTopCircles" checked> show top circles (rings)</label>
-    <div class="row"><span class="label">ring stroke weight</span><input type="range" id="topCirclesLineWidth" min="0.5" max="8" step="0.5" value="1"><span class="val" id="topCirclesLineWidthVal"></span></div>
-    <label class="chk"><input type="checkbox" id="showRecoveredPoles" checked> show reconstructed poles</label>
+    <label class="chk"><input type="checkbox" id="showTopCircles"> show top circles (rings)</label>
+    <div class="row"><span class="label">ring stroke weight</span><input type="range" id="topCirclesLineWidth" min="0.5" max="8" step="0.5"><span class="val" id="topCirclesLineWidthVal"></span></div>
+    <label class="chk"><input type="checkbox" id="showRecoveredPoles"> show reconstructed poles</label>
     <label class="chk"><input type="checkbox" id="showAxisVectors"> show vote axis vectors</label>
-    <div class="row"><span class="label">min grazing cos</span><input type="range" id="minGrazingCos" min="0" max="0.5" step="0.01" value="0.1"><span class="val" id="minGrazingCosVal"></span></div>
+    <div class="row"><span class="label">min grazing cos</span><input type="range" id="minGrazingCos" min="0" max="0.5" step="0.01"><span class="val" id="minGrazingCosVal"></span></div>
     <button id="captureAxesBtn" class="captureBtn">&#9889; capture now</button>
     <label class="chk"><input type="checkbox" id="axesAutoCapture"> auto-recompute</label>
-    <div class="row"><span class="label">interval (ms)</span><input type="range" id="axesCaptureInterval" min="50" max="2000" step="50" value="500"><span class="val" id="axesCaptureIntervalVal"></span></div>
+    <div class="row"><span class="label">interval (ms)</span><input type="range" id="axesCaptureInterval" min="50" max="2000" step="50"><span class="val" id="axesCaptureIntervalVal"></span></div>
     <div id="axesReadout">not yet computed</div>
   </div>
 

@@ -16,7 +16,7 @@
 
 import * as THREE from 'three';
 import { toGrayscale } from './decode.ts';
-import { config } from './sphereLab/config.ts';
+import { config, fetchConfigFile } from './sphereLab/config.ts';
 import { globalState } from './sphereLab/state.ts';
 // Only the data-side rebuild is needed here now. The board's world EXTENT
 // (C/R/GRID_STEP) is read by gameOverlay.ts instead, which is the only thing
@@ -72,14 +72,59 @@ const arCanvas = document.getElementById('arCanvas') as HTMLCanvasElement;
 const arOverlayCheckbox = document.getElementById('arOverlayEnabled') as HTMLInputElement;
 const imuCheckbox = document.getElementById('imuEnabled') as HTMLInputElement;
 const imuCorrectionCheckbox = document.getElementById('imuCorrection') as HTMLInputElement;
+// Deliberately NOT the same ids sphere-lab.html uses for its own pair:
+// sphereLab/ui/dom.ts runs getElementById at module scope and is loaded on
+// this page too (via scene/renderer.ts), so sharing an id would hand the
+// desktop's binding this page's button.
+const reloadConfigBtn = document.getElementById('reloadConfigBtn') as HTMLButtonElement;
+const reloadConfigStatus = document.getElementById('reloadConfigStatus') as HTMLDivElement;
 // mobile-capture.html carries no `checked` attributes -- config.phone owns
 // these five defaults, the same way config.camera owns every desktop control
-// (see sphereLab/config.ts). Seeded here, once, before anything reads them.
-computeOnDeviceCheckbox.checked = config.phone.computeOnDevice;
-sendDebugInfoCheckbox.checked = config.phone.sendDebugInfo;
-sendCapturedImageCheckbox.checked = config.phone.sendCapturedImage;
-imuCheckbox.checked = config.phone.imuEnabled;
-imuCorrectionCheckbox.checked = config.phone.imuCorrection;
+// (see sphereLab/config.ts).
+//
+// Applying is a DISPATCH, not a plain assignment, so each box's own change
+// listener runs: setComputeMode tells the desktop, the IMU one asks for the
+// motion permission, and so on. Assigning `.checked` alone fires nothing, and
+// a box that looks on while nothing is recording is a lie. Boot passes
+// `silent` because those listeners are registered further down this file and
+// the seeding has to happen before anything reads the values -- boot's own
+// wiring covers the same ground.
+function applyPhoneConfig(phone: typeof config.phone, silent: boolean): void {
+  for (const [box, value] of [
+    [computeOnDeviceCheckbox, phone.computeOnDevice],
+    [sendDebugInfoCheckbox, phone.sendDebugInfo],
+    [sendCapturedImageCheckbox, phone.sendCapturedImage],
+    [imuCheckbox, phone.imuEnabled],
+    [imuCorrectionCheckbox, phone.imuCorrection],
+  ] as [HTMLInputElement, boolean][]) {
+    const changed = box.checked !== value;
+    box.checked = value;
+    if (changed && !silent) box.dispatchEvent(new Event('change'));
+  }
+}
+applyPhoneConfig(config.phone, true);
+
+// Re-reads sphere-lab.config.json and applies config.phone in place. Unlike
+// the desktop's load button this does NOT reload: a reload here drops the
+// camera stream and the websocket, and the desktop sees the reconnect as an
+// entirely new phone (a fresh captureId means a fresh camera tab). The surface
+// is five booleans that all already have working change handlers, so applying
+// in place is both possible and honest here in a way it is not over there.
+//
+// Nothing to discard first, either: this page never writes the localStorage
+// overlay -- only sphere-lab.html does -- so the file is already the only
+// thing it was reading.
+reloadConfigBtn.addEventListener('click', async () => {
+  reloadConfigStatus.textContent = 'loading…';
+  try {
+    const fresh = await fetchConfigFile();
+    applyPhoneConfig(fresh.phone, false);
+    config.phone = fresh.phone;
+    reloadConfigStatus.textContent = 'config reloaded';
+  } catch (err) {
+    reloadConfigStatus.textContent = `load failed: ${err instanceof Error ? err.message : String(err)}`;
+  }
+});
 const imuReadoutEl = document.getElementById('imuReadout')!;
 
 // ── Hiding the page's own UI ─────────────────────────────────────────────

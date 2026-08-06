@@ -202,6 +202,14 @@
   }
   #debugToggles label { color: #ccc; font-family: monospace; font-size: 12px; display: flex; align-items: center; gap: 8px; }
   #debugToggles input { accent-color: #f80; }
+  /* Same pill look as #resBox's buttons -- this page's own button style. */
+  #debugToggles button {
+    background: rgba(255,255,255,0.25); color: #fff; border: none;
+    border-radius: 999px; padding: 6px 12px; font-family: monospace; font-size: 12px;
+    white-space: nowrap; align-self: stretch;
+  }
+  #reloadConfigStatus { color: #9cf; font-family: monospace; font-size: 11px; }
+  #reloadConfigStatus:empty { display: none; }
   /* white-space: pre-line so updateImuReadout's two-line string breaks where
      its \n says to, without needing markup for the second line. :empty
      collapses the box entirely when the toggle is off, so an unused readout
@@ -296,6 +304,14 @@
        the motion permission that the record toggle obtains, so turning this
        on alone does nothing until that has been granted at least once. -->
   <label><input type="checkbox" id="imuCorrection"> use IMU correction</label>
+  <!-- Explicit, because this page has no other way to pick up a config edit:
+       it does not write the localStorage overlay at all (only sphere-lab.html
+       does), so its toggles are whatever the FILE said at load. Re-reads the
+       file and applies it in place rather than reloading -- a reload here
+       would drop the camera stream and the websocket, and the desktop would
+       see the reconnect as a whole new phone. -->
+  <button id="reloadConfigBtn" type="button">reload config from disk</button>
+  <div id="reloadConfigStatus"></div>
   <!-- Inside the toggles box on purpose: every other panel here is
        fixed-positioned against a hand-computed `bottom`, and adding a fourth
        one to that stack means re-deriving the offsets of everything below it

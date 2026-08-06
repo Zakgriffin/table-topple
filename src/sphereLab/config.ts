@@ -99,10 +99,24 @@ function overlay<T extends TObject>(base: Static<T>, saved: unknown, schema: T, 
   }
 }
 
-async function load(): Promise<SphereLabConfig> {
+// The file alone, validated, with no localStorage overlay applied. Shared by
+// boot and by the "load config from disk" buttons, so that what a load reads
+// is byte-for-byte what a fresh boot would read.
+export async function fetchConfigFile(): Promise<SphereLabConfig> {
   const res = await fetch(CONFIG_URL, { cache: 'no-store' });
   if (!res.ok) throw new Error(`config: GET ${CONFIG_URL} failed (${res.status})`);
-  const disk = validate(await res.json());
+  return validate(await res.json());
+}
+
+// Drops this browser's live overlay, so the next boot is the file exactly.
+// Separate from fetchConfigFile on purpose: a load validates FIRST and only
+// discards once it knows the file it is falling back to is good.
+export function discardSavedOverlay(): void {
+  localStorage.removeItem(STORAGE_KEY);
+}
+
+async function load(): Promise<SphereLabConfig> {
+  const disk = await fetchConfigFile();
 
   let saved: Record<string, unknown> = {};
   try { saved = JSON.parse(localStorage.getItem(STORAGE_KEY) ?? '{}'); } catch { saved = {}; }

@@ -3,7 +3,7 @@ import { PhysicalCamera } from '../camera/model.ts';
 import { activeCamera, activeCameraId, cameras, isPhysical, isSimulated, setActiveCameraId } from '../camera/store.ts';
 import { pushSettingsSync, sendToDevBridge } from '../devBridge/client.ts';
 import { rebuildGridLineKs } from '../math/geometry.ts';
-import { config, configAsJson, registerActiveCameraSettingsSource } from '../config.ts';
+import { config, configAsJson, discardSavedOverlay, fetchConfigFile, registerActiveCameraSettingsSource } from '../config.ts';
 import { updateContaminationAvailability } from '../overlays/contaminationOverlays.ts';
 import { updateTopGradientAvailability } from '../overlays/gradientHighlightOverlays.ts';
 import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, updateHoverOverlays } from '../overlays/hoverDebugOverlays.ts';
@@ -20,7 +20,7 @@ import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, saveConfigBtn, saveConfigStatus, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, loadConfigBtn, saveConfigBtn, configStatus, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Tells config.ts which camera's settings persistConfig should capture before
@@ -36,8 +36,32 @@ registerActiveCameraSettingsSource(() => activeCamera()?.settings ?? null);
 // reviewable default, and a config that churned on every drag would be
 // impossible to read a diff of.
 saveConfigBtn.addEventListener('click', () => {
-  saveConfigStatus.textContent = 'saving…';
+  configStatus.textContent = 'saving…';
   sendToDevBridge({ type: 'saveConfig', json: configAsJson() });
+});
+
+// The other direction: throw away this browser's overlay and take the file.
+//
+// It RELOADS rather than re-applying in place, and that is the point. Settings
+// are spread across N camera objects, ~45 DOM controls and globalState by the
+// time the page is running, and re-driving all of that would be a second code
+// path that could disagree with boot about what the file means. A reload IS
+// the boot path, so "load" and "open the page fresh" cannot diverge.
+//
+// The file is fetched and validated BEFORE the overlay is discarded, so a
+// broken config leaves you exactly where you were, with the reason on screen,
+// rather than dropping your edits and then failing to come back up.
+loadConfigBtn.addEventListener('click', async () => {
+  if (!confirm('Discard this browser\'s config edits and reload from sphere-lab.config.json?\n\nThe current capture is lost.')) return;
+  configStatus.textContent = 'loading…';
+  try {
+    await fetchConfigFile();
+  } catch (err) {
+    configStatus.textContent = `load failed, nothing discarded: ${err instanceof Error ? err.message : String(err)}`;
+    return;
+  }
+  discardSavedOverlay();
+  location.reload();
 });
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --

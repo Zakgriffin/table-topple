@@ -75,7 +75,8 @@
     transition: right 0.25s ease;
   }
   #overlayPanelToggle.collapsed { right: 16px; }
-  #overlayPanel button {
+  #overlayPanel button,
+  #panel .panelBtn {
     display: block; width: 100%; padding: 8px 12px; border-radius: 6px;
     border: 1px solid rgba(255,255,255,0.25);
     background: rgba(20,20,20,0.75); color: #ccc; font-family: monospace; font-size: 11px;
@@ -99,7 +100,8 @@
   #overlayPanel button.active#toggleGradientArrow,
   #overlayPanel button.active#toggleLevelLineArrow,
   #overlayPanel button.active#toggleTrueCardinalOrientation { background: rgba(60,140,255,0.5); color: #fff; border-color: #6af; }
-  #overlayPanel button:disabled { opacity: 0.35; cursor: not-allowed; }
+  #overlayPanel button:disabled,
+  #panel .panelBtn:disabled { opacity: 0.35; cursor: not-allowed; }
 
   #panel {
     position: fixed; top: 16px; left: 16px; z-index: 10;
@@ -293,12 +295,14 @@
     <div class="hint" id="lsdChainTransfers" style="margin-bottom:0;"></div>
 
     <!-- Every value in this panel lives in sphere-lab.config.json. Editing a
-         control changes localStorage (the live overlay); this button promotes
-         the whole current object back onto the file, through the dev bridge.
-         Needs `npm run dev:bridge` running -- the readout says so if not. -->
+         control changes localStorage (the live overlay) only; these two move
+         values between that overlay and the file, in either direction, through
+         the dev bridge. Both need `npm run dev:bridge` running -- the readout
+         below says so if not. -->
     <div class="subhead">config</div>
-    <button id="saveConfigBtn">save config to disk</button>
-    <div class="hint" id="saveConfigStatus" style="margin-bottom:0;"></div>
+    <button id="saveConfigBtn" class="panelBtn" title="Writes the whole live config (this browser's edits included) over sphere-lab.config.json, through the dev bridge. Needs `npm run dev:bridge`.">save config to disk</button>
+    <button id="loadConfigBtn" class="panelBtn" title="Discards this browser's local edits and reloads the page from sphere-lab.config.json exactly. The file is validated BEFORE anything is discarded, so a broken file leaves you where you are.">load config from disk</button>
+    <div class="hint" id="configStatus" style="margin-bottom:0;"></div>
 
     <!-- Deliberately last, and deliberately NOT persisted across reloads (see
          ui/cameraPanel.ts's bind) -- this one changes what the pipeline COSTS,

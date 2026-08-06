@@ -8,7 +8,7 @@ import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import { tryUnpackPoseResultWithImage } from './poseResultWire.ts';
 import { renderer } from '../scene/renderer.ts';
 import { globalState } from '../state.ts';
-import { saveConfigStatus } from '../ui/dom.ts';
+import { configStatus } from '../ui/dom.ts';
 import { renderCameraTabs, refreshCameraPanel } from '../ui/cameraPanel.ts';
 import { throughCamCanvas } from '../ui/dom.ts';
 import { nowMs } from '../clock.ts';
@@ -342,7 +342,7 @@ export function pushPoseSync(cam: PhysicalCamera) {
           };
         }
       } else if (msg.type === 'configSaved') {
-        saveConfigStatus.textContent = msg.ok
+        configStatus.textContent = msg.ok
           ? `saved to ${String(msg.path).split('/').pop()}`
           : `save failed: ${msg.error}`;
       } else if (msg.type === 'captureDisconnected' && msg.captureId) {

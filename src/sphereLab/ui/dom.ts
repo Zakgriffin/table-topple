@@ -3,7 +3,8 @@ import { Mode } from '../types.ts';
 
 export const canvas = document.getElementById('gl') as HTMLCanvasElement;
 export const saveConfigBtn = document.getElementById('saveConfigBtn') as HTMLButtonElement;
-export const saveConfigStatus = document.getElementById('saveConfigStatus') as HTMLDivElement;
+export const loadConfigBtn = document.getElementById('loadConfigBtn') as HTMLButtonElement;
+export const configStatus = document.getElementById('configStatus') as HTMLDivElement;
 export const throughCamCanvas = document.getElementById('throughCamCanvas') as HTMLCanvasElement;
 export const throughCamCtx = throughCamCanvas.getContext('2d')!;
 export const panel = document.getElementById('panel') as HTMLDivElement;

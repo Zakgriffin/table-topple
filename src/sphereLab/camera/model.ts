@@ -86,7 +86,7 @@ export interface CameraBase {
   // by resizeCaptureBuffers so a stale-sized buffer can never be reused
   // after a viewport/supersample resize.
   lastAxesCaptureGray: { gray: Float64Array; w: number; h: number } | null;
-  // -- deferred-visualization mailbox (globalState.useDeferredVisuals) --
+  // -- deferred-visualization mailbox --
   //
   // One slot, freshest-wins, exactly like pendingCapture below, but holding no
   // payload at all: the display tail is an idempotent function of this
@@ -279,16 +279,8 @@ export interface PhysicalCamera extends CameraBase {
   // signal only goes out on a genuine true/false transition instead of
   // every frame.
   lastReportedReady: boolean;
-  // Same "only send on a real change" throttle as lastReportedReady, but
-  // for globalState.useCapturePipelining riding along on the same message
-  // (see main.ts's animate loop) -- deliberately initialized to the
-  // OPPOSITE of that setting's actual default (see factory.ts) so a
-  // freshly-connected phone gets synced immediately instead of waiting for
-  // the first real busy/idle transition, which might not happen for a
-  // while.
-  lastReportedPipelined: boolean;
-  // Mailbox slot for globalState.useCapturePipelining (see devBridge/
-  // client.ts's realCapture handler and main.ts's animate loop pump) --
+  // Mailbox slot for an arriving capture (see devBridge/client.ts's
+  // realCapture handler and main.ts's animate loop pump) --
   // always overwritten with the newest arrived frame, never queued, so a
   // desktop that falls behind naturally drops stale frames instead of
   // working through a backlog. sentAt/pulledAt/encodedAt/receivedAt are all

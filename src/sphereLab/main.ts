@@ -67,7 +67,7 @@ import { globalState } from './state.ts';
 import { euler } from './constants.ts';
 import { canvas, readout, savedControls } from './ui/dom.ts';
 import { setMode, setPanelCollapsed } from './ui/mode.ts';
-import { renderCameraTabs, refreshCameraPanel, updateProfilerStatus } from './ui/cameraPanel.ts';
+import { renderCameraTabs, refreshCameraPanel } from './ui/cameraPanel.ts';
 import { renderViewport, layoutPip, resize, computeThroughRect } from './ui/layout.ts';
 import './ui/cameraPanel.ts'; // side effect: wires every slider/checkbox to the active camera
 import { renderer } from './scene/renderer.ts';
@@ -197,9 +197,8 @@ function animate() {
       // Drain the mailbox every tick a frame's sitting in it and the camera
       // is actually free (see devBridge/client.ts's realCapture handler,
       // which always writes here now rather than calling ingestRealCapture
-      // directly -- the mailbox is strictly safer than a direct call even
-      // when useCapturePipelining is off, since it can never overlap two
-      // decodes of the same camera's capture buffers).
+      // directly -- the mailbox can never overlap two decodes of the same
+      // camera's capture buffers, which a direct call could).
       if (!camera.axesCapturing && !camera.captureIngestBusy && camera.pendingCapture) {
         const pending = camera.pendingCapture;
         camera.pendingCapture = null;
@@ -220,22 +219,16 @@ function animate() {
           .catch((e) => console.error('[poseResult] ingest failed:', e))
           .finally(() => { camera.captureIngestBusy = false; });
       }
-      // Tell the phone behind a physical camera (a) whether Sphere Lab is
-      // actually still crunching the last frame -- axesCapturing, exactly
-      // what drives the shutter button's yellow "working" state -- and (b)
-      // whether useCapturePipelining is on, which the phone uses to decide
-      // whether that yellow state should also BLOCK sending (off: old
-      // strict one-frame-in-flight handshake) or is purely informational
-      // (on: freshest-wins mailbox absorbs a send at any time, so the
-      // phone can capture while yellow). Only sent on an actual change to
-      // either value, not every frame.
+      // Tell the phone behind a physical camera whether Sphere Lab is still
+      // crunching the last frame -- axesCapturing, exactly what drives the
+      // shutter button's yellow "working" state. Purely informational on the
+      // phone: the freshest-wins mailbox absorbs a send at any time, so it can
+      // capture while yellow. Only sent on an actual change, not every frame.
       const ready = !camera.axesCapturing;
-      const pipelined = globalState.useCapturePipelining;
-      if (ready !== camera.lastReportedReady || pipelined !== camera.lastReportedPipelined) {
+      if (ready !== camera.lastReportedReady) {
         const justFinished = ready && !camera.lastReportedReady;
         camera.lastReportedReady = ready;
-        camera.lastReportedPipelined = pipelined;
-        sendToDevBridge({ type: 'captureReady', captureId: camera.connectionId, ready, pipelined });
+        sendToDevBridge({ type: 'captureReady', captureId: camera.connectionId, ready });
         // Ships the freshly recovered pose back down to the phone (see
         // devBridge/client.ts's pushPoseSync) right as a desktop-compute
         // capture finishes -- same busy->ready edge captureReady itself
@@ -262,12 +255,6 @@ function animate() {
     drainVisuals(camera);
   }
   floorMesh.visible = globalState.showFloor;
-  // Keeps the diagnostics hint's capture count live while recording. Self-
-  // memoizing (see its own comment) -- it only touches the DOM when the text
-  // it would write actually changed, so it costs nothing on a normal frame and
-  // does not pollute the profile it is reporting on.
-  updateProfilerStatus();
-
   // Expensive pass: only ever needed for the active camera (Through-Cam/
   // Projected-Cam/Inside-Sphere, and the PIP preview, only ever show one
   // camera at a time -- see this file's header comment).

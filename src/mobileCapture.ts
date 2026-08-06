@@ -10,11 +10,9 @@
 // video (streams frames automatically). Sphere Lab's own reconstruction
 // pass is slow enough that it needs to say something about pacing -- see
 // the "Capture mode + readiness" section below. Exactly what that signal
-// MEANS depends on Sphere Lab's own useCapturePipelining toggle, relayed
-// alongside it: off, "not ready" blocks sending outright (old strict
-// one-frame-in-flight handshake); on, it's purely a status indicator for
-// the shutter button's yellow "working" state -- Sphere Lab's mailbox can
-// always take a fresher frame, busy or not, so sending is never blocked.
+// "Not ready" is purely a status indicator for the shutter button's yellow
+// "working" state -- Sphere Lab's capture mailbox can always take a fresher
+// frame, busy or not, so sending is never blocked by it.
 
 import * as THREE from 'three';
 import { toGrayscale } from './decode.ts';
@@ -1608,17 +1606,7 @@ function scheduleReconnect() {
 // no-op whenever Sphere Lab isn't ready, exactly like video mode already
 // has to gate its automatic sends.
 let captureMode: 'single' | 'video' = 'single';
-let sphereLabReady = true;
 let readyTimeoutTimer: number | undefined;
-// Mirrors Sphere Lab's globalState.useCapturePipelining, riding along on
-// every captureReady message (see server.js's relay). Conservative default
-// (false, i.e. old strict handshake) until the first real message arrives,
-// since we don't know the desktop's setting yet at connect time. When true,
-// sphereLabReady/the yellow "notReady" state is purely informational --
-// Sphere Lab's mailbox absorbs a send at any time, so it no longer blocks
-// captureAndSendFrame the way it still does when this is false.
-let sphereLabPipelined = false;
-
 function setCaptureMode(mode: 'single' | 'video') {
   captureMode = mode;
   modeSingleBtn.classList.toggle('active', mode === 'single');
@@ -1671,8 +1659,10 @@ sendCapturedImageCheckbox.addEventListener('change', () => { sendCapturedImage =
 // crunch) don't stay stuck yellow/stalled forever -- fall back to assuming
 // ready after a while. A real captureReady message always overrides this.
 const READY_TIMEOUT_MS = 8000;
+// Display only. Nothing gates on this any more: Sphere Lab's capture mailbox
+// always accepts the freshest frame, so the yellow shutter reports that the
+// desktop is busy without ever blocking a send.
 function setReady(ready: boolean) {
-  sphereLabReady = ready;
   shutterBtn.classList.toggle('notReady', !ready);
   clearTimeout(readyTimeoutTimer);
   if (!ready) readyTimeoutTimer = window.setTimeout(() => setReady(true), READY_TIMEOUT_MS);
@@ -1700,7 +1690,6 @@ function connectRelay() {
     let msg: any;
     try { msg = JSON.parse(ev.data); } catch { return; }
     if (msg.type === 'captureReady') {
-      sphereLabPipelined = !!msg.pipelined;
       setReady(!!msg.ready);
     } else if (msg.type === 'settingsSync') {
       applySettingsSync(msg);
@@ -1782,7 +1771,6 @@ function sendGateStatus(): 'ok' | 'backpressure' | 'not-ready' {
   // the pipeline. The mailbox on the desktop only helps once a message
   // arrives; it can't do anything about a backlog stuck in transit.
   if (ws && ws.bufferedAmount > 0) return 'backpressure';
-  if (!(sphereLabPipelined || sphereLabReady)) return 'not-ready';
   return 'ok';
 }
 function canSend() {
@@ -1930,15 +1918,11 @@ function captureAndSendFrame() {
     ws.send(blob);
     shutterBtn.classList.add('sent');
     setTimeout(() => shutterBtn.classList.remove('sent'), 300);
-    // Optimistic -- Sphere Lab will confirm the real state via captureReady
-    // once it's actually looked at this frame; this just stops us (or the
-    // video loop) from firing off a second one in the meantime. Skipped
-    // when pipelined: Sphere Lab's mailbox can always take another frame,
-    // so forcing sphereLabReady false here would just make the yellow
-    // state lie about whether it's actually still crunching (and did,
-    // before this fix -- nothing ever cleared it back in pipelined mode
-    // since the desktop only reports genuine busy/idle transitions).
-    if (!sphereLabPipelined) setReady(false);
+    // Deliberately NOT setting sphereLabReady false here. Sphere Lab's mailbox
+    // can always take another frame, so forcing the yellow state on would make
+    // it lie about whether the desktop is actually still crunching -- and
+    // nothing would clear it, since the desktop only reports genuine busy/idle
+    // transitions.
   }, 'image/jpeg', 0.85);
 }
 
@@ -2226,13 +2210,9 @@ shutterBtn.addEventListener('click', () => {
   captureAndSendFrame();
 });
 
-// Ticks every frame; only actually sends in video mode. When Sphere Lab
-// isn't pipelined, the gate is 'not-ready' whenever sphereLabReady is
-// false, turning a slow reconstruction pass into a natural frame-rate cap
-// instead of flooding the relay with frames nothing's looked at yet -- same
-// as before. When pipelined, Sphere Lab's own mailbox does that job instead
-// (always takes the freshest frame, drops stale ones), so the only gate
-// left in practice is 'backpressure'. loopTicks/etc. (see above) count
+// Ticks every frame; only actually sends in video mode. Sphere Lab's own
+// mailbox is what paces this -- it always takes the freshest frame and drops
+// stale ones -- so the only gate left is 'backpressure'. loopTicks/etc. count
 // every outcome so a diagnostic script can tell which one actually explains
 // the idle gap, instead of guessing from timing alone.
 function videoLoop() {

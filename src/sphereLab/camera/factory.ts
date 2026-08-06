@@ -282,9 +282,6 @@ export function createPhysicalCamera(color: THREE.Color, connectionId: string): 
     type: 'physical', settings,
     lastRealCaptureGray: null, lastRealCaptureW: 0, lastRealCaptureH: 0,
     connectionId, captureMode: 'single', computeMode: 'desktop', neverSyncedSettings: true, lastRemoteDebug: null, lastReportedReady: true,
-    // false regardless of globalState.useCapturePipelining's own default --
-    // see its comment on PhysicalCamera for why the mismatch is deliberate.
-    lastReportedPipelined: false,
     pendingCapture: null, pendingPoseResult: null, captureIngestBusy: false,
     idleSpan: null,
     lastPullMs: null, lastEncodeMs: null, lastTransitMs: null,

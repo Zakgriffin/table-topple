@@ -247,14 +247,14 @@ wss.on('connection', (ws) => {
     }
 
     // Browser -> a specific phone: is Sphere Lab ready to receive/process
-    // another frame from it, and whether useCapturePipelining is on (the
+    // another frame from it (the
     // phone uses that to decide if "not ready" should still block sending
     // -- see mobileCapture.ts). Routed the same way kickCapture is (find
     // the one capture socket matching captureId), just sent instead of
     // closed.
     if (msg.type === 'captureReady' && msg.captureId) {
       for (const [capWs, id] of captureSockets) {
-        if (id === msg.captureId) { send(capWs, { type: 'captureReady', ready: msg.ready, pipelined: msg.pipelined }); break; }
+        if (id === msg.captureId) { send(capWs, { type: 'captureReady', ready: msg.ready }); break; }
       }
       return;
     }

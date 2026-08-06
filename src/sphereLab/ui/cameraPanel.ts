@@ -14,12 +14,12 @@ import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { isWebGPUSupported } from '../pipelineGPU/device.ts';
-import { checkNesting, getRoots, profilerDevToolsMirror, profilerReset, profilerSetDevToolsMirror } from '../profiling/profiler.ts';
+import { profilerReset, profilerSetDevToolsMirror } from '../profiling/profiler.ts';
 import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, profilerStatus, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -351,13 +351,11 @@ bindCheckbox('forceCPU', (v) => {
 // Doesn't affect any already-computed camera state, just how the NEXT
 // physical-camera frame gets scheduled -- no recomputeFromLastCapture call
 // needed (unlike forceCPU above).
-bindCheckbox('useCapturePipelining', (v) => { globalState.useCapturePipelining = v; });
 // Same story -- this only picks WHEN the display tail runs, never what it
 // computes, so there is nothing to recompute on a flip. Turning it off leaves
 // any already-posted mailbox slot to be drained normally (markVisualsDirty and
 // drainVisuals are both unconditional; only the caller in recomputeStages
 // consults the flag), so a camera can't be stranded mid-repaint by a toggle.
-bindCheckbox('useDeferredVisuals', (v) => { globalState.useDeferredVisuals = v; });
 
 // ── The profiler toggle ──────────────────────────────────────────────────
 //
@@ -377,38 +375,6 @@ bindCheckbox('useDeferredVisuals', (v) => { globalState.useDeferredVisuals = v; 
 // an absent `checked` attribute in the HTML is NOT enough to guarantee off.
 const profilerCheckbox = document.getElementById('profilerEnabled') as HTMLInputElement;
 
-// Called every frame from animate() so the capture count stays live, which is
-// why it memoizes on the rendered string rather than writing unconditionally:
-// a textContent write per frame WHILE PROFILING would add main-thread work to
-// the very recording being taken. Reduces to one call and one string compare
-// on frames where nothing changed, which is nearly all of them.
-let lastProfilerStatusText = '';
-export function updateProfilerStatus() {
-  let text: string;
-  // The checkbox controls the DevTools MIRROR only -- spans themselves record
-  // unconditionally now, because pipeline/poseCompute.ts reads its per-stage
-  // timings off them. So "off" here means "not being written into DevTools'
-  // Timings track", never "not being measured", and the text says so rather
-  // than implying the pipeline is uninstrumented.
-  if (!profilerDevToolsMirror()) {
-    text = 'Not mirroring to DevTools. Spans still record — formatFlamechart() works either way.';
-  } else {
-    // ROOT SPANS, not captures -- with deferred visuals on, one capture leaves
-    // three (axesReconstruction, then the drain's projectBins and
-    // poleMarkers+overlays, which are roots precisely BECAUSE the tail no
-    // longer runs inside the reconstruction). Calling them captures would
-    // misreport the thing this readout exists to show.
-    const n = getRoots().length;
-    const bad = checkNesting().length;
-    text = n === 0
-      ? 'Mirroring. Start the DevTools capture FIRST, then take one here.'
-      : `Mirroring -- ${n} root span${n === 1 ? '' : 's'}${bad ? `, ${bad} INVALID nesting` : ''}. formatFlamechart() for the text form.`;
-  }
-  if (text === lastProfilerStatusText) return;
-  lastProfilerStatusText = text;
-  profilerStatus.textContent = text;
-}
-
 function applyProfilerToggle() {
   const on = profilerCheckbox.checked;
   // Reset on the way ON, per session -- deliberately NOT per capture.
@@ -419,7 +385,6 @@ function applyProfilerToggle() {
   // formatFlamechart() still has something to print.
   if (on) profilerReset();
   profilerSetDevToolsMirror(on);
-  updateProfilerStatus();
 }
 profilerCheckbox.checked = false;
 profilerCheckbox.addEventListener('change', applyProfilerToggle);

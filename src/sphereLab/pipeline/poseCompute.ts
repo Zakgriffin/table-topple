@@ -142,7 +142,7 @@ async function computeCompositesAndVotes(
 // and onto state.pendingDecodeGrid for the caller to drain. It is a PARAMETER
 // rather than a globalState read on purpose: this function has three callers and
 // only one of them can honour it. axesReconstruction has the visual mailbox and
-// passes globalState.useDeferredVisuals; mobileCapture reads state.lastDecodeGrid
+// passes true; mobileCapture reads state.lastDecodeGrid
 // synchronously the moment this returns (buildDebugPayload) and has no drain at
 // all; reconstructionTiming releases without resolving, because it is measuring
 // the pose path and the readback is no longer on it. A globalState flag would

@@ -171,7 +171,6 @@
      correct, they just stop being independently priced. The island toggles
      below deliberately get NO rule, because that contrast is the whole point:
      they are fenced by CPU-only stages and always cost 2 crossings each. */
-  .chkGroup { border-left: 2px solid rgba(136,170,187,0.4); padding-left: 8px; margin: 0 0 8px 2px; }
   label.chk { display: flex; align-items: center; gap: 6px; font-size: 12px; margin-bottom: 4px; cursor: pointer; }
   /* A control that refines the one directly above it. */
   label.chk.sub { margin-left: 18px; }
@@ -281,34 +280,16 @@
     <label class="chk"><input type="checkbox" id="showFloor" checked> floor</label>
     <div class="row"><span class="label">cell outline</span><input type="range" id="floorCellOutlineSubdiv" min="0" max="20" step="1" value="0"><span class="val" id="floorCellOutlineSubdivVal"></span></div>
     <div class="row"><span class="label">De Bruijn board size</span><input type="range" id="boardSize" min="0" max="512" step="1" value="144"><span class="val" id="boardSizeVal"></span></div>
-    <!-- First thing that happens to a frame, so it goes first. Not a WebGPU
-         toggle at all -- it changes how the NEXT capture is scheduled, not how
-         any stage computes -- hence its own heading rather than a spot among
-         the GPU ones. -->
-    <div class="subhead">capture</div>
-    <label class="chk"><input type="checkbox" id="useCapturePipelining" checked> pipelined video capture (mailbox, drop stale frames)</label>
-    <label class="chk" title="Moves the projected-bins/overlay/decal repaint out of the reconstruction and into a per-camera mailbox drained by the render loop. Overlays land one animation frame after the pose instead of in the same frame."><input type="checkbox" id="useDeferredVisuals" checked> deferred visuals (mailbox, repaint after the pose)</label>
-
     <div class="hint" id="gpuVotesStatus"></div>
 
-    <!-- Listed in PIPELINE ORDER (stage 1 -> 3 -> 3b -> 4), not in the order
-         they were written, because adjacency is exactly what determines their
-         cost. Two neighbours both on GPU share a buffer and the crossing
-         between them disappears. -->
-    <!-- Labels are deliberately bare; the caveats live in `title` tooltips
-         rather than being deleted, because several of them are operational
-         warnings (the grower is not bit-identical to CPU) rather than trivia. -->
-    <!-- ONE switch, replacing nine per-stage ones (2026-08-05). Those toggles
-         were the measurement instrument that produced every number on record,
-         and the answer was "everything is GPU" -- so what is left is a
-         reference/production A/B, not nine independent choices. Unchecked is
-         the shipping path; checking it runs the CPU reference implementations
-         end to end. See state.ts's forceCPU for why the CPU code stayed. -->
+    <!-- ONE switch, replacing nine per-stage ones. Those toggles were the
+         measurement instrument that produced every number on record, and the
+         answer was "everything is GPU" -- so what is left is a reference/
+         production A/B. Unchecked is the shipping path. See state.ts's
+         forceCPU for why the CPU implementations stayed. -->
     <div class="subhead">GPU</div>
-    <div class="chkGroup">
-      <label class="chk" title="Runs the CPU reference implementations for every stage instead of the GPU ones. For checking whether a GPU stage is lying -- the shipping path is unchecked. Note the no-WebGPU fallback is separate and automatic: each stage falls back on its own if there is no device or a dispatch fails validation."><input type="checkbox" id="forceCPU"> force CPU reference path</label>
-      <div class="hint" id="lsdChainTransfers" style="margin-bottom:0;"></div>
-    </div>
+    <label class="chk" title="Runs the CPU reference implementations for every stage instead of the GPU ones. For checking whether a GPU stage is lying -- the shipping path is unchecked. Note the no-WebGPU fallback is separate and automatic: each stage falls back on its own if there is no device or a dispatch fails validation."><input type="checkbox" id="forceCPU"> force CPU reference path</label>
+    <div class="hint" id="lsdChainTransfers" style="margin-bottom:0;"></div>
 
     <!-- Deliberately last, and deliberately NOT persisted across reloads (see
          ui/cameraPanel.ts's bind) -- this one changes what the pipeline COSTS,
@@ -316,7 +297,6 @@
          later measurement. -->
     <div class="subhead">diagnostics</div>
     <label class="chk" title="Records the nested span tree AND mirrors every span into Chrome DevTools' Timings track, so a reconstruction reads as one bar instead of a dozen unrelated task slices. Costs real time -- leave it off when measuring."><input type="checkbox" id="profilerEnabled"> profile captures (DevTools Timings track)</label>
-    <div class="hint" id="profilerStatus" style="margin-bottom:0;"></div>
   </div>
 
   <div id="cameraSettingsSections" class="hidden">

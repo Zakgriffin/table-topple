@@ -172,9 +172,10 @@ export function updateChainTransfersReadout(camera: Camera | undefined) {
 //
 // Everything below the pose itself: the projected bins + texture paint, the
 // pole markers/floor overlay, and the mode-specific overlays. Split out of
-// recomputeStages so it can run EITHER inline (the old behaviour, kept as the
-// measurement baseline) or deferred through a one-slot mailbox drained by
-// animate() -- globalState.useDeferredVisuals picks which.
+// recomputeStages so it runs deferred, through a one-slot mailbox drained by
+// animate(), rather than inline inside the pose window -- that ~20ms of
+// display GPU work used to serialize against the same device queue the pose
+// stages were using. It costs one animation frame (~16ms) of overlay lag.
 //
 // The reason a boolean is enough where a work queue looks like it's needed:
 // this function reads NOTHING but camera state, and that state is already
@@ -274,9 +275,7 @@ async function runVisualTail(camera: Camera): Promise<void> {
   }
 }
 
-// Posts to the mailbox. Deliberately NOT gated on useDeferredVisuals: the
-// flag decides who CALLS this, and a slot left full when the flag is switched
-// off mid-session still has to get drained rather than sit stale forever.
+// Posts to the mailbox.
 function markVisualsDirty(camera: Camera): void {
   camera.visualsDirty = true;
 }
@@ -371,19 +370,19 @@ async function recomputeStages(camera: Camera) {
   // confirmed not on the critical path to a pose (distance is already
   // finalized by gridPeriodPhase before that stage would run); they exist
   // only to feed Projected-Cam/World-floor-decal DISPLAY.
-  // Deferring the decode grid is tied to useDeferredVisuals rather than given
-  // its own toggle: the handle is drained by runVisualTail, so with the tail
-  // running inline there is nothing to defer INTO -- the drain would be one
-  // statement later, buying nothing and adding a lifetime.
-  camera.lastPoseTiming = await computePoseFromCapture(camera, gray, w, h, globalState.useDeferredVisuals);
+  // `true` = defer the decode grid's readback into the visual drain. Always on
+  // here because the drain always runs; it stays a PARAMETER rather than a
+  // global because computePoseFromCapture's other two callers have no drain to
+  // defer into (mobileCapture reads lastDecodeGrid synchronously, and the
+  // timing harness releases the handle without resolving it).
+  camera.lastPoseTiming = await computePoseFromCapture(camera, gray, w, h, true);
   camera.axesComputed = !!camera.lastQuadricPair;
 
   // The pose is final here; everything past this point is display. Deferred,
   // that display work stops being awaited inside the reconstruction's own
   // window, where it serialized ~20ms of GPU work against the same device
   // queue the pose stages were using.
-  if (globalState.useDeferredVisuals) markVisualsDirty(camera);
-  else await runVisualTail(camera);
+  markVisualsDirty(camera);
 }
 
 export function runAxesReconstruction(camera: Camera) {

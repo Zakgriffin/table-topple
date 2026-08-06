@@ -11,7 +11,8 @@ export interface GradientField { fx: Float64Array; fy: Float64Array; w: number; 
 // and what gridPeriodPhase classifies into row/column families.
 //
 // It lived in pipeline/bucketFillJoin.ts back when a "composite" genuinely was
-// a composite: several raw segments merged into one line by the join walk. That
+// a composite: several raw segments merged into one line by the (since removed)
+// join walk. That
 // walk is retired (see its header), so today this is exactly ONE accepted LSD
 // rectangle's own two endpoints and nothing is composed at all. The name is
 // kept because it is threaded through Camera, the dev bridge wire format and

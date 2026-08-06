@@ -216,13 +216,6 @@ function drawRectanglesSvg(camera: Camera, rects: readonly LsdRectangle[]) {
     lsdRectanglesGroup.appendChild(svgEl('polygon', {
       points, fill: 'none', stroke, 'stroke-width': width, 'stroke-dasharray': dash,
     }));
-
-    if (r.accepted && r.retries > 0) {
-      const c = toScreen(r.cx, r.cy);
-      lsdRectanglesGroup.appendChild(svgEl('circle', {
-        cx: c.x, cy: c.y, r: 3.5, fill: 'rgb(255,225,0)', stroke: 'rgba(0,0,0,0.85)', 'stroke-width': 1,
-      }));
-    }
   }
 }
 
@@ -278,9 +271,6 @@ export async function updateLsdOverlay(camera: Camera) {
     minRegionSize: settings.lsdMinRegionSize,
     nfaEpsilon: settings.lsdNfaEpsilon,
     nfaTestExponent: settings.lsdNfaTestExponent,
-    maxRetries: settings.lsdMaxRetries,
-    retryToleranceFactor: settings.lsdRetryToleranceFactor,
-    retryShrinkFraction: settings.lsdRetryShrinkFraction,
   });
   if (seq !== lsdOverlaySeq) return; // a newer call started while this one was in flight -- its result wins instead
   camera.lastLsdRectangles = rects;
@@ -292,8 +282,6 @@ export async function updateLsdOverlay(camera: Camera) {
   drawRectanglesSvg(camera, rects);
 
   const accepted = rects.filter((r) => r.accepted);
-  const retried = rects.filter((r) => r.retries > 0);
-  const totalRetries = rects.reduce((sum, r) => sum + r.retries, 0);
   // The growth half of the readout is only populated when the raw-regions
   // view is on, since that's the only branch above that runs growRegionsCCL
   // separately (the rectangle path runs its own copy internally and doesn't
@@ -306,8 +294,7 @@ export async function updateLsdOverlay(camera: Camera) {
       + `${grown.converged ? ' (converged)' : ' (CAPPED -- mid-growth, not the real result)'} -- `
     : '';
   lsdReadout.textContent = growthPart
-    + `${accepted.length} accepted, ${rects.length - accepted.length} rejected -- `
-    + `${retried.length} needed a retry (${totalRetries} retries total)`;
+    + `${accepted.length} accepted, ${rects.length - accepted.length} rejected`;
 }
 
 // No-op hook -- see contaminationOverlays.ts's updateContaminationAvailability

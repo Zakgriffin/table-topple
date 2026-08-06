@@ -59,12 +59,7 @@ export interface LsdCompositeSettings {
   lsdToleranceDeg: number; lsdRhoNoiseThreshold: number; lsdRhoHighThreshold: number; lsdCclSteps: number;
   lsdMinRegionSize: number;
   lsdNfaEpsilon: number;
-  lsdNfaTestExponent: number; lsdMaxRetries: number; lsdRetryToleranceFactor: number; lsdRetryShrinkFraction: number;
-  // lsdMergeMinSimilarity/lsdJoinSteps/lsdMaxTravelFactor USED TO BE HERE and
-  // are gone: they were the join walk's own four parameters and nothing reads
-  // them now. They survive on CameraSettingsCommon and on the dev-bridge wire
-  // (removing them there is a separate, wider change), so a real camera's
-  // settings still satisfies this structurally.
+  lsdNfaTestExponent: number;
   lsdMinLengthPx: number;
 }
 
@@ -104,9 +99,6 @@ export async function computeGradient2x2Composites(
     minRegionSize: settings.lsdMinRegionSize,
     nfaEpsilon: settings.lsdNfaEpsilon,
     nfaTestExponent: settings.lsdNfaTestExponent,
-    maxRetries: settings.lsdMaxRetries,
-    retryToleranceFactor: settings.lsdRetryToleranceFactor,
-    retryShrinkFraction: settings.lsdRetryShrinkFraction,
   });
   // Its own span inside this function's: it walks all ~5200 rectangles and keeps
   // ~893, and until it was split out that walk was indistinguishable from the
@@ -123,46 +115,20 @@ export async function computeGradient2x2Composites(
 // the rectangle/rejected/raw-region views) can produce lines from that SAME
 // array instead of re-running the chain a second time just to get here.
 //
-// ── The join walk was REMOVED here (2026-08-05), not disabled ──
+// ── The join walk was removed here, and it was a NO-OP when it went ──
 //
-// This used to run pipeline/bucketFillJoin.ts's front-walking merge (via
-// lsdRectanglesToBucketFillShape, which rebuilt a per-pixel regionId buffer to
-// seed it) and emit one line per MERGE GROUP. Both are retired; see
-// bucketFillJoin.ts's own header for the walk's design and why it went.
+// This used to merge rectangles into composite lines and emit one line per
+// merge group. It ran at joinSteps 0, where the step loop never executes: every
+// segment was already its own root and the length filter compared the same
+// endpoint pair `r.length` compares below. So every line, root number and
+// filter decision is unchanged by its removal.
 //
-// **This change is a NO-OP at lsdJoinSteps = 0, which is what was actually
-// running.** That is worth stating precisely, because it bounds the risk: with
-// numSteps 0 the walk's step loop never executes, so `merges` comes back empty,
-// computeMergeGroups makes every segment its own root, and computeCompositeLines
-// picks the farthest-apart pair among that root's only two candidate points --
-// which are exactly the endpoints below. The old length filter compared that
-// same pair's length against lsdMinLengthPx, so `r.length` here is the identical
-// test. Every line, every root number, every filter decision is unchanged.
-//
-// So removing this did NOT answer the accuracy question the perf plan raised
-// (does voting per raw segment instead of per merged composite hurt the fit or
-// the row/col classification?). At joinSteps 0 there was never a merged
-// composite to lose. That question only exists for a configuration that was not
-// in use, and it goes away with the code.
-//
-// What the removal DOES buy is structural: a serial, unparallelizable stage is
-// off the pose path, and the members readback stops being MANDATORY. Rebuilding
-// regionId to seed the walk was the reason the GPU plan recorded that readback
-// as "not going away"; it is now going away.
-//
-// AND IT HAS NOW GONE (2026-08-05, same day). This comment used to warn that
-// the win had not landed yet -- that fitRegionsGPU still called res.regionsCPU()
-// unconditionally to feed the raw-region and rejected debug overlays, so the
-// bytes crossed every frame regardless. That turned out to be wrong about the
-// overlays: overlays/lsdOverlay.ts recomputes its own rectangles on CPU from
-// lastNoisedPreviewGray and reads rawMembers off THAT array, never off this
-// path's. So the readback had no consumer at all and was deleted rather than
-// deferred. See fitRegionsGPU's own header in lsdSegments.ts for the full
-// consumer audit.
-//
-// `root` is the index among ACCEPTED rectangles, not among all of them. That is
-// what lsdRectanglesToBucketFillShape's own `id = segments.length` counter
-// produced, and gridPeriodPhase/the composite overlay both key off it.
+// The consequence worth remembering is what that means for the OPEN question:
+// "does voting per raw segment rather than per merged composite hurt the fit?"
+// was never actually being tested, because at joinSteps 0 there was no merged
+// composite to lose. See lsdSegments.ts's growth-rule block for the one place
+// this genuinely bites -- a polarity flip mid-line yields two antiparallel
+// halves that nothing reassembles.
 export function compositesFromLsdRectangles(
   rects: ReturnType<typeof computeLsdRectangles>, w: number, h: number, settings: LsdCompositeSettings,
 ): { root: number; line: CompositeLine }[] {

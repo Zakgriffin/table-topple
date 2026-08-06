@@ -169,12 +169,6 @@ export function refreshCameraPanel() {
   setNum('lsdMinRegionSize', cam.settings.lsdMinRegionSize);
   setNum('lsdNfaEpsilon', cam.settings.lsdNfaEpsilon);
   setNum('lsdNfaTestExponent', cam.settings.lsdNfaTestExponent);
-  setNum('lsdMaxRetries', cam.settings.lsdMaxRetries);
-  setNum('lsdRetryToleranceFactor', cam.settings.lsdRetryToleranceFactor);
-  setNum('lsdRetryShrinkFraction', cam.settings.lsdRetryShrinkFraction);
-  setNum('lsdJoinSteps', cam.settings.lsdJoinSteps);
-  setNum('lsdMergeMinSimilarity', cam.settings.lsdMergeMinSimilarity);
-  setNum('lsdMaxTravelFactor', cam.settings.lsdMaxTravelFactor);
   setNum('lsdMinLengthPx', cam.settings.lsdMinLengthPx);
   setBool('showRecoveredPoles', cam.settings.showRecoveredPoles); setBool('showAxisVectors', cam.settings.showAxisVectors);
   setBool('showTopCircles', cam.settings.showTopCircles);
@@ -494,22 +488,11 @@ bindSlider('lsdCclSteps', (v) => { const cam = activeCamera(); if (cam) { cam.se
 bindSlider('lsdMinRegionSize', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinRegionSize = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
 bindSlider('lsdNfaEpsilon', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaEpsilon = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
 bindSlider('lsdNfaTestExponent', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaTestExponent = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
-// Still BOUND, though their inputs carry `disabled` (see sphere-lab.html): the
-// stage-5 retry loop is retired and nothing reads these three, but keeping the
-// bindings means the readouts still render the persisted values instead of
-// showing blank, and un-disabling the inputs is all it takes to bring the
-// retired fitRegionWithRetries back for a comparison.
-bindSlider('lsdMaxRetries', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMaxRetries = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
-bindSlider('lsdRetryToleranceFactor', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRetryToleranceFactor = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
-bindSlider('lsdRetryShrinkFraction', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRetryShrinkFraction = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
-// The join walk's own 4 params -- feed pipeline/votes.ts's
-// computeGradient2x2Composites (production) directly, not a live debug
+// Feeds pipeline/votes.ts's computeGradient2x2Composites (production)
+// directly, not a live debug
 // overlay, so recomputeFromLastCapture (not a repaint call) is what picks
 // up the new value -- reusing the last capture rather than waiting for the
 // next unrelated "capture now"/axesAutoCapture tick.
-bindSlider('lsdJoinSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdJoinSteps = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
-bindSlider('lsdMergeMinSimilarity', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMergeMinSimilarity = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
-bindSlider('lsdMaxTravelFactor', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMaxTravelFactor = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(1));
 bindSlider('lsdMinLengthPx', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinLengthPx = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
 bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
 // Turning either on refreshes immediately -- updateGradientCirclesDebug now

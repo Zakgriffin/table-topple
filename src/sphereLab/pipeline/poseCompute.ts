@@ -95,8 +95,8 @@ async function computeCompositesAndVotes(
   state: PoseComputeState, res: FieldResidency, gray: Float64Array, w: number, h: number, vFovRad: number,
 ): Promise<{ voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[] }> {
   {
-    // Composite lines (bucket-fill -> join walk -> merge groups -> one line
-    // per group, over the 2x2 gradient field) computed exactly once here and
+    // Composite lines (one per accepted LSD rectangle, over the 2x2 gradient
+    // field) computed exactly once here and
     // shared by every downstream consumer that needs them -- vote casting
     // below and row/col family classification in computeGridPeriodPhase
     // further down (and, for a real desktop camera, the "color composite

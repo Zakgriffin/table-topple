@@ -11,24 +11,17 @@ import { computeGradient2x2Field } from './gradientField.ts';
 // ── LSD (Line Segment Detector, von Gioi/Jakubowicz/Morel/Randall 2010) ───
 // ── from scratch ────────────────────────────────────────────────────────
 //
-// A genuinely traditional reimplementation. This is now the PRODUCTION
-// composite-line source -- pipeline/votes.ts's computeGradient2x2Composites
-// calls lsdRectanglesToBucketFillShape (bottom of this file) to feed
-// pipeline/bucketFillJoin.ts's join walk, replacing pipeline/
-// bucketFillSegments.ts's own BFS growing, which stays defined and correct
-// but is no longer invoked from anywhere in the live pipeline -- kept in
-// the repo as a reference/comparison implementation, not deleted.
+// A genuinely traditional reimplementation, and the PRODUCTION composite-line
+// source: pipeline/votes.ts's computeGradient2x2Composites turns each accepted
+// rectangle straight into one line.
 //
 // Pipeline: hysteresis-gated, directed-angle CONNECTED-COMPONENT region
 // growing (stage 2+3, see growRegionsCCL below -- replaces the JFA-strided
 // competitive relabeling that replaced the original magnitude-sorted serial
 // BFS) -> magnitude-weighted PCA rectangle fit per region (stage 4) -> NFA
-// statistical validation with a bounded tighten-then-shrink retry loop
-// (stage 5).
+// statistical validation (stage 5).
 //
-// This file forms segments ONLY, and as of 2026-08-05 NOTHING bridges them
-// afterwards: pipeline/bucketFillJoin.ts's join walk is retired and
-// pipeline/votes.ts turns each accepted rectangle straight into one line.
+// This file forms segments ONLY, and NOTHING bridges them afterwards.
 // Bridging genuinely disjoint segments (across a gradient dropout, or across a
 // level-line POLARITY flip -- see below) is therefore currently UNSOLVED rather
 // than solved elsewhere; it was a no-op at the settings in use. The previous design
@@ -61,14 +54,13 @@ import { computeGradient2x2Field } from './gradientField.ts';
 // header, and pipelineGPU/growRegionsVerify.ts for how to measure the exposure
 // on a given capture.
 //
-// Stage 5's retry loop (tighten-then-shrink on NFA rejection) is RETIRED --
-// fitRegionOnce is the live fitter, fitRegionWithRetries stays below as
-// unreferenced reference code. It was never ported (retry 2+ needs a per-region
-// partial sort, the hardest GPU problem in this file), and keeping it CPU-side
-// meant every GPU-rejected region fell back to CPU and dragged mag/theta along
-// with it -- the last dependency preventing stages 1-4 from becoming one
-// GPU-resident run. Both fitters are now attempt-0-only, so the CPU and GPU
-// paths have identical scope by construction rather than by pinning a setting.
+// Stage 5 had a tighten-then-shrink retry loop on NFA rejection. It is gone,
+// code and settings both -- fitRegionOnce is the only fitter. It was never
+// ported to GPU (retry 2+ needs a per-region partial sort, the hardest GPU
+// problem in this file), and keeping it CPU-side meant every GPU-rejected
+// region fell back to CPU and dragged mag/theta along with it, which was the
+// last dependency preventing stages 1-4 from becoming one GPU-resident run. The
+// CPU and GPU fitters now have identical scope by construction.
 //
 // Regions below settings.minRegionSize are dropped in
 // collectRegionsFromLabels, before either fitter sees them. At the default
@@ -81,7 +73,7 @@ import { computeGradient2x2Field } from './gradientField.ts';
 //
 // EVERY orientation comparison in this file is directed (mod 2π): growth
 // compatibility, countRectanglePixels' NFA alignment count, and
-// fitRegionWithRetries' retry-1 refilter all use a plain SIGNED cos-dot
+// and the fitter's own alignment test all use a plain SIGNED cos-dot
 // against cos(τ). This reverts a previous mod-π (theta and theta+π both count)
 // experiment, and the reason for the revert is worth recording, because the
 // original motivation for mod-π was real and is still real:
@@ -107,15 +99,20 @@ import { computeGradient2x2Field } from './gradientField.ts';
 // stripe. That could be encoded as a mod-π test plus a "polarity may only flip
 // for tangential connections" side condition -- but since bridging disjoint
 // segments is bucketFillJoin.ts's job now (see this file's header), the
-// simpler resolution is to not tolerate flips here at all and let the join
-// walk reassemble them. Which makes the growth rule a single signed dot
-// product, and makes it canonical LSD's own rule again rather than a variant.
+// simpler resolution is to not tolerate flips here at all. Which makes the
+// growth rule a single signed dot product, and makes it canonical LSD's own
+// rule again rather than a variant.
 //
-// CONSEQUENCE FOR THE JOIN WALK: a line whose polarity flips mid-length now
-// arrives at bucketFillJoin.ts as two COLLINEAR, ABUTTING, ANTIPARALLEL
-// segments. Merging those is a hard requirement on that stage, not an
-// optional nicety -- if its merge test rejects antiparallel candidates, these
-// lines stay fragmented with nothing downstream to recover them.
+// THE STANDING CONSEQUENCE, and it is a real limitation rather than a note
+// about a stage that used to follow: a line whose polarity flips mid-length
+// comes out as two COLLINEAR, ABUTTING, ANTIPARALLEL segments, and NOTHING
+// reassembles them. The join walk that was once responsible for merging them
+// is deleted. Both halves still vote (each contributes its own weighted n n^T,
+// and the sub-lengths nearly sum to the whole), so the orientation fit barely
+// moves -- but each half is fitted from a shorter baseline, so its normal is
+// noisier, and that error enters gridPeriodPhase's row/col classification
+// quadratically. Grazing angles, where lines are already short, are where this
+// would show up first.
 //
 // One simplification falls out for free: with no polarity flips inside a
 // region, a plain raw sum of member level-line vectors can no longer partially
@@ -171,8 +168,8 @@ import { computeGradient2x2Field } from './gradientField.ts';
 // every transcendental in the chain.
 //
 // The one atan2 that remains is the one producing a fitted rectangle's OWN
-// theta (see fitRectangle), because that is a real output the join walk
-// downstream consumes as an angle.
+// theta (see fitRectangle), because that is a real output votes.ts consumes
+// as an angle.
 //
 // Two forms of the magnitude test show up below, and the split is deliberate:
 // eligibility compares SQUARED magnitude against a squared threshold, so a
@@ -622,7 +619,7 @@ function logBinomialTail(n: number, k: number, p: number): number {
 }
 
 // Squashes nfaLog10 (unbounded, more negative = more confident) into the
-// shared [0, 1] "how line-y is this" scale bucketFillJoin.ts's join walk
+// shared [0, 1] "how line-y is this" scale the retired join walk
 // reads uniformly off every segment, regardless of which producer built it
 // (see BucketFillSegment's own lineScore comment). A logistic curve centered
 // exactly on the accept/reject threshold: a rectangle that JUST clears NFA
@@ -723,14 +720,10 @@ export function countRectanglePixels(
 export interface LsdRectangle {
   cx: number; cy: number; theta: number; length: number; width: number;
   accepted: boolean;
-  retries: number; // how many tighten/shrink attempts were taken before the final accept/reject
   nfaLog10: number; // log10(NFA) -- more negative = more statistically confident
   lineScore: number; // nfaLog10 squashed to [0, 1] via nfaLog10ToLineScore -- see that function's own comment
-  // Stage 3's ORIGINAL grown-region membership (pixel indices into the
-  // field), before any retry loop tightened/shrank it -- region.members
-  // itself is never mutated by the retry loop below (only the local
-  // `members` variable gets reassigned), so this is always the true,
-  // complete flood-fill result this rectangle came from. For debug display
+  // Stage 3's grown-region membership (pixel indices into the field) -- the
+  // true, complete flood-fill result this rectangle came from. For debug display
   // only (overlays/hoverDebugOverlays.ts's raw-region-pixels toggle) -- not
   // read anywhere in the accept/reject decision itself.
   //
@@ -758,8 +751,6 @@ export interface LsdSettings {
   cclSteps: number; // debug round scrubber only -- 0 = run to fixpoint, see growRegionsCCL
   minRegionSize: number; // components smaller than this never become regions -- see camera/settings.ts's lsdMinRegionSize
   nfaEpsilon: number; nfaTestExponent: number;
-  // Read only by the retired fitRegionWithRetries -- no live path touches them.
-  maxRetries: number; retryToleranceFactor: number; retryShrinkFraction: number;
 }
 
 // RETIRED-NOTE: computeMagTheta used to live here, turning the gradient field
@@ -771,12 +762,11 @@ export interface LsdSettings {
 // vector block near the top of this file for the identity that makes that
 // work, and the notes on fitRectangle for the one angle that survives.
 
-// Stage 4 + stage 5 for ONE region, attempt 0 only -- the LIVE fitter, used by
+// Stage 4 + stage 5 for ONE region -- the fitter, used by
 // the CPU path for every region and by pipelineGPU/lsdFitVerify.ts as the
 // per-region reference the GPU kernel is compared against. Exactly the scope
-// lsdFit.wgsl.ts implements, which is the point: with no retry concept on
-// either side there is nothing left for the two paths to disagree about
-// structurally.
+// lsdFit.wgsl.ts implements, which is the point: there is nothing left for the
+// two paths to disagree about structurally.
 //
 // Returns null only for a region below the 2-member floor. In practice that
 // never happens now -- collectRegionsFromLabels' minRegionSize prefilter
@@ -795,7 +785,7 @@ export function fitRegionOnce(
   const nfaLog10 = logNfa / Math.LN10;
   return {
     cx: rect.cx, cy: rect.cy, theta: rect.theta, length: rect.length, width: rect.width,
-    accepted: logNfa < logEpsilon, retries: 0, nfaLog10,
+    accepted: logNfa < logEpsilon, nfaLog10,
     lineScore: nfaLog10ToLineScore(nfaLog10, logEpsilon), rawMembers: region.members,
   };
 }
@@ -831,7 +821,7 @@ function fitRegionsCPU(
 //
 // REJECTED candidates are taken straight from the GPU's own output rather than
 // re-fitted on CPU. That fallback existed only to run the retry loop on regions
-// the first pass rejected; with the fitter attempt-0-only and the two paths
+// the first pass rejected; with the retry loop gone and the two paths
 // verified to agree on n/k/accept, re-running a rejection on CPU would spend
 // real time reproducing the identical numbers. The shader already returns full
 // geometry for rejected regions, which is all the "show rejected candidates"
@@ -900,7 +890,7 @@ async function fitRegionsGPU(
     const g = gpuResults[i];
     results.push({
       cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
-      accepted: g.accepted, retries: 0, nfaLog10: g.nfaLog10,
+      accepted: g.accepted, nfaLog10: g.nfaLog10,
       lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon),
       rawMembers: regions ? regions[i].members : NO_MEMBERS,
     });

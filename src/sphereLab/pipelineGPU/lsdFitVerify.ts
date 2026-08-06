@@ -80,7 +80,6 @@ export async function verifyLsdFit(camera?: Camera | null): Promise<LsdFitVerify
     toleranceDeg: s.lsdToleranceDeg, rhoNoiseThreshold: s.lsdRhoNoiseThreshold,
     rhoHighThreshold: s.lsdRhoHighThreshold, cclSteps: s.lsdCclSteps, minRegionSize: s.lsdMinRegionSize,
     nfaEpsilon: s.lsdNfaEpsilon, nfaTestExponent: s.lsdNfaTestExponent,
-    maxRetries: 0, retryToleranceFactor: s.lsdRetryToleranceFactor, retryShrinkFraction: s.lsdRetryShrinkFraction,
   };
 
   const cpuStart = performance.now();

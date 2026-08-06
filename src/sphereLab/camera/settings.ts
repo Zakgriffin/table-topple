@@ -34,11 +34,9 @@ export interface CameraSettingsCommon {
   showTrueContamination: boolean; showReconstructedContamination: boolean; hideField: boolean;
   showTopGradient: boolean;
   // ── From-scratch traditional LSD pipeline (pipeline/lsdSegments.ts) --
-  // this is now the PRODUCTION composite-line source: pipeline/votes.ts's
-  // computeGradient2x2Composites feeds pipeline/bucketFillJoin.ts's join
-  // walk from lsdRectanglesToBucketFillShape's output, not
-  // bucketFillSegments.ts's own BFS growing (still defined, just no longer
-  // invoked live). None of these are gated behind a show/hide toggle --
+  // the PRODUCTION composite-line source: pipeline/votes.ts's
+  // computeGradient2x2Composites turns each accepted rectangle straight into
+  // one line. None of these are gated behind a show/hide toggle --
   // they're tuning knobs for a live feature, not just a debug view.
   showLsdSegments: boolean;
   showLsdRejected: boolean; // also draw candidates that failed NFA validation (dashed red), not just accepted rectangles
@@ -100,19 +98,15 @@ export interface CameraSettingsCommon {
   // is attempt-0-only now. These three stay defined so the retired function
   // still typechecks and so persisted values survive, but nothing reads them
   // and their sliders are disabled.
-  lsdMaxRetries: number; // how many tighter-tolerance-then-shrink attempts before giving up on a candidate that fails NFA
-  lsdRetryToleranceFactor: number; // tau is multiplied by this on the first retry (LSD: retighten before shrinking)
-  lsdRetryShrinkFraction: number; // fraction of a region's own farthest-from-center pixels dropped on each shrink retry
-  // The join walk's own 4 parameters (pipeline/bucketFillJoin.ts's
-  // computeJoinWalk) -- unchanged in meaning from the old bucketFillJoinSteps/
-  // MergeMinSimilarity/MaxTravelFactor/MinLengthPx names, just relocated
-  // here since the join walk is now exclusively fed by this LSD pipeline.
-  // lsdMergeMinSimilarity is now a FLOOR, not a fixed gate: computeJoinWalk's
-  // own requiredSimilarityFor scales the real bar up from this value toward
-  // 1 as the two segments/groups' shared lineScore confidence drops, so this
-  // is exactly the old fixed threshold only when both sides are maximally
-  // confident.
-  lsdJoinSteps: number; lsdMergeMinSimilarity: number; lsdMaxTravelFactor: number; lsdMinLengthPx: number;
+  // The last survivor of the join walk's four parameters -- the other three
+  // (join steps, merge similarity, max travel) went with the walk itself.
+  //
+  // NOT the same filter as lsdMinRegionSize, and the two are easy to confuse:
+  // minRegionSize counts PIXELS in a connected component and runs BEFORE any
+  // rectangle is fitted; this compares the FITTED rectangle's long-axis extent
+  // and runs after NFA acceptance, in compositesFromLsdRectangles. A fat
+  // 8-pixel blob passes the first and fails this one.
+  lsdMinLengthPx: number;
   // showLevelLineArrow: the gradient rotated -90deg (LSD's own level-line
   // convention, see pipeline/lsdSegments.ts's level-line vector block) -- was named
   // "perpendicular" before, renamed to match that shared terminology.
@@ -219,12 +213,6 @@ function createDefaultCommonSettings(): CameraSettingsCommon {
     lsdNfaEpsilon: savedNum('lsdNfaEpsilon', 1),
     lsdNfaTestExponent: savedNum('lsdNfaTestExponent', 5),
     lsdMinRegionSize: savedNum('lsdMinRegionSize', 2),
-    lsdMaxRetries: savedNum('lsdMaxRetries', 2),
-    lsdRetryToleranceFactor: savedNum('lsdRetryToleranceFactor', 0.5),
-    lsdRetryShrinkFraction: savedNum('lsdRetryShrinkFraction', 0.2),
-    lsdJoinSteps: savedNum('lsdJoinSteps', 0),
-    lsdMergeMinSimilarity: savedNum('lsdMergeMinSimilarity', 0.9),
-    lsdMaxTravelFactor: savedNum('lsdMaxTravelFactor', 1),
     lsdMinLengthPx: savedNum('lsdMinLengthPx', 3),
     // 10*255 preserves the pre-normalization arrow length exactly, now that
     // computeGradient2x2Field's own output (the only field this arrow ever

@@ -187,9 +187,6 @@ export async function verifyLsdChain(camera?: Camera | null, reps = 3): Promise<
     minRegionSize: s.lsdMinRegionSize,
     nfaEpsilon: s.lsdNfaEpsilon,
     nfaTestExponent: s.lsdNfaTestExponent,
-    maxRetries: s.lsdMaxRetries,
-    retryToleranceFactor: s.lsdRetryToleranceFactor,
-    retryShrinkFraction: s.lsdRetryShrinkFraction,
   };
 
   const savedForceCPU = globalState.forceCPU;

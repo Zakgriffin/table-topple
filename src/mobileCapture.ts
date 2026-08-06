@@ -741,7 +741,7 @@ let cameraSettings: PoseComputeState['settings'] = {
   horizFovDeg: 65, weightSharpenPower: 1, gridPeriodPhaseGapLowerBound: 0.005, minGrazingCos: 0.1,
   useWorldVoteOrientation: false, worldVoteRefineSteps: 0,
   lsdToleranceDeg: 9.5, lsdRhoNoiseThreshold: 0.132, lsdRhoHighThreshold: 0, lsdCclSteps: 0, lsdNfaEpsilon: 1,
-  lsdMinRegionSize: 2, lsdNfaTestExponent: 5, lsdMaxRetries: 2, lsdRetryToleranceFactor: 0.5, lsdRetryShrinkFraction: 0.2,
+  lsdMinRegionSize: 2, lsdNfaTestExponent: 5,
   lsdMinLengthPx: 3,
 };
 // Tracks the last boardSize a settingsSync actually applied, so
@@ -1998,7 +1998,7 @@ function buildDebugPayload(state: PoseComputeState, lsdRects: LsdRectangle[]) {
       voteComposites: state.lastVoteComposites,
       lsdRectangles: lsdRects.map((r) => ({
         cx: r.cx, cy: r.cy, theta: r.theta, length: r.length, width: r.width,
-        accepted: r.accepted, retries: r.retries, nfaLog10: r.nfaLog10, lineScore: r.lineScore,
+        accepted: r.accepted, nfaLog10: r.nfaLog10, lineScore: r.lineScore,
       })),
     },
   };
@@ -2166,9 +2166,6 @@ async function captureComputeAndSendPose() {
           minRegionSize: cameraSettings.lsdMinRegionSize,
           nfaEpsilon: cameraSettings.lsdNfaEpsilon,
           nfaTestExponent: cameraSettings.lsdNfaTestExponent,
-          maxRetries: cameraSettings.lsdMaxRetries,
-          retryToleranceFactor: cameraSettings.lsdRetryToleranceFactor,
-          retryShrinkFraction: cameraSettings.lsdRetryShrinkFraction,
         });
         msg.debug = buildDebugPayload(state, lsdRects);
       }

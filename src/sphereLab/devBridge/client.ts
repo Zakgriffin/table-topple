@@ -61,10 +61,8 @@ function buildCameraSettingsPayload(cam: PhysicalCamera) {
     lsdRhoHighThreshold: s.lsdRhoHighThreshold, lsdCclSteps: s.lsdCclSteps,
     lsdMinRegionSize: s.lsdMinRegionSize,
     lsdNfaEpsilon: s.lsdNfaEpsilon,
-    lsdNfaTestExponent: s.lsdNfaTestExponent, lsdMaxRetries: s.lsdMaxRetries,
-    lsdRetryToleranceFactor: s.lsdRetryToleranceFactor, lsdRetryShrinkFraction: s.lsdRetryShrinkFraction,
-    lsdMergeMinSimilarity: s.lsdMergeMinSimilarity, lsdJoinSteps: s.lsdJoinSteps,
-    lsdMinLengthPx: s.lsdMinLengthPx, lsdMaxTravelFactor: s.lsdMaxTravelFactor,
+    lsdNfaTestExponent: s.lsdNfaTestExponent,
+    lsdMinLengthPx: s.lsdMinLengthPx,
   };
 }
 

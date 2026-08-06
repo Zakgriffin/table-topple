@@ -971,6 +971,15 @@ async function fitRegionsGPU(
   // all now. fitAndTestRegionsGPU allocates `new Array(regionCount)` -- the same
   // count regionsCPU() returns -- so rectangle numbering downstream is
   // unchanged, and `regions[i]` still lines up index for index when present.
+  // The SECOND object array of the same length in as many statements, and that
+  // is the point of measuring it separately: fitAndTestRegionsGPU has just built
+  // one LsdFitResult per region straight off the readback, and this immediately
+  // re-wraps every one of them into an LsdRectangle. ~5200 regions is ~10400
+  // short-lived objects per frame, of which compositesFromLsdRectangles keeps
+  // 893. Whether that costs anything worth fixing is what this span and
+  // 'lsdFit unpack (objects)' answer -- separately, so the two loops can be
+  // judged apart rather than as one lump.
+  const wrapSpan = spanStart('rectangle wrap (objects)', true);
   const results: LsdRectangle[] = [];
   for (let i = 0; i < gpuResults.length; i++) {
     const g = gpuResults[i];
@@ -981,6 +990,7 @@ async function fitRegionsGPU(
       rawMembers: regions ? regions[i].members : NO_MEMBERS,
     });
   }
+  spanEnd(wrapSpan);
   return results;
 }
 
@@ -1056,6 +1066,7 @@ export async function computeLsdRectanglesAuto(
   const growArgs = [
     w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
   ] as const;
+  const growSpan = spanStart('grow+collect regions');
   const grown = !globalState.forceCPU ? await growRegionsCCLGPU(res, ...growArgs) : null;
   if (!grown) {
     // Either the toggle is off or the GPU grower bailed; on both paths it
@@ -1066,6 +1077,18 @@ export async function computeLsdRectanglesAuto(
     res.provideCPU('regionId', cpu.regionId);
     res.provideRegionsCPU(cpu.regions);
   }
+  // Closed AFTER the fallback, not after the GPU call, so the span means "grow
+  // finished, whoever did it" -- otherwise a forceCPU run would report a grow of
+  // ~0 and silently move the CPU grower's cost into its parent's self time,
+  // which is the one number this instrumentation exists to read.
+  //
+  // Named grow+collect because collect lives INSIDE growRegionsCCLGPU (via its
+  // collectOnGPU parameter), so there is no seam here to split them at. The two
+  // are separable in gpuTimeline, which already reports grow:hook/grow:compress
+  // and collect:finalize/regionMeta as distinct kernels -- this span is the host
+  // time wrapped around all of them, and dividing it further would need a
+  // boundary that does not exist in the call graph.
+  spanEnd(growSpan);
 
   if (!globalState.forceCPU) {
     const gpu = await fitRegionsGPU(res, w, h, settings, wantMembers);

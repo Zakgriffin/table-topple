@@ -1,8 +1,9 @@
 import { ORDER, R, C, debruijnLookup } from '../floorPattern.ts';
 import { rotatedDims } from '../pipeline/decodeGrid.ts';
 import { DecodeSampleGrid, VoteResult } from '../types.ts';
-import { attachGPUKernelBreakdown, profilerEnabled, spanEnd, spanStart } from '../profiling/profiler.ts';
-import { createStorageBuffer, createTimestampQuerySet, dispatchCount, getGPUDevice, readUint32, resolveTimestamps, supportsTimestampQuery, uploadUint32, uploadUniform } from './device.ts';
+import { spanEnd, spanStart } from '../profiling/profiler.ts';
+import { createStorageBuffer, dispatchCount, getGPUDevice, readUint32, uploadUint32, uploadUniform } from './device.ts';
+import { gpuTimelineSlot } from './gpuTimeline.ts';
 import { DECODE_TALLY_WGSL } from './decodeTally.wgsl.ts';
 
 const NOT_FOUND = 0xffffffff;
@@ -146,9 +147,6 @@ export async function tallyFromDeviceGrid(
   const tallyBuf = createStorageBuffer(device, 4 * R * C * 4); // zero-initialized per WebGPU spec
   const totalWindowsBuf = createStorageBuffer(device, 4);
 
-  const wantTimestamps = profilerEnabled() && supportsTimestampQuery(device);
-  const querySet = wantTimestamps ? createTimestampQuerySet(device, 4) : null;
-
   const dispatchSpan = spanStart('GPU dispatch (4 orientations)');
   const encoder = device.createCommandEncoder();
   const uniformBufs: GPUBuffer[] = [];
@@ -167,18 +165,18 @@ export async function tallyFromDeviceGrid(
         { binding: 5, resource: { buffer: totalWindowsBuf } },
       ],
     });
-    const pass = encoder.beginComputePass(querySet ? { timestampWrites: { querySet, beginningOfPassWriteIndex: o * 2, endOfPassWriteIndex: o * 2 + 1 } } : undefined);
+    // One label for all four orientations rather than `tally:o0..o3`: they are
+    // the same kernel over the same grid at four rotations, so gpuTimeline's
+    // per-label aggregation reports them as `tally:orient x4` -- which is the
+    // useful reading, and four rows of one quantum each is not (see
+    // gpuTimeline.ts on the resolution limit).
+    const pass = encoder.beginComputePass(gpuTimelineSlot('tally:orient'));
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(dispatchCount(rr), dispatchCount(cc));
     pass.end();
   }
   device.queue.submit([encoder.finish()]);
-  if (querySet) {
-    const durations = await resolveTimestamps(device, querySet, 4);
-    attachGPUKernelBreakdown(durations.map((durationMs, o) => ({ name: `orientation ${o} kernel`, durationMs })));
-    querySet.destroy();
-  }
   spanEnd(dispatchSpan);
 
   const [tallyRaw, totalWindowsRaw] = await Promise.all([

@@ -8,6 +8,40 @@
 // slot, so (like every "map" stage ported so far) no atomics are needed
 // here at all.
 
+// ── Centered finite-difference gradient (mirrors computeGradientField) ────
+//
+// Lived in voteGeneration.wgsl.ts until that module was deleted (it was the
+// GPU vote path, which had no callers left). projectSamples.ts is now its only
+// consumer, so it moved here rather than keeping a 258-line file alive for one
+// export.
+//
+// NOT the same kernel as gradient2x2.wgsl.ts, and the difference is load-
+// bearing: this one is a CENTERED difference at radius r (gray[i+r]-gray[i-r]),
+// zeroing an r-wide margin. gradient2x2's is a 2x2 forward difference on a
+// half-pixel-offset lattice. See that file's header for why the LSD chain needs
+// its version specifically.
+export const GRADIENT_WGSL = /* wgsl */ `
+struct Dims { w: u32, h: u32, r: u32, pad: u32 }
+@group(0) @binding(0) var<uniform> dims: Dims;
+@group(0) @binding(1) var<storage, read> gray: array<f32>;
+@group(0) @binding(2) var<storage, read_write> fxOut: array<f32>;
+@group(0) @binding(3) var<storage, read_write> fyOut: array<f32>;
+
+@compute @workgroup_size(8, 8)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let x = gid.x; let y = gid.y;
+  if (x >= dims.w || y >= dims.h) { return; }
+  let r = dims.r;
+  let i = y * dims.w + x;
+  if (x < r || x >= dims.w - r || y < r || y >= dims.h - r) {
+    fxOut[i] = 0.0; fyOut[i] = 0.0;
+    return;
+  }
+  fxOut[i] = gray[i + r] - gray[i - r];
+  fyOut[i] = gray[i + r * dims.w] - gray[i - r * dims.w];
+}
+`;
+
 export const PROJECT_SAMPLES_WGSL = /* wgsl */ `
 struct Uniforms {
   w: u32, h: u32, pad0: u32, pad1: u32,

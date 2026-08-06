@@ -1,8 +1,9 @@
 import * as THREE from 'three';
 import { jacobiEigenSymmetric, smallestEigenvector } from '../../linalg.ts';
-import { attachGPUKernelBreakdown, profilerEnabled, spanEnd, spanStart } from '../profiling/profiler.ts';
+import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { Vote } from '../types.ts';
-import { createStorageBuffer, createTimestampQuerySet, getGPUDevice, readFloat32, resolveTimestamps, supportsTimestampQuery, uploadFloat32, uploadUniform } from './device.ts';
+import { createStorageBuffer, getGPUDevice, readFloat32, uploadFloat32, uploadUniform } from './device.ts';
+import { gpuTimelineSlot } from './gpuTimeline.ts';
 import { FIT_PLANES_WGSL } from './fitPlanes.wgsl.ts';
 
 const pipelineCache = new WeakMap<GPUDevice, GPUComputePipeline>();
@@ -61,21 +62,14 @@ export async function fitPairOfPlanesGPU(
     ],
   });
 
-  const wantTimestamps = profilerEnabled() && supportsTimestampQuery(device);
-  const querySet = wantTimestamps ? createTimestampQuerySet(device, 1) : null;
   const dispatchSpan = spanStart('GPU dispatch (ATA reduction)');
   const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass(querySet ? { timestampWrites: { querySet, beginningOfPassWriteIndex: 0, endOfPassWriteIndex: 1 } } : undefined);
+  const pass = encoder.beginComputePass(gpuTimelineSlot('fit:ATA'));
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(numWorkgroups);
   pass.end();
   device.queue.submit([encoder.finish()]);
-  if (querySet) {
-    const [durationMs] = await resolveTimestamps(device, querySet, 1);
-    attachGPUKernelBreakdown([{ name: 'ATA reduction kernel', durationMs }]);
-    querySet.destroy();
-  }
   spanEnd(dispatchSpan);
 
   const raw = await readFloat32(device, outBuf, numWorkgroups * 21 * 4, 'fit:ATApartials');

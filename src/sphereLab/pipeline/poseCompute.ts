@@ -3,7 +3,7 @@ import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { FieldResidency, TransferSummary } from '../pipelineGPU/fieldResidency.ts';
 import { fitPairOfPlanesGPU } from '../pipelineGPU/fitPlanes.ts';
-import { spanEnd, spanStart } from '../profiling/profiler.ts';
+import { spanDurationMs, spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
 import { CompositeLine, DecodeCellDebug, DecodeSampleGrid, GradientField, PositionDecodeResult, RecoveredAxes, Vote } from '../types.ts';
 import { PendingDecodeGrid, runPositionDecode } from './decodeGrid.ts';
@@ -107,7 +107,12 @@ async function computeCompositesAndVotes(
     const voteComposites = await computeGradient2x2Composites(state.settings, res, w, h);
     spanEnd(compositesSpan);
 
-    const votesSpan = spanStart('votes (segments)');
+    // Sync only on the branch that does not await. useWorldVoteOrientation
+    // awaits a gradient readback below, so on THAT path this span's duration is
+    // wall time containing a fence and must not be counted as host CPU. The old
+    // name-based classification could not express the distinction and simply
+    // asserted the common case, with a comment conceding the other.
+    const votesSpan = spanStart('votes (segments)', !state.settings.useWorldVoteOrientation);
     // useWorldVoteOrientation swaps the vote SOURCE (one per pixel, straight
     // off the same gradient field/composites already computed above, instead
     // of one per composite line) -- voteComposites/gridPeriodPhase downstream
@@ -148,19 +153,27 @@ export async function computePoseFromCapture(
   deferDecodeGrid = false,
 ): Promise<PoseComputeTiming> {
   const vFovRad = getAnalysisVFovRad(state);
-  const t0 = performance.now();
+
+  // IS `votesMs` -- see the return statement. It is also what makes the
+  // subtree's self times readable as a decomposition of a stage rather than as
+  // free-floating durations: reconstructionTiming subtracts the children from
+  // this span to get the part of the votes stage that is in no child span at
+  // all.
+  const stageSpan = spanStart('votes stage');
 
   // Owned here rather than inside computeCompositesAndVotes so `gray` stays on
   // the device long enough for the fused decode at the bottom to reuse it --
   // see that function's own comment. Destroyed in the finally, which is also
   // what makes it safe to hand a raw GPUBuffer to runPositionDecode: nothing
   // outlives this call.
+  const residencySpan = spanStart('residency create (gray up)');
   const res = await createLsdChainResidency(gray, w, h);
+  spanEnd(residencySpan);
   try {
     const { voteComposites, votes } = await computeCompositesAndVotes(state, res, gray, w, h, vFovRad);
     state.lastVoteComposites = voteComposites;
     state.lastVotes = votes;
-    const t1 = performance.now();
+    spanEnd(stageSpan);
 
     const fitSpan = spanStart('fit (fitPairOfPlanes)');
     let quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
@@ -199,7 +212,6 @@ export async function computePoseFromCapture(
       spanEnd(fitOnlySpan);
     }
     spanEnd(fitSpan);
-    const t2 = performance.now();
 
     const poseAssemblySpan = spanStart('poseAssembly');
     let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
@@ -221,7 +233,6 @@ export async function computePoseFromCapture(
       ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal }
       : null;
     spanEnd(poseAssemblySpan);
-    const t3 = performance.now();
 
     // Grid period/phase is the SOLE source of state.lastRecoveredAxes.distance
     // -- runs unconditionally whenever a quadric pair was found (real distance
@@ -236,7 +247,6 @@ export async function computePoseFromCapture(
       : null;
     state.lastGridPeriodPhase = gpp;
     spanEnd(gppSpan);
-    const t4 = performance.now();
 
     state.lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair && gpp
       ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: gpp.height ?? 1 }
@@ -249,9 +259,25 @@ export async function computePoseFromCapture(
     const sharedGray = res.device && res.hasGPU('gray') ? res.gpu('gray') : null;
     await runPositionDecode(state, gray, w, h, vFovRad, sharedGray, deferDecodeGrid);
     spanEnd(decodeSpan);
-    const t5 = performance.now();
 
-    return { votesMs: t1 - t0, fitMs: t2 - t1, poseMs: t3 - t2, distanceMs: t4 - t3, decodeMs: t5 - t4, worldVoteIterations };
+    // Read off the span objects held above, not off a parallel set of
+    // performance.now() marks. Those marks existed until the profiler stopped
+    // being gated: there were six of them bracketing exactly these five spans,
+    // and keeping the two in step was a hand-maintained invariant that
+    // reconstructionTiming had to assert on (`stageDeltaMs`) to catch drift.
+    // One source, so there is nothing left to drift.
+    //
+    // Immune to the span tree's reparenting hazard (see profiler.ts's header):
+    // that corrupts a span's PLACE in the tree, never its own start/end, and
+    // these are read straight from the objects.
+    return {
+      votesMs: spanDurationMs(stageSpan),
+      fitMs: spanDurationMs(fitSpan),
+      poseMs: spanDurationMs(poseAssemblySpan),
+      distanceMs: spanDurationMs(gppSpan),
+      decodeMs: spanDurationMs(decodeSpan),
+      worldVoteIterations,
+    };
   } finally {
     // Read BEFORE destroy, and in the finally rather than the happy path, so a
     // configuration that threw still reports the traffic it managed to incur.

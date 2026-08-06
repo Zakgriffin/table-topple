@@ -82,6 +82,17 @@ export interface TransferSample {
   dir: 'up' | 'down';
   bytes: number;
   ms: number;
+  // performance.now() when this crossing STARTED. Recorded so a consumer can
+  // tell CONCURRENT crossings from sequential ones, which is the difference
+  // between counting readbacks and counting STALLS -- a distinction the perf
+  // notes had to keep repairing by hand ("readbacks are not fences: collect's
+  // two, tally's two and the CSR's four each share ONE Promise.all after one
+  // submit, so 12 readbacks are ~8 distinct stalls"). Two samples whose
+  // [startMs, startMs+ms] windows overlap were waiting on the same submit, so
+  // their costs OVERLAP rather than sum, and a consumer that adds them
+  // double-counts. With this field that grouping is computed instead of
+  // remembered.
+  startMs: number;
   // Probe mode only; null otherwise. See the header for how to read them.
   bareFenceMs: number | null;
   queueDrainMs: number | null;
@@ -125,8 +136,11 @@ async function bareRead(device: GPUDevice, buffer: GPUBuffer): Promise<number> {
 // ── Buffer helpers ──────────────────────────────────────────────────────
 //
 // Every GPU-resident intermediate in this pipeline stays a plain storage
-// buffer (STORAGE | COPY_SRC | COPY_DST as needed) -- nothing is read back
-// to CPU except the final vote array, see voteGeneration.ts.
+// buffer (STORAGE | COPY_SRC | COPY_DST as needed). What comes back to the
+// host is enumerated by the crossings table in pipelineGPU/
+// reconstructionTiming.ts -- and every one of those is load-bearing, i.e. the
+// host needs the value to size a dispatch, terminate a loop, or finish a
+// computation that has not been ported.
 
 export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage = 0, label = 'UNLABELLED f32'): GPUBuffer {
   const s = spanStart(`CPU→GPU upload (${data.byteLength}B)`);
@@ -138,7 +152,7 @@ export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage 
   });
   new Float32Array(buffer.getMappedRange()).set(data);
   buffer.unmap();
-  ledger.push({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, bareFenceMs: null, queueDrainMs: null });
+  ledger.push({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs: null, queueDrainMs: null });
   spanEnd(s);
   return buffer;
 }
@@ -153,7 +167,7 @@ export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 
   });
   new Uint32Array(buffer.getMappedRange()).set(data);
   buffer.unmap();
-  ledger.push({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, bareFenceMs: null, queueDrainMs: null });
+  ledger.push({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs: null, queueDrainMs: null });
   spanEnd(s);
   return buffer;
 }
@@ -286,8 +300,10 @@ export function uploadUniform(device: GPUDevice, data: ArrayBuffer): GPUBuffer {
 // The one point in this whole pipeline where the GPU's result has to cross
 // back into JS-visible memory -- mapAsync is the real cost here, not the
 // copyBufferToBuffer (device-local, effectively free next to a PCIe/unified-
-// memory round trip through the driver). See profiling/profiler.ts's
-// attachGPUKernelBreakdown for how this compares against actual kernel time.
+// memory round trip through the driver). To compare this against actual kernel
+// time, read it beside gpuTimeline.ts's table -- they measure different clocks
+// and are expected to disagree, since a readback blocks until everything queued
+// ahead of it has executed.
 export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED f32'): Promise<Float32Array> {
   const s = spanStart(`GPU→CPU readback (${byteLength}B)`);
   // Both probes BEFORE the timed read, so the real read is measured against a
@@ -303,7 +319,7 @@ export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLeng
   const result = new Float32Array(staging.getMappedRange().slice(0));
   staging.unmap();
   staging.destroy();
-  ledger.push({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, ms: performance.now() - t0, bareFenceMs, queueDrainMs });
+  ledger.push({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs, queueDrainMs });
   spanEnd(s);
   return result;
 }
@@ -321,7 +337,7 @@ export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLengt
   const result = new Uint32Array(staging.getMappedRange().slice(0));
   staging.unmap();
   staging.destroy();
-  ledger.push({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, ms: performance.now() - t0, bareFenceMs, queueDrainMs });
+  ledger.push({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs, queueDrainMs });
   spanEnd(s);
   return result;
 }
@@ -333,10 +349,17 @@ export function dispatchCount(dim: number): number {
 
 // ── GPU-kernel timestamp queries ────────────────────────────────────────
 //
-// Only meaningful if the device was granted the 'timestamp-query' feature
-// above. Used by the profiler (profiling/profiler.ts) to get true GPU
-// kernel execution time, as opposed to CPU-side wall-clock time around
-// dispatch+submit+readback (which also includes driver/queue overhead).
+// The PRIMITIVES only. All measurement built on them lives in gpuTimeline.ts,
+// which is the one instrument for device execution time -- see its header.
+//
+// There used to be a second implementation here (`resolveTimestamps`), which
+// each caller drove for its own module: its own query set, its own submit, its
+// own mapAsync. That made measuring cost a fence PER MODULE, landing in the
+// middle of the work being measured, and the numbers were unusable -- fitPlanes
+// reported 9.3ms around a 0.07ms kernel. It is deleted rather than fixed
+// because gpuTimeline already does the same job correctly with one fence for
+// the whole pipeline, and two implementations of one measurement is how a
+// ranking gets quoted from the wrong one.
 
 export function supportsTimestampQuery(device: GPUDevice): boolean {
   return device.features.has('timestamp-query');
@@ -345,23 +368,4 @@ export function supportsTimestampQuery(device: GPUDevice): boolean {
 // pairCount timestamp pairs (begin/end) -- one pair per GPU pass being timed.
 export function createTimestampQuerySet(device: GPUDevice, pairCount: number): GPUQuerySet {
   return device.createQuerySet({ type: 'timestamp', count: pairCount * 2 });
-}
-
-// Resolves a timestamp query set into per-pair durations, in milliseconds.
-export async function resolveTimestamps(device: GPUDevice, querySet: GPUQuerySet, pairCount: number): Promise<number[]> {
-  const count = pairCount * 2;
-  const resolveBuf = device.createBuffer({ size: count * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC });
-  const staging = device.createBuffer({ size: count * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  const encoder = device.createCommandEncoder();
-  encoder.resolveQuerySet(querySet, 0, count, resolveBuf, 0);
-  encoder.copyBufferToBuffer(resolveBuf, 0, staging, 0, count * 8);
-  device.queue.submit([encoder.finish()]);
-  await staging.mapAsync(GPUMapMode.READ);
-  const raw = new BigInt64Array(staging.getMappedRange().slice(0));
-  staging.unmap();
-  staging.destroy();
-  resolveBuf.destroy();
-  const durations: number[] = [];
-  for (let i = 0; i < pairCount; i++) durations.push(Number(raw[i * 2 + 1] - raw[i * 2]) / 1e6); // ns -> ms
-  return durations;
 }

@@ -9,20 +9,26 @@ import { createTimestampQuerySet, supportsTimestampQuery } from './device.ts';
 // but a readback blocks until everything queued has executed, so "GPU compute
 // queued ahead" is a single 10.6ms lump with no attribution at all.
 //
-// ── Why not the existing per-module timestamps ──
+// ── THE one instrument for device time, and why the other one is gone ──
 //
-// device.ts already has createTimestampQuerySet/resolveTimestamps, and four
-// modules use them. Each one allocates its own query set, resolves it, and
-// awaits its own mapAsync -- so measuring costs a submit and a fence PER MODULE,
-// and the number that comes back is inflated by the very stall it added.
-// fitPlanes reports `GPU dispatch (ATA reduction) 9.3ms` around a kernel that
-// took 0.07ms. That is not a small error, it is two orders of magnitude, and it
-// makes those numbers unusable for exactly the comparison item 7b needs.
+// device.ts used to carry a second implementation (`resolveTimestamps`) that
+// four modules drove per-module: each allocated its own query set, resolved it,
+// and awaited its own mapAsync -- so measuring cost a submit and a fence PER
+// MODULE, and the number that came back was inflated by the very stall it
+// added. fitPlanes reported `GPU dispatch (ATA reduction) 9.3ms` around a
+// kernel that took 0.07ms. Two orders of magnitude, not a small error.
 //
-// So: ONE query set for the whole chain, every pass writing into its own slot,
-// ONE resolveQuerySet and ONE readback at the end. Measuring the pipeline then
+// It is deleted, and its two live users (fitPlanes, decodeTally) write into
+// this timeline instead -- the other two had no callers at all and went with
+// it. So there is now ONE query set for the whole pipeline, every pass writing
+// into its own slot, ONE resolveQuerySet and ONE readback at the end. Measuring
 // costs one fence total rather than one per module, and that fence lands after
 // every kernel it is measuring rather than in the middle of them.
+//
+// The coverage that buys: `fit:ATA` and `tally:orient` now appear in the same
+// table as the LSD chain, on the same clock, in the same run. Previously the
+// two halves of the pipeline were measured by different instruments and could
+// not be put in one ranking at all.
 //
 // ── Aggregation by label is the point, not a convenience ──
 //
@@ -53,11 +59,17 @@ import { createTimestampQuerySet, supportsTimestampQuery } from './device.ts';
 //
 // ── What this is NOT ──
 //
-// Not the in-repo profiler. profiler.ts's spans are CPU-side performance.measure
-// calls and stay useful for structure; this measures device execution. They
-// disagree BY CONSTRUCTION under a pipelined queue -- a pass whose CPU span is
-// 0.1ms can be 4ms of GPU work that the host simply did not wait for -- and the
-// disagreement is the finding, not an error in either.
+// Not the in-repo profiler. profiler.ts's spans are host wall-clock and stay
+// useful for structure; this measures device execution. They disagree BY
+// CONSTRUCTION under a pipelined queue -- a pass whose CPU span is 0.1ms can be
+// 4ms of GPU work that the host simply did not wait for -- and the disagreement
+// is the finding, not an error in either.
+//
+// That is also why the two are never merged into one number. An earlier design
+// laid GPU durations into the span tree at synthetic positions; it made the
+// flamechart readable and the arithmetic wrong, since device time and host time
+// overlap and subtracting one from the other double-counts. Read them as two
+// tables side by side, which is what formatReconstructionTiming prints.
 
 interface Armed {
   device: GPUDevice;

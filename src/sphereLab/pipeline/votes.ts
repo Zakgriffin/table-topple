@@ -154,7 +154,13 @@ export async function computeGradient2x2Composites(
     retryToleranceFactor: settings.lsdRetryToleranceFactor,
     retryShrinkFraction: settings.lsdRetryShrinkFraction,
   });
-  return compositesFromLsdRectangles(rects, w, h, settings);
+  // Its own span inside this function's: it walks all ~5200 rectangles and keeps
+  // ~893, and until it was split out that walk was indistinguishable from the
+  // chain that produced them. Contains no await, so its duration is host CPU.
+  const filterSpan = spanStart('compositesFromLsdRectangles', true);
+  const out = compositesFromLsdRectangles(rects, w, h, settings);
+  spanEnd(filterSpan);
+  return out;
 }
 
 // One line per ACCEPTED LSD rectangle -- its own two endpoints, no merging.

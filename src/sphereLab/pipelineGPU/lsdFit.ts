@@ -2,6 +2,7 @@ import { createStorageBuffer, readFloat32, uploadUniform } from './device.ts';
 import { FieldResidency } from './fieldResidency.ts';
 import { gpuTimelineSlot } from './gpuTimeline.ts';
 import { LSD_FIT_WGSL } from './lsdFit.wgsl.ts';
+import { spanEnd, spanStart } from '../profiling/profiler.ts';
 
 const pipelineCache = new WeakMap<GPUDevice, GPUComputePipeline>();
 function getPipeline(device: GPUDevice): GPUComputePipeline {
@@ -86,6 +87,7 @@ export async function fitAndTestRegionsGPU(
 ): Promise<LsdFitResult[] | null> {
   const device = res.device;
   if (!device) return null;
+  const dispatchSpan = spanStart('lsdFit dispatch+fence');
   const rs = res.regionsGPU();
   // No `regionCount === 0` early return any more -- the host does not know the
   // count here, by design. An empty capture falls out correctly anyway:
@@ -168,9 +170,24 @@ export async function fitAndTestRegionsGPU(
   const err = await device.popErrorScope();
   if (err) {
     console.error('fitAndTestRegionsGPU: WebGPU validation error, falling back to CPU --', err.message);
+    spanEnd(dispatchSpan);
     return null;
   }
+  // Everything inside the span above: encode, submit, the fence, and the error
+  // scope. Everything below: pure JS over an array already in host memory. The
+  // split is here rather than at the readback because popErrorScope also awaits,
+  // so folding it into the unpack span would put a second fence inside a span
+  // documented as containing none.
+  spanEnd(dispatchSpan);
 
+  // ~5200 objects per frame, of which the pose path's consumer keeps 893 -- the
+  // specific hypothesis the perf TODO names for the unattributed ~7ms, and until
+  // now invisible because the stage boundary hid it inside `votes`. NO await in
+  // this loop, so whatever it reports is real executing JS (or a GC pause, which
+  // is the same hypothesis rather than a confound). Measure before rewriting: the
+  // fix, if one is warranted, is to filter on `accepted` here or to hand the flat
+  // Float32Array down and skip the array entirely.
+  const unpackSpan = spanStart('lsdFit unpack (objects)', true);
   const results: LsdFitResult[] = new Array(regionCount);
   for (let i = 0; i < regionCount; i++) {
     const o = i * 10;
@@ -179,5 +196,6 @@ export async function fitAndTestRegionsGPU(
       nfaLog10: raw[o + 5], accepted: raw[o + 6] !== 0, n: raw[o + 8], k: raw[o + 9],
     };
   }
+  spanEnd(unpackSpan);
   return results;
 }

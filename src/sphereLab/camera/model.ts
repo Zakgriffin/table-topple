@@ -347,7 +347,9 @@ export interface PhysicalCamera extends CameraBase {
   // ingestRealCapture starts on the next mailbox frame -- so its duration
   // IS the round trip (phone capture+encode, network there, mailbox pump
   // delay, network back) with zero attribution to any single stage on its
-  // own. Null whenever profilerEnabled() is false, same as any other span.
+  // own. Never null in practice now that spans record unconditionally; the
+  // type stays nullable because nothing has opened one yet before the first
+  // reconstruction completes.
   idleSpan: ProfileSpan | null;
   // Approximate phone-side "pull the current video frame onto a canvas"
   // duration (canvas resize + drawImage, NOT the JPEG encode itself) for

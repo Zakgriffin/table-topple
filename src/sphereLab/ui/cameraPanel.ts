@@ -14,9 +14,8 @@ import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
 import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { isWebGPUSupported } from '../pipelineGPU/device.ts';
-import { getRoots, profilerEnabled, profilerReset, profilerSetEnabled } from '../profiling/profiler.ts';
+import { checkNesting, getRoots, profilerDevToolsMirror, profilerReset, profilerSetDevToolsMirror } from '../profiling/profiler.ts';
 import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
-import { invalidateTorusBufferCache } from '../pipelineGPU/positionLM.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
@@ -343,7 +342,6 @@ bindSlider('boardSize', (v) => {
   rebuildFloorPattern(v); // re-crops the torus, rebuilds the decode lookup table, resizes the floor mesh/texture/reference lines
   rebuildGridLineKs(); // reads HALF_R/HALF_C, which rebuildFloorPattern just updated -- must run after it
   invalidateHashTableCache(); // GPU decode-tally's hash table was built from the OLD debruijnLookup
-  invalidateTorusBufferCache(); // GPU Phase 3's torus-brightness buffer was built from the OLD torus
   for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render/re-decode against the new board
   pushSettingsSyncToAllPhysical();
 }, (v) => v.toFixed(0));
@@ -393,8 +391,13 @@ const profilerCheckbox = document.getElementById('profilerEnabled') as HTMLInput
 let lastProfilerStatusText = '';
 export function updateProfilerStatus() {
   let text: string;
-  if (!profilerEnabled()) {
-    text = 'Profiler off. On: spans mirror into DevTools’ Timings track, and GPU dispatch spans inflate.';
+  // The checkbox controls the DevTools MIRROR only -- spans themselves record
+  // unconditionally now, because pipeline/poseCompute.ts reads its per-stage
+  // timings off them. So "off" here means "not being written into DevTools'
+  // Timings track", never "not being measured", and the text says so rather
+  // than implying the pipeline is uninstrumented.
+  if (!profilerDevToolsMirror()) {
+    text = 'Not mirroring to DevTools. Spans still record — formatFlamechart() works either way.';
   } else {
     // ROOT SPANS, not captures -- with deferred visuals on, one capture leaves
     // three (axesReconstruction, then the drain's projectBins and
@@ -402,9 +405,10 @@ export function updateProfilerStatus() {
     // longer runs inside the reconstruction). Calling them captures would
     // misreport the thing this readout exists to show.
     const n = getRoots().length;
+    const bad = checkNesting().length;
     text = n === 0
-      ? 'Recording. Start the DevTools capture FIRST, then take one here.'
-      : `Recording -- ${n} root span${n === 1 ? '' : 's'}. formatFlamechart() for the text form.`;
+      ? 'Mirroring. Start the DevTools capture FIRST, then take one here.'
+      : `Mirroring -- ${n} root span${n === 1 ? '' : 's'}${bad ? `, ${bad} INVALID nesting` : ''}. formatFlamechart() for the text form.`;
   }
   if (text === lastProfilerStatusText) return;
   lastProfilerStatusText = text;
@@ -420,7 +424,7 @@ function applyProfilerToggle() {
   // every following capture shows up". Turning it OFF leaves the tree intact so
   // formatFlamechart() still has something to print.
   if (on) profilerReset();
-  profilerSetEnabled(on);
+  profilerSetDevToolsMirror(on);
   updateProfilerStatus();
 }
 profilerCheckbox.checked = false;

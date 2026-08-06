@@ -133,8 +133,6 @@ import * as NS31 from './ui/dom.ts';
 import * as NS32 from './ui/layout.ts';
 import * as NS33 from './ui/mode.ts';
 import * as NS34 from './pipelineGPU/device.ts';
-import * as NS35 from './pipelineGPU/voteGeneration.ts';
-import * as NS36 from './pipelineGPU/positionLM.ts';
 import * as NS37 from './profiling/profiler.ts';
 import * as NS38 from './pipelineGPU/fitPlanes.ts';
 import * as NS39 from './pipelineGPU/decodeTally.ts';
@@ -165,7 +163,7 @@ import * as NS65 from './pipelineGPU/reconstructionTiming.ts';
 Object.assign(
   globalThis,
   NS0, NS1, NS2, NS3, NS4, NS5, NS6, NS7, NS8, NS9, NS10, NS11, NS12, NS13, NS14, NS15, NS16, NS17,
-  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS35, NS36, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS45, NS47, NS48, NS49, NS50, NS51, NS52, NS53, NS54, NS55, NS56, NS57, NS58, NS59, NS60, NS61, NS62, NS63, NS64, NS65,
+  NS18, NS19, NS20, NS21, NS22, NS23, NS24, NS25, NS26, NS27, NS28, NS30, NS31, NS32, NS33, NS34, NS37, NS38, NS39, NS40, NS41, NS42, NS43, NS45, NS47, NS48, NS49, NS50, NS51, NS52, NS53, NS54, NS55, NS56, NS57, NS58, NS59, NS60, NS61, NS62, NS63, NS64, NS65,
   { THREE, activeCamera, cameras, isSimulated, isPhysical, globalState, euler, canvas, readout, savedControls,
     setMode, setPanelCollapsed, renderCameraTabs, refreshCameraPanel, renderViewport, layoutPip, resize,
     renderer, floorMesh, viewerCam, worldOrbit, insideCam, renderPreviewViewport, renderProjectedViewport,

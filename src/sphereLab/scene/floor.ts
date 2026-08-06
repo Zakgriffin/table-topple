@@ -100,10 +100,9 @@ for (const o of [rowGridLines, colGridLines]) o.layers.set(DEBUG_LAYER);
 // full R x C torus for that order, so this is a no-op there.
 //
 // Does NOT touch math/geometry.ts's rowLineKs/colLineKs (those read
-// HALF_R/HALF_C live but need their own rebuild call) or the two per-device
-// GPU caches keyed on the old board (pipelineGPU/decodeTally.ts's hash
-// table, pipelineGPU/positionLM.ts's torus-brightness buffer) -- the
-// caller (bindSlider('boardSize', ...)) is responsible for calling those
+// HALF_R/HALF_C live but need their own rebuild call) or the per-device GPU
+// cache keyed on the old board (pipelineGPU/decodeTally.ts's hash table) --
+// the caller (bindSlider('boardSize', ...)) is responsible for calling those
 // too, in that order, since floor.ts can't import from either without a
 // circular-import cycle back into itself.
 export function rebuildFloorPattern(size: number) {

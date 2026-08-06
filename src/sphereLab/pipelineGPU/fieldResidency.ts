@@ -226,7 +226,7 @@ export class FieldResidency {
       : new Uint32Array(s.cpu.buffer, s.cpu.byteOffset, s.cpu.length);
     recordTransfer({
       what: `${name} (f64→f32 narrow)`, kind: 'convert', dir: 'up', bytes: this.n * 4,
-      ms: performance.now() - tConv, bareFenceMs: null, queueDrainMs: null,
+      ms: performance.now() - tConv, startMs: tConv, bareFenceMs: null, queueDrainMs: null,
     });
     const buf = kind === 'f32'
       ? uploadFloat32(device, narrowed as Float32Array, 0, name)
@@ -264,7 +264,7 @@ export class FieldResidency {
       : new Int32Array((raw as Uint32Array).buffer.slice(0));
     recordTransfer({
       what: `${name} (f32→f64 widen)`, kind: 'convert', dir: 'down', bytes,
-      ms: performance.now() - tConv, bareFenceMs: null, queueDrainMs: null,
+      ms: performance.now() - tConv, startMs: tConv, bareFenceMs: null, queueDrainMs: null,
     });
     this.transfers.push({ what: name, direction: 'down', bytes });
     s.cpu = out;

@@ -5,8 +5,7 @@ import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { ProjectedSamplesDense } from '../types.ts';
 import { createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, readUint32, uploadFloat32, uploadUniform } from './device.ts';
-import { GRADIENT_WGSL } from './voteGeneration.wgsl.ts';
-import { PROJECT_SAMPLES_WGSL } from './projectSamples.wgsl.ts';
+import { GRADIENT_WGSL, PROJECT_SAMPLES_WGSL } from './projectSamples.wgsl.ts';
 
 // Stage 2 (bucket accumulation) deliberately stays on CPU for now -- it's a
 // scatter-add of FLOAT sums (color, gradient covector) into a data-dependent
@@ -73,9 +72,9 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   const minGrazingCos = camera.settings.minGrazingCos;
   const n = w * h;
 
-  // Gradient field (reuses voteGeneration.ts's own GRADIENT_WGSL kernel --
-  // same finite-difference computation, radius 1, just a different input
-  // image) -- only needed if there's a captured frame to differentiate.
+  // Gradient field (GRADIENT_WGSL, now colocated in projectSamples.wgsl.ts --
+  // same centered finite-difference computation, radius 1, just a different
+  // input image) -- only needed if there's a captured frame to differentiate.
   const gray = camera.lastNoisedPreviewGray;
   const fxBuf = createStorageBuffer(device, n * 4);
   const fyBuf = createStorageBuffer(device, n * 4);

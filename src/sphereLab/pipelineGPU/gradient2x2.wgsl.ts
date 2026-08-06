@@ -1,7 +1,7 @@
 // WGSL source for the GPU 2x2 gradient field -- the GPU-resident
 // counterpart to pipeline/gradientField.ts's computeGradient2x2Field.
 //
-// Deliberately NOT voteGeneration.wgsl.ts's GRADIENT_WGSL (the centered-
+// Deliberately NOT projectSamples.wgsl.ts's GRADIENT_WGSL (the centered-
 // difference field, mirroring computeGradientField) reused with r=1 --
 // that kernel zeros a SYMMETRIC r-pixel margin on all 4 sides, whereas
 // computeGradient2x2Field's 2x2-block gradient only leaves the LAST row

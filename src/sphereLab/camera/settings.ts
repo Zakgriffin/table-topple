@@ -32,9 +32,7 @@ export interface CameraSettingsCommon {
   showSphere: boolean; showCircles: boolean; showPoles: boolean; showFrustum: boolean; showPatch: boolean;
   showGizmoBody: boolean; showRecoveredFloor: boolean; recoveredFloorOpacity: number;
   showTrueContamination: boolean; showReconstructedContamination: boolean;
-  // Same reconstructed axes as the one above, weighted by raw 2x2 gradient
-  // magnitude instead of the agreement field -- see contaminationOverlays.ts.
-  showMagnitudeContamination: boolean; hideField: boolean;
+  hideField: boolean;
   showTopGradient: boolean;
   // ── From-scratch traditional LSD pipeline (pipeline/lsdSegments.ts) --
   // the PRODUCTION composite-line source: pipeline/votes.ts's
@@ -114,28 +112,12 @@ export interface CameraSettingsCommon {
   // convention, see pipeline/lsdSegments.ts's level-line vector block) -- was named
   // "perpendicular" before, renamed to match that shared terminology.
   showGradientArrow: boolean; showLevelLineArrow: boolean; gradientArrowScale: number;
-  coherenceRadius: number;
   tangentWalkMaxSteps: number; tangentWalkDeviationDeg: number; tangentWalkMagFraction: number; tangentWalkGraceSamples: number;
   tangentWalkAdaptive: boolean;
   showRecoveredPoles: boolean;
   showAxisVectors: boolean;
   showTopCircles: boolean;
   topCirclesLineWidth: number;
-  weightSharpenPower: number;
-  // Orientation-fit source: false (default) is today's composite-line path
-  // (computeSegmentVotes -> fitPairOfPlanes), true swaps in
-  // pipeline/votes.ts's computePixelVotes2x2 -> refineOrientationIRLS --
-  // one vote per pixel straight off the 2x2 gradient field, iteratively
-  // reweighted instead of segmented. Orthogonal to gridPeriodPhase, which
-  // keeps reading composite lines (see computePoseFromCapture) either way --
-  // this only changes which Drow/Dcol/Dnormal it's handed.
-  useWorldVoteOrientation: boolean;
-  // Cap on refineOrientationIRLS's reweight-and-refit loop -- 0 disables
-  // refinement (the loop's own single-shot initial fit only), for direct
-  // A/B against fitPairOfPlanes. The loop itself stops early on convergence
-  // well before this in the typical case, so this is a worst-case bound,
-  // not a fixed per-frame cost -- see refineOrientationIRLS's own comment.
-  worldVoteRefineSteps: number;
   // Grazing-angle cutoff (cosine) shared by projectSamplesCPU (forward:
   // screen pixel -> floor point) and buildDecodeSampleGrid (reverse: floor
   // point -> screen pixel) -- see pipeline/decodeGrid.ts's own comment.
@@ -185,7 +167,7 @@ function createDefaultCommonSettings(): CameraSettingsCommon {
   return {
     showSphere: true, showCircles: false, showPoles: true, showFrustum: true, showPatch: true, showGizmoBody: true, showRecoveredFloor: true, recoveredFloorOpacity: savedNum('recoveredFloorOpacity', 0.9),
     showTrueContamination: false, showReconstructedContamination: false,
-    showMagnitudeContamination: false, hideField: false,
+    hideField: false,
     showTopGradient: false,
     showLsdSegments: savedBool('toggleLsdSegments', false),
     showLsdRejected: savedBool('toggleLsdRejected', false),
@@ -223,7 +205,6 @@ function createDefaultCommonSettings(): CameraSettingsCommon {
     // draws -- overlays/hoverDebugOverlays.ts derives it per-hover from
     // lastNoisedPreviewGray) tops out at 1 instead of 255.
     showGradientArrow: false, showLevelLineArrow: false, gradientArrowScale: 10 * 255,
-    coherenceRadius: 1,
     // See the pre-Stage-A history for the full derivation of these tangent-walk
     // defaults (guided tangent walk, simNoise=8 stability etc.) -- unchanged.
     tangentWalkMaxSteps: 76, tangentWalkDeviationDeg: 45, tangentWalkMagFraction: 0, tangentWalkGraceSamples: 50,
@@ -232,9 +213,6 @@ function createDefaultCommonSettings(): CameraSettingsCommon {
     showAxisVectors: false,
     showTopCircles: true,
     topCirclesLineWidth: savedNum('topCirclesLineWidth', 1),
-    weightSharpenPower: 1,
-    useWorldVoteOrientation: savedBool('useWorldVoteOrientation', false),
-    worldVoteRefineSteps: savedNum('worldVoteRefineSteps', 0),
     minGrazingCos: savedNum('minGrazingCos', 0.1),
     gridPeriodPhaseBinCount: savedNum('gridPeriodPhaseBinCount', 150),
     gridPeriodPhaseGapLowerBound: savedNum('gridPeriodPhaseGapLowerBound', 0.005),

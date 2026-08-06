@@ -40,10 +40,8 @@ import { CompositeLine } from '../types.ts';
 // parameters don't reduce to one polynomial eigen-solve the way
 // fitPairOfPlanes' orientation did) -- it's a small, deliberately NARROW
 // bracketed search around a pairwise-gap seed estimate, scored at each
-// candidate period by the weighted circular-mean resultant length (the same
-// "fold onto a circle, measure how tightly it clusters" construction
-// computeGradientAgreementField itself uses, via its own double-angle
-// folding). Row and
+// candidate period by the weighted circular-mean resultant length -- a
+// "fold onto a circle, measure how tightly it clusters" construction. Row and
 // column periods are pooled into one shared search (square cells force the
 // same physical period on both axes), which sharpens the search and is more
 // robust than fitting each axis independently.

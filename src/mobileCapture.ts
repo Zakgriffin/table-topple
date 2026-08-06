@@ -736,8 +736,7 @@ fpsSlider.addEventListener('input', () => {
 // it within a second of the phone connecting, and only shows up in the narrow
 // window before that push lands.
 let cameraSettings: PoseComputeState['settings'] = {
-  horizFovDeg: 65, weightSharpenPower: 1, gridPeriodPhaseGapLowerBound: 0.005, minGrazingCos: 0.1,
-  useWorldVoteOrientation: false, worldVoteRefineSteps: 0,
+  horizFovDeg: 65, gridPeriodPhaseGapLowerBound: 0.005, minGrazingCos: 0.1,
   lsdToleranceDeg: 9.5, lsdRhoNoiseThreshold: 0.132, lsdRhoHighThreshold: 0, lsdCclSteps: 0, lsdNfaEpsilon: 1,
   lsdMinRegionSize: 2, lsdNfaTestExponent: 5,
   lsdMinLengthPx: 3,

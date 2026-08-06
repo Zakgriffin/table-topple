@@ -83,7 +83,6 @@
   }
   #overlayPanel button.active#toggleTrueContam { background: rgba(220,50,50,0.6); color: #fff; border-color: #e33; }
   #overlayPanel button.active#toggleReconContam { background: rgba(230,150,20,0.6); color: #fff; border-color: #e08c14; }
-  #overlayPanel button.active#toggleMagContam { background: rgba(40,200,235,0.6); color: #fff; border-color: #28c8eb; }
   #overlayPanel button.active#toggleTopGradient { background: rgba(60,230,90,0.6); color: #fff; border-color: #3ce65a; }
   #overlayPanel button.active#toggleLsdSegments { background: rgba(180,90,230,0.6); color: #fff; border-color: #b45ae6; }
   #overlayPanel button.active#toggleLsdRejected { background: rgba(230,60,60,0.6); color: #fff; border-color: #e63c3c; }
@@ -222,7 +221,6 @@
       <button id="toggleHideField">hide field</button>
       <button id="toggleTrueContam">true contamination overlay (red)</button>
       <button id="toggleReconContam">reconstructed contamination overlay (orange)</button>
-      <button id="toggleMagContam">gradient-magnitude contamination (cyan)</button>
       <button id="toggleTopGradient">top gradient overlay (green)</button>
     </div>
     <div class="section">
@@ -331,11 +329,6 @@
   </div>
 
   <div class="section">
-    <h2>2D filter pipeline</h2>
-    <div class="row"><span class="label">agreement window</span><input type="range" id="coherenceRadius" min="0" max="20" step="1" value="1"><span class="val" id="coherenceRadiusVal"></span></div>
-  </div>
-
-  <div class="section">
     <h2>field view</h2>
     <label class="chk"><input type="radio" name="fieldView" id="fieldViewRaw" value="raw"> <span id="fieldViewRawLabel">raw</span></label>
     <div id="simOnlyFieldViews">
@@ -346,8 +339,6 @@
     <div class="fieldViewDivider">&darr; 2D filter pipeline starts here &darr;</div>
     <label class="chk" title="hue = full 360&deg; direction, so opposing edges get opposite hues -- what LSD region growing actually sees"><input type="radio" name="fieldView" id="fieldViewGradient2x2Directed" value="gradient2x2Directed"> gradient field (directed)</label>
     <label class="chk" title="hue = direction mod 180&deg;, saturation = magnitude"><input type="radio" name="fieldView" id="fieldViewGradient2x2" value="gradient2x2"> gradient field (undirected)</label>
-    <label class="chk" title="Raw per-pixel 2x2 gradient magnitude, banded by the live rho sliders: black = below rho low (never grows), gray = in the hysteresis band, white = above rho high."><input type="radio" name="fieldView" id="fieldViewRhoMagnitude" value="rhoMagnitude"> rho bands: gradient magnitude</label>
-    <label class="chk" title="Same bands, same absolute scale, but over the 3x3 agreement field (radius 1) derived from that same gradient. DIRECTED (mod 360), matching what LSD growing actually tests -- opposing edges cancel rather than reinforce. Flipping between this and the one above changes only the aggregation radius."><input type="radio" name="fieldView" id="fieldViewRhoAgreement" value="rhoAgreement"> rho bands: agreement 3x3, directed</label>
   </div>
 
   <div class="section">
@@ -368,9 +359,6 @@
     <div class="row"><span class="label">ring stroke weight</span><input type="range" id="topCirclesLineWidth" min="0.5" max="8" step="0.5" value="1"><span class="val" id="topCirclesLineWidthVal"></span></div>
     <label class="chk"><input type="checkbox" id="showRecoveredPoles" checked> show reconstructed poles</label>
     <label class="chk"><input type="checkbox" id="showAxisVectors"> show vote axis vectors</label>
-    <div class="row"><span class="label">weight sharpen</span><input type="range" id="weightSharpenPower" min="1" max="10" step="0.5" value="1"><span class="val" id="weightSharpenPowerVal"></span></div>
-    <label class="chk"><input type="checkbox" id="useWorldVoteOrientation"> world votes (2x2, per-pixel) for orientation</label>
-    <div class="row"><span class="label">refine steps (IRLS cap)</span><input type="range" id="worldVoteRefineSteps" min="0" max="20" step="1" value="0"><span class="val" id="worldVoteRefineStepsVal"></span></div>
     <div class="row"><span class="label">min grazing cos</span><input type="range" id="minGrazingCos" min="0" max="0.5" step="0.01" value="0.1"><span class="val" id="minGrazingCosVal"></span></div>
     <button id="captureAxesBtn" class="captureBtn">&#9889; capture now</button>
     <label class="chk"><input type="checkbox" id="axesAutoCapture"> auto-recompute</label>

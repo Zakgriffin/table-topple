@@ -25,7 +25,7 @@ const WORKGROUP_SIZE_1D = 64;
 // regardless of vote count). Returns null if WebGPU isn't available; caller
 // falls back to the CPU version, which stays the source of truth.
 export async function fitPairOfPlanesGPU(
-  votes: Vote[], power: number,
+  votes: Vote[],
 ): Promise<{ Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null> {
   const device = await getGPUDevice();
   if (!device) return null;
@@ -48,9 +48,9 @@ export async function fitPairOfPlanesGPU(
   const numWorkgroups = Math.ceil(n / WORKGROUP_SIZE_1D);
   const outBuf = createStorageBuffer(device, numWorkgroups * 21 * 4);
 
-  const uniformData = new ArrayBuffer(16);
+  const uniformData = new ArrayBuffer(8);
   const dv = new DataView(uniformData);
-  dv.setUint32(0, n, true); dv.setFloat32(4, maxW, true); dv.setFloat32(8, power, true);
+  dv.setUint32(0, n, true); dv.setFloat32(4, maxW, true);
   const uniformBuf = uploadUniform(device, uniformData);
 
   const bindGroup = device.createBindGroup({

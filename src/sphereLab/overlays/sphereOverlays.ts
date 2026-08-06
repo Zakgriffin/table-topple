@@ -12,8 +12,8 @@ export function updateGradientCirclesDebug(camera: Camera) {
   // Builds circle-segment geometry for every vote (no percentile cutoff
   // anymore, see this session's chat) -- skip entirely when neither toggle
   // that would actually show it is on. Callers that flip one of those
-  // toggles ON call this directly to refresh (see ui/cameraPanel.ts), same
-  // as changing the sharpen slider already does. NOTE: this can be
+  // toggles ON call this directly to refresh (see ui/cameraPanel.ts).
+  // NOTE: this can be
   // hundreds of thousands of votes on a real capture -- showTopCircles
   // defaults to off specifically because of this.
   if (!camera.settings.showTopCircles && !camera.settings.showAxisVectors) return;
@@ -86,7 +86,7 @@ export function updateGradientCirclesDebug(camera: Camera) {
       pushVert(i0x, i0y, i0z, r, b); pushVert(o0x, o0y, o0z, r, b); pushVert(o1x, o1y, o1z, r, b);
       pushVert(i0x, i0y, i0z, r, b); pushVert(o1x, o1y, o1z, r, b); pushVert(i1x, i1y, i1z, r, b);
     }
-    const len = maxW > 0 ? AXIS_VECTOR_LENGTH * Math.pow(vote.weight / maxW, camera.settings.weightSharpenPower) : 0;
+    const len = maxW > 0 ? AXIS_VECTOR_LENGTH * (vote.weight / maxW) : 0;
     axisPositions[ap++] = 0; axisPositions[ap++] = 0; axisPositions[ap++] = 0;
     axisPositions[ap++] = normal.x * len;
     axisPositions[ap++] = normal.y * len;

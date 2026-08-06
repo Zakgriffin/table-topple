@@ -16,7 +16,7 @@
 // final sum-of-partials (one add per workgroup, typically a few hundred)
 // happens back on CPU in fitPlanes.ts.
 export const FIT_PLANES_WGSL = /* wgsl */ `
-struct Uniforms { voteCount: u32, maxWeight: f32, power: f32, pad: f32 }
+struct Uniforms { voteCount: u32, maxWeight: f32 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> votes: array<vec4<f32>>; // (nx,ny,nz,weight) per vote
 @group(0) @binding(2) var<storage, read_write> outPartials: array<f32>; // numWorkgroups x 21
@@ -31,11 +31,11 @@ fn main(
 ) {
   let li = lid.x;
   var row: array<f32, 6>;
-  var sharpened = 0.0;
+  var weight = 0.0;
   if (gid.x < u.voteCount) {
     let v = votes[gid.x];
     if (u.maxWeight > 0.0) {
-      sharpened = pow(v.w / u.maxWeight, u.power);
+      weight = v.w / u.maxWeight;
     }
     row[0] = v.x * v.x; row[1] = v.y * v.y; row[2] = v.z * v.z;
     row[3] = v.x * v.y; row[4] = v.x * v.z; row[5] = v.y * v.z;
@@ -49,7 +49,7 @@ fn main(
   var idx = 0u;
   for (var a = 0u; a < 6u; a = a + 1u) {
     for (var b = a; b < 6u; b = b + 1u) {
-      partial[li][idx] = sharpened * row[a] * row[b];
+      partial[li][idx] = weight * row[a] * row[b];
       idx = idx + 1u;
     }
   }

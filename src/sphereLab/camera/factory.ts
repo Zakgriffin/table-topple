@@ -113,9 +113,6 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
   const reconContamTex = new THREE.DataTexture(reconContamData, rtSize.w, rtSize.h, THREE.RGBAFormat);
   reconContamTex.flipY = false;
 
-  const magContamData = new Uint8Array(rtSize.w * rtSize.h * 4);
-  const magContamTex = new THREE.DataTexture(magContamData, rtSize.w, rtSize.h, THREE.RGBAFormat);
-  magContamTex.flipY = false;
 
   const topGradientData = new Uint8Array(rtSize.w * rtSize.h * 4);
   const topGradientTex = new THREE.DataTexture(topGradientData, rtSize.w, rtSize.h, THREE.RGBAFormat);
@@ -206,7 +203,7 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
     lastGridPeriodPhase: null,
     gridPeriodPhaseViewMin: null, gridPeriodPhaseViewMax: null,
     distortedPreviewData, distortedPreviewTex, projectedPreviewData, projectedPreviewTex,
-    trueContamData, trueContamTex, reconContamData, reconContamTex, magContamData, magContamTex, topGradientData, topGradientTex,
+    trueContamData, trueContamTex, reconContamData, reconContamTex, topGradientData, topGradientTex,
     tangentWalkPathData, tangentWalkPathTex,
     lsdRawRegionsData, lsdRawRegionsTex, lsdRejectedData, lsdRejectedTex,
     recoveredCamGizmo, recoveredCamAxes,
@@ -321,7 +318,6 @@ export function destroyCamera(camera: Camera) {
   camera.projectedPreviewTex.dispose();
   camera.trueContamTex.dispose();
   camera.reconContamTex.dispose();
-  camera.magContamTex.dispose();
   camera.topGradientTex.dispose();
   camera.tangentWalkPathTex.dispose();
   camera.lsdRawRegionsTex.dispose();

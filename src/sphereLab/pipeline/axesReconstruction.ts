@@ -253,8 +253,7 @@ async function runVisualTail(camera: Camera): Promise<void> {
   const t = camera.lastPoseTiming;
   let timingLine: string | undefined;
   if (t) {
-    const irlsSuffix = t.worldVoteIterations !== null ? `  irls ${t.worldVoteIterations} iter` : '';
-    timingLine = `votes ${t.votesMs.toFixed(0)}ms  fit ${t.fitMs.toFixed(0)}ms  pose ${t.poseMs.toFixed(0)}ms  distance ${t.distanceMs.toFixed(0)}ms  project ${projectMs.toFixed(0)}ms  decode ${t.decodeMs.toFixed(0)}ms${irlsSuffix}`;
+    timingLine = `votes ${t.votesMs.toFixed(0)}ms  fit ${t.fitMs.toFixed(0)}ms  pose ${t.poseMs.toFixed(0)}ms  distance ${t.distanceMs.toFixed(0)}ms  project ${projectMs.toFixed(0)}ms  decode ${t.decodeMs.toFixed(0)}ms`;
   }
   applyPoseVisualizations(camera, isActive, timingLine);
   spanEnd(overlaySpan);
@@ -443,8 +442,7 @@ export function runAxesReconstruction(camera: Camera) {
 // last stored into camera.lastAxesCaptureGray instead of taking a fresh
 // capture -- the recompute half of "every setting recomputes everything
 // downstream of it" for settings that don't invalidate the capture itself
-// (LSD/join-walk tuning, weightSharpenPower, gridPeriodPhaseGapLowerBound,
-// minGrazingCos, forceCPU). Guarded by the same axesCapturing
+// (LSD tuning, gridPeriodPhaseGapLowerBound, minGrazingCos, forceCPU). Guarded by the same axesCapturing
 // flag as runAxesReconstruction (reused, not a separate flag) so a rapid
 // slider drag naturally self-throttles: a call that arrives while one is
 // already in flight just no-ops, same as an overlapping "capture now"

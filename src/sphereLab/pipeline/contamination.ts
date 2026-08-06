@@ -3,9 +3,15 @@ import { angleBetweenDegV, cornerDir } from '../math/geometry.ts';
 import { GradientField } from '../types.ts';
 
 // ── Contamination overlay math (pure) ────────────────────────────────────
-
+//
+// `weight` is a per-pixel [0,1] multiplier on the geometric badness, i.e. "how
+// much does this pixel count". Its only supplier is computeGradientMagnitudeField
+// (frame-normalized raw gradient magnitude) -- it stays a parameter rather than
+// being computed inline because the badness math below is genuinely independent
+// of the weighting, and this is where a spatially-aggregated "agreement" field
+// used to be swapped in.
 export function computeContaminationAlpha(
-  field: GradientField, agreement: Float64Array,
+  field: GradientField, weight: Float64Array,
   dirA: THREE.Vector3, dirB: THREE.Vector3,
   quat: THREE.Quaternion, vFovRad: number, aspect: number,
 ): Float64Array {
@@ -31,7 +37,7 @@ export function computeContaminationAlpha(
       const badnessA = 90 - angleBetweenDegV(n, dirA);
       const badnessB = 90 - angleBetweenDegV(n, dirB);
       const badnessAlpha = THREE.MathUtils.clamp(Math.min(badnessA, badnessB) / 45, 0, 1);
-      alpha[i] = badnessAlpha * agreement[i];
+      alpha[i] = badnessAlpha * weight[i];
     }
   }
   return alpha;
@@ -47,6 +53,4 @@ export function paintContaminationOverlay(alpha: Float64Array, color: readonly [
 
 export const TRUE_CONTAM_COLOR = [230, 40, 40] as const;
 export const RECON_CONTAM_COLOR = [235, 150, 20] as const;
-// Magnitude-weighted variant -- same reconstructed axes as RECON, different weight.
-export const MAG_CONTAM_COLOR = [40, 200, 235] as const;
 

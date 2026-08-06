@@ -29,19 +29,6 @@ export function cornerDir(u: number, v: number, quat: THREE.Quaternion, vFovRad:
   return new THREE.Vector3(xc, yc, -1).normalize().applyQuaternion(quat);
 }
 
-// A vote normal's residual against a candidate row/col pole pair, under the
-// grid's FOUR-FOLD symmetry: exactly 0 when n lies on either family's great
-// circle, and sin(4*psi) rather than a plain angle so all four quarter-turn-
-// equivalent alignments score identically.
-//
-// Lived in pipeline/orientationLM.ts until the Levenberg-Marquardt orientation
-// refinement it was written for was deleted -- it was the only thing left in
-// that file, and it is pure geometry with two consumers, so it belongs here.
-export function fourFoldResidual(n: THREE.Vector3, Drow: THREE.Vector3, Dcol: THREE.Vector3): number {
-  const psi = Math.atan2(n.dot(Dcol), n.dot(Drow));
-  return Math.sin(4 * psi);
-}
-
 export function angleBetweenDegV(a: THREE.Vector3, b: THREE.Vector3): number {
   return THREE.MathUtils.radToDeg(Math.acos(THREE.MathUtils.clamp(Math.abs(a.dot(b)), -1, 1)));
 }

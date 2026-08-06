@@ -76,9 +76,8 @@ export interface CameraBase {
   // lastRealCaptureGray for physical), already flipped to analysis row
   // order -- recomputeFromLastCapture (pipeline/axesReconstruction.ts)
   // reads this instead of taking a fresh capture, so settings that only
-  // affect stages downstream of capture (LSD/join-walk tuning,
-  // weightSharpenPower, gridPeriodPhaseGapLowerBound, minGrazingCos, the
-  // forceCPU) can recompute without re-rendering/re-photographing.
+  // affect stages downstream of capture (LSD tuning,
+  // gridPeriodPhaseGapLowerBound, minGrazingCos, forceCPU) can recompute without re-rendering/re-photographing.
   // Deliberately a SEPARATE buffer from lastNoisedPreviewGray -- that one is
   // also written by the passive preview loop on its own throttled cycle
   // (see pipeline/preview.ts), which would otherwise risk this drifting
@@ -163,7 +162,6 @@ export interface CameraBase {
   projectedPreviewData: Uint8Array; projectedPreviewTex: THREE.DataTexture;
   trueContamData: Uint8Array; trueContamTex: THREE.DataTexture;
   reconContamData: Uint8Array; reconContamTex: THREE.DataTexture;
-  magContamData: Uint8Array; magContamTex: THREE.DataTexture;
   topGradientData: Uint8Array; topGradientTex: THREE.DataTexture;
   tangentWalkPathData: Uint8Array; tangentWalkPathTex: THREE.DataTexture;
   // Per-pixel raster overlays for pipeline/lsdSegments.ts's own debug views

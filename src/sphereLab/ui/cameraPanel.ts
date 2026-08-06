@@ -19,7 +19,7 @@ import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleMagContamBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, savedControls, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Rebuilds the tab bar from `cameras` (Map iteration = creation order) --
@@ -154,7 +154,6 @@ export function refreshCameraPanel() {
   setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
   setNum('gridPeriodPhaseGapLowerBound', cam.settings.gridPeriodPhaseGapLowerBound);
 
-  setNum('coherenceRadius', cam.settings.coherenceRadius);
 
   const fieldViewId = 'fieldView' + cam.settings.fieldView[0].toUpperCase() + cam.settings.fieldView.slice(1);
   const fieldViewInput = document.getElementById(fieldViewId) as HTMLInputElement | null;
@@ -172,9 +171,6 @@ export function refreshCameraPanel() {
   setBool('showRecoveredPoles', cam.settings.showRecoveredPoles); setBool('showAxisVectors', cam.settings.showAxisVectors);
   setBool('showTopCircles', cam.settings.showTopCircles);
   setNum('topCirclesLineWidth', cam.settings.topCirclesLineWidth);
-  setNum('weightSharpenPower', cam.settings.weightSharpenPower);
-  setBool('useWorldVoteOrientation', cam.settings.useWorldVoteOrientation);
-  setNum('worldVoteRefineSteps', cam.settings.worldVoteRefineSteps);
   setNum('minGrazingCos', cam.settings.minGrazingCos);
   setBool('axesAutoCapture', cam.settings.axesAutoCapture);
   setNum('axesCaptureInterval', cam.settings.axesCaptureIntervalMs);
@@ -182,7 +178,6 @@ export function refreshCameraPanel() {
   toggleHideFieldBtn.classList.toggle('active', cam.settings.hideField);
   toggleTrueContamBtn.classList.toggle('active', cam.settings.showTrueContamination);
   toggleReconContamBtn.classList.toggle('active', cam.settings.showReconstructedContamination);
-  toggleMagContamBtn.classList.toggle('active', cam.settings.showMagnitudeContamination);
   toggleTrueCardinalOrientationBtn.classList.toggle('active', cam.settings.useTrueCardinalOrientation);
   toggleSampleLatticeBtn.classList.toggle('active', cam.settings.showSampleLattice);
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
@@ -415,7 +410,6 @@ bindSlider('gridPeriodPhaseGapLowerBound', (v) => {
 bindSlider('simNoise', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
 bindSlider('simBlur', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simBlur = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
 bindSlider('captureSupersample', (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.captureSupersample = v; resizeCaptureBuffers(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}x`);
-bindSlider('coherenceRadius', (v) => { const cam = activeCamera(); if (cam) { cam.settings.coherenceRadius = v; markCaptureDirty(cam); } }, (v) => v.toFixed(0));
 bindRadioGroup('fieldView', (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.fieldView = v as FieldView;
@@ -444,11 +438,8 @@ function refreshLsd() {
 // pipeline/votes.ts's computeGradient2x2Composites), so recomputeFromLastCapture
 // is also needed here or camera.lastVoteComposites/lastGridPeriodPhase go stale.
 bindSlider('lsdToleranceDeg', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdToleranceDeg = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => `${v.toFixed(1)}°`);
-// updateDistortedPreview as well as refreshLsd: the rhoMagnitude/rhoAgreement
-// field views paint their bands FROM these two values, and refreshLsd only
-// redraws the LSD overlay, so without this the bands would lag the slider.
-bindSlider('lsdRhoNoiseThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); updateDistortedPreview(cam); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
-bindSlider('lsdRhoHighThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoHighThreshold = v; refreshLsd(); updateDistortedPreview(cam); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
+bindSlider('lsdRhoNoiseThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
+bindSlider('lsdRhoHighThreshold', (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoHighThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
 // 0 is the REAL algorithm (run growRegionsCCL to its fixpoint), not "off" --
 // labelled "auto" rather than "0" so the slider's own left end doesn't read as
 // a disabled/no-growth state the way the grow-steps slider it replaces did.
@@ -470,9 +461,6 @@ bindCheckbox('showRecoveredPoles', (v) => { const cam = activeCamera(); if (cam)
 bindCheckbox('showAxisVectors', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showAxisVectors = v; if (v) updateGradientCirclesDebug(cam); } });
 bindCheckbox('showTopCircles', (v) => { const cam = activeCamera(); if (cam) { cam.settings.showTopCircles = v; if (v) updateGradientCirclesDebug(cam); } });
 bindSlider('topCirclesLineWidth', (v) => { const cam = activeCamera(); if (cam) { cam.settings.topCirclesLineWidth = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
-bindSlider('weightSharpenPower', (v) => { const cam = activeCamera(); if (cam) { cam.settings.weightSharpenPower = v; updateGradientCirclesDebug(cam); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(1));
-bindCheckbox('useWorldVoteOrientation', (v) => { const cam = activeCamera(); if (cam) { cam.settings.useWorldVoteOrientation = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); });
-bindSlider('worldVoteRefineSteps', (v) => { const cam = activeCamera(); if (cam) { cam.settings.worldVoteRefineSteps = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
 // Feeds projectSamplesCPU/buildDecodeSampleGrid (stages 9+10) -- recompute
 // from the last capture rather than waiting for the next unrelated one.
 bindSlider('minGrazingCos', (v) => { const cam = activeCamera(); if (cam) { cam.settings.minGrazingCos = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));

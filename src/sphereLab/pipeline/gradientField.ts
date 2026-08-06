@@ -1,5 +1,5 @@
 import { GradientField } from '../types.ts';
-import { hsvToRgb, separableBoxBlur } from './distortion.ts';
+import { hsvToRgb } from './distortion.ts';
 
 // ── Value fields (no color) ─────────────────────────────────────────────
 
@@ -48,113 +48,23 @@ export function computeGradient2x2Field(gray: Float64Array, w: number, h: number
   return { fx, fy, w, h, r: 1 };
 }
 
-// ── The two candidate LSD driving fields, on ONE absolute scale ──────────
-//
-// Both of these return magnitudes on the SAME scale rho is thresholded
-// against, with no frame-relative normalization -- which is what makes them
-// directly comparable to each other AND directly meaningful against
-// lsdRhoNoiseThreshold / lsdRhoHighThreshold.
-//
-// That they share a scale is not a coincidence worth trusting blindly, so:
-// computeGradient2x2Field divides by 2*GRAYSCALE_MAX, giving hypot(fx,fy) a
-// true ceiling of exactly 1. separableBoxBlur AVERAGES rather than sums, so
-// the agreement value is the magnitude of the MEAN double-angle vector over
-// the window -- bounded by the mean of the magnitudes, hence by that same 1.
-//
-// The behavioural difference, which is the point of comparing them: agreement
-// at pixel i is a NEIGHBOURHOOD quantity, so it can come out HIGHER than the
-// raw magnitude there. A weak pixel inside a coherent edge is lifted by its
-// neighbours; an isolated strong spike whose neighbours disagree is pulled
-// toward zero. Raw magnitude does neither.
-
-// Raw per-pixel gradient magnitude. Absolute, ceiling 1.
-export function gradientMagnitudes(field: GradientField): Float64Array {
+// Frame-normalized per-pixel gradient magnitude, i.e. each pixel's |g| divided
+// by this frame's own max |g|. This is the contamination overlays' WEIGHT, and
+// frame-relative is what they want: there it is an ALPHA, so a low-contrast
+// capture stays visible instead of coming out nearly transparent. That divisor
+// changes frame to frame, so it is NOT a quantity to reason about rho with --
+// computeGradient2x2Field's own output is (ceiling exactly 1, see its comment).
+export function computeGradientMagnitudeField(field: GradientField): Float64Array {
   const { fx, fy } = field;
   const out = new Float64Array(fx.length);
-  for (let i = 0; i < fx.length; i++) out[i] = Math.hypot(fx[i], fy[i]);
-  return out;
-}
-
-// Magnitude of the local MEAN of gradients. Absolute, same ceiling.
-//
-// aggRadius 0 is the identity (a radius-0 box blur returns its input), so this
-// degenerates exactly to gradientMagnitudes -- which is why radius is the
-// single knob separating the two fields being compared.
-//
-// ── `directed` is NOT a display choice here, it decides what is being measured ──
-//
-// UNDIRECTED (mod π) folds each gradient to double angle before averaging, so
-// θ and θ+π land on the same vector and opposing edges REINFORCE. That is the
-// right convention for the contamination overlays, whose question is "is there
-// a strong oriented structure here", polarity irrelevant.
-//
-// DIRECTED (mod 2π) averages the raw vectors, so opposing edges CANCEL. That is
-// the right convention for judging this field as an LSD driver, because
-// lsdSegments' growth rule is directed: every orientation comparison there is a
-// plain SIGNED cos-dot against cos(τ). Aggregating mod π and then feeding a
-// directed grower would inflate exactly the pixel pairs the grower goes on to
-// refuse -- the two sides of a thin stripe boosting each other, then not being
-// allowed to join.
-export function agreementMagnitudes(field: GradientField, aggRadius: number, directed: boolean): Float64Array {
-  const { fx, fy, w, h } = field;
-  const n = w * h;
-  let cx: Float64Array, cy: Float64Array;
-  if (directed) {
-    cx = fx; cy = fy;
-  } else {
-    cx = new Float64Array(n); cy = new Float64Array(n);
-    for (let i = 0; i < n; i++) {
-      const mag = Math.hypot(fx[i], fy[i]);
-      if (mag === 0) continue;
-      const theta = Math.atan2(fy[i], fx[i]);
-      cx[i] = mag * Math.cos(2 * theta);
-      cy[i] = mag * Math.sin(2 * theta);
-    }
-  }
-  const sx = separableBoxBlur(cx, w, h, aggRadius);
-  const sy = separableBoxBlur(cy, w, h, aggRadius);
-  const out = new Float64Array(n);
-  for (let i = 0; i < n; i++) out[i] = Math.hypot(sx[i], sy[i]);
-  return out;
-}
-
-// Frame-normalized agreement, i.e. divided by this frame's own RAW max
-// magnitude. The contamination overlays want this rather than the absolute
-// form: there it is an ALPHA, and a frame-relative one keeps a low-contrast
-// capture's overlay visible instead of nearly transparent. Do NOT use it to
-// reason about rho -- the divisor changes frame to frame.
-export function computeGradientAgreementField(field: GradientField, aggRadius: number): Float64Array {
-  const { fx, fy } = field;
-  let maxRawMag = 0;
+  let maxMag = 0;
   for (let i = 0; i < fx.length; i++) {
     const mag = Math.hypot(fx[i], fy[i]);
-    if (mag > maxRawMag) maxRawMag = mag;
+    out[i] = mag;
+    if (mag > maxMag) maxMag = mag;
   }
-  // Undirected: the contamination question is polarity-agnostic. See
-  // agreementMagnitudes on why the LSD-driver view uses the other convention.
-  const agreement = agreementMagnitudes(field, aggRadius, false);
-  if (maxRawMag > 0) for (let i = 0; i < agreement.length; i++) agreement[i] /= maxRawMag;
-  return agreement;
-}
-
-// Frame-normalized raw magnitude -- the aggRadius 0 counterpart to
-// computeGradientAgreementField, carrying the identical normalization so the
-// two contamination alphas are directly comparable to each other. Same caveat:
-// not a rho-scale quantity.
-export function computeGradientMagnitudeField(field: GradientField): Float64Array {
-  const out = gradientMagnitudes(field);
-  let maxMag = 0;
-  for (let i = 0; i < out.length; i++) if (out[i] > maxMag) maxMag = out[i];
   if (maxMag > 0) for (let i = 0; i < out.length; i++) out[i] /= maxMag;
   return out;
-}
-
-export function computeEffectiveGradientField(field: GradientField, agreement: Float64Array): GradientField {
-  const { fx, fy, w, h, r } = field;
-  const n = w * h;
-  const efx = new Float64Array(n), efy = new Float64Array(n);
-  for (let i = 0; i < n; i++) { efx[i] = fx[i] * agreement[i]; efy[i] = fy[i] * agreement[i]; }
-  return { fx: efx, fy: efy, w, h, r };
 }
 
 
@@ -166,7 +76,7 @@ export function computeEffectiveGradientField(field: GradientField, agreement: F
 // AXIAL (directed=false, the long-standing default, fieldView 'gradient2x2'):
 // theta is folded into [0, PI) before mapping to a full 0-360 hue sweep, so a
 // black-to-white edge and the white-to-black edge facing it get the SAME hue.
-// That matches every mod-PI consumer in the codebase (computeGradientAgreementField,
+// That matches every mod-PI consumer in the codebase (computeContaminationAlpha,
 // tangentWalk's guided walk) -- for them a line is a line regardless of which
 // side is darker.
 //
@@ -208,29 +118,6 @@ export function paintVectorFieldAsColor(field: GradientField, out: Uint8Array, d
   }
 }
 
-
-// Paints a magnitude field as the THREE BANDS the LSD grower actually sees,
-// against the live rho sliders. Not a grayscale ramp on purpose: the question
-// this view exists to answer is "what would rho keep", and a ramp makes the
-// reader do the thresholding by eye.
-//
-//   black  mag <= rhoLow            never eligible, cannot form a growth edge
-//   gray   rhoLow < mag <= rhoHigh   grows, but its component is discarded
-//                                    unless some member clears rhoHigh
-//   white  mag > rhoHigh            clears survival on its own
-//
-// rhoHigh <= rhoLow (the shipping default has rhoHigh 0) is the documented
-// degenerate case -- hysteresis collapses to a single threshold, so the middle
-// band correctly does not appear rather than being special-cased away.
-export function paintRhoBands(mag: Float64Array, rhoLow: number, rhoHigh: number, out: Uint8Array) {
-  const survive = Math.max(rhoLow, rhoHigh);
-  for (let i = 0; i < mag.length; i++) {
-    const m = mag[i];
-    const v = m <= rhoLow ? 0 : (m > survive ? 255 : 96);
-    const o = i * 4;
-    out[o] = v; out[o + 1] = v; out[o + 2] = v; out[o + 3] = 255;
-  }
-}
 
 export function fillGrayscalePreview(gray: Float64Array, out: Uint8Array) {
   for (let i = 0; i < gray.length; i++) {

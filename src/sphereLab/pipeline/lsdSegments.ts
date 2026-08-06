@@ -1010,9 +1010,10 @@ async function runGradient2x2Stage(res: FieldResidency, w: number, h: number): P
 
 // The chain's two entry points, always used as a pair. Split rather than fused
 // because the caller has to be able to reach into the residency AFTER the
-// rectangles come out -- pipeline/poseCompute.ts's useWorldVoteOrientation
-// branch still wants fx/fy on the CPU -- and because the caller owns the
-// destroy. Anything that runs the chain should go through these two and nothing
+// rectangles come out, and because the caller owns the destroy. (The reader
+// that motivated the split -- poseCompute's per-pixel "world votes" branch,
+// which wanted fx/fy back on the CPU -- is deleted; the residency now outlives
+// the rectangles for `gray`, so the fused decode can reuse it.) Anything that runs the chain should go through these two and nothing
 // else, so that a residency-plumbing mistake is visible to the dev harness
 // (pipelineGPU/lsdChainVerify.ts) rather than only to production.
 export async function createLsdChainResidency(gray: Float64Array, w: number, h: number): Promise<FieldResidency> {

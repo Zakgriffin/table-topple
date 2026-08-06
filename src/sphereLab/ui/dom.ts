@@ -46,7 +46,6 @@ export const arrowToggles = document.getElementById('arrowToggles') as HTMLDivEl
 export const projectedToggles = document.getElementById('projectedToggles') as HTMLDivElement;
 export const toggleTrueCardinalOrientationBtn = document.getElementById('toggleTrueCardinalOrientation') as HTMLButtonElement;
 export const toggleSampleLatticeBtn = document.getElementById('toggleSampleLattice') as HTMLButtonElement;
-export const toggleMagContamBtn = document.getElementById('toggleMagContam') as HTMLButtonElement;
 export const simDistortionSection = document.getElementById('simDistortionSection') as HTMLDivElement;
 
 export const modeBtns: Record<Mode, HTMLButtonElement> = {

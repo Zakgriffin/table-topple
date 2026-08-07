@@ -59,6 +59,84 @@ export interface HarnessInput {
 // as a return value. The "detached state, never the live Camera" caution it
 // carried is likewise moot: there is no state to detach.
 
+// ── PROVENANCE: what a report has to carry to be re-derivable ─────────────
+//
+// The complaint that voided every historical timing number was not that the
+// numbers were wrong. It was that no report said what it had measured, so a
+// year later nobody could tell whether two of them were comparable. Step 1 made
+// the configuration expressible and step 2 made it storable; this is the third
+// piece, and it is the one that puts it ON THE OUTPUT.
+//
+// Six of the seven harnesses in this directory recorded NOTHING about their
+// input -- not the label, not the size, not the settings. Their deltas were
+// exactly the un-re-derivable kind, in a new place. One spread fixes all of
+// them at once.
+//
+// ── TWO hashes, because "it changed" is not a useful answer on its own ──
+//
+// configHash covers what the pipeline READS: `settings` and `aspect`. That is
+// provably the whole of it, and it is provable only because step 5 drew the
+// boundary -- `PoseInput` is the entire surface computePoseFromCapture takes
+// besides the pixels and the backend, and nothing under src/pose reads an
+// ambient global any more. Hashing the whole config file (what fixture.ts
+// snapshots) would have been the safe answer BEFORE that boundary existed; now
+// it would just make the fingerprint churn on UI edits that cannot reach the
+// pipeline, which trains a reader to ignore it.
+//
+// captureHash covers the pixels. A label does not pin them: `camera:sim-1` is a
+// different image every capture, so two runs with an identical configHash can
+// still be measuring different work. Separating the two is what makes the
+// answer diagnostic -- "same config, different capture" and "same capture,
+// different config" are different problems.
+//
+// The BACKEND is deliberately not in either. It is per-call, several harnesses
+// sweep it, and the reports that care record it as its own field.
+export interface InputProvenance {
+  input: string;
+  w: number;
+  h: number;
+  configHash: string;
+  captureHash: string;
+}
+
+// FNV-1a, 32 bits. Zero dependencies and deterministic across engines, which is
+// the whole requirement -- this identifies a configuration, it does not defend
+// against one. Math.imul because the multiply overflows 2^53 otherwise and the
+// hash silently degenerates.
+function fnv1a(bytes: Uint8Array): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < bytes.length; i++) { h ^= bytes[i]; h = Math.imul(h, 0x01000193); }
+  return h >>> 0;
+}
+
+function hex(n: number): string { return n.toString(16).padStart(8, '0'); }
+
+// Key order must not change the hash: two settings objects built by different
+// code paths hold the same configuration, and a report that called them
+// different would be worse than no report.
+function canonical(v: unknown): string {
+  if (v === null || typeof v !== 'object') return JSON.stringify(v) ?? 'null';
+  if (Array.isArray(v)) return `[${v.map(canonical).join(',')}]`;
+  const o = v as Record<string, unknown>;
+  return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`).join(',')}}`;
+}
+
+export function provenance(input: HarnessInput): InputProvenance {
+  return {
+    input: input.label,
+    w: input.w,
+    h: input.h,
+    configHash: hex(fnv1a(new TextEncoder().encode(
+      canonical({ settings: input.settings, aspect: input.aspect }),
+    ))),
+    // Over the raw bytes of the f64 samples, not over a stringification: it is
+    // ~2.4MB and one pass, paid once when a harness starts rather than per rep.
+    captureHash: hex(fnv1a(new Uint8Array(
+      input.gray.buffer, input.gray.byteOffset, input.gray.byteLength,
+    ))),
+  };
+}
+
 export function inputFromFixture(fixture: Fixture): HarnessInput {
   return {
     label: `fixture:${fixture.name}`,

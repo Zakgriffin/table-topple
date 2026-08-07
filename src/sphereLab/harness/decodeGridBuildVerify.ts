@@ -5,6 +5,7 @@ import {
 import { getAnalysisVFovRad } from '../math/geometry.ts';
 import { buildAndTallyDecodeGPU } from '../../pose/stages/decode/decodeGridBuild.gpu.ts';
 import type { Backend } from '../../pose/backend.ts';
+import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 import { runPoseOn } from './runPose.ts';
 
@@ -27,7 +28,11 @@ import { runPoseOn } from './runPose.ts';
 // why the report separates `bitDiffs` (tolerable, expect a few) from
 // `winnerAgrees` (must be true) and `validDiffs` (a validity disagreement is a
 // geometry/threshold problem, not a rounding one).
-interface DecodeGridBuildVerifyReport {
+// Every report in this directory carries where it came from. See
+// harness/input.ts's InputProvenance: six of these recorded nothing at all
+// about their input, which made their deltas exactly as un-re-derivable as the
+// timing numbers the config-pinning work exists to replace.
+interface DecodeGridBuildVerifyReport extends InputProvenance {
   dims: { rows: number; cols: number };
   cells: number;
   // Per-cell agreement between the two grids.
@@ -117,6 +122,7 @@ export async function verifyDecodeGridBuild(
       && rzI === rotCpu.zeroI && rzJ === rotCpu.zeroJ;
 
     return {
+      ...provenance(input),
       dims: { rows: cpuGrid.rows, cols: cpuGrid.cols },
       cells: cpuGrid.rows * cpuGrid.cols,
       validDiffs, bitDiffs, maxPxDelta, maxPyDelta, maxUvDelta,

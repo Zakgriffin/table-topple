@@ -1,6 +1,7 @@
 import { createLsdChainResidency, runLsdChain } from '../../pose/stages/lsd/chain.ts';
 import type { LsdRectangle, LsdSettings } from '../../pose/stages/lsd/types.ts';
 import { type Backend } from '../../pose/backend.ts';
+import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 
 // ── Dev harness: does the LSD chain give the same answer at every toggle? ──
@@ -118,7 +119,11 @@ interface ChainConfigReport {
   error: string | null; // a throw is itself a result worth reporting, not a reason to abandon the sweep
 }
 
-interface LsdChainVerifyReport {
+// Every report in this directory carries where it came from. See
+// harness/input.ts's InputProvenance: six of these recorded nothing at all
+// about their input, which made their deltas exactly as un-re-derivable as the
+// timing numbers the config-pinning work exists to replace.
+interface LsdChainVerifyReport extends InputProvenance {
   reps: number;
   baseline: string;
   configs: ChainConfigReport[];
@@ -278,6 +283,7 @@ export async function verifyLsdChain(input: HarnessInput, reps = 3): Promise<Lsd
   }
 
   return {
+    ...provenance(input),
     reps,
     baseline,
     configs: reports,

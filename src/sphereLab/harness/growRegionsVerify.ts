@@ -2,6 +2,7 @@ import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientFiel
 import { growRegionsCCL } from '../../pose/stages/lsd/regions.cpu.ts';
 import type { GrownRegion } from '../../pose/stages/lsd/types.ts';
 import { growRegionsCCLGPUToCPU } from '../../pose/stages/lsd/growRegions.gpu.ts';
+import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 
 // ── Dev harness: does growRegions.wgsl.ts's labeling agree with the CPU's? ──
@@ -27,7 +28,11 @@ import type { HarnessInput } from './input.ts';
 // zero disagreement below is structural, not luck; if it is nonzero, expect
 // roughly that many split/merge events and judge by whether the region
 // population is materially the same.
-interface GrowRegionsVerifyReport {
+// Every report in this directory carries where it came from. See
+// harness/input.ts's InputProvenance: six of these recorded nothing at all
+// about their input, which made their deltas exactly as un-re-derivable as the
+// timing numbers the config-pinning work exists to replace.
+interface GrowRegionsVerifyReport extends InputProvenance {
   cpuRegions: number;
   gpuRegions: number;
   cpuLabeledPixels: number; // pixels surviving hysteresis, i.e. belonging to some region
@@ -170,6 +175,7 @@ export async function verifyGrowRegions(input: HarnessInput): Promise<GrowRegion
   for (let g = 0; g < gpu.regions.length; g++) if (absorbedFrom[g] === -1) gpuRegionsMerged++;
 
   return {
+    ...provenance(input),
     cpuRegions: cpu.regions.length,
     gpuRegions: gpu.regions.length,
     cpuLabeledPixels, gpuLabeledPixels, pixelsOnlyCpu, pixelsOnlyGpu,

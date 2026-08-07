@@ -1,5 +1,6 @@
 import { circularFit } from '../../pose/stages/period/gridPeriodPhase.ts';
 import type { Backend } from '../../pose/backend.ts';
+import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 import { runPoseOn } from './runPose.ts';
 import { sweepResultantsGPU } from '../../pose/stages/period/periodSweep.gpu.ts';
@@ -24,7 +25,11 @@ import { sweepResultantsGPU } from '../../pose/stages/period/periodSweep.gpu.ts'
 // whether the two paths pick out the same peaks -- which is why the report
 // leads with peak agreement and with the argmax period, and treats the raw
 // score deltas as context for those.
-interface PeriodSweepVerifyReport {
+// Every report in this directory carries where it came from. See
+// harness/input.ts's InputProvenance: six of these recorded nothing at all
+// about their input, which made their deltas exactly as un-re-derivable as the
+// timing numbers the config-pinning work exists to replace.
+interface PeriodSweepVerifyReport extends InputProvenance {
   // Whether the STORED scores matched the recomputed CPU ones -- i.e. whether
   // the capture ran on the CPU path. Purely informational: the comparison below
   // uses the recomputed CPU scores either way, so false does not weaken it.
@@ -145,6 +150,7 @@ export async function verifyPeriodSweep(
   const hadCpuBaseline = coarseSamples.every((s, i) => Math.abs(s.score - cpuSamples[i].score) < 1e-12);
 
   return {
+    ...provenance(input),
     hadCpuBaseline,
     candidates: cpuSamples.length,
     lines: { row: rowValues.length, col: colValues.length },

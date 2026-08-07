@@ -4,6 +4,7 @@ import { growRegionsCCL } from '../../pose/stages/lsd/regions.cpu.ts';
 import type { LsdRectangle } from '../../pose/stages/lsd/types.ts';
 import { FieldResidency } from '../../pose/gpu/fieldResidency.ts';
 import { fitAndTestRegionsGPU } from '../../pose/stages/lsd/lsdFit.gpu.ts';
+import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 
 // ── Dev harness: is lsdFit.wgsl.ts's output still the CPU path's output? ──
@@ -31,7 +32,11 @@ import type { HarnessInput } from './input.ts';
 // GPU-rejected region on CPU (which would have masked rejection disagreements
 // as agreement); it no longer does, but calling the kernel directly is still
 // what keeps this a test of the kernel rather than of the wrapper.
-interface LsdFitVerifyReport {
+// Every report in this directory carries where it came from. See
+// harness/input.ts's InputProvenance: six of these recorded nothing at all
+// about their input, which made their deltas exactly as un-re-derivable as the
+// timing numbers the config-pinning work exists to replace.
+interface LsdFitVerifyReport extends InputProvenance {
   regions: number;
   regionSizes: { min: number; median: number; p95: number; max: number; singletons: number };
   acceptedCpu: number;
@@ -148,6 +153,7 @@ export async function verifyLsdFit(input: HarnessInput): Promise<LsdFitVerifyRep
 
   const sizes = regions.map((r) => r.members.length).sort((a, b) => a - b);
   return {
+    ...provenance(input),
     regions: regions.length,
     regionSizes: {
       min: sizes[0], median: quantile(sizes, 0.5), p95: quantile(sizes, 0.95), max: sizes[sizes.length - 1],

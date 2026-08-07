@@ -1,6 +1,7 @@
 import { type Backend } from '../../pose/backend.ts';
 import { computePoseFromCapture, type PoseResult } from '../../pose/poseCompute.ts';
 import { NO_INTERMEDIATES } from '../../pose/intermediates.ts';
+import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 import {
   type PathNode, type TreeNode, criticalPath, joinRecords, profilerBeginSession,
@@ -306,14 +307,13 @@ interface CrossingReport {
   misattributed: string[];
 }
 
-interface ReconstructionTimingReport {
+// `input`, `w`, `h`, `configHash` and `captureHash` all come from
+// InputProvenance -- see harness/input.ts. The two hashes are what finally make
+// this report's claim to re-derivability checkable rather than asserted: a
+// reader can tell whether two reports measured the same configuration and the
+// same pixels without trusting that nothing moved in between.
+interface ReconstructionTimingReport extends InputProvenance {
   reps: number;
-  w: number;
-  h: number;
-  // What was measured, by name -- 'fixture:default' or 'camera:<id>'. The
-  // report's whole claim to being re-derivable rests on this plus `backend`
-  // plus the fixture's own pinned config; see harness/input.ts.
-  input: string;
   // WHICH CONFIGURATION PRODUCED THESE NUMBERS. Recorded rather than assumed,
   // because the alternative is what voided every timing this project took before
   // 2026-08-06: the backend was an ambient global at measurement time, so a
@@ -893,8 +893,8 @@ export async function timeReconstruction(
     });
 
     return {
-      reps, w, h,
-      input: input.label,
+      reps,
+      ...provenance(input),
       backend,
       poseMedianMs,
       poseMsAll,
@@ -972,6 +972,10 @@ export function formatReconstructionTiming(r: ReconstructionTimingReport | strin
   if (r.spreadPct > 12) warn.push(`!! IQR spread ${r.spreadPct.toFixed(0)}% across reps -- this run cannot resolve a change smaller than that.`);
   lines.push(...warn);
   lines.push(`reconstruction: ${r.poseMedianMs.toFixed(1)}ms median / ${r.poseMinMs.toFixed(1)}ms min of ${r.reps}  (${r.w}x${r.h}, ${r.input}, backend=${r.backend})`);
+  // The line that decides whether this report can be compared with another one.
+  // Two reports agreeing on both hashes and the backend measured the same work;
+  // disagreeing on ONE of them says which half moved. See harness/input.ts.
+  lines.push(`  config ${r.configHash} / capture ${r.captureHash} -- compare only against a run with BOTH the same.`);
   lines.push(`  compare changes on the MIN; quote the MEDIAN.`);
   lines.push(`  reps: ${r.poseMsAll.map((m) => m.toFixed(1)).join(', ')}   (IQR spread ${r.spreadPct.toFixed(0)}%)`);
   lines.push(`  warm-up (${r.warmupMs.length} reps, ${r.warmedUp ? 'settled' : 'NOT settled'}): ${r.warmupMs.map((m) => m.toFixed(1)).join(', ')}`);

@@ -1,4 +1,5 @@
 import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientField.ts';
+import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 import type { GrownRegion } from '../../pose/stages/lsd/types.ts';
 import { growRegionsCCLGPUToCPU } from '../../pose/stages/lsd/growRegions.gpu.ts';
@@ -26,7 +27,11 @@ import { growRegionsCCLGPUToCPU } from '../../pose/stages/lsd/growRegions.gpu.ts
 //   - regionId identical for every pixel
 // The one thing that legitimately differs is meanAngle: the GPU sums cos/sin in
 // f32. Reported as a delta rather than an equality.
-interface CollectRegionsVerifyReport {
+// Every report in this directory carries where it came from. See
+// harness/input.ts's InputProvenance: six of these recorded nothing at all
+// about their input, which made their deltas exactly as un-re-derivable as the
+// timing numbers the config-pinning work exists to replace.
+interface CollectRegionsVerifyReport extends InputProvenance {
   cpuRegions: number;
   gpuRegions: number;
   countMatches: boolean;
@@ -97,6 +102,7 @@ export async function verifyCollectRegions(input: HarnessInput): Promise<Collect
     for (let i = 0; i < cpu.regionId.length; i++) if (cpu.regionId[i] !== gpu.regionId[i]) regionIdMismatches++;
 
     return {
+      ...provenance(input),
       cpuRegions: cpu.regions.length,
       gpuRegions: gpu.regions.length,
       countMatches: cpu.regions.length === gpu.regions.length,

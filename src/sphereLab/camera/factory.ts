@@ -96,7 +96,7 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
   sphereAnchor.add(patchMesh);
   patchMesh.layers.set(DEBUG_LAYER);
 
-  // Initial size only -- pipeline/decodeGrid.ts's paintProjectedTexture
+  // Initial size only -- pose/stages/decode/decodeGrid.ts's paintProjectedTexture
   // reallocates this to match its own SQUARE-CELL bucket grid (bucketW x
   // bucketH, generally NOT rtSize.w x .h and NOT square itself -- see its
   // own comment) on every capture, since that grid's shape depends on the

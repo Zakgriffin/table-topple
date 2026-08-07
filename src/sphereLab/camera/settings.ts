@@ -54,8 +54,8 @@ export const CameraSettingsCommonSchema = Type.Object({
   hideField: Type.Boolean(),
   showTopGradient: Type.Boolean(),
 
-  // ── From-scratch traditional LSD pipeline (pipeline/lsdSegments.ts) --
-  // the PRODUCTION composite-line source: pipeline/votes.ts's
+  // ── From-scratch traditional LSD pipeline (pose/stages/lsd/lsdSegments.ts) --
+  // the PRODUCTION composite-line source: pose/stages/votes/votes.ts's
   // computeGradient2x2Composites turns each accepted rectangle straight into
   // one line. None of these are gated behind a show/hide toggle --
   // they're tuning knobs for a live feature, not just a debug view.
@@ -105,7 +105,7 @@ export const CameraSettingsCommonSchema = Type.Object({
   // competitive growers relied on to stop weak noise out-competing a real
   // ridge (a symmetric edge predicate has no notion of "wins"). Set at or
   // below lsdRhoNoiseThreshold to degrade to plain single-threshold
-  // behavior. See pipeline/lsdSegments.ts's growRegionsCCL.
+  // behavior. See pose/stages/lsd/lsdSegments.ts's growRegionsCCL.
   lsdRhoHighThreshold: Type.Number(),
   // DEBUG SCRUBBER ONLY (0 = run to the fixpoint, the real algorithm): caps
   // how many hook+compress rounds growRegionsCCL runs so the overlay can
@@ -141,7 +141,7 @@ export const CameraSettingsCommonSchema = Type.Object({
   lsdMinLengthPx: Type.Number(),
 
   // showLevelLineArrow: the gradient rotated -90deg (LSD's own level-line
-  // convention, see pipeline/lsdSegments.ts's level-line vector block) -- was
+  // convention, see pose/stages/lsd/lsdSegments.ts's level-line vector block) -- was
   // named "perpendicular" before, renamed to match that shared terminology.
   showGradientArrow: Type.Boolean(),
   showLevelLineArrow: Type.Boolean(),
@@ -154,13 +154,13 @@ export const CameraSettingsCommonSchema = Type.Object({
 
   // Grazing-angle cutoff (cosine) shared by projectSamplesCPU (forward:
   // screen pixel -> floor point) and buildDecodeSampleGrid (reverse: floor
-  // point -> screen pixel) -- see pipeline/decodeGrid.ts's own comment.
+  // point -> screen pixel) -- see pose/stages/decode/decodeGrid.ts's own comment.
   // Higher = stricter (excludes more of the near-horizon view).
   minGrazingCos: Type.Number(),
   gridPeriodPhaseBinCount: Type.Number(),
   // Below this, a red/blue neighbor gap (gridPeriodPhaseOverlays.ts's
   // per-family median lines) is excluded from the median -- filters out the
-  // same near-duplicate-line noise gaps pipeline/gridPeriodPhase.ts's own
+  // same near-duplicate-line noise gaps pose/stages/period/gridPeriodPhase.ts's own
   // seed-period mode search is built to shrug off, which would otherwise
   // drag a small-sample median toward ~0 instead of the true spacing.
   gridPeriodPhaseGapLowerBound: Type.Number(),

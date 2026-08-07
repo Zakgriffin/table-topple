@@ -2,11 +2,11 @@ import * as THREE from 'three';
 import { type Camera } from '../camera/model.ts';
 import { MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
-import { projectSamplesGPU } from '../pipelineGPU/projectSamples.ts';
+import { projectSamplesGPU } from './projectSamples.gpu.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { type GradientField, type ProjectedBins, type ProjectedSamplesDense } from '../types.ts';
-import { type Backend } from './backend.ts';
-import { computeGradientField } from './gradientField.ts';
+import { type Backend } from '../../pose/backend.ts';
+import { computeGradientField } from '../../pose/stages/gradient/gradientField.ts';
 
 // ── The projection stage: DISPLAY, not pose ───────────────────────────────
 //
@@ -54,7 +54,7 @@ function getCachedSrcGradientField(camera: Camera, gray: Float64Array, w: number
 // grazing-angle cutoff, projects it onto the recovered floor plane's (u,v)
 // frame plus its gradient covector. Dense output (one slot per pixel,
 // valid=0 for misses) specifically so this and projectSamplesGPU (see
-// pipelineGPU/projectSamples.ts) can feed the exact same stage-2 bucketing
+// pipeline/projectSamples.gpu.ts) can feed the exact same stage-2 bucketing
 // code below -- see pre-Stage-A history for the full derivation
 // (grazing-angle cutoff, gradient-covector re-expression in the (u,v)
 // frame, the U-mirror that cancels a handedness mismatch).

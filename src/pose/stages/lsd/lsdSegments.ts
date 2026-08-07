@@ -1,0 +1,1074 @@
+import * as THREE from 'three';
+import { FieldResidency } from '../../gpu/fieldResidency.ts';
+import { computeGradient2x2FieldGPU } from '../gradient/gradient2x2.gpu.ts';
+import { fitAndTestRegionsGPU } from './lsdFit.gpu.ts';
+import { growRegionsCCLGPU } from './growRegions.gpu.ts';
+import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
+import { type GradientField } from '../../../sphereLab/types.ts';
+import { type Backend } from '../../backend.ts';
+import { computeGradient2x2Field } from '../gradient/gradientField.ts';
+
+// ── LSD (Line Segment Detector, von Gioi/Jakubowicz/Morel/Randall 2010) ───
+// ── from scratch ────────────────────────────────────────────────────────
+//
+// A genuinely traditional reimplementation, and the PRODUCTION composite-line
+// source: pose/stages/votes/votes.ts's computeGradient2x2Composites turns each accepted
+// rectangle straight into one line.
+//
+// Pipeline: hysteresis-gated, directed-angle CONNECTED-COMPONENT region
+// growing (stage 2+3, see growRegionsCCL below -- replaces the JFA-strided
+// competitive relabeling that replaced the original magnitude-sorted serial
+// BFS) -> magnitude-weighted PCA rectangle fit per region (stage 4) -> NFA
+// statistical validation (stage 5).
+//
+// This file forms segments ONLY, and NOTHING bridges them afterwards.
+// Bridging genuinely disjoint segments (across a gradient dropout, or across a
+// level-line POLARITY flip -- see below) is therefore currently UNSOLVED rather
+// than solved elsewhere; it was a no-op at the settings in use. The previous design
+// tried to do both at once via long strided jumps, which is where all of its
+// complexity and all of its failure modes lived: a jump of tens or hundreds
+// of pixels only checks ANGLE agreement, so it could silently land on a
+// completely different parallel ridge (an adjacent De Bruijn grid row) that
+// merely shares a direction, and a bad merge like that compounds. Every pixel
+// comparison here is now strictly between 8-NEIGHBORS, so that class of error
+// is not merely guarded against, it is unreachable.
+//
+// GPU-friendliness note: stage 4+5's FIRST NFA pass HAS a GPU port
+// (pose/stages/lsd/lsdFit.gpu.ts), and it is VERIFIED identical to this file's CPU
+// path -- zero disagreements on n, k or accept/reject across a 2931-region
+// capture, max nfaLog10 delta 7.7e-6 (see harness/lsdFitVerify.ts, which
+// is how to re-check it after any change to either side). It defaults OFF
+// anyway, for a PERFORMANCE reason: fitAndTestRegionsGPU still uploads
+// mag/theta and the region CSR from CPU on every call, so it currently ADDS a
+// round trip and measures slower (3.5ms CPU vs 8ms GPU). That inverts once
+// stage 2+3 is GPU-resident and the labeling never lands on CPU.
+// Stage 2+3 ALSO has a GPU port now (pose/stages/lsd/growRegions.gpu.ts, selected by the
+// `backend` argument, alongside the fit stage in computeLsdRectanglesAuto). Like the JFA version it replaces, it was
+// architecturally GPU-ready by construction -- each round is two
+// frozen-buffer-in/fresh-buffer-out passes with no same-round cross-pixel
+// dependency -- and it needed strictly LESS GPU machinery than that version
+// would have: the per-round segmented reduction over region sums is gone
+// entirely, leaving only the propagate step itself. It is the one stage that is
+// NOT bit-identical to its CPU counterpart and cannot be made so; see its own
+// header, and harness/growRegionsVerify.ts for how to measure the exposure
+// on a given capture.
+//
+// Stage 5 had a tighten-then-shrink retry loop on NFA rejection. It is gone,
+// code and settings both -- fitRegionOnce is the only fitter. It was never
+// ported to GPU (retry 2+ needs a per-region partial sort, the hardest GPU
+// problem in this file), and keeping it CPU-side meant every GPU-rejected
+// region fell back to CPU and dragged mag/theta along with it, which was the
+// last dependency preventing stages 1-4 from becoming one GPU-resident run. The
+// CPU and GPU fitters now have identical scope by construction.
+//
+// Regions below settings.minRegionSize are dropped in
+// collectRegionsFromLabels, before either fitter sees them. At the default
+// floor of 2 that is free (a 1-member region has no axis to fit) and removes
+// ~40% of the fit stage's input on a real capture.
+
+// The level-line angle (LSD's own convention): the gradient rotated -90
+// degrees, a DIRECTED angle -- it encodes which side is darker. The two edges
+// of one bright stripe have level-line angles ~180 degrees apart.
+//
+// EVERY orientation comparison in this file is directed (mod 2π): growth
+// compatibility, countRectanglePixels' NFA alignment count, and
+// and the fitter's own alignment test all use a plain SIGNED cos-dot
+// against cos(τ). This reverts a previous mod-π (theta and theta+π both count)
+// experiment, and the reason for the revert is worth recording, because the
+// original motivation for mod-π was real and is still real:
+//
+// WHY MOD-π WAS TRIED: a single De Bruijn grid line separates cells whose
+// VALUES vary along its own length, so the exact same physical line can
+// legitimately flip which side is darker partway along it. Directed growth
+// splits that line in two at the flip.
+//
+// WHY IT WAS REVERTED ANYWAY: directed angles were silently buying a second
+// thing nobody had accounted for -- FREE SEPARATION OF THE TWO EDGES OF A
+// THIN STRIPE. Those two edges are geometrically parallel but antiparallel as
+// vectors, so a directed test rejects merging them by definition. Under mod-π
+// they are indistinguishable, and at a 1-2px stripe width they are 8-ADJACENT,
+// so nothing stops them fusing into one wrongly-fattened region. The old
+// strided search masked this by only ever probing along the tangent (it rarely
+// OFFERED a perpendicular neighbor as a candidate), but that was an accident
+// of the search geometry, not a guarantee -- and with growth now testing an
+// honest 8-neighborhood at stride 1, the mask is gone.
+//
+// The two concerns are separable by WHERE the flip happens: the flip we need
+// to tolerate happens ALONG a line, the flip we must reject sits ACROSS a
+// stripe. That could be encoded as a mod-π test plus a "polarity may only flip
+// for tangential connections" side condition -- but since bridging disjoint
+// segments is bucketFillJoin.ts's job now (see this file's header), the
+// simpler resolution is to not tolerate flips here at all. Which makes the
+// growth rule a single signed dot product, and makes it canonical LSD's own
+// rule again rather than a variant.
+//
+// THE STANDING CONSEQUENCE, and it is a real limitation rather than a note
+// about a stage that used to follow: a line whose polarity flips mid-length
+// comes out as two COLLINEAR, ABUTTING, ANTIPARALLEL segments, and NOTHING
+// reassembles them. The join walk that was once responsible for merging them
+// is deleted. Both halves still vote (each contributes its own weighted n n^T,
+// and the sub-lengths nearly sum to the whole), so the orientation fit barely
+// moves -- but each half is fitted from a shorter baseline, so its normal is
+// noisier, and that error enters gridPeriodPhase's row/col classification
+// quadratically. Grazing angles, where lines are already short, are where this
+// would show up first.
+//
+// One simplification falls out for free: with no polarity flips inside a
+// region, a plain raw sum of member level-line vectors can no longer partially
+// cancel, so a region's mean direction needs none of the
+// sign-resolve-against-a-fixed-reference machinery the mod-π version required.
+//
+// ── THE LEVEL-LINE VECTOR (the canonical definition -- comments elsewhere
+//    point here) ──────────────────────────────────────────────────────────
+//
+// The level line at a pixel runs perpendicular to the gradient, i.e. a quarter
+// turn from it. Written as a unit vector that is simply
+//
+//   (ux, uy) = (-fy, fx) / ‖(fx, fy)‖
+//
+// and that vector is what every consumer in this file actually wants.
+//
+// GET THE COMPONENT ORDER RIGHT -- it was wrong here from faf55f6 until
+// 2026-08-04, and the way it was wrong is worth keeping because the same slip
+// is one keystroke away at every site below. The angle this replaced was
+// `theta = atan2(fx, -fy)`, and the vector was written as `(fx, -fy)` by
+// reading those two arguments left to right. But atan2 takes Y FIRST, so
+// (cos theta, sin theta) = (-fy, fx). The buggy form is the correct one with
+// its components SWAPPED, i.e. reflected about the 45-degree line rather than
+// rotated a quarter turn.
+//
+// WHY IT SURVIVED SO LONG, which is the genuinely instructive part: swapping
+// components is an ORTHOGONAL map, and every growth test is a dot product
+// between two pixels' vectors. dot(Mu, Mv) == dot(u, v) for orthogonal M, so
+// region growing was BIT-IDENTICAL under the bug -- the clumps looked perfect,
+// and faf55f6's own verification (0 edge-predicate flips over 187630 pairs,
+// max dot delta 5.6e-16) was measuring a quantity that is INVARIANT under the
+// error it was meant to catch. The CPU-vs-GPU harnesses were equally blind,
+// since both sides carried the same reflection.
+//
+// It only became observable where a level-line vector meets something that is
+// NOT reflected with it: the fitted rectangle's own axis, which comes from a
+// PCA of member POSITIONS. countRectanglePixels' alignment count is that
+// meeting point, and dot(Mu, a) == dot(u, Ma) means the count was scored
+// against an axis mirrored about 45 degrees. A vertical edge (fx>0, fy=0) has
+// level line (0,1) but scored as (1,0) -- exactly perpendicular, k=0, rejected
+// every time. Only edges near +/-45 degrees, where the mirror is close to the
+// identity, survived at all.
+//
+// It used to be materialized as an ANGLE: computeMagTheta stored
+// theta = atan2(fx, -fy) per pixel, and then every single consumer immediately
+// undid it. The grower precomputed cos(theta)/sin(theta) for every pixel;
+// collect summed cos/sin over a region's members and atan2'd the result back
+// into an angle; fitRectangle took cos/sin of THAT to get a direction again;
+// countRectanglePixels took a cos/sin pair per pixel of every rectangle
+// footprint. Not one site used the angle as an angle. So the angle is gone and
+// the vector is carried directly, straight off the gradient field the previous
+// stage already produces -- which deletes a whole per-pixel pass along with
+// every transcendental in the chain.
+//
+// The one atan2 that remains is the one producing a fitted rectangle's OWN
+// theta (see fitRectangle), because that is a real output votes.ts consumes
+// as an angle.
+//
+// Two forms of the magnitude test show up below, and the split is deliberate:
+// eligibility compares SQUARED magnitude against a squared threshold, so a
+// pixel that fails costs no sqrt at all -- and most pixels fail -- while only a
+// pixel that passes pays the single sqrt needed to normalize.
+
+// ── Stage 2+3: directed connected-component region growing ───────────────
+//
+// The segments are, by definition, the CONNECTED COMPONENTS of one fixed
+// undirected graph: a node per eligible pixel, an edge between 8-neighbors
+// whose level-line angles agree within τ (directed -- see the level-line vector block's // own comment). That is the entire specification. Everything below is just
+// how it gets computed.
+//
+// This replaces a round-synchronous, JFA-strided COMPETITIVE relabeling
+// scheme (each pixel re-evaluating every round whether some neighbor's label
+// was "more compatible AND stronger" than its own, where strength was the
+// label's summed member magnitude, recomputed each round by a segmented
+// reduction, and the neighbor offsets were long steered jumps whose stride
+// grew with the region's own accumulated angular coherence). The single
+// biggest thing that buys is CONFLUENCE.
+//
+// WHY CONFLUENCE MATTERS HERE. Because the edge predicate is SYMMETRIC, the
+// answer is the transitive closure of a fixed relation, so it does not depend
+// on round order, round COUNT, seeding, or which pixel happened to win a
+// contested tie first. Concretely:
+//   - There is a real termination condition. The old growSteps was "how many
+//     rounds to run", with the honest admission in its own comment that there
+//     was no closed form for how far growth would get in N rounds -- it was a
+//     tuning knob wearing an iteration count's clothes. Here the loop runs to
+//     a FIXPOINT and the round count is a pure debug scrubber.
+//   - Two completely different implementations can be checked against each
+//     other. A serial union-find over the same edge set must produce a
+//     byte-identical labeling; any divergence is a bug rather than a tuning
+//     difference. (Not implemented here -- see this file's tabled notes --
+//     but the property is what makes it worth writing when it is.)
+//   - No flapping. The old scheme needed a strictly-stronger tiebreak purely
+//     to stop two comparably-sized regions trading a boundary pixel forever.
+//   - Far less state. Gone: the per-round segmented reduction over
+//     sumCos/sumSin/sumMag, the per-pixel strideDivider shrink-on-stall
+//     counter and its wrap constant, largestStride, the steered candidate fan
+//     and its lateral-drift bound. A round is now two flat passes over two
+//     buffers.
+//
+// HOW IT CONVERGES FAST. Naive label propagation ("take the min label among
+// my compatible neighbors") moves information exactly one pixel per round, so
+// a 300px-long line would need ~300 rounds -- which is precisely the problem
+// the strided JFA jumps existed to solve. The fix is NOT to reintroduce
+// spatial strides. It is to do the doubling in LABEL SPACE instead:
+//
+//   hook:     next[i]  = min(label[i], min over edge-connected neighbors j of label[j])
+//   compress: label[i] = next[next[i]]        <- pointer jumping
+//
+// Labels are pixel indices, so `next` is a forest of pointers and the
+// compress pass halves every node's distance to its root each round. That is
+// classic Shiloach-Vishkin hooking-and-shortcutting, and it recovers the
+// logarithmic round count JFA had (O(log L) in practice) WITHOUT ever
+// comparing two non-adjacent pixels. This is the crux of the whole redesign:
+// long-range shortcutting can only ever compress connectivity that
+// adjacent-pixel tests already proved, so it is structurally incapable of
+// jumping onto a different parallel ridge -- the failure mode the old
+// maxLateralSearchPx bound existed to (partially) contain.
+//
+// Both passes keep the frozen-buffer-in/fresh-buffer-out discipline the JFA
+// version had, so each is still one trivially-parallel compute dispatch for a
+// future GPU port -- two dispatches per round, and no reduction between them.
+//
+// WHY THE FIXPOINT IS THE RIGHT ANSWER. At the fixpoint, for every pixel i and
+// every edge-connected neighbor j, label[i] <= label[j] and label[j] <=
+// label[i], hence label[i] === label[j]; by induction across the component
+// every member shares one label, and the compress pass's own fixpoint forces
+// that label to be a self-pointing root. Since labels only ever propagate
+// from members, that root is the component's MINIMUM pixel index. So the
+// converged output is exactly "min member index per connected component" --
+// the same thing union-find would produce, which is what makes the two
+// checkable against each other.
+//
+// SEEDING is dense and uninteresting: every eligible pixel starts as its own
+// singleton. There is no "which pixels get to seed" decision to make at all,
+// because with a symmetric predicate the seed set cannot influence the result.
+//
+// CHAINING (accepted, deliberately unfixed). A pairwise-only predicate lets a
+// gently curving arc chain end to end -- each adjacent pair agrees within τ
+// while the two ends differ by far more. The classic guard is to compare each
+// candidate against the REGION's running mean angle instead of its neighbor's
+// pixel angle, but that is exactly what would destroy confluence and drag the
+// per-round reduction back in. It is left unfixed on purpose: under lens
+// distortion a physically straight line genuinely IS a gentle arc, so a
+// grower that follows it is reporting the truth about the image, and stage
+// 4+5's PCA fit and NFA test already measure and judge the resulting shape.
+// Tabled remedies if it ever does bite: split-on-fit-failure (strictly better
+// than stage 5's current shrink, since it keeps BOTH halves as real
+// detections); or angle-bucketed CCL (run the whole thing independently
+// inside each of B overlapping angle bins, which kills chaining by
+// construction and stays embarrassingly parallel across bins).
+// meanU is the region's mean level-line DIRECTION, normalized. It was an angle
+// (meanAngle) until the vector-space pass; its only consumer, fitRectangle,
+// used it purely to pick which of the PCA axis's two opposite directions to
+// keep, so only the direction has ever mattered and the normalization is for
+// comparability rather than correctness.
+export interface GrownRegion { members: Int32Array; meanUx: number; meanUy: number }
+
+// The full 8-neighborhood. All eight are tested, not a steered subset: the
+// old scheme picked a handful of long offsets aimed along the region's
+// aggregate direction because most of 8 directions would have been wasted
+// perpendicular probes at a large stride. At stride 1 that reasoning
+// evaporates -- a perpendicular neighbor is one pixel away, testing it is
+// free, and it is exactly the test that lets a genuinely 2px-thick ridge grow
+// across its own width instead of splitting into two parallel components.
+const NEIGHBOR_DX = [1, 1, 0, -1, -1, -1, 0, 1];
+const NEIGHBOR_DY = [0, 1, 1, 1, 0, -1, -1, -1];
+
+// A hard ceiling on rounds, purely so a debug tool can never hang. Hook alone
+// (no compression) propagates one pixel per round, so the longest possible
+// chain sets a true upper bound; compression makes the real count
+// logarithmic, so this is never reached in practice -- if it ever IS, that is
+// a bug in the fixpoint detection, not a legitimately slow image.
+function roundHardCap(w: number, h: number): number { return w + h + 64; }
+
+// THE predicate -- the single rule the whole of stage 2+3 is built on.
+// Exported so overlays/lsdOverlay.ts's edge-connectivity hover view tests the
+// exact same condition the real algorithm does, rather than an independently
+// reimplemented copy that could quietly drift out of sync (the same reason
+// the JFA version exported computeGrowthCandidates).
+//
+// Directed, so a plain SIGNED dot: cos(θi - θj) >= cos(τ). No abs(), which is
+// what keeps the two antiparallel edges of a thin stripe from fusing -- see
+// the level-line vector block (lsdSegments.ts).
+function levelLinesCompatible(
+  cosA: number, sinA: number, cosB: number, sinB: number, cosTol: number,
+): boolean {
+  return cosA * cosB + sinA * sinB >= cosTol;
+}
+
+// Which of pixel i's 8 neighbors it shares a graph edge with. Used by the
+// hover debug view; the growth loop below inlines the same test rather than
+// allocating an array per pixel per round.
+export function computeEdgeNeighbors(
+  fx: Float64Array, fy: Float64Array, w: number, h: number, i: number,
+  toleranceDeg: number, rhoLow: number,
+): number[] {
+  const out: number[] = [];
+  const mi = Math.hypot(fx[i], fy[i]);
+  if (mi <= rhoLow) return out;
+  const cosTol = Math.cos(THREE.MathUtils.degToRad(toleranceDeg));
+  const x = i % w, y = (i / w) | 0;
+  // The quarter turn plus normalize -- see the level-line vector block above.
+  const ci = -fy[i] / mi, si = fx[i] / mi;
+  for (let k = 0; k < 8; k++) {
+    const nx = x + NEIGHBOR_DX[k], ny = y + NEIGHBOR_DY[k];
+    if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+    const j = ny * w + nx;
+    const mj = Math.hypot(fx[j], fy[j]);
+    if (mj <= rhoLow) continue;
+    if (levelLinesCompatible(ci, si, -fy[j] / mj, fx[j] / mj, cosTol)) out.push(j);
+  }
+  return out;
+}
+
+// Squared eligibility threshold, so the per-pixel test below costs no sqrt.
+// Exact rather than approximately equivalent: for rhoLow >= 0, ‖g‖ > rhoLow iff
+// ‖g‖² > rhoLow², and the negative case (which no slider produces, but which
+// would silently invert the test) is mapped to "everything is eligible", which
+// is what comparing against a negative threshold means.
+function eligibilityThresholdSq(rho: number): number {
+  return rho >= 0 ? rho * rho : -Infinity;
+}
+
+// rhoLow/rhoHigh implement CANNY-STYLE HYSTERESIS, which is what stands in
+// for the magnitude-priority ordering this design dropped. The old serial-BFS
+// and JFA schemes both leaned on magnitude in an ordering-dependent way (grow
+// the strongest seed first; let the higher summed-magnitude label win a
+// contested pixel) specifically so a weak noisy pixel could not out-compete a
+// real ridge. A symmetric predicate has no notion of "wins", so without a
+// replacement a chain of barely-above-threshold noise could bridge two
+// genuine ridges into one region.
+//
+// Hysteresis restores that guarantee without restoring any ordering: any pixel
+// above rhoLow may participate in edges, but a finished component only
+// SURVIVES if it contains at least one pixel above rhoHigh. That is a
+// per-component OR-reduction over an already-finalized labeling -- computed
+// after the fact, so it cannot influence what merged with what, and it stays
+// confluent. It also strictly dominates a single threshold: a faint but real
+// line anchored anywhere by one strong pixel survives intact, while a
+// same-strength blob of pure noise with no strong pixel anywhere is dropped
+// whole. Setting rhoHigh <= rhoLow degrades gracefully to plain single-
+// threshold behavior (every eligible pixel trivially clears the high bar).
+//
+// maxRounds is a DEBUG SCRUBBER, not a tuning parameter: 0 means run to the
+// fixpoint (the real algorithm, and the production default), while 1..N caps
+// the round count so an overlay can watch components coalesce. Unlike the
+// growSteps it replaces, changing it cannot change the converged answer --
+// only how much of the way there you are looking at.
+// Hysteresis survival + the collect/relabel pass, shared by growRegionsCCL and
+// its GPU counterpart (pose/stages/lsd/growRegions.gpu.ts) so the two can never drift
+// in how a finished labeling turns into regions.
+//
+// This is the CPU route AND the fallback; pose/stages/lsd/collectRegions.gpu.ts is the
+// GPU one. An earlier version of this comment called the step "inherently
+// serial", which was simply wrong: every stage is a standard parallel pattern
+// -- labelSurvives is a scatter of a constant (no atomic needed, every writer
+// writes 1), the grouping is a histogram + prefix sum + scatter CSR build,
+// ascending label order falls out of the scan for free because labels ARE pixel
+// indices, and meanAngle is a segmented reduction over the resulting slices.
+// What actually blocked it was the missing prefix-sum primitive, now
+// pose/gpu/prefixSum.ts.
+export function collectRegionsFromLabels(
+  label: Int32Array, fx: Float64Array, fy: Float64Array, rhoHigh: number, n: number,
+  minRegionSize: number,
+): { regionId: Int32Array; regions: GrownRegion[] } {
+  // Which components contain a pixel above rhoHigh. Indexed by label value (a
+  // pixel index, so bounded by n), the same convention the round loop uses.
+  const rhoHighSq = eligibilityThresholdSq(rhoHigh);
+  const labelSurvives = new Uint8Array(n);
+  for (let i = 0; i < n; i++) {
+    const lab = label[i];
+    if (lab !== -1 && fx[i] * fx[i] + fy[i] * fy[i] > rhoHighSq) labelSurvives[lab] = 1;
+  }
+
+  const membersByLabel = new Map<number, number[]>();
+  for (let i = 0; i < n; i++) {
+    const lab = label[i];
+    if (lab === -1 || !labelSurvives[lab]) continue;
+    let list = membersByLabel.get(lab);
+    if (!list) { list = []; membersByLabel.set(lab, list); }
+    list.push(i);
+  }
+  const sortedLabels = Array.from(membersByLabel.keys()).sort((a, b) => a - b); // deterministic order
+
+  const regionId = new Int32Array(n).fill(-1);
+  const regions: GrownRegion[] = [];
+  for (const lab of sortedLabels) {
+    const members = membersByLabel.get(lab)!;
+    // Prefilter, here rather than at the fitter, so an undersized component is
+    // never materialized as a region on EITHER path -- no GrownRegion object,
+    // no CSR row, no GPU thread. At the default floor of 2 this is purely work
+    // removed: a 1-member component has no axis to fit, so the fitter could
+    // only ever return null for it and the caller drop it. Its pixels are left
+    // at regionId -1, which is what the raw-region debug overlay paints as "no
+    // region" -- an isolated pixel stops showing as a region of one.
+    if (members.length < minRegionSize) continue;
+    const id = regions.length;
+    for (const p of members) regionId[p] = id;
+    // A plain raw sum of member level-line vectors -- no sign resolution
+    // against a reference member. With directed growth every member is within
+    // tau of every other member it is connected THROUGH, so there is no
+    // polarity flip inside a region for the sum to cancel against. (Chaining
+    // can still walk the direction a long way around a curve, which is a real
+    // effect, but it walks CONTINUOUSLY and never jumps by pi.) The result
+    // stays a genuine directed value, which is what fitRectangle's PCA-sign
+    // resolution needs.
+    let sc = 0, ss = 0;
+    for (const p of members) {
+      const m = Math.hypot(fx[p], fy[p]);
+      // Every member cleared rhoLow to be labeled at all, so m > 0 here.
+      sc += -fy[p] / m; ss += fx[p] / m;
+    }
+    // Normalized for comparability across paths; only the DIRECTION is load-
+    // bearing. The degenerate all-cancel case can't arise from directed growth
+    // but is pinned to a fixed axis rather than left as NaN.
+    const sLen = Math.hypot(sc, ss);
+    regions.push({
+      members: Int32Array.from(members),
+      meanUx: sLen > 0 ? sc / sLen : 1, meanUy: sLen > 0 ? ss / sLen : 0,
+    });
+  }
+  return { regionId, regions };
+}
+
+export function growRegionsCCL(
+  fx: Float64Array, fy: Float64Array, w: number, h: number,
+  toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
+): { regionId: Int32Array; regions: GrownRegion[]; roundsRun: number; converged: boolean } {
+  const n = w * h;
+  const cosTol = Math.cos(THREE.MathUtils.degToRad(toleranceDeg));
+
+  // The level-line vector never changes across rounds -- only which LABEL owns
+  // a pixel does -- so it is normalized once here rather than recomputed by
+  // every round's neighbor tests. This is where the old cos(theta)/sin(theta)
+  // precompute lived, and where computeMagTheta's atan2 used to be undone one
+  // stage after it was applied. Raw direction, NOT a doubled-angle pair: the
+  // predicate is a signed dot, and doubling is precisely what would throw away
+  // the sign it depends on.
+  //
+  // Eligibility is folded into the same pass, against a SQUARED threshold, so
+  // an ineligible pixel costs no sqrt -- and most pixels are ineligible.
+  // Ineligible entries keep (0,0), which no round ever reads: label -1 is
+  // checked first everywhere.
+  const rhoLowSq = eligibilityThresholdSq(rhoLow);
+  const ux = new Float64Array(n), uy = new Float64Array(n);
+  let label = new Int32Array(n);
+  for (let i = 0; i < n; i++) {
+    const gx = fx[i], gy = fy[i];
+    const m2 = gx * gx + gy * gy;
+    if (m2 > rhoLowSq) {
+      const inv = 1 / Math.sqrt(m2);
+      ux[i] = -gy * inv; uy[i] = gx * inv;
+      label[i] = i; // dense: every eligible pixel is its own singleton
+    } else {
+      label[i] = -1;
+    }
+  }
+  let next = new Int32Array(n);
+
+  const cap = maxRounds > 0 ? Math.min(maxRounds, roundHardCap(w, h)) : roundHardCap(w, h);
+  let roundsRun = 0, converged = false;
+
+  for (let round = 0; round < cap; round++) {
+    let changed = false;
+
+    // ── Hook: read ONLY the frozen `label`, write ONLY `next` ─────────────
+    for (let y = 0; y < h; y++) {
+      for (let x = 0; x < w; x++) {
+        const i = y * w + x;
+        const own = label[i];
+        if (own === -1) { next[i] = -1; continue; } // below rhoLow -- never participates
+        let best = own;
+        const ci = ux[i], si = uy[i];
+        for (let k = 0; k < 8; k++) {
+          const nx = x + NEIGHBOR_DX[k], ny = y + NEIGHBOR_DY[k];
+          if (nx < 0 || nx >= w || ny < 0 || ny >= h) continue;
+          const j = ny * w + nx;
+          const nlab = label[j];
+          if (nlab === -1 || nlab >= best) continue; // -1 ineligible; >= best can't lower our min
+          if (!levelLinesCompatible(ci, si, ux[j], uy[j], cosTol)) continue;
+          best = nlab;
+        }
+        next[i] = best;
+      }
+    }
+
+    // ── Compress: pointer-jump one level, `next` in / `label` out ─────────
+    // next[i] is always either -1 or the index of an ELIGIBLE pixel (labels
+    // only ever originate from eligible pixels), so next[next[i]] is always a
+    // defined, non-(-1) entry -- no second guard needed past the -1 check.
+    for (let i = 0; i < n; i++) {
+      const l = next[i];
+      const jumped = l === -1 ? -1 : next[l];
+      if (jumped !== label[i]) changed = true;
+      label[i] = jumped;
+    }
+
+    roundsRun++;
+    if (!changed) { converged = true; break; }
+  }
+
+  const { regionId, regions } = collectRegionsFromLabels(label, fx, fy, rhoHigh, n, minRegionSize);
+  return { regionId, regions, roundsRun, converged };
+}
+
+// ── Stage 4: magnitude-weighted PCA rectangle fit ─────────────────────────
+
+interface RectangleCandidate { cx: number; cy: number; theta: number; length: number; width: number }
+
+// The rectangle's angle comes from PCA on the region's own PIXEL
+// COORDINATES (weighted by gradient magnitude) -- the standard image-
+// moments technique for "what's this region's own axis of elongation,"
+// which is exactly what a thin, long region wants for its rectangle's long
+// axis. PCA only determines this axis up to a 180-degree ambiguity (an
+// inertia matrix has no notion of "which way" along its own principal
+// axis) -- resolved using the region's OWN directed growth-mean direction
+// (meanUx/meanUy, already computed in stage 3): whichever of the PCA axis's two
+// directions agrees with it is the one kept. This also matters for
+// correctness, not just cosmetics -- stage 5's NFA alignment test compares
+// pixel directions against the rectangle's theta directly, so a 180-degree-
+// flipped theta would make every genuinely-aligned pixel look
+// anti-aligned instead.
+//
+// NOTE this function deliberately KEEPS its atan2/cos/sin, even though the
+// vector-space pass removed them everywhere else. The reason is that all of it
+// is PER REGION (~1800 calls) rather than per pixel, so replacing the PCA angle
+// with a direct half-angle eigenvector would buy nothing measurable while
+// perturbing the one quantity that genuinely escapes this file as an angle.
+// The per-pixel transcendentals were the whole cost, and those are gone.
+function fitRectangle(
+  members: Int32Array, fx: Float64Array, fy: Float64Array, w: number,
+  meanUx: number, meanUy: number,
+): RectangleCandidate {
+  let sumW = 0, sumX = 0, sumY = 0;
+  for (let mi = 0; mi < members.length; mi++) {
+    const i = members[mi];
+    const m = Math.hypot(fx[i], fy[i]);
+    sumW += m; sumX += m * (i % w); sumY += m * ((i / w) | 0);
+  }
+  const wcx = sumX / sumW, wcy = sumY / sumW;
+
+  let Ixx = 0, Iyy = 0, Ixy = 0;
+  for (let mi = 0; mi < members.length; mi++) {
+    const i = members[mi];
+    const m = Math.hypot(fx[i], fy[i]);
+    const x = (i % w) - wcx, y = ((i / w) | 0) - wcy;
+    Ixx += m * x * x; Iyy += m * y * y; Ixy += m * x * y;
+  }
+  let theta = 0.5 * Math.atan2(2 * Ixy, Ixx - Iyy);
+  if (Math.cos(theta) * meanUx + Math.sin(theta) * meanUy < 0) theta += Math.PI;
+
+  const ax = Math.cos(theta), ay = Math.sin(theta);
+  const px = -ay, py = ax;
+  let minProj = Infinity, maxProj = -Infinity, minPerp = Infinity, maxPerp = -Infinity;
+  for (let mi = 0; mi < members.length; mi++) {
+    const i = members[mi];
+    const x = (i % w) - wcx, y = ((i / w) | 0) - wcy;
+    const proj = x * ax + y * ay, perp = x * px + y * py;
+    if (proj < minProj) minProj = proj; if (proj > maxProj) maxProj = proj;
+    if (perp < minPerp) minPerp = perp; if (perp > maxPerp) maxPerp = perp;
+  }
+  // Rectangle center = midpoint of the projected extent, NOT the weighted
+  // centroid directly -- the centroid isn't generally at the geometric
+  // middle of the region's own extent along either axis, so placing the
+  // rectangle there could clip real member pixels on one side while
+  // overshooting empty space on the other.
+  const midProj = (minProj + maxProj) / 2, midPerp = (minPerp + maxPerp) / 2;
+  return {
+    cx: wcx + midProj * ax + midPerp * px,
+    cy: wcy + midProj * ay + midPerp * py,
+    theta, length: maxProj - minProj, width: maxPerp - minPerp,
+  };
+}
+
+// ── Stage 5: NFA validation ────────────────────────────────────────────────
+
+// log(sum_{j=k}^{n} C(n,j) p^j (1-p)^(n-j)), natural log -- the standard
+// stable approach: each term as log-choose + j*log(p) + (n-j)*log(1-p),
+// with log-choose built INCREMENTALLY (C(n,j) = C(n,j-1) * (n-j+1)/j)
+// rather than restarting an O(j) computation per term, then combined via
+// log-sum-exp (subtract the running max before exponentiating) since terms
+// can span many orders of magnitude and would overflow/underflow computed
+// directly.
+function logBinomialTail(n: number, k: number, p: number): number {
+  if (k <= 0) return 0; // log(1) -- any n pixels trivially have >=0 aligned
+  if (k > n) return -Infinity;
+  const logP = Math.log(p), log1mP = Math.log(1 - p);
+  let logChoose = 0;
+  for (let i = 1; i <= k; i++) logChoose += Math.log((n - k + i) / i);
+  const logTerms: number[] = [];
+  let logTerm = logChoose + k * logP + (n - k) * log1mP;
+  logTerms.push(logTerm);
+  let maxLog = logTerm;
+  for (let j = k + 1; j <= n; j++) {
+    logChoose += Math.log((n - j + 1) / j);
+    logTerm = logChoose + j * logP + (n - j) * log1mP;
+    logTerms.push(logTerm);
+    if (logTerm > maxLog) maxLog = logTerm;
+  }
+  let sumExp = 0;
+  for (const t of logTerms) sumExp += Math.exp(t - maxLog);
+  return maxLog + Math.log(sumExp);
+}
+
+// Squashes nfaLog10 (unbounded, more negative = more confident) into the
+// shared [0, 1] "how line-y is this" scale the retired join walk
+// reads uniformly off every segment, regardless of which producer built it
+// (see BucketFillSegment's own lineScore comment). A logistic curve centered
+// exactly on the accept/reject threshold: a rectangle that JUST clears NFA
+// scores 0.5, one an order of magnitude past it scores ~0.91, and it
+// saturates smoothly toward 1 from there -- no separate span constant to
+// tune, since the threshold itself (already a real per-settings quantity) is
+// the only anchor this needs.
+function nfaLog10ToLineScore(nfaLog10: number, logEpsilon: number): number {
+  const thresholdLog10 = logEpsilon / Math.LN10;
+  return 1 / (1 + Math.pow(10, nfaLog10 - thresholdLog10));
+}
+
+// n = pixels whose center falls inside the rectangle's actual rotated
+// footprint (scanned via its axis-aligned bounding box, not just the
+// region's original flood-fill members -- the fitted rectangle's shape can
+// differ slightly from the grown blob). k = of those, how many have a
+// level-line angle within toleranceRad of the rectangle's own theta,
+// DIRECTED: a plain signed cos-dot >= cos(toleranceRad), matching
+// levelLinesCompatible's growth test exactly.
+//
+// This briefly used abs(cos-dot) instead, to match a mod-π growth experiment
+// -- and that combination was quietly WRONG in a way worth recording, because
+// it is easy to reintroduce. The NFA null model below uses p = τ/π, which is
+// the probability that a uniformly-random DIRECTED angle lands within ±τ of a
+// fixed direction (measure 2τ out of 2π). An abs() acceptance test admits TWO
+// such windows (±τ of theta and of theta+π), i.e. measure 4τ out of 2π = 2τ/π
+// -- twice as permissive as the model it was scored against. Every region
+// therefore looked more statistically significant than it was, and the
+// effective accept threshold was looser than nfaEpsilon claimed. Going
+// directed here makes p = τ/π correct as-written rather than needing to be
+// doubled. If mod-π counting is ever reintroduced, p MUST double with it.
+//
+// Sub-rho pixels count toward n (they were geometrically tested) but never
+// toward k (too weak to trust their angle at all).
+export function countRectanglePixels(
+  rect: RectangleCandidate, fx: Float64Array, fy: Float64Array, w: number, h: number, rho: number, toleranceRad: number,
+): { n: number; k: number } {
+  const { cx, cy, theta: rectTheta, length } = rect;
+  const ax = Math.cos(rectTheta), ay = Math.sin(rectTheta);
+  const px = -ay, py = ax;
+  const cosTol = Math.cos(toleranceRad);
+  const rhoSq = eligibilityThresholdSq(rho);
+  // Inclusion is tested with a small tolerance because the rectangle's own
+  // extent is DEFINED by its extreme members: fitRectangle sets length =
+  // maxProj - minProj, so those members land at |proj| exactly == hl, and on a
+  // thin region every member lands at |perp| exactly == hw (which pins to the
+  // 0.5 floor). Exact-boundary pixels are therefore guaranteed to exist in
+  // every region, not a rare edge case -- and `Math.abs(proj) > hl` decides
+  // them on whichever side the last ulp of rounding falls. That made the count
+  // non-deterministic across arithmetic: the GPU port (f32) and this path
+  // (f64) disagreed on n for 180 of 2931 regions and on k for 277, by up to 4
+  // pixels each, which on a 12-pixel region moved nfaLog10 by 4.7 decades and
+  // flipped 6 accept/reject decisions. The epsilon is far above f32 geometry
+  // error (~1e-4 at image coordinates) and far below a pixel, so it includes
+  // the boundary deterministically without admitting anything that isn't
+  // genuinely inside.
+  const BOUNDARY_EPS = 1e-3;
+  const hl = length / 2;
+  // Floor the tested half-width so a near-zero-width fit (a nearly
+  // 1-pixel-wide ridge, common on a clean synthetic edge) still tests a
+  // real strip of pixels instead of degenerating to nothing.
+  const hw = Math.max(rect.width / 2, 0.5);
+
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const [a, b] of [[hl, hw], [hl, -hw], [-hl, -hw], [-hl, hw]]) {
+    const x = cx + a * ax + b * px, y = cy + a * ay + b * py;
+    if (x < minX) minX = x; if (x > maxX) maxX = x;
+    if (y < minY) minY = y; if (y > maxY) maxY = y;
+  }
+  const x0 = Math.max(0, Math.floor(minX)), x1 = Math.min(w - 1, Math.ceil(maxX));
+  const y0 = Math.max(0, Math.floor(minY)), y1 = Math.min(h - 1, Math.ceil(maxY));
+
+  let n = 0, k = 0;
+  for (let y = y0; y <= y1; y++) {
+    for (let x = x0; x <= x1; x++) {
+      const dx = x - cx, dy = y - cy;
+      const proj = dx * ax + dy * ay, perp = dx * px + dy * py;
+      if (Math.abs(proj) > hl + BOUNDARY_EPS || Math.abs(perp) > hw + BOUNDARY_EPS) continue;
+      n++;
+      const i = y * w + x;
+      // The hot loop of the whole fitter -- every pixel of every candidate
+      // rectangle's footprint passes through here. The squared test rejects a
+      // sub-rho pixel with no sqrt at all, and a pixel that survives pays
+      // exactly one: alignDot is the level-line unit vector dotted with the
+      // rectangle axis, and the unit vector is (-fy, fx)/‖g‖, so the whole
+      // thing is one divide by the magnitude. This used to be a cos and a sin
+      // per pixel, on an angle that had itself cost an atan2 to build.
+      const gx = fx[i], gy = fy[i];
+      const m2 = gx * gx + gy * gy;
+      if (m2 <= rhoSq) continue;
+      const alignDot = (-gy * ax + gx * ay) / Math.sqrt(m2); // = cos(levelLine(i) - rectTheta)
+      if (alignDot >= cosTol) k++;
+    }
+  }
+  return { n, k };
+}
+
+export interface LsdRectangle {
+  cx: number; cy: number; theta: number; length: number; width: number;
+  accepted: boolean;
+  nfaLog10: number; // log10(NFA) -- more negative = more statistically confident
+  lineScore: number; // nfaLog10 squashed to [0, 1] via nfaLog10ToLineScore -- see that function's own comment
+  // Stage 3's grown-region membership (pixel indices into the field) -- the
+  // true, complete flood-fill result this rectangle came from. For debug display
+  // only (overlays/hoverDebugOverlays.ts's raw-region-pixels toggle) -- not
+  // read anywhere in the accept/reject decision itself.
+  //
+  // EMPTY ON THE POSE PATH as of 2026-08-05 -- see NO_MEMBERS below and
+  // fitRegionsGPU's header. Populated only by the CPU fitter, which is what
+  // overlays/lsdOverlay.ts's own from-scratch recomputation runs.
+  rawMembers: Int32Array;
+}
+
+// The one shared empty membership, handed to every rectangle the GPU fitter
+// produces. Shared rather than allocated per rectangle because there are a few
+// thousand per frame and nothing ever writes through it -- and a single identity
+// makes "this rectangle has no members because nobody asked for them" greppable,
+// which `new Int32Array(0)` scattered at four call sites would not be.
+const NO_MEMBERS = new Int32Array(0);
+
+export interface LsdSettings {
+  toleranceDeg: number;
+  // rhoNoiseThreshold is hysteresis' LOW bar (participate in edges);
+  // rhoHighThreshold is its HIGH bar (a component must contain at least one
+  // pixel above it to survive at all). Kept under the original name so every
+  // existing caller/persisted control id stays valid -- see growRegionsCCL's
+  // own comment for what the pair does.
+  rhoNoiseThreshold: number; rhoHighThreshold: number;
+  cclSteps: number; // debug round scrubber only -- 0 = run to fixpoint, see growRegionsCCL
+  minRegionSize: number; // components smaller than this never become regions -- see camera/settings.ts's lsdMinRegionSize
+  nfaEpsilon: number; nfaTestExponent: number;
+}
+
+// RETIRED-NOTE: computeMagTheta used to live here, turning the gradient field
+// into per-pixel (magnitude, angle) arrays for every stage below to consume.
+// It is gone rather than moved. Its output was a lossy re-encoding of the
+// gradient the previous stage already produces -- every consumer immediately
+// converted the angle back into the vector it came from -- so stages 2 through
+// 5 now read fx/fy directly and the pass does not exist. See the level-line
+// vector block near the top of this file for the identity that makes that
+// work, and the notes on fitRectangle for the one angle that survives.
+
+// Stage 4 + stage 5 for ONE region -- the fitter, used by
+// the CPU path for every region and by harness/lsdFitVerify.ts as the
+// per-region reference the GPU kernel is compared against. Exactly the scope
+// lsdFit.wgsl.ts implements, which is the point: there is nothing left for the
+// two paths to disagree about structurally.
+//
+// Returns null only for a region below the 2-member floor. In practice that
+// never happens now -- collectRegionsFromLabels' minRegionSize prefilter
+// already dropped those -- but the guard stays because fitRectangle genuinely
+// has no axis to fit with fewer than 2 points, and the floor is a slider.
+export function fitRegionOnce(
+  region: GrownRegion, fx: Float64Array, fy: Float64Array, w: number, h: number,
+  settings: LsdSettings, logNTests: number, logEpsilon: number,
+): LsdRectangle | null {
+  const members = region.members;
+  if (members.length < 2) return null;
+  const rect = fitRectangle(members, fx, fy, w, region.meanUx, region.meanUy);
+  const toleranceRad = THREE.MathUtils.degToRad(settings.toleranceDeg);
+  const { n: rn, k: rk } = countRectanglePixels(rect, fx, fy, w, h, settings.rhoNoiseThreshold, toleranceRad);
+  const logNfa = logNTests + logBinomialTail(rn, rk, toleranceRad / Math.PI);
+  const nfaLog10 = logNfa / Math.LN10;
+  return {
+    cx: rect.cx, cy: rect.cy, theta: rect.theta, length: rect.length, width: rect.width,
+    accepted: logNfa < logEpsilon, nfaLog10,
+    lineScore: nfaLog10ToLineScore(nfaLog10, logEpsilon), rawMembers: region.members,
+  };
+}
+
+
+// The two NFA log terms, derived once per call from the settings + image size
+// so the stage-4 helpers below can't drift in how they compute them.
+function nfaLogTerms(w: number, h: number, settings: LsdSettings): { logNTests: number; logEpsilon: number } {
+  return {
+    logNTests: settings.nfaTestExponent * Math.log(Math.max(w, h)),
+    logEpsilon: Math.log(settings.nfaEpsilon),
+  };
+}
+
+// Stage 4+5 on CPU, for an ALREADY-GROWN region set. Split out from
+// computeLsdRectangles so the grower and the fitter can be dispatched to
+// CPU/GPU independently of each other (see computeLsdRectanglesAuto).
+function fitRegionsCPU(
+  regions: readonly GrownRegion[], fx: Float64Array, fy: Float64Array,
+  w: number, h: number, settings: LsdSettings,
+): LsdRectangle[] {
+  const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
+  const results: LsdRectangle[] = [];
+  for (const region of regions) {
+    const r = fitRegionOnce(region, fx, fy, w, h, settings, logNTests, logEpsilon);
+    if (r) results.push(r);
+  }
+  return results;
+}
+
+// Stage 4 + stage 5 on GPU (pose/stages/lsd/lsdFit.gpu.ts). Null only if WebGPU itself
+// is unavailable.
+//
+// REJECTED candidates are taken straight from the GPU's own output rather than
+// re-fitted on CPU. That fallback existed only to run the retry loop on regions
+// the first pass rejected; with the retry loop gone and the two paths
+// verified to agree on n/k/accept, re-running a rejection on CPU would spend
+// real time reproducing the identical numbers. The shader already returns full
+// geometry for rejected regions, which is all the "show rejected candidates"
+// overlay wants. Dropping it is also what frees stages 1-4 from needing
+// the gradient field on CPU at all.
+//
+// ── THE MEMBERS READBACK IS NOW OPT-IN (2026-08-05) ──
+//
+// This used to `await res.regionsCPU()` alongside the fit, unconditionally, to
+// fill in each rectangle's `rawMembers`: four readbacks (offsets/sizes/members/
+// meanDirs) and the largest byte cost left in the chain. Now it happens only
+// when `wantMembers` is set, which the pose path never sets.
+//
+// WHO ACTUALLY READS rawMembers, since a first audit got this wrong in a way
+// worth recording. The tempting conclusion is that NOBODY does, because
+// overlays/lsdOverlay.ts recomputes its own rectangles from
+// lastNoisedPreviewGray rather than reading the camera field the pose path
+// fills. That is true and it is not the point: its recomputation calls
+// computeLsdRectanglesFromField, which lands in THIS function whenever
+// the GPU fitter is in use -- which is the shipping setting. Deleting the readback
+// outright would have blanked the rejected-region raster and thrown on
+// `rawMembers[0]` in the accepted-rectangle hue. Same function, two callers,
+// only one of which needs the data.
+//
+// So the split is by CALLER, not by field:
+//   - pose path (votes.ts's computeGradient2x2Composites -> runLsdChain): the
+//     rectangles feed compositesFromLsdRectangles, which reads only
+//     accepted/length/theta/cx/cy, and are then dropped. Nothing stores them.
+//     wantMembers stays false and the CSR never crosses.
+//   - display (computeLsdRectanglesFromField, i.e. the LSD debug overlay and the
+//     phone's sendDebugInfo pass): opts in, and pays for what it draws.
+//   - harness/lsdChainVerify.ts wants the member TOTALS but not per
+//     rectangle, so it leaves this false and asks the residency directly --
+//     after taking the transfer ledger, so its own readback is not charged to
+//     the configuration it is measuring.
+async function fitRegionsGPU(
+  res: FieldResidency, w: number, h: number, settings: LsdSettings, wantMembers: boolean,
+): Promise<LsdRectangle[] | null> {
+  const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
+  // Concurrent when both are wanted, not sequential: fitAndTestRegionsGPU binds
+  // the region CSR synchronously before its first await, so starting it first
+  // and letting the members readback run alongside puts that transfer under the
+  // kernel instead of after it. Promise.all rather than two bare awaits so a
+  // failure in either one can't leave the other rejecting unobserved.
+  const [gpuResults, regions] = await Promise.all([
+    fitAndTestRegionsGPU(res, w, h, settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon),
+    wantMembers ? res.regionsCPU() : Promise.resolve(null),
+  ]);
+  if (!gpuResults) return null;
+
+  // Counted off the fitter rather than off `regions`, which may not be here at
+  // all now. fitAndTestRegionsGPU allocates `new Array(regionCount)` -- the same
+  // count regionsCPU() returns -- so rectangle numbering downstream is
+  // unchanged, and `regions[i]` still lines up index for index when present.
+  // The SECOND object array of the same length in as many statements, and that
+  // is the point of measuring it separately: fitAndTestRegionsGPU has just built
+  // one LsdFitResult per region straight off the readback, and this immediately
+  // re-wraps every one of them into an LsdRectangle. ~5200 regions is ~10400
+  // short-lived objects per frame, of which compositesFromLsdRectangles keeps
+  // 893. Whether that costs anything worth fixing is what this span and
+  // 'lsdFit unpack (objects)' answer -- separately, so the two loops can be
+  // judged apart rather than as one lump.
+  const wrapSpan = spanStart('rectangle wrap (objects)', true);
+  const results: LsdRectangle[] = [];
+  for (let i = 0; i < gpuResults.length; i++) {
+    const g = gpuResults[i];
+    results.push({
+      cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
+      accepted: g.accepted, nfaLog10: g.nfaLog10,
+      lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon),
+      rawMembers: regions ? regions[i].members : NO_MEMBERS,
+    });
+  }
+  spanEnd(wrapSpan);
+  return results;
+}
+
+// Fully-CPU path, and the source of truth every GPU stage is verified against.
+export function computeLsdRectangles(field: GradientField, settings: LsdSettings): LsdRectangle[] {
+  const { w, h, fx, fy } = field;
+  const { regions } = growRegionsCCL(
+    fx, fy, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+  );
+  return fitRegionsCPU(regions, fx, fy, w, h, settings);
+}
+
+
+// Single dispatch point every caller uses -- centralizes the backend check once
+// instead of duplicating it at each call site.
+//
+// Both stages follow the one `backend` argument, and either still falls back to
+// CPU on
+// its own without disturbing the other. That independence is the point -- the
+// grower is the one stage whose GPU output is NOT bit-identical to its CPU
+// output (see pose/stages/lsd/growRegions.gpu.ts's header), so it has to stay
+// separately switchable from a stage that is.
+//
+// Takes the residency (pose/gpu/fieldResidency.ts) rather than a
+// GradientField, and does NOT own it. That is deliberate: this function used to
+// create one per call, which capped the chain at stage 3 and forced stage 1's
+// output down to CPU and straight back up again no matter what either toggle
+// said. The caller owning it is what lets the gradient join the chain -- see
+// pose/poseCompute.ts, and computeLsdRectanglesFromField below for callers
+// that genuinely do start from a CPU field.
+//
+// Stages transfer nothing themselves; they publish on the side they produced on
+// and ask for the side they want, and the residency moves data only when a
+// producer and a consumer are actually on opposite sides of the bus. That is
+// what makes these toggles cost what the configuration implies rather than what
+// each module hardcoded: with the whole chain on GPU, fx/fy are never uploaded
+// at all and the labeling never crosses either.
+//
+// `wantMembers` decides whether the GPU fitter pays for LsdRectangle.rawMembers
+// -- four readbacks of the region CSR, and the largest byte cost left in the
+// chain. It defaults to FALSE because the pose path never looks at them; the two
+// callers that render them (see computeLsdRectanglesFromField) opt in. The CPU
+// fitter ignores the flag entirely: it is holding the regions already, so its
+// members are free either way, and that is what keeps the two fitters
+// comparable under the verify sweep.
+async function computeLsdRectanglesAuto(
+  res: FieldResidency, w: number, h: number, settings: LsdSettings, backend: Backend, wantMembers = false,
+): Promise<LsdRectangle[]> {
+  const growArgs = [
+    w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+  ] as const;
+  const growSpan = spanStart('grow+collect regions');
+  const grown = backend === 'gpu' ? await growRegionsCCLGPU(res, ...growArgs, backend === 'gpu') : null;
+  if (!grown) {
+    // Either the toggle is off or the GPU grower bailed; on both paths it
+    // published nothing, so the CPU grower owns these slots. Asking the
+    // residency for the CPU side of fx/fy is what pulls stage 1's output back
+    // down if -- and only if -- it was produced on the device.
+    const cpu = growRegionsCCL(await res.cpuF64('fx'), await res.cpuF64('fy'), ...growArgs);
+    res.provideCPU('regionId', cpu.regionId);
+    res.provideRegionsCPU(cpu.regions);
+  }
+  // Closed AFTER the fallback, not after the GPU call, so the span means "grow
+  // finished, whoever did it" -- otherwise a forceCPU run would report a grow of
+  // ~0 and silently move the CPU grower's cost into its parent's self time,
+  // which is the one number this instrumentation exists to read.
+  //
+  // Named grow+collect because collect lives INSIDE growRegionsCCLGPU (via its
+  // collectOnGPU parameter), so there is no seam here to split them at. The two
+  // are separable in gpuTimeline, which already reports grow:hook/grow:compress
+  // and collect:finalize/regionMeta as distinct kernels -- this span is the host
+  // time wrapped around all of them, and dividing it further would need a
+  // boundary that does not exist in the call graph.
+  spanEnd(growSpan);
+
+  if (backend === 'gpu') {
+    const gpu = await fitRegionsGPU(res, w, h, settings, wantMembers);
+    if (gpu) return gpu;
+  }
+  return fitRegionsCPU(await res.regionsCPU(), await res.cpuF64('fx'), await res.cpuF64('fy'), w, h, settings);
+}
+
+// ── Stage 1: the 2x2 forward-difference gradient ──
+//
+// Publishes into the residency instead of returning a field, which is what
+// makes stage 1 part of the chain rather than a thing that happens before it.
+// Neither branch transfers anything: the GPU one leaves fx/fy on the device and
+// the CPU one leaves them in JS, and whether either ever crosses is decided
+// later, by whoever asks for the other side. Before this, the GPU branch
+// uploaded gray and read fx/fy straight back, and then growRegionsCCLGPU
+// uploaded those same two arrays again a moment later.
+async function runGradient2x2Stage(res: FieldResidency, w: number, h: number, backend: Backend): Promise<void> {
+  const useGPU = backend === 'gpu' && res.device !== null;
+  const s = spanStart(useGPU ? 'gradient2x2 (GPU)' : 'gradient2x2 (CPU)');
+  if (!(useGPU && await computeGradient2x2FieldGPU(res, w, h))) {
+    // gray is CPU-resident by construction (createLsdChainResidency put it
+    // there), so this is a lookup and never a readback.
+    const field = computeGradient2x2Field(await res.cpuF64('gray'), w, h);
+    res.provideCPU('fx', field.fx);
+    res.provideCPU('fy', field.fy);
+  }
+  spanEnd(s);
+}
+
+// The chain's two entry points, always used as a pair. Split rather than fused
+// because the caller has to be able to reach into the residency AFTER the
+// rectangles come out, and because the caller owns the destroy. (The reader
+// that motivated the split -- poseCompute's per-pixel "world votes" branch,
+// which wanted fx/fy back on the CPU -- is deleted; the residency now outlives
+// the rectangles for `gray`, so the fused decode can reuse it.) Anything that runs the chain should go through these two and nothing
+// else, so that a residency-plumbing mistake is visible to the dev harness
+// (harness/lsdChainVerify.ts) rather than only to production.
+// `backend` decides whether a device is requested at all: an all-CPU chain never
+// touches navigator.gpu. Stage 1 counts toward that, because it can want a device
+// when nothing downstream does.
+export async function createLsdChainResidency(
+  gray: Float64Array, w: number, h: number, backend: Backend,
+): Promise<FieldResidency> {
+  const res = await FieldResidency.create(w * h, backend === 'gpu');
+  res.provideCPU('gray', gray);
+  return res;
+}
+
+// Stages 1 through 4: gray in, rectangles out, every intermediate left wherever
+// its producer put it.
+//
+// No `wantMembers` parameter, deliberately: this is the POSE path's entry point
+// (and the verify harness's), and neither renders per-rectangle membership.
+// Leaving it off the signature means a future caller that does need members has
+// to notice it is asking for four extra readbacks, rather than passing `true`
+// through a chain of defaults without seeing the bill.
+// `wantMembers` fills each rectangle's rawMembers by bringing the region CSR
+// down. It is a HAND-BACK decision, not an algorithm one -- the members exist on
+// whichever side the collect ran regardless, and nothing on the pose path reads
+// them -- so passing it cannot change a pose. The production path leaves it
+// false and pays nothing; a caller that asked for 'rects' (see
+// pose/intermediates.ts) turns it on, because a rectangle with no members
+// cannot be hued by its seed pixel or rasterized.
+export async function runLsdChain(
+  res: FieldResidency, w: number, h: number, settings: LsdSettings, backend: Backend,
+  wantMembers = false,
+): Promise<LsdRectangle[]> {
+  await runGradient2x2Stage(res, w, h, backend);
+  return await computeLsdRectanglesAuto(res, w, h, settings, backend, wantMembers);
+}
+
+// computeLsdRectanglesAuto for callers that already hold a CPU gradient field
+// and have no interest in where anything lives: it wraps the field in a
+// residency of its own for the duration of the call. The production pose path
+// does NOT come through here -- it owns a residency spanning stage 1 as well,
+// which is the whole point (see pose/poseCompute.ts) -- but the debug
+// overlay and the phone both compute their gradient on CPU and would gain
+// nothing from threading one through.
+//
+// Asks for rawMembers. ONE caller left: mobileCapture's sendDebugInfo pass.
+// overlays/lsdOverlay.ts used to be the other, and that is the whole of what
+// this function was for on the desktop -- a second complete LSD chain run
+// purely so display could see rectangles the pose path had just computed and
+// thrown away. It asks for them now (see pose/intermediates.ts), and
+// runLsdChain takes wantMembers itself, so the desktop never comes through
+// here. Still off the pose path either way.
+export async function computeLsdRectanglesFromField(
+  field: GradientField, settings: LsdSettings, backend: Backend,
+): Promise<LsdRectangle[]> {
+  const { w, h, fx, fy } = field;
+  // Stage 1 has already happened on CPU here, so `backend` says nothing about
+  // the gradient -- only about stages 2-4, which is why this creates its
+  // residency from the same flag but publishes fx/fy on the CPU side regardless.
+  const res = await FieldResidency.create(w * h, backend === 'gpu');
+  try {
+    res.provideCPU('fx', fx);
+    res.provideCPU('fy', fy);
+    return await computeLsdRectanglesAuto(res, w, h, settings, backend, true);
+  } finally {
+    res.destroy();
+  }
+}

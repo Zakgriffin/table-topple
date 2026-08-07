@@ -8,13 +8,13 @@ import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo, updateRecoveredFlo
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { globalState } from '../state.ts';
 import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
-import { backendFromForceCPU } from './backend.ts';
+import { backendFromForceCPU } from '../../pose/backend.ts';
 import { captureDistortedGrayscale } from './capture.ts';
 import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './projectedBins.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
-import { type IntermediateName, type IntermediatesRequest, wants } from './intermediates.ts';
-import { computePoseFromCapture } from './poseCompute.ts';
+import { type IntermediateName, type IntermediatesRequest, wants } from '../../pose/intermediates.ts';
+import { computePoseFromCapture } from '../../pose/poseCompute.ts';
 import { type ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
 // Shared pole-marker/gizmo/floor-overlay/readout tail -- called after EITHER
@@ -195,7 +195,7 @@ async function runVisualTail(camera: Camera): Promise<void> {
 
   // FIRST, before anything reads lastDecodeGrid/lastDecodeRotated/
   // lastDecodeCorrectness or camera.intermediates. computePoseFromCapture left
-  // those null and parked the readback here (see pipeline/intermediates.ts) so
+  // those null and parked the readback here (see pose/intermediates.ts) so
   // the pose did not have to wait 0.45MB for display data; this is the moment
   // they get filled. updateGradientCirclesDebug, applyPoseVisualizations and
   // every mode overlay below are downstream of it.
@@ -400,7 +400,7 @@ async function recomputeStages(camera: Camera) {
   const { gray, w, h } = camera.lastAxesCaptureGray!;
 
   // Every stage from the 2x2-gradient composite lines through
-  // runPositionDecode now lives in pipeline/poseCompute.ts's
+  // runPositionDecode now lives in pose/poseCompute.ts's
   // computePoseFromCapture -- a pure function operating on the same field
   // names (a real Camera structurally satisfies its PoseComputeState), so
   // it can also run standalone on the phone (see this session's

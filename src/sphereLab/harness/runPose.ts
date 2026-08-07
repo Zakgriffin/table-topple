@@ -1,7 +1,7 @@
-import type { Backend } from '../pipeline/backend.ts';
-import { type IntermediatesRequest, NO_INTERMEDIATES } from '../pipeline/intermediates.ts';
-import { computePoseFromCapture } from '../pipeline/poseCompute.ts';
-import type { PoseComputeState } from '../pipeline/poseCompute.ts';
+import type { Backend } from '../../pose/backend.ts';
+import { type IntermediatesRequest, NO_INTERMEDIATES } from '../../pose/intermediates.ts';
+import { computePoseFromCapture } from '../../pose/poseCompute.ts';
+import type { PoseComputeState } from '../../pose/poseCompute.ts';
 import { poseStateFor } from './input.ts';
 import type { HarnessInput } from './input.ts';
 

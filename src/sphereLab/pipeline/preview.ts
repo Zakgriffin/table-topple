@@ -3,7 +3,7 @@ import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
-import { computeGradient2x2Field } from './gradientField.ts';
+import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientField.ts';
 import { fillGrayscalePreview, paintVectorFieldAsColor } from './fieldPaint.ts';
 
 // Shared tail for both capture sources: given a final analysis-resolution
@@ -20,7 +20,7 @@ function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
     // and the white-to-black edge facing it share one hue;
     // 'gradient2x2Directed' does not, so those two land exactly opposite on
     // the hue wheel. See paintVectorFieldAsColor's own comment for why that
-    // distinction is worth being able to SEE -- pipeline/lsdSegments.ts's
+    // distinction is worth being able to SEE -- pose/stages/lsd/lsdSegments.ts's
     // segment growing is directed now, so two edges that look identical in
     // the axial view are genuinely different lines to it.
     paintVectorFieldAsColor(field, camera.distortedPreviewData, settings.fieldView === 'gradient2x2Directed');
@@ -51,7 +51,7 @@ function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
 //
 // The remaining readers of lastNoisedPreviewGray are not toggles and were never
 // in this function's scope: preview.ts itself paints the field views from it,
-// and decodeGrid.ts/pipelineGPU/projectSamples.ts read it for projected bins.
+// and decodeGrid.ts/pipeline/projectSamples.gpu.ts read it for projected bins.
 // Verifiable by grep, which is how this list should be checked -- it is a
 // hand-maintained duplicate of "who reads this buffer" and it has rotted once
 // already.
@@ -87,7 +87,7 @@ export function updateDistortedPreview(camera: Camera) {
       // lastNoisedPreviewGray must go stale-free the SAME cycle -- every
       // reader (gradientHighlightOverlays.ts, contaminationOverlays.ts,
       // lsdOverlay.ts, decodeGrid.ts's projectSamplesCPU,
-      // pipelineGPU/projectSamples.ts) already null-guards it, but leaving
+      // pipeline/projectSamples.gpu.ts) already null-guards it, but leaving
       // a PRIOR real capture's gray buffer sitting here would let any of
       // them read it against the CURRENT camera.rtSize/aspect -- which can
       // legitimately differ now (a device-compute phone's own resolution

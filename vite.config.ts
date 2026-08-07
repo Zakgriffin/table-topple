@@ -12,7 +12,7 @@ export default defineConfig({
     // performance.now() to 100us by default and to 5us when the context is
     // cross-origin isolated -- a 20x sharper clock for every number the perf
     // harnesses report. It is not a micro-optimization of the measurement: at
-    // 100us, pipelineGPU/device.ts's allocation probe sums 78 sub-resolution
+    // 100us, src/pose/gpu/device.ts's allocation probe sums 78 sub-resolution
     // deltas and rounds every one of them to zero, which is how it reported
     // 0.60ms one session and 0.00ms the next for identical work.
     //

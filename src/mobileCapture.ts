@@ -18,8 +18,8 @@ import * as THREE from 'three';
 import { toGrayscale } from './decode.ts';
 import { config, fetchConfigFile } from './sphereLab/config.ts';
 import { globalState } from './sphereLab/state.ts';
-import { backendFromForceCPU } from './sphereLab/pipeline/backend.ts';
-import { wants } from './sphereLab/pipeline/intermediates.ts';
+import { backendFromForceCPU } from './pose/backend.ts';
+import { wants } from './pose/intermediates.ts';
 // Only the data-side rebuild is needed here now. The board's world EXTENT
 // (C/R/GRID_STEP) is read by gameOverlay.ts instead, which is the only thing
 // on this page that still draws anything at board scale.
@@ -32,9 +32,9 @@ import {
   type ARCameraPose,
 } from './gameOverlay.ts';
 import { getAnalysisVFovRad } from './sphereLab/math/geometry.ts';
-import { computeGradient2x2Field } from './sphereLab/pipeline/gradientField.ts';
-import { computeLsdRectanglesFromField, type LsdRectangle } from './sphereLab/pipeline/lsdSegments.ts';
-import { computePoseFromCapture, type PoseComputeState } from './sphereLab/pipeline/poseCompute.ts';
+import { computeGradient2x2Field } from './pose/stages/gradient/gradientField.ts';
+import { computeLsdRectanglesFromField, type LsdRectangle } from './pose/stages/lsd/lsdSegments.ts';
+import { computePoseFromCapture, type PoseComputeState } from './pose/poseCompute.ts';
 // Shared with the desktop rather than restated here, so the wire shape and
 // the recorded shape cannot drift apart -- this page PRODUCES the value that
 // camera/model.ts types on the receiving end.
@@ -1678,7 +1678,7 @@ modeVideoBtn.addEventListener('click', () => setCaptureMode('video'));
 
 // ── Compute pose on this device -- orthogonal to the single/video axis
 // above (see this session's on-device-pose-recovery plan): when on, the
-// phone runs the same pose-recovery math locally (pipeline/poseCompute.ts's
+// phone runs the same pose-recovery math locally (pose/poseCompute.ts's
 // computePoseFromCapture) and sends only the recovered pose, no image
 // bytes. Still respects captureMode: single taps one compute+send cycle,
 // video runs devicePoseLoop continuously.
@@ -2003,7 +2003,7 @@ function captureAndSendFrame() {
 // `state` at zero marginal cost; lsdRectangles is the one genuinely NEW
 // computation here (LSD rectangle data isn't retained anywhere in the
 // production pose pipeline -- see computeGradient2x2Composites in
-// pipeline/votes.ts, which discards them after reducing to composite
+// pose/stages/votes/votes.ts, which discards them after reducing to composite
 // lines) -- a second, explicit LSD pass, mirroring the same
 // recompute-for-debug-display pattern overlays/lsdOverlay.ts's own
 // updateLsdOverlay already uses desktop-side. rawMembers (the per-pixel

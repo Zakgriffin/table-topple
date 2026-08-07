@@ -1,4 +1,4 @@
-import { exclusiveScanU32, SCAN_BLOCK } from '../pipelineGPU/prefixSum.ts';
+import { exclusiveScanU32, SCAN_BLOCK } from '../../pose/gpu/prefixSum.ts';
 
 // ── Dev harness: is the GPU exclusive scan correct? ──────────────────────
 //

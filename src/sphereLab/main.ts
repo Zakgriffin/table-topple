@@ -42,16 +42,33 @@
 // or not), not a togglable setting.
 //
 // ── Directory layout ───────────────────────────────────────────────────────
+//
+// THE POSE LIBRARY LIVES OUTSIDE THIS APP, at src/pose/. Sphere Lab is a
+// CONSUMER of it, not its owner -- src/mobileCapture.ts (the phone) is the
+// other one, and the headless tests are a third. Its entry point is
+// pose/poseCompute.ts, it is organized by pipeline STAGE (stages/gradient,
+// stages/lsd, stages/votes, stages/period, stages/decode, plus gpu/ for the
+// device plumbing), and it imports nothing from sphereLab/ except the shared
+// leaves below. That constraint is checked, not hoped for: see
+// tests/libraryBoundary.test.ts.
+//
 // types.ts/state.ts/constants.ts   shared types + tiny bits of module state
 // math/geometry.ts                 pure sphere/ray-casting math
+// profiling/profiler.ts            the one host clock
+//    ^ the four above are the SHARED LEAVES: both this app and src/pose/
+//      depend on them, and the board game depends on constants.ts too, which
+//      is why they did not move into the library.
 // camera/                          the Camera data model: settings, types,
 //                                   the live store, factories, add/remove/kick
 // scene/                           THREE.js scene setup shared by every
 //                                   camera: renderer, floor+pattern, quad
 //                                   blitters, world/inside-sphere controls
-// pipeline/                        the CV/reconstruction math -- no THREE
-//                                   scene graph, no DOM; plain data in,
-//                                   plain data out
+// pipeline/                        what is left after the library moved out:
+//                                   capture, preview, the reconstruction
+//                                   DRIVER (axesReconstruction), mode refresh,
+//                                   and the display-only projection stage
+//                                   (projectedBins + projectSamples.gpu)
+// harness/                         the verifies + timing, detached in step 3
 // overlays/                        paints pipeline results into the 3D scene
 //                                   or 2D debug canvases
 // ui/                              DOM wiring: controls, camera panel, mode
@@ -118,8 +135,17 @@ import { pushPoseSync, pushSettingsSync, sendToDevBridge } from './devBridge/cli
 // The two exclusions are load-bearing, not tidiness: this file would otherwise
 // glob ITSELF into a circular import, and a .d.ts has no runtime module to
 // import at all.
+//
+// ../pose/** IS LOAD-BEARING TOO, and it is the one line of this move that no
+// typechecker could have caught. These patterns are resolved by vite at build
+// time from strings, so when the pose library moved out of sphereLab/, every
+// one of its exports would have silently stopped appearing on globalThis --
+// and the dev bridge reaches them BY BARE NAME (runLsdChain, growRegionsCCL,
+// computeLsdRectangles, and every harness entry point that calls them). The
+// failure mode is a ReferenceError in a console eval, at the far end of a
+// websocket, in a session where the page has to be re-warmed to try again.
 const DEV_MODULES = import.meta.glob(
-  ['./**/*.ts', '!./main.ts', '!./**/*.d.ts'],
+  ['./**/*.ts', '../pose/**/*.ts', '!./main.ts', '!./**/*.d.ts', '!../pose/**/*.d.ts'],
   { eager: true },
 ) as Record<string, Record<string, unknown>>;
 // Collisions are REPORTED rather than silently resolved. Two modules exporting
@@ -314,7 +340,7 @@ function animate() {
       const rotationSteps = active.settings.useTrueCardinalOrientation && active.lastPositionDecode
         ? (active.lastPositionDecode.orientation + 2) % 4 : 0;
       // The bucket grid's OWN aspect (bins.w/bins.h), not active.aspect (the
-      // viewport's) -- pipeline/decodeGrid.ts's squareCellBucketDims sizes
+      // viewport's) -- pose/stages/decode/decodeGrid.ts's squareCellBucketDims sizes
       // bucketW/bucketH from the recovered floor extent's aspect ratio
       // specifically so each bucket is a square in world units; stretching
       // that onto a rect shaped for the viewport's own (generally

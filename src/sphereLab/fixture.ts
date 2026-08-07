@@ -5,8 +5,8 @@ import { physicalSettingsFrom } from './camera/settings.ts';
 import type { PhysicalCameraSettings } from './camera/settings.ts';
 import { SphereLabConfigSchema } from './configSchema.ts';
 import type { SphereLabConfig } from './configSchema.ts';
-import { backendFromForceCPU } from './pipeline/backend.ts';
-import type { Backend } from './pipeline/backend.ts';
+import { backendFromForceCPU } from '../pose/backend.ts';
+import type { Backend } from '../pose/backend.ts';
 
 // ── A fixture: a capture that carries the configuration it is to be run under ──
 //
@@ -167,7 +167,7 @@ export function fixtureSettings(fixture: Fixture): PhysicalCameraSettings {
 // What the APP would choose for this config -- not what a harness must use. A
 // differential run sweeps both backends over one fixture, which is the whole
 // argument for backend being a parameter rather than a settings field (see
-// pipeline/backend.ts). This is the default, nothing more.
+// pose/backend.ts). This is the default, nothing more.
 export function fixtureBackend(fixture: Fixture): Backend {
   return backendFromForceCPU(fixture.config.global.forceCPU);
 }

@@ -3,13 +3,13 @@ import { persistConfig } from '../config.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { getAnalysisVFovRad } from '../pipeline/capture.ts';
-import { projectedUVScale } from '../pipeline/decodeGrid.ts';
-import { circularFit, computePooledGaps, type GnomonicPoint, type GridPeriodPhaseResult, makeCellCentreDistinctness, type PeriodSearchSample } from '../pipeline/gridPeriodPhase.ts';
+import { projectedUVScale } from '../../pose/stages/decode/decodeGrid.ts';
+import { circularFit, computePooledGaps, type GnomonicPoint, type GridPeriodPhaseResult, makeCellCentreDistinctness, type PeriodSearchSample } from '../../pose/stages/period/gridPeriodPhase.ts';
 import { type DecodeCellDebug } from '../types.ts';
 import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleProductCurveBtn, toggleValueHistogramBtn } from '../ui/dom.ts';
 import { svgEl, svgText } from './svgUtil.ts';
 
-// ── Grid period/phase debug visualizations (pipeline/gridPeriodPhase.ts) ──
+// ── Grid period/phase debug visualizations (pose/stages/period/gridPeriodPhase.ts) ──
 
 // Default view: a modest 1.1x padding around the search BRACKET's own
 // width, centered on its midpoint -- deliberately NOT based on pooledGaps'
@@ -376,7 +376,7 @@ export function hideGridPeriodPhaseProjected() {
 // -- shown whenever the debug pipeline is on, no separate toggle, since
 // it's the direct visual evidence behind the period/phase numbers; (2) the
 // sample lattice -- gated on its own toggle (showSampleLattice), drawing the
-// real decode grid's own points (pipeline/decodeGrid.ts's
+// real decode grid's own points (pose/stages/decode/decodeGrid.ts's
 // buildDecodeSampleGrid) directly, so it always matches decode's actual
 // corner-quad-bounded extent instead of an independently re-derived one.
 //
@@ -387,7 +387,7 @@ export function hideGridPeriodPhaseProjected() {
 // top of the actual bucketed image instead of drifting by whatever the
 // (unrelated) extent of the detected lines happens to be. gpp's own
 // {xRow,xCol} are converted into that same u/v space via projectedUVScale
-// (pipeline/decodeGrid.ts), a single shared scalar.
+// (pose/stages/decode/decodeGrid.ts), a single shared scalar.
 // rotationSteps: multiples of 90 degrees (0-3) -- see renderProjectedViewport's
 // matching param (scene/quadRenderers.ts), same "use true cardinal
 // orientation" toggle. Applied as a canvas transform around the rect's own
@@ -441,7 +441,7 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
   }
 
   if (showLattice && gpp) {
-    // Draws the REAL decode grid's own points (pipeline/decodeGrid.ts's
+    // Draws the REAL decode grid's own points (pose/stages/decode/decodeGrid.ts's
     // buildDecodeSampleGrid, corner-quad-bounded) rather than re-deriving an
     // independent loop range from the detected composite lines' own index
     // spread -- that used to draw a dot for every cell in a rectangle padded

@@ -12,12 +12,12 @@ import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { recomputeFromLastCapture, runAxesReconstruction, updateChainTransfersReadout } from '../pipeline/axesReconstruction.ts';
 import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
-import { backendFromForceCPU } from '../pipeline/backend.ts';
+import { backendFromForceCPU } from '../../pose/backend.ts';
 import { buildProjectedTexture } from '../pipeline/projectedBins.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
-import { isWebGPUSupported } from '../pipelineGPU/device.ts';
+import { isWebGPUSupported } from '../../pose/gpu/device.ts';
 import { profilerReset, profilerSetDevToolsMirror } from '../profiling/profiler.ts';
-import { invalidateHashTableCache } from '../pipelineGPU/decodeTally.ts';
+import { invalidateHashTableCache } from '../../pose/stages/decode/decodeTally.gpu.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { type FieldView } from '../types.ts';
@@ -262,7 +262,7 @@ function rerunOnRealCaptureSettingChange() {
   if (cam && isPhysical(cam) && cam.computeMode === 'desktop' && cam.lastRealCaptureGray) runAxesReconstruction(cam);
 }
 // Per-camera-settings sliders (the 16 fields making up PoseComputeState.settings,
-// see pipeline/poseCompute.ts) push a fresh settingsSync to THAT camera's own
+// see pose/poseCompute.ts) push a fresh settingsSync to THAT camera's own
 // phone only -- source of truth stays the desktop's own sliders (see this
 // session's on-device-pose-recovery plan). No-op for a simulated camera
 // (nothing to push to) or a camera not currently active.
@@ -453,7 +453,7 @@ updateGradientArrowAvailability();
 updateTopGradientAvailability();
 updateLsdAvailability();
 bindSlider('gradientArrowScale', config.camera.common.gradientArrowScale, (v) => { const cam = activeCamera(); if (cam) cam.settings.gradientArrowScale = v; updateHoverOverlays(lastHoverClientX, lastHoverClientY); }, (v) => v.toFixed(1));
-// The from-scratch traditional LSD pipeline (pipeline/lsdSegments.ts) --
+// The from-scratch traditional LSD pipeline (pose/stages/lsd/lsdSegments.ts) --
 // this DOES have a live debug overlay (the accepted/rejected/raw-region
 // views), so every stage-2..5 change here recomputes and redraws it
 // immediately.
@@ -464,7 +464,7 @@ function refreshLsd() {
 // refreshLsd() updates the live-preview LSD debug overlay only (reads
 // camera.lastNoisedPreviewGray) -- a separate, already-correct concern from
 // the PRODUCTION composite lines these same settings feed (stage 3, see
-// pipeline/votes.ts's computeGradient2x2Composites), so recomputeFromLastCapture
+// pose/stages/votes/votes.ts's computeGradient2x2Composites), so recomputeFromLastCapture
 // is also needed here or camera.lastVoteComposites/lastGridPeriodPhase go stale.
 bindSlider('lsdToleranceDeg', config.camera.common.lsdToleranceDeg, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdToleranceDeg = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => `${v.toFixed(1)}°`);
 bindSlider('lsdRhoNoiseThreshold', config.camera.common.lsdRhoNoiseThreshold, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
@@ -476,7 +476,7 @@ bindSlider('lsdCclSteps', config.camera.common.lsdCclSteps, (v) => { const cam =
 bindSlider('lsdMinRegionSize', config.camera.common.lsdMinRegionSize, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinRegionSize = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
 bindSlider('lsdNfaEpsilon', config.camera.common.lsdNfaEpsilon, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaEpsilon = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
 bindSlider('lsdNfaTestExponent', config.camera.common.lsdNfaTestExponent, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaTestExponent = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
-// Feeds pipeline/votes.ts's computeGradient2x2Composites (production)
+// Feeds pose/stages/votes/votes.ts's computeGradient2x2Composites (production)
 // directly, not a live debug
 // overlay, so recomputeFromLastCapture (not a repaint call) is what picks
 // up the new value -- reusing the last capture rather than waiting for the

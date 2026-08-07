@@ -50,7 +50,7 @@ export function sendToDevBridge(obj: unknown) {
 }
 
 // Builds the 16-field PoseComputeState.settings payload for one physical
-// camera's phone -- see pipeline/poseCompute.ts's PoseComputeState and this
+// camera's phone -- see pose/poseCompute.ts's PoseComputeState and this
 // session's on-device-pose-recovery plan.
 function buildCameraSettingsPayload(cam: PhysicalCamera) {
   const s = cam.settings;

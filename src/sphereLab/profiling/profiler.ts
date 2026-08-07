@@ -2,7 +2,7 @@
 //
 // Spans record ALWAYS. That is a deliberate change from the old design, where
 // everything here sat behind an `enabled` flag, and it is what lets
-// pipeline/poseCompute.ts report its per-stage timings straight off its own
+// pose/poseCompute.ts report its per-stage timings straight off its own
 // span objects instead of keeping a parallel set of performance.now() marks in
 // step with them by hand.
 //

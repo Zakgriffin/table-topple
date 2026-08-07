@@ -1,13 +1,13 @@
-import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import { countRectanglePixels, fitRegionOnce, growRegionsCCL, type LsdRectangle } from '../pipeline/lsdSegments.ts';
-import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
-import { fitAndTestRegionsGPU } from '../pipelineGPU/lsdFit.ts';
+import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientField.ts';
+import { countRectanglePixels, fitRegionOnce, growRegionsCCL, type LsdRectangle } from '../../pose/stages/lsd/lsdSegments.ts';
+import { FieldResidency } from '../../pose/gpu/fieldResidency.ts';
+import { fitAndTestRegionsGPU } from '../../pose/stages/lsd/lsdFit.gpu.ts';
 import type { HarnessInput } from './input.ts';
 
 // ── Dev harness: is lsdFit.wgsl.ts's output still the CPU path's output? ──
 //
 // The GPU fitter was pinned off for a long time, since the shader and
-// pipeline/lsdSegments.ts's countRectanglePixels disagreed about whether the
+// pose/stages/lsd/lsdSegments.ts's countRectanglePixels disagreed about whether the
 // NFA alignment test was directed or mod-PI. That disagreement is gone (both
 // are directed again -- see the level-line vector block's  own comment there), so the shader
 // SHOULD be correct as written. This turns "should" into evidence.

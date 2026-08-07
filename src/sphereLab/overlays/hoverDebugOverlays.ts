@@ -29,19 +29,19 @@ export function clearArrowOverlays() {
 
 
 // Draws camera.lastVoteComposites -- the composite lines actually fed to
-// fitPairOfPlanes and classified by pipeline/gridPeriodPhase.ts (pipeline/
+// fitPairOfPlanes and classified by pose/stages/period/gridPeriodPhase.ts (pipeline/
 // votes.ts's computeGradient2x2Composites). Drawing this exact same array
 // (rather than an independently-recomputed copy) guarantees a line's root
 // here means the same thing as it does in gpp's own row/col maps.
 //
-// Family coloring (pipeline/gridPeriodPhase.ts): blue = row family, red =
+// Family coloring (pose/stages/period/gridPeriodPhase.ts): blue = row family, red =
 // column family, black -> full-color by each line's own RANK within its
 // family (sorted by its rectified `value` -- the same order the
 // period/phase fit itself assigns integer indices in), so this literally
 // shows the sequence the fit will register each line as. Gray for any line
 // gridPeriodPhase itself skipped (e.g. a degenerate gnomonic projection).
 // Draws camera.lastVoteComposites -- the composite lines actually fed to
-// fitPairOfPlanes and classified by pipeline/gridPeriodPhase.ts (pipeline/
+// fitPairOfPlanes and classified by pose/stages/period/gridPeriodPhase.ts (pipeline/
 // votes.ts's computeGradient2x2Composites) -- as SVG lines in
 // lsdCompositeGroup. Populated once per REAL capture (not live-recomputed
 // per LSD slider tweak, unlike the rectangle/rejected/raw-region views in

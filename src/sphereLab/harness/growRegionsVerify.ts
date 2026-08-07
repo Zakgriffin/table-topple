@@ -1,6 +1,6 @@
-import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import { type GrownRegion, growRegionsCCL } from '../pipeline/lsdSegments.ts';
-import { growRegionsCCLGPUToCPU } from '../pipelineGPU/growRegions.ts';
+import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientField.ts';
+import { type GrownRegion, growRegionsCCL } from '../../pose/stages/lsd/lsdSegments.ts';
+import { growRegionsCCLGPUToCPU } from '../../pose/stages/lsd/growRegions.gpu.ts';
 import type { HarnessInput } from './input.ts';
 
 // ── Dev harness: does growRegions.wgsl.ts's labeling agree with the CPU's? ──

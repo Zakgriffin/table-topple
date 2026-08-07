@@ -11,7 +11,7 @@ import type { GradientField } from '../types.ts';
 //
 // They did that because they had no choice: the residency was destroyed in
 // computePoseFromCapture's finally, so by the time display ran, fx/fy did not
-// exist. Now display asks for them (see pipeline/intermediates.ts) and this is
+// exist. Now display asks for them (see pose/intermediates.ts) and this is
 // where it collects the answer.
 //
 // ── TWO CONVENTIONS, and this module is the seam ──────────────────────────

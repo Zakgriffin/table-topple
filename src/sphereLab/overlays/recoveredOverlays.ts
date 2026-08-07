@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { type Camera } from '../camera/model.ts';
 import { MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
-import { projectImageCornersToPlane } from '../pipeline/decodeGrid.ts';
+import { projectImageCornersToPlane } from '../../pose/stages/decode/decodeGrid.ts';
 import { globalState } from '../state.ts';
 
 // The World-view recovered-floor quad's OUTLINE ONLY -- a 4-point closed

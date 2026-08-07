@@ -101,7 +101,7 @@ for (const o of [rowGridLines, colGridLines]) o.layers.set(DEBUG_LAYER);
 //
 // Does NOT touch math/geometry.ts's rowLineKs/colLineKs (those read
 // HALF_R/HALF_C live but need their own rebuild call) or the per-device GPU
-// cache keyed on the old board (pipelineGPU/decodeTally.ts's hash table) --
+// cache keyed on the old board (pose/stages/decode/decodeTally.gpu.ts's hash table) --
 // the caller (bindSlider('boardSize', ...)) is responsible for calling those
 // too, in that order, since floor.ts can't import from either without a
 // circular-import cycle back into itself.

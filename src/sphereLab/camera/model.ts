@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 import { type CompositeLine } from '../types.ts';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
-import type { Intermediates, PendingIntermediates } from '../pipeline/intermediates.ts';
-import { type GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
-import type { PoseComputeTiming } from '../pipeline/poseCompute.ts';
-import { type TransferSummary } from '../pipelineGPU/fieldResidency.ts';
+import type { Intermediates, PendingIntermediates } from '../../pose/intermediates.ts';
+import { type GridPeriodPhaseResult } from '../../pose/stages/period/gridPeriodPhase.ts';
+import type { PoseComputeTiming } from '../../pose/poseCompute.ts';
+import { type TransferSummary } from '../../pose/gpu/fieldResidency.ts';
 import { type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type ProjectedBins, type RecoveredAxes, type Vote } from '../types.ts';
 import { type ProfileSpan } from '../profiling/profiler.ts';
 import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './settings.ts';
@@ -51,11 +51,11 @@ export interface CameraBase {
   pendingIntermediates: PendingIntermediates | null;
   // What that drain handed back -- the pose run's own fx/fy/regionId/regions/
   // rects, for the overlays that used to recompute them. See
-  // pipeline/intermediates.ts.
+  // pose/intermediates.ts.
   intermediates: Intermediates | null;
   lastProjectedBins: ProjectedBins | null;
   // Bus traffic the LSD chain incurred on this camera's last frame -- see
-  // pipeline/poseCompute.ts's PoseComputeState for why it is recorded rather
+  // pose/poseCompute.ts's PoseComputeState for why it is recorded rather
   // than derived from the toggles. Drives the readout under the GPU toggles.
   lastChainTransfers: TransferSummary | null;
   lastVotes: Vote[];
@@ -68,7 +68,7 @@ export interface CameraBase {
   // Raw fit result (Drow/Dcol/Dnormal only, no distance) BEFORE period-search
   // gating -- the pole markers render off this even when gridPeriodPhase
   // fails and lastRecoveredAxes ends up null (see
-  // pipeline/poseCompute.ts/applyPoseVisualizations). Its own field, rather
+  // pose/poseCompute.ts/applyPoseVisualizations). Its own field, rather
   // than reusing lastRecoveredAxes, specifically so that degenerate-period
   // behavior survives the Step 2 refactor instead of silently regressing.
   lastQuadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
@@ -140,7 +140,7 @@ export interface CameraBase {
   trueContamData: Uint8Array; trueContamTex: THREE.DataTexture;
   reconContamData: Uint8Array; reconContamTex: THREE.DataTexture;
   topGradientData: Uint8Array; topGradientTex: THREE.DataTexture;
-  // Per-pixel raster overlays for pipeline/lsdSegments.ts's own debug views
+  // Per-pixel raster overlays for pose/stages/lsd/lsdSegments.ts's own debug views
   // (overlays/lsdOverlay.ts) -- same "flat Uint8Array + DataTexture + quad"
   // shape as trueContamData/reconContamData above, not the shared SVG
   // overlay LSD rectangles/composite lines use, since these paint a colored

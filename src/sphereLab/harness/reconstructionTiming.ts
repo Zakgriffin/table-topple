@@ -1,6 +1,6 @@
-import { type Backend } from '../pipeline/backend.ts';
-import { computePoseFromCapture, type PoseComputeState } from '../pipeline/poseCompute.ts';
-import { NO_INTERMEDIATES } from '../pipeline/intermediates.ts';
+import { type Backend } from '../../pose/backend.ts';
+import { computePoseFromCapture, type PoseComputeState } from '../../pose/poseCompute.ts';
+import { NO_INTERMEDIATES } from '../../pose/intermediates.ts';
 import { poseStateFor } from './input.ts';
 import type { HarnessInput } from './input.ts';
 import {
@@ -9,8 +9,8 @@ import {
 import {
   type AllocationSample, allocationProbeResult, getGPUDevice, setAllocationProbe,
   setTransferProbe, type TransferSample, transferLedger, transferLedgerReset,
-} from '../pipelineGPU/device.ts';
-import { type GpuTimelineResult, gpuTimelineArm, gpuTimelineDisarm, gpuTimelineResolve } from '../pipelineGPU/gpuTimeline.ts';
+} from '../../pose/gpu/device.ts';
+import { type GpuTimelineResult, gpuTimelineArm, gpuTimelineDisarm, gpuTimelineResolve } from '../../pose/gpu/gpuTimeline.ts';
 import { awaitPageFocus } from './lsdChainVerify.ts';
 
 // ── Dev harness: what does ONE WHOLE RECONSTRUCTION cost? ─────────────────
@@ -396,7 +396,7 @@ function median(xs: number[]): number {
 // only way to keep it off the measured path. An empty request does not build
 // the handle, does not read the grid back, and destroys the residency in
 // computePoseFromCapture's own finally, so there is nothing left here to clean
-// up. See pipeline/intermediates.ts, capability (1).
+// up. See pose/intermediates.ts, capability (1).
 async function poseOnce(state: PoseComputeState, gray: Float64Array, w: number, h: number, backend: Backend) {
   return computePoseFromCapture(state, gray, w, h, backend, NO_INTERMEDIATES);
 }

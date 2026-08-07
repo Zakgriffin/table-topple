@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { computeGradient2x2Field } from '../src/sphereLab/pipeline/gradientField.ts';
-import { growRegionsCCL } from '../src/sphereLab/pipeline/lsdSegments.ts';
+import { computeGradient2x2Field } from '../src/pose/stages/gradient/gradientField.ts';
+import { growRegionsCCL } from '../src/pose/stages/lsd/lsdSegments.ts';
 import { runPoseOn } from '../src/sphereLab/harness/runPose.ts';
 import { closeTo, loadInput } from './helpers/fixtures.ts';
 

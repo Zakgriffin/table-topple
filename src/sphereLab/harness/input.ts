@@ -2,7 +2,7 @@ import { decodeGray, fixtureSettings } from '../fixture.ts';
 import type { Fixture } from '../fixture.ts';
 // Type-only, so this module stays pure and node can import it -- see
 // fixture.ts's header for why that matters and what enforces it.
-import type { PoseComputeState } from '../pipeline/poseCompute.ts';
+import type { PoseComputeState } from '../../pose/poseCompute.ts';
 
 // ── What a harness runs ON ────────────────────────────────────────────────
 //
@@ -67,7 +67,7 @@ export function poseStateFor(input: HarnessInput): PoseComputeState {
     lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
     lastPositionDecode: null, lastChainTransfers: null,
     // A caller that wants intermediates asks for them by name and owns the
-    // handle that comes back -- see pipeline/intermediates.ts.
+    // handle that comes back -- see pose/intermediates.ts.
     pendingIntermediates: null, intermediates: null,
   };
 }

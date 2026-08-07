@@ -45,7 +45,7 @@ export function angleBetweenDegV(a: THREE.Vector3, b: THREE.Vector3): number {
 //
 // Originally lived on pipeline/capture.ts (taking a full `Camera`), which
 // made it (and everything downstream that called it: decodeGrid.ts,
-// pipelineGPU/projectSamples.ts) transitively hazardous to import on a page
+// pipeline/projectSamples.gpu.ts) transitively hazardous to import on a page
 // with no #gl canvas -- capture.ts imports the scene/renderer.ts singleton.
 // Relocated here (already dependency-free, home of cornerDir) and narrowed
 // to just the two fields it actually needs; re-exported from capture.ts so

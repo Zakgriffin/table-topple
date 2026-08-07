@@ -7,17 +7,17 @@ import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
-import { backendFromForceCPU } from './backend.ts';
+import { backendFromForceCPU } from '../../pose/backend.ts';
 import { type CompositeLine } from '../types.ts';
 import { buildProjectedTexture, computeProjectedBinsAuto, paintProjectedTexture } from './projectedBins.ts';
-import { type GridPeriodPhaseResult } from './gridPeriodPhase.ts';
+import { type GridPeriodPhaseResult } from '../../pose/stages/period/gridPeriodPhase.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
 import { updateDistortedPreview } from './preview.ts';
 
 // ── Per-camera capture/analysis pipeline ─────────────────────────────────
 
 // Relocated to math/geometry.ts (see this session's on-device-pose-recovery
-// plan) so decodeGrid.ts/pipelineGPU/projectSamples.ts -- both on the
+// plan) so decodeGrid.ts/pipeline/projectSamples.gpu.ts -- both on the
 // critical path to a pose, needed to stay importable without a #gl canvas --
 // don't have to import THIS file (which pulls in the scene/renderer.ts
 // singleton) just for this one function. Re-exported here unchanged so
@@ -126,7 +126,7 @@ export function renderCamRT(camera: SimulatedCamera) {
 // near-continuous image; only the sensor's final discretization should
 // introduce the pixel grid). GL's readback is natively bottom-up, but this
 // function's own contract is top-down -- the one dominant row convention the
-// reconstruction math (pipeline/votes.ts's toNDC) and every capture source
+// reconstruction math (pose/stages/votes/votes.ts's toNDC) and every capture source
 // (this, ingestRealCapture, ingestRemotePose, mobileCapture.ts's on-device
 // pipeline) now share, so nothing downstream of a capture needs to know or
 // care which GPU/decode path produced it. flipRowsF64 (its own exact
@@ -333,7 +333,7 @@ export async function ingestRemotePose(
   // camera/model.ts's own comment) is never transmitted over the wire --
   // whenever lastRecoveredAxes is non-null, gridPeriodPhase already
   // succeeded on the phone, so its Drow/Dcol/Dnormal are EXACTLY
-  // lastQuadricPair's own (see pipeline/poseCompute.ts's assembly of both
+  // lastQuadricPair's own (see pose/poseCompute.ts's assembly of both
   // fields from the same rowDirRecovered/colDirRecovered/quadricPair.Dnormal)
   // -- reconstructing it here needs no extra wire data.
   camera.lastQuadricPair = camera.lastRecoveredAxes ? {

@@ -1,13 +1,13 @@
 import {
   buildCorrectnessArray, buildDecodeSampleGrid, decodeGridCellUV, decodeGridLayout,
   rotateGrid, rotatedZeroIndex, tallyPositionVotes,
-} from '../pipeline/decodeGrid.ts';
+} from '../../pose/stages/decode/decodeGrid.ts';
 import { getAnalysisVFovRad } from '../math/geometry.ts';
-import { buildAndTallyDecodeGPU } from '../pipelineGPU/decodeGridBuild.ts';
-import type { Backend } from '../pipeline/backend.ts';
+import { buildAndTallyDecodeGPU } from '../../pose/stages/decode/decodeGridBuild.gpu.ts';
+import type { Backend } from '../../pose/backend.ts';
 import type { HarnessInput } from './input.ts';
 import { runPoseOn } from './runPose.ts';
-import { wants } from '../pipeline/intermediates.ts';
+import { wants } from '../../pose/intermediates.ts';
 
 // ── Dev harness: does the fused GPU decode match the CPU pair? ───────────
 //

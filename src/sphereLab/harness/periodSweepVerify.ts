@@ -1,8 +1,8 @@
-import { circularFit } from '../pipeline/gridPeriodPhase.ts';
-import type { Backend } from '../pipeline/backend.ts';
+import { circularFit } from '../../pose/stages/period/gridPeriodPhase.ts';
+import type { Backend } from '../../pose/backend.ts';
 import type { HarnessInput } from './input.ts';
 import { runPoseOn } from './runPose.ts';
-import { sweepResultantsGPU } from '../pipelineGPU/periodSweep.ts';
+import { sweepResultantsGPU } from '../../pose/stages/period/periodSweep.gpu.ts';
 
 // ── Dev harness: does periodSweep.wgsl.ts's sweep match the CPU's? ────────
 //

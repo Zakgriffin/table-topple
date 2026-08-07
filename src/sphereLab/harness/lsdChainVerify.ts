@@ -1,5 +1,5 @@
-import { createLsdChainResidency, type LsdRectangle, type LsdSettings, runLsdChain } from '../pipeline/lsdSegments.ts';
-import { type Backend } from '../pipeline/backend.ts';
+import { createLsdChainResidency, type LsdRectangle, type LsdSettings, runLsdChain } from '../../pose/stages/lsd/lsdSegments.ts';
+import { type Backend } from '../../pose/backend.ts';
 import type { HarnessInput } from './input.ts';
 
 // ── Dev harness: does the LSD chain give the same answer at every toggle? ──
@@ -10,7 +10,7 @@ import type { HarnessInput } from './input.ts';
 //   await verifyLsdChain(cameraInput())
 //   await verifyLsdChain(await fixtureInput('default'))
 //
-// This is the test that matters for pipelineGPU/fieldResidency.ts, and it
+// This is the test that matters for pose/gpu/fieldResidency.ts, and it
 // exists because the per-stage verify harnesses CANNOT catch what it catches.
 // growRegionsVerify/collectRegionsVerify/lsdFitVerify each compare one stage's
 // CPU output against its GPU output through a path that asks the residency for
@@ -22,7 +22,7 @@ import type { HarnessInput } from './input.ts';
 // per-stage harnesses and immediately visible here.
 //
 // So this runs the REAL entry point (createLsdChainResidency + runLsdChain, the
-// same two calls pipeline/poseCompute.ts makes) in both configurations and diffs
+// same two calls pose/poseCompute.ts makes) in both configurations and diffs
 // production against the CPU reference.
 //
 // ── It used to sweep 12 configurations, and that is not a loss (2026-08-05) ──
@@ -153,7 +153,7 @@ const CONFIGS: ChainConfig[] = ['reference (forceCPU)', 'production (GPU)'];
 
 // `members` is passed in rather than summed off rects[].rawMembers, and that is
 // load-bearing rather than cosmetic. The production fitter stopped filling
-// rawMembers in (see pipeline/lsdSegments.ts's fitRegionsGPU), so summing it
+// rawMembers in (see pose/stages/lsd/lsdSegments.ts's fitRegionsGPU), so summing it
 // here would report 0 for every fit=GPU configuration and a real total for every
 // fit=CPU one -- i.e. this harness's single most alarming-looking column would
 // show a large dMembers on exactly the configurations it exists to clear. That

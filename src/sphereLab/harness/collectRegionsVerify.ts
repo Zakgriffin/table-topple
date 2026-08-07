@@ -1,7 +1,7 @@
-import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
+import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientField.ts';
 import type { HarnessInput } from './input.ts';
-import { type GrownRegion } from '../pipeline/lsdSegments.ts';
-import { growRegionsCCLGPUToCPU } from '../pipelineGPU/growRegions.ts';
+import { type GrownRegion } from '../../pose/stages/lsd/lsdSegments.ts';
+import { growRegionsCCLGPUToCPU } from '../../pose/stages/lsd/growRegions.gpu.ts';
 
 // ── Dev harness: does the GPU region collector match the CPU one? ────────
 //

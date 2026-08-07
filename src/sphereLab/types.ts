@@ -30,7 +30,7 @@ export interface ProjectedBins { minU: number; maxU: number; minV: number; maxV:
 // Stage-1 output of castAndBucketProjectedSamples (decodeGrid.ts) -- one
 // ray-cast+project result per SCREEN pixel, dense (w*h, valid=0 for pixels
 // that failed the grazing-angle cutoff) so the CPU and GPU implementations
-// of that stage (pipelineGPU/projectSamples.ts) can feed the exact same
+// of that stage (pipeline/projectSamples.gpu.ts) can feed the exact same
 // stage-2 bucketing code.
 export interface ProjectedSamplesDense {
   u: Float32Array; v: Float32Array; cx: Float32Array; cy: Float32Array; valid: Uint8Array;

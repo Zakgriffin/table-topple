@@ -3,7 +3,7 @@ import { activeCamera, isSimulated } from '../camera/store.ts';
 import { COL_DIR, MATH_QUAT, ROW_DIR } from '../constants.ts';
 import { getAnalysisVFovRad } from '../pipeline/capture.ts';
 import { RECON_CONTAM_COLOR, TRUE_CONTAM_COLOR, computeContaminationAlpha, paintContaminationOverlay } from '../pipeline/contamination.ts';
-import { computeGradientMagnitudeField } from '../pipeline/gradientField.ts';
+import { computeGradientMagnitudeField } from '../pipeline/fieldPaint.ts';
 import { pipelineField } from './pipelineField.ts';
 import { toggleReconContamBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 

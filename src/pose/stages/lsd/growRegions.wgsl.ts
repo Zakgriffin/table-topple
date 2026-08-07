@@ -1,4 +1,4 @@
-// WGSL source for the GPU port of pose/stages/lsd/lsdSegments.ts's stage 2+3
+// WGSL source for the GPU port of pose/stages/lsd/regions.cpu.ts's stage 2+3
 // (growRegionsCCL -- directed connected-component region growing).
 //
 // Three entry points, all pure per-pixel maps over the field:
@@ -20,7 +20,7 @@
 // hook. WebGPU guarantees a memory barrier between passes in a command
 // encoder, not between dispatches inside one pass.
 //
-// See growRegionsCCL's own header in lsdSegments.ts for why the doubling
+// See growRegionsCCL's own header in the LSD stage for why the doubling
 // happens in LABEL space (pointer jumping) rather than image space, and why
 // that makes long-range shortcutting structurally unable to jump onto a
 // different parallel ridge.
@@ -38,7 +38,7 @@ struct Uniforms {
 @group(0) @binding(6) var<storage, read_write> next: array<i32>;
 @group(0) @binding(7) var<storage, read_write> changed: atomic<u32>;
 
-// Matches NEIGHBOR_DX/NEIGHBOR_DY in lsdSegments.ts exactly -- the full
+// Matches NEIGHBOR_DX/NEIGHBOR_DY in the LSD stage exactly -- the full
 // 8-neighbourhood, including the perpendicular ones. At stride 1 a
 // perpendicular neighbour is one pixel away, testing it is free, and it is
 // what lets a genuinely 2px-thick ridge grow across its own width instead of
@@ -55,7 +55,7 @@ fn init(@builtin(global_invocation_id) gid: vec3<u32>) {
   // angle that a previous pass had spent an atan2 building out of exactly
   // these two numbers. COMPONENT ORDER IS EASY TO GET WRONG HERE and was, from
   // faf55f6 until 2026-08-04 -- see the level-line vector block in
-  // lsdSegments.ts for why growing stayed bit-identical while the fit did not.
+  // the LSD stage for why growing stayed bit-identical while the fit did not.
   //
   // Eligibility is tested SQUARED, so an ineligible pixel costs no sqrt, and
   // only an eligible one is normalized. Ineligible entries keep (0,0), which
@@ -99,7 +99,7 @@ fn hook(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (nlab < 0 || nlab >= best) { continue; }
     // THE predicate: one signed dot against cos(tau). Directed -- no abs() --
     // which is what keeps the two antiparallel edges of a thin stripe from
-    // fusing. See levelLinesCompatible in lsdSegments.ts.
+    // fusing. See levelLinesCompatible in the LSD stage.
     if (ci * ux[j] + si * uy[j] < u.cosTol) { continue; }
     best = nlab;
   }

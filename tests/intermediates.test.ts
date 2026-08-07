@@ -2,7 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { computeGradient2x2Field } from '../src/pose/stages/gradient/gradientField.ts';
 import { type Intermediates, NO_INTERMEDIATES, wants } from '../src/pose/intermediates.ts';
-import { growRegionsCCL } from '../src/pose/stages/lsd/lsdSegments.ts';
+import { growRegionsCCL } from '../src/pose/stages/lsd/regions.cpu.ts';
 import { computePoseFromCapture } from '../src/pose/poseCompute.ts';
 import { poseStateFor } from '../src/sphereLab/harness/input.ts';
 import { closeTo, loadInput } from './helpers/fixtures.ts';

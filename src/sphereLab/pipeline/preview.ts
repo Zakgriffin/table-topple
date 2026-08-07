@@ -20,7 +20,7 @@ function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
     // and the white-to-black edge facing it share one hue;
     // 'gradient2x2Directed' does not, so those two land exactly opposite on
     // the hue wheel. See paintVectorFieldAsColor's own comment for why that
-    // distinction is worth being able to SEE -- pose/stages/lsd/lsdSegments.ts's
+    // distinction is worth being able to SEE -- pose/stages/lsd/'s
     // segment growing is directed now, so two edges that look identical in
     // the axial view are genuinely different lines to it.
     paintVectorFieldAsColor(field, camera.distortedPreviewData, settings.fieldView === 'gradient2x2Directed');

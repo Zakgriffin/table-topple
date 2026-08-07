@@ -50,7 +50,7 @@ function getPipelines(device: GPUDevice): Pipelines {
   return p;
 }
 
-// GPU-resident counterpart to pose/stages/lsd/lsdSegments.ts's collectRegionsFromLabels.
+// GPU-resident counterpart to pose/stages/lsd/regions.cpu.ts's collectRegionsFromLabels.
 //
 // Reads label/mag/theta out of the residency (already on device when stage 3
 // ran there) and PUBLISHES regionId plus the region CSR back into it, still on
@@ -93,7 +93,7 @@ export async function collectRegionsGPU(
     const b = new ArrayBuffer(16);
     const dv = new DataView(b);
     // Squared here, once, rather than in the shader per pixel. Matches
-    // lsdSegments.ts's eligibilityThresholdSq, including the negative case.
+    // levelLine.ts's eligibilityThresholdSq, including the negative case.
     dv.setUint32(0, n, true);
     dv.setFloat32(4, rhoHigh >= 0 ? rhoHigh * rhoHigh : -Infinity, true);
     dv.setUint32(8, minRegionSize, true);

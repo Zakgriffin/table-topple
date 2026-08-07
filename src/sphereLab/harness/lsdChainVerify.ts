@@ -1,4 +1,5 @@
-import { createLsdChainResidency, type LsdRectangle, type LsdSettings, runLsdChain } from '../../pose/stages/lsd/lsdSegments.ts';
+import { createLsdChainResidency, runLsdChain } from '../../pose/stages/lsd/chain.ts';
+import type { LsdRectangle, LsdSettings } from '../../pose/stages/lsd/types.ts';
 import { type Backend } from '../../pose/backend.ts';
 import type { HarnessInput } from './input.ts';
 
@@ -153,7 +154,7 @@ const CONFIGS: ChainConfig[] = ['reference (forceCPU)', 'production (GPU)'];
 
 // `members` is passed in rather than summed off rects[].rawMembers, and that is
 // load-bearing rather than cosmetic. The production fitter stopped filling
-// rawMembers in (see pose/stages/lsd/lsdSegments.ts's fitRegionsGPU), so summing it
+// rawMembers in (see pose/stages/lsd/chain.ts's fitRegionsGPU), so summing it
 // here would report 0 for every fit=GPU configuration and a real total for every
 // fit=CPU one -- i.e. this harness's single most alarming-looking column would
 // show a large dMembers on exactly the configurations it exists to clear. That

@@ -140,7 +140,7 @@ export interface CameraBase {
   trueContamData: Uint8Array; trueContamTex: THREE.DataTexture;
   reconContamData: Uint8Array; reconContamTex: THREE.DataTexture;
   topGradientData: Uint8Array; topGradientTex: THREE.DataTexture;
-  // Per-pixel raster overlays for pose/stages/lsd/lsdSegments.ts's own debug views
+  // Per-pixel raster overlays for pose/stages/lsd/the LSD stage's own debug views
   // (overlays/lsdOverlay.ts) -- same "flat Uint8Array + DataTexture + quad"
   // shape as trueContamData/reconContamData above, not the shared SVG
   // overlay LSD rectangles/composite lines use, since these paint a colored

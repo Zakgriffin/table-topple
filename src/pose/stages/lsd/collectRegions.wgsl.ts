@@ -1,8 +1,8 @@
-// WGSL source for the GPU port of pose/stages/lsd/lsdSegments.ts's
+// WGSL source for the GPU port of pose/stages/lsd/'s
 // collectRegionsFromLabels -- turning a finished CCL labeling into hysteresis-
 // filtered, size-filtered, deterministically-ordered regions in CSR form.
 //
-// An earlier comment in lsdSegments.ts called this step "inherently serial".
+// An earlier comment in the LSD stage called this step "inherently serial".
 // That was simply wrong, and this file is the refutation: every stage below is a
 // standard parallel pattern, and the only reason it hadn't moved is that the
 // CSR build needs a prefix sum, which the pipeline didn't have until
@@ -15,7 +15,7 @@
 // its Map keys. Region numbering is preserved EXACTLY, not merely equivalently.
 //
 //   survive     labelSurvives[label] = 1 where a member clears rhoHigh (tested
-//               squared, no sqrt -- see lsdSegments.ts). A
+//               squared, no sqrt -- see the LSD stage). A
 //               scatter of a constant -- every writer writes 1, so no atomic.
 //   histogram   counts[label]++ over surviving labels. atomicAdd.
 //   markKept    per label: keptFlag = survives && count >= minRegionSize, and
@@ -48,7 +48,7 @@ fn survive(@builtin(global_invocation_id) gid: vec3<u32>) {
   let lab = label[i];
   // Benign race by construction: every thread that writes here writes the same
   // value, so the result is the OR of all of them regardless of ordering.
-  // Squared, so the hysteresis test costs no sqrt. See lsdSegments.ts.
+  // Squared, so the hysteresis test costs no sqrt. See the LSD stage.
   if (lab >= 0 && fx[i] * fx[i] + fy[i] * fy[i] > u.rhoHighSq) { labelSurvives[u32(lab)] = 1u; }
 }
 `;

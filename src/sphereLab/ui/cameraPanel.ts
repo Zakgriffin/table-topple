@@ -453,7 +453,7 @@ updateGradientArrowAvailability();
 updateTopGradientAvailability();
 updateLsdAvailability();
 bindSlider('gradientArrowScale', config.camera.common.gradientArrowScale, (v) => { const cam = activeCamera(); if (cam) cam.settings.gradientArrowScale = v; updateHoverOverlays(lastHoverClientX, lastHoverClientY); }, (v) => v.toFixed(1));
-// The from-scratch traditional LSD pipeline (pose/stages/lsd/lsdSegments.ts) --
+// The from-scratch traditional LSD pipeline (pose/stages/lsd/) --
 // this DOES have a live debug overlay (the accepted/rejected/raw-region
 // views), so every stage-2..5 change here recomputes and redraws it
 // immediately.

@@ -2,7 +2,8 @@ import { type Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { pipelineField } from './pipelineField.ts';
-import { computeEdgeNeighbors, type GrownRegion, type LsdRectangle } from '../../pose/stages/lsd/lsdSegments.ts';
+import { computeEdgeNeighbors } from '../../pose/stages/lsd/levelLine.ts';
+import type { GrownRegion, LsdRectangle } from '../../pose/stages/lsd/types.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import {
   growthCandidateGroup, lsdReadout, lsdRectanglesGroup, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn,
@@ -16,7 +17,7 @@ import { svgEl } from './svgUtil.ts';
 // different colors, which is exactly what these debug views are for
 // (inspecting flood-fill/fragmentation behavior, not direction). rawMembers[0]
 // is just some deterministic, stable-given-the-same-settings member pixel to
-// hash off of -- growRegionsCCL (pose/stages/lsd/lsdSegments.ts) collects a
+// hash off of -- growRegionsCCL (pose/stages/lsd/) collects a
 // region's members in increasing pixel-index order, so this is actually its
 // LOWEST-index member, not a meaningful "seed" (dense JFA seeding has no
 // single privileged seed pixel the way the old serial BFS's seed-first
@@ -72,7 +73,7 @@ function paintMember(
 // Edge-connectivity preview: for the pixel under the cursor, draws a short
 // stub toward each of its 8 neighbors that it shares a GRAPH EDGE with --
 // i.e. exactly the neighbors growRegionsCCL's hook pass would consider
-// merging with. Calls computeEdgeNeighbors (pose/stages/lsd/lsdSegments.ts -- the
+// merging with. Calls computeEdgeNeighbors (pose/stages/lsd/ -- the
 // SAME predicate the real algorithm's inner loop uses, not an independently
 // reimplemented copy that could drift out of sync).
 //

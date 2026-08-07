@@ -1,4 +1,4 @@
-// WGSL source for the GPU port of pose/stages/lsd/lsdSegments.ts's stage 4
+// WGSL source for the GPU port of pose/stages/lsd/rectangles.cpu.ts's stage 4
 // (magnitude-weighted PCA rectangle fit) + stage 5's FIRST-PASS NFA test
 // (countRectanglePixels + logBinomialTail, at the ORIGINAL toleranceDeg,
 // no retry). One thread per region -- regions are already independent by
@@ -15,7 +15,7 @@
 // retry 2+ needs a per-region partial sort/selection (drop the
 // farthest-from-center fraction), a genuinely harder GPU problem than
 // anything else in this stage. It is now RETIRED on the CPU side too
-// (pose/stages/lsd/lsdSegments.ts's fitRegionWithRetries, kept unreferenced), so
+// (pose/stages/lsd/rectangles.cpu.ts's fitRegionWithRetries, kept unreferenced), so
 // this kernel is no longer a partial implementation of a larger CPU
 // algorithm: it is the whole fitter, and rejected candidates are used
 // exactly as this pass returns them instead of being re-derived on CPU.

@@ -54,7 +54,7 @@ export const CameraSettingsCommonSchema = Type.Object({
   hideField: Type.Boolean(),
   showTopGradient: Type.Boolean(),
 
-  // ── From-scratch traditional LSD pipeline (pose/stages/lsd/lsdSegments.ts) --
+  // ── From-scratch traditional LSD pipeline (pose/stages/lsd/) --
   // the PRODUCTION composite-line source: pose/stages/votes/votes.ts's
   // computeGradient2x2Composites turns each accepted rectangle straight into
   // one line. None of these are gated behind a show/hide toggle --
@@ -105,7 +105,7 @@ export const CameraSettingsCommonSchema = Type.Object({
   // competitive growers relied on to stop weak noise out-competing a real
   // ridge (a symmetric edge predicate has no notion of "wins"). Set at or
   // below lsdRhoNoiseThreshold to degrade to plain single-threshold
-  // behavior. See pose/stages/lsd/lsdSegments.ts's growRegionsCCL.
+  // behavior. See pose/stages/lsd/regions.cpu.ts's growRegionsCCL.
   lsdRhoHighThreshold: Type.Number(),
   // DEBUG SCRUBBER ONLY (0 = run to the fixpoint, the real algorithm): caps
   // how many hook+compress rounds growRegionsCCL runs so the overlay can
@@ -141,7 +141,7 @@ export const CameraSettingsCommonSchema = Type.Object({
   lsdMinLengthPx: Type.Number(),
 
   // showLevelLineArrow: the gradient rotated -90deg (LSD's own level-line
-  // convention, see pose/stages/lsd/lsdSegments.ts's level-line vector block) -- was
+  // convention, see pose/stages/lsd/levelLine.ts) -- was
   // named "perpendicular" before, renamed to match that shared terminology.
   showGradientArrow: Type.Boolean(),
   showLevelLineArrow: Type.Boolean(),

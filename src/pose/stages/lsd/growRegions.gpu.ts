@@ -1,4 +1,5 @@
-import { collectRegionsFromLabels, type GrownRegion } from './lsdSegments.ts';
+import { collectRegionsFromLabels } from './regions.cpu.ts';
+import type { GrownRegion } from './types.ts';
 import {
   createStorageBuffer, dispatchCount, readUint32, uploadUniform,
 } from '../../gpu/device.ts';
@@ -65,7 +66,7 @@ function getPipelines(device: GPUDevice): GrowPipelines {
 // extra readback stall.
 const ROUNDS_PER_BATCH = 8;
 
-// GPU-resident counterpart to pose/stages/lsd/lsdSegments.ts's growRegionsCCL, for
+// GPU-resident counterpart to pose/stages/lsd/regions.cpu.ts's growRegionsCCL, for
 // the ROUND LOOP (stage 2+3's fixpoint iteration). Hysteresis survival and the
 // collect/relabel pass follow it, on GPU by default (collectRegions.gpu.ts,
 // consuming label/mag/theta where they already sit) and on
@@ -135,7 +136,7 @@ export async function growRegionsCCLGPU(
   const uni = new ArrayBuffer(32);
   const dv = new DataView(uni);
   dv.setUint32(0, w, true); dv.setUint32(4, h, true);
-  // Squared, matching lsdSegments.ts's eligibilityThresholdSq (negative case
+  // Squared, matching levelLine.ts's eligibilityThresholdSq (negative case
   // included) -- the shader's init tests squared magnitude so an ineligible
   // pixel costs no sqrt.
   dv.setFloat32(16, rhoLow >= 0 ? rhoLow * rhoLow : -Infinity, true);

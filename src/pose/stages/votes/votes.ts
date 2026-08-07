@@ -5,9 +5,8 @@ import { FieldResidency } from '../../gpu/fieldResidency.ts';
 import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
 import { type CompositeLine, type Vote } from '../../../sphereLab/types.ts';
 import { type Backend } from '../../backend.ts';
-import { computeLsdRectangles, type LsdRectangle, runLsdChain } from '../lsd/lsdSegments.ts';
-
-
+import { computeLsdRectangles, runLsdChain } from '../lsd/chain.ts';
+import type { LsdRectangle } from '../lsd/types.ts';
 // Just the LSD tuning knobs computeGradient2x2Composites/
 // compositesFromLsdRectangles actually read off `settings` -- narrowed off
 // the full CameraSettingsCommon (which also carries dozens of display-only
@@ -28,7 +27,7 @@ export interface LsdCompositeSettings {
 // One LINE per accepted LSD rectangle, tagged with its root -- the shared
 // first stage behind computeSegmentVotes below AND pose/stages/period/gridPeriodPhase.ts.
 // Runs the full traditional LSD pipeline (region growing -> rectangle fit ->
-// NFA validation, see pose/stages/lsd/lsdSegments.ts's own header) over the gray `res`
+// NFA validation, see pose/stages/lsd/chain.ts's own header) over the gray `res`
 // was created around, then turns each accepted rectangle into a line.
 // It used to run a JOIN WALK between those two steps, merging collinear
 // rectangles into composites; that is retired, see compositesFromLsdRectangles.
@@ -93,7 +92,7 @@ export async function computeGradient2x2Composites(
 // The consequence worth remembering is what that means for the OPEN question:
 // "does voting per raw segment rather than per merged composite hurt the fit?"
 // was never actually being tested, because at joinSteps 0 there was no merged
-// composite to lose. See lsdSegments.ts's growth-rule block for the one place
+// composite to lose. See levelLine.ts for the one place
 // this genuinely bites -- a polarity flip mid-line yields two antiparallel
 // halves that nothing reassembles.
 export function compositesFromLsdRectangles(

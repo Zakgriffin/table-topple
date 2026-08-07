@@ -9,7 +9,8 @@ import { type Backend } from './backend.ts';
 import { type PendingDecodeGrid, runPositionDecode } from './stages/decode/decodeGrid.ts';
 import { computeGridPeriodPhase, type GridPeriodPhaseResult } from './stages/period/gridPeriodPhase.ts';
 import { type Intermediates, type IntermediatesRequest, NO_INTERMEDIATES, type PendingIntermediates } from './intermediates.ts';
-import { createLsdChainResidency, type GrownRegion, type LsdRectangle } from './stages/lsd/lsdSegments.ts';
+import { createLsdChainResidency } from './stages/lsd/chain.ts';
+import type { GrownRegion, LsdRectangle } from './stages/lsd/types.ts';
 import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes, type LsdCompositeSettings } from './stages/votes/votes.ts';
 
 // ── Shared pure pose-recovery orchestrator ────────────────────────────────

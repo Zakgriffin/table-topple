@@ -1,5 +1,6 @@
 import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientField.ts';
-import { type GrownRegion, growRegionsCCL } from '../../pose/stages/lsd/lsdSegments.ts';
+import { growRegionsCCL } from '../../pose/stages/lsd/regions.cpu.ts';
+import type { GrownRegion } from '../../pose/stages/lsd/types.ts';
 import { growRegionsCCLGPUToCPU } from '../../pose/stages/lsd/growRegions.gpu.ts';
 import type { HarnessInput } from './input.ts';
 

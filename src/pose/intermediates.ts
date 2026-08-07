@@ -1,5 +1,4 @@
-import type { GrownRegion, LsdRectangle } from './stages/lsd/lsdSegments.ts';
-
+import type { GrownRegion, LsdRectangle } from './stages/lsd/types.ts';
 // ── Asking the pipeline for its intermediates, as DATA ────────────────────
 //
 // The problem, in the user's own diagnosis: this project has repeatedly spent

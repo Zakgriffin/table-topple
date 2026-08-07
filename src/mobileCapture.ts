@@ -33,7 +33,8 @@ import {
 } from './gameOverlay.ts';
 import { getAnalysisVFovRad } from './sphereLab/math/geometry.ts';
 import { computeGradient2x2Field } from './pose/stages/gradient/gradientField.ts';
-import { computeLsdRectanglesFromField, type LsdRectangle } from './pose/stages/lsd/lsdSegments.ts';
+import { computeLsdRectanglesFromField } from './pose/stages/lsd/chain.ts';
+import type { LsdRectangle } from './pose/stages/lsd/types.ts';
 import { computePoseFromCapture, type PoseComputeState } from './pose/poseCompute.ts';
 // Shared with the desktop rather than restated here, so the wire shape and
 // the recorded shape cannot drift apart -- this page PRODUCES the value that

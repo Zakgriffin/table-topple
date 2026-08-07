@@ -24,7 +24,7 @@ interface LsdFitResult {
   n: number; k: number;
 }
 
-// GPU-resident counterpart to pose/stages/lsd/lsdSegments.ts's fitRectangle +
+// GPU-resident counterpart to pose/stages/lsd/rectangles.cpu.ts's fitRectangle +
 // countRectanglePixels + logBinomialTail (stage 4 + stage 5's first pass,
 // no retry -- see lsdFit.wgsl.ts's own header for why the retry loop stays
 // CPU-only). One region's members never overlap another's (stage 3's own
@@ -35,7 +35,7 @@ interface LsdFitResult {
 // 2931-region capture): zero disagreements on n, k, or accept/reject, and a
 // max nfaLog10 delta of 7.7e-6 -- pure f32-vs-f64 rounding. Geometry agrees to
 // ~4e-5. The mod-π/directed parity problem that originally pinned this is gone
-// (both sides are directed again, see the level-line vector block in lsdSegments.ts).
+// (both sides are directed again, see the level-line vector block in the LSD stage).
 //
 // Getting there required one real fix on BOTH sides: countRectanglePixels'
 // inclusion test now carries a BOUNDARY_EPS, because a rectangle's extent is
@@ -107,7 +107,7 @@ export async function fitAndTestRegionsGPU(
   const uniformData = new ArrayBuffer(32);
   const dv = new DataView(uniformData);
   dv.setUint32(0, w, true); dv.setUint32(4, h, true);
-  // Squared, matching lsdSegments.ts's eligibilityThresholdSq (negative case
+  // Squared, matching levelLine.ts's eligibilityThresholdSq (negative case
   // included), so the shader's per-pixel test needs no sqrt.
   dv.setFloat32(16, rho >= 0 ? rho * rho : -Infinity, true);
   dv.setFloat32(20, toleranceRad, true);

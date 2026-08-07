@@ -8,7 +8,7 @@ import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
 import { backendFromForceCPU } from '../../pose/backend.ts';
-import { type CompositeLine } from '../types.ts';
+import { type CompositeLine } from '../../pose/results.ts';
 import { buildProjectedTexture, computeProjectedBinsAuto, paintProjectedTexture } from './projectedBins.ts';
 import { type GridPeriodPhaseResult } from '../../pose/stages/period/gridPeriodPhase.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';

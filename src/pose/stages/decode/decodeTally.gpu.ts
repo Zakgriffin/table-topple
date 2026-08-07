@@ -1,6 +1,6 @@
 import { ORDER, R, C, debruijnLookup } from '../../../sphereLab/floorPattern.ts';
 import { rotatedDims } from './decodeGrid.ts';
-import { type DecodeSampleGrid, type VoteResult } from '../../../sphereLab/types.ts';
+import { type DecodeSampleGrid, type VoteResult } from '../../results.ts';
 import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
 import { createStorageBuffer, dispatchCount, getGPUDevice, readUint32, uploadUint32, uploadUniform } from '../../gpu/device.ts';
 import { gpuTimelineSlot } from '../../gpu/gpuTimeline.ts';

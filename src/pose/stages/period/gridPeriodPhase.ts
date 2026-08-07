@@ -3,7 +3,7 @@ import { cornerDir } from '../../../sphereLab/math/geometry.ts';
 import { C, R } from '../../../sphereLab/floorPattern.ts';
 import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
 import { sweepResultantsGPU } from './periodSweep.gpu.ts';
-import { type CompositeLine } from '../../../sphereLab/types.ts';
+import { type CompositeLine } from '../../results.ts';
 import { type Backend } from '../../backend.ts';
 
 // ── Grid period/phase recovery from composite lines (pure) ────────────────

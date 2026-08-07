@@ -5,7 +5,7 @@ import { GRID_STEP, MATH_QUAT } from '../constants.ts';
 import { getAnalysisVFovRad } from '../pipeline/capture.ts';
 import { projectedUVScale } from '../../pose/stages/decode/decodeGrid.ts';
 import { circularFit, computePooledGaps, type GnomonicPoint, type GridPeriodPhaseResult, makeCellCentreDistinctness, type PeriodSearchSample } from '../../pose/stages/period/gridPeriodPhase.ts';
-import { type DecodeCellDebug } from '../types.ts';
+import { type DecodeCellDebug } from '../../pose/results.ts';
 import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleProductCurveBtn, toggleValueHistogramBtn } from '../ui/dom.ts';
 import { svgEl, svgText } from './svgUtil.ts';
 

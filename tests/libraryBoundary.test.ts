@@ -50,7 +50,6 @@ const SHARED_LEAVES = new Set([
   'src/sphereLab/floorPattern.ts',
   'src/sphereLab/math/geometry.ts',
   'src/sphereLab/profiling/profiler.ts',
-  'src/sphereLab/types.ts',
 ]);
 
 const loaded: string[] = [];

@@ -4,7 +4,7 @@ import { cornerDir, getAnalysisVFovRad } from '../sphereLab/math/geometry.ts';
 import { FieldResidency, type TransferSummary } from './gpu/fieldResidency.ts';
 import { fitPairOfPlanesGPU } from './stages/votes/fitPlanes.gpu.ts';
 import { spanDurationMs, spanEnd, spanStart } from '../sphereLab/profiling/profiler.ts';
-import { type CompositeLine, type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type RecoveredAxes, type Vote } from '../sphereLab/types.ts';
+import { type CompositeLine, type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type RecoveredAxes, type Vote } from './results.ts';
 import { type Backend } from './backend.ts';
 import { type PendingDecodeGrid, runPositionDecode } from './stages/decode/decodeGrid.ts';
 import { computeGridPeriodPhase, type GridPeriodPhaseResult } from './stages/period/gridPeriodPhase.ts';

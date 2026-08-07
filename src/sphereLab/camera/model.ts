@@ -1,11 +1,12 @@
 import * as THREE from 'three';
-import { type CompositeLine } from '../types.ts';
+import { type CompositeLine } from '../../pose/results.ts';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import type { Intermediates, PendingIntermediates } from '../../pose/intermediates.ts';
 import { type GridPeriodPhaseResult } from '../../pose/stages/period/gridPeriodPhase.ts';
 import type { PoseComputeTiming } from '../../pose/poseCompute.ts';
 import { type TransferSummary } from '../../pose/gpu/fieldResidency.ts';
-import { type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type ProjectedBins, type RecoveredAxes, type Vote } from '../types.ts';
+import { type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type RecoveredAxes, type Vote } from '../../pose/results.ts';
+import { type ProjectedBins } from '../types.ts';
 import { type ProfileSpan } from '../profiling/profiler.ts';
 import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './settings.ts';
 

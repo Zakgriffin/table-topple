@@ -1,4 +1,4 @@
-import { type GradientField } from '../../../sphereLab/types.ts';
+import { type GradientField } from '../../results.ts';
 
 // ── Stage 1: the gradient field (no color, no display) ───────────────────
 //

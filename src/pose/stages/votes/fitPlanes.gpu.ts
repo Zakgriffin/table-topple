@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { jacobiEigenSymmetric, smallestEigenvector } from '../../../linalg.ts';
 import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
-import { type Vote } from '../../../sphereLab/types.ts';
+import { type Vote } from '../../results.ts';
 import { createStorageBuffer, getGPUDevice, readFloat32, uploadFloat32, uploadUniform } from '../../gpu/device.ts';
 import { gpuTimelineSlot } from '../../gpu/gpuTimeline.ts';
 import { FIT_PLANES_WGSL } from './fitPlanes.wgsl.ts';

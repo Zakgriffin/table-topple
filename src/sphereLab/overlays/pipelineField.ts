@@ -1,5 +1,5 @@
 import type { Camera } from '../camera/model.ts';
-import type { GradientField } from '../types.ts';
+import type { GradientField } from '../../pose/results.ts';
 
 // ── Reading the POSE RUN's own gradient field from display code ───────────
 //

@@ -4,7 +4,8 @@ import { MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { projectSamplesGPU } from './projectSamples.gpu.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
-import { type GradientField, type ProjectedBins, type ProjectedSamplesDense } from '../types.ts';
+import { type ProjectedBins, type ProjectedSamplesDense } from '../types.ts';
+import { type GradientField } from '../../pose/results.ts';
 import { type Backend } from '../../pose/backend.ts';
 import { computeGradientField } from '../../pose/stages/gradient/gradientField.ts';
 

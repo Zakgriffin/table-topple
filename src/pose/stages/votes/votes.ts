@@ -3,7 +3,7 @@ import { jacobiEigenSymmetric, smallestEigenvector } from '../../../linalg.ts';
 import { cornerDir } from '../../../sphereLab/math/geometry.ts';
 import { FieldResidency } from '../../gpu/fieldResidency.ts';
 import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
-import { type CompositeLine, type Vote } from '../../../sphereLab/types.ts';
+import { type CompositeLine, type Vote } from '../../results.ts';
 import { type Backend } from '../../backend.ts';
 import { computeLsdRectangles, runLsdChain } from '../lsd/chain.ts';
 import type { LsdRectangle } from '../lsd/types.ts';

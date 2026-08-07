@@ -6,7 +6,7 @@
 // (see that function's own comment), so no separate max constant is needed
 // here anymore.
 
-import { type GradientField } from '../types.ts';
+import { type GradientField } from '../../pose/results.ts';
 
 // `field` is the pipeline's, so it is TOP-DOWN, while `out` is a flipY=false
 // preview texture and is bottom-up. The row reversal happens here, at the

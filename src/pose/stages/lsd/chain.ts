@@ -3,7 +3,7 @@ import { computeGradient2x2FieldGPU } from '../gradient/gradient2x2.gpu.ts';
 import { fitAndTestRegionsGPU } from './lsdFit.gpu.ts';
 import { growRegionsCCLGPU } from './growRegions.gpu.ts';
 import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
-import { type GradientField } from '../../../sphereLab/types.ts';
+import { type GradientField } from '../../results.ts';
 import { type Backend } from '../../backend.ts';
 import { computeGradient2x2Field } from '../gradient/gradientField.ts';
 import { growRegionsCCL } from './regions.cpu.ts';

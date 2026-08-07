@@ -5,7 +5,7 @@ import { tallyPositionVotesGPU } from './decodeTally.gpu.ts';
 import { buildAndTallyDecodeGPU } from './decodeGridBuild.gpu.ts';
 import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
 import { C, ORDER, R, debruijnLookup, torus } from '../../../sphereLab/floorPattern.ts';
-import { type DecodeCellDebug, type DecodeSampleGrid, type DecodeSamplePoint, type PositionDecodeResult, type RecoveredAxes, type VoteResult } from '../../../sphereLab/types.ts';
+import { type DecodeCellDebug, type DecodeSampleGrid, type DecodeSamplePoint, type PositionDecodeResult, type RecoveredAxes, type VoteResult } from '../../results.ts';
 import { type Backend } from '../../backend.ts';
 import { type GridPeriodPhaseResult } from '../period/gridPeriodPhase.ts';
 

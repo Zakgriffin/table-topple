@@ -1,7 +1,7 @@
 import { GRID_STEP } from '../../../sphereLab/constants.ts';
 import { C, R, torus } from '../../../sphereLab/floorPattern.ts';
 import { type DecodeGridLayout } from './decodeGrid.ts';
-import { type DecodeSampleGrid, type DecodeSamplePoint, type VoteResult } from '../../../sphereLab/types.ts';
+import { type DecodeSampleGrid, type DecodeSamplePoint, type VoteResult } from '../../results.ts';
 import { tallyFromDeviceGrid } from './decodeTally.gpu.ts';
 import {
   createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, readUint32,

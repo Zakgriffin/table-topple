@@ -114,15 +114,16 @@ async function fitRegionsGPU(
   res: FieldResidency, w: number, h: number, settings: LsdSettings, wantMembers: boolean,
 ): Promise<LsdRectangle[] | null> {
   const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
-  // The stage span this function never had. It exists so the Promise.all below
-  // has somewhere to BE: its two branches genuinely overlap, and with no span
-  // around them their children were siblings of the whole composites stage,
-  // which put concurrent work next to sequential work with nothing saying
-  // which was which. Contained here, the overlap is visible as exactly what it
-  // is -- two children whose intervals intersect, subtracted from this parent
-  // as a union rather than as a sum (see profiler.ts's TreeNode.selfMs).
-  const fitSpan = poseSpan('lsd.fit', { wantMembers });
-  try {
+  // `lsd.fit` is opened by the CALLER (computeLsdRectanglesAuto), not here --
+  // see the comment there for why. Everything in this function runs inside it,
+  // including the Promise.all below, which is what that span exists to contain:
+  // its two branches genuinely overlap, and with no span around them their
+  // children were siblings of the whole composites stage, which put concurrent
+  // work next to sequential work with nothing saying which was which. Contained
+  // there, the overlap is visible as exactly what it is -- two children whose
+  // intervals intersect, subtracted from their parent as a union rather than as
+  // a sum (see profiler.ts's TreeNode.selfMs).
+  {
     // Concurrent when both are wanted, not sequential: fitAndTestRegionsGPU binds
     // the region CSR synchronously before its first await, so starting it first
     // and letting the members readback run alongside puts that transfer under the
@@ -159,8 +160,6 @@ async function fitRegionsGPU(
     }
     spanEnd(wrapSpan);
     return results;
-  } finally {
-    spanEnd(fitSpan);
   }
 }
 
@@ -236,11 +235,26 @@ async function computeLsdRectanglesAuto(
   // boundary that does not exist in the call graph.
   spanEnd(growSpan);
 
-  if (backend === 'gpu') {
-    const gpu = await fitRegionsGPU(res, w, h, settings, wantMembers);
-    if (gpu) return gpu;
+  // Around BOTH fitters, for the same reason `lsd.grow` above is closed after
+  // its own fallback: the span has to mean "fit finished, whoever did it".
+  // Opened here rather than inside fitRegionsGPU -- where it was until the
+  // critical-path join went looking for it -- because there it recorded only on
+  // the GPU backend, so a CPU run had no `lsd.fit` at all and `votes.filter`'s
+  // declared input simply vanished. That silently dropped the whole LSD chain
+  // off the CPU critical path: the walk terminated at votes.filter, reporting
+  // 0.25ms of rectangle filtering and none of the 41ms of grow feeding it.
+  // Recording on both backends is also what makes `lsd.fit` aggregate across
+  // its `backend` attr, which was the point of collapsing the two ids into one.
+  const fitSpan = poseSpan('lsd.fit', { wantMembers, backend });
+  try {
+    if (backend === 'gpu') {
+      const gpu = await fitRegionsGPU(res, w, h, settings, wantMembers);
+      if (gpu) return gpu;
+    }
+    return fitRegionsCPU(await res.regionsCPU(), await res.cpuF64('fx'), await res.cpuF64('fy'), w, h, settings);
+  } finally {
+    spanEnd(fitSpan);
   }
-  return fitRegionsCPU(await res.regionsCPU(), await res.cpuF64('fx'), await res.cpuF64('fy'), w, h, settings);
 }
 
 // ── Stage 1: the 2x2 forward-difference gradient ──

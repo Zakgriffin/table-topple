@@ -330,6 +330,149 @@ export function joinRecords(recs: readonly StageRecord[], table: StageTable): Jo
   return { roots, orphans, unknown };
 }
 
+// ── THE CRITICAL PATH: the DEPENDENT chain that sets the floor ───────────
+//
+// `within` decomposes cost; `inputs` is what this walks, and they are different
+// graphs. A tree of self times answers "where did the time go" and structurally
+// CANNOT answer "which dependent chain sets the floor on a reconstruction" --
+// the perf-actionable question, because a stage off the critical path can be
+// made free without the total moving at all.
+//
+// Two numbers per node, and the second is the one with no equivalent in the
+// tree view:
+//
+//   readyAt = the latest END among the stages this one declares as inputs, i.e.
+//             the moment its last input existed.
+//   waitMs  = start - readyAt. Time the stage COULD have been running and was
+//             not. It localizes a stall to an EDGE rather than leaving it in the
+//             enclosing stage's self time: `fit.dispatch` closes at submit and
+//             `fit.finish` opens after the readback resolves, so the fence
+//             between them is not inside either span -- it is this number.
+//
+// ── Resolution reaches DOWN and lifts back UP ──
+//
+// An input is routinely produced deeper than it is consumed: `pose.distance`
+// declares `pose.composites`, which runs two levels down inside `pose.votes`.
+// So the producer is found wherever it actually ran, and then LIFTED to the
+// sibling containing it -- the edge at this level reads votes -> distance,
+// while readyAt still means "when the data existed" rather than "when its
+// container finished". Both halves are needed: without the lift there is no
+// chain at this level, and without the deep search the edge simply vanishes.
+export interface PathNode {
+  readonly node: TreeNode;
+  // Null when no declared input of this stage recorded in this scope -- the
+  // head of a chain, not an error. `lsd.gradient` declares `pose.residency`,
+  // which runs a level above it and so is legitimately absent from its own.
+  readonly readyAt: number | null;
+  readonly waitMs: number;
+  // The stage id whose end SET readyAt -- the binding input. The chain follows
+  // this edge backwards, so it is also the answer to "what was this waiting on".
+  readonly boundBy: string | null;
+  // The critical path through this node's own children. Empty for a leaf.
+  readonly inner: PathNode[];
+}
+
+export interface CriticalPath {
+  // Head first, in execution order.
+  readonly chain: PathNode[];
+  // Wall time from the head's start to the tail's end. Compare against the
+  // parent's duration: at ~100% the level is a serial chain with no slack to
+  // exploit, and the only way to make it faster is to make a stage faster.
+  readonly spanMs: number;
+  // Sum of the chain's own durations at the TOP level. spanMs - onPathMs is
+  // the time inside the window that no chain member was executing in.
+  readonly onPathMs: number;
+  // Edges where the input stage DID record here but no occurrence of it
+  // finished before the consumer started. Either the declaration is wrong or
+  // the two genuinely overlap, and both are worth knowing; an input that did
+  // not record at all is silent, since that is the normal cross-level and
+  // wrong-backend case.
+  readonly unsatisfied: string[];
+}
+
+function recEnd(r: StageRecord): number { return r.end > 0 ? r.end : r.start; }
+
+function levelPath(parent: TreeNode, unsatisfied: string[]): PathNode[] {
+  const sibs = parent.children;
+  if (sibs.length === 0) return [];
+
+  // Every descendant by id, plus which SIBLING contains it. See the lift above.
+  const byId = new Map<string, TreeNode[]>();
+  const owner = new Map<TreeNode, TreeNode>();
+  const index = (n: TreeNode, sib: TreeNode): void => {
+    owner.set(n, sib);
+    const l = byId.get(n.rec.id);
+    if (l) l.push(n); else byId.set(n.rec.id, [n]);
+    for (const c of n.children) index(c, sib);
+  };
+  for (const s of sibs) index(s, s);
+
+  interface Edge { readyAt: number | null; producer: TreeNode | null; prev: TreeNode | null }
+  const edges = new Map<TreeNode, Edge>();
+  for (const s of sibs) {
+    let readyAt: number | null = null;
+    let producer: TreeNode | null = null;
+    for (const inputId of s.node.inputs ?? []) {
+      // Occurrences inside S itself are excluded: a stage cannot be its own
+      // predecessor at this level, and a nested one is part of its cost rather
+      // than a thing it waited for.
+      const cands = (byId.get(inputId) ?? []).filter((c) => owner.get(c) !== s);
+      if (cands.length === 0) continue;
+      let best: TreeNode | null = null;
+      for (const c of cands) {
+        // The LATEST occurrence that finished before this stage began. Latest
+        // rather than first because a stage run repeatedly (CCL rounds, a
+        // second overflow readback) is consumed at its most recent value.
+        if (c.rec.end <= 0 || c.rec.end > s.rec.start) continue;
+        if (!best || c.rec.end > best.rec.end) best = c;
+      }
+      if (!best) { unsatisfied.push(`${s.rec.id} <- ${inputId}`); continue; }
+      if (readyAt === null || best.rec.end > readyAt) { readyAt = best.rec.end; producer = best; }
+    }
+    edges.set(s, { readyAt, producer, prev: producer ? owner.get(producer)! : null });
+  }
+
+  // The walk starts at the LAST-FINISHING sibling, which is what "sets the
+  // floor" means: nothing at this level can complete before it does.
+  let terminal = sibs[0];
+  for (const s of sibs) if (recEnd(s.rec) > recEnd(terminal.rec)) terminal = s;
+
+  const rev: PathNode[] = [];
+  // Ends strictly decrease along the walk (a producer finished before its
+  // consumer started), so this cannot cycle. The guard is here anyway because
+  // a coarsened clock can make two timestamps equal, and an instrument that
+  // hangs is worse than one that reports a short chain.
+  const seen = new Set<TreeNode>();
+  let cur: TreeNode | null = terminal;
+  while (cur && !seen.has(cur)) {
+    seen.add(cur);
+    // Annotated because the inference is circular otherwise: `cur` is
+    // reassigned from `e.prev`, so tsc will not derive `e` from a lookup keyed
+    // on `cur` (TS7022).
+    const e: Edge = edges.get(cur)!;
+    rev.push({
+      node: cur,
+      readyAt: e.readyAt,
+      waitMs: e.readyAt === null ? 0 : cur.rec.start - e.readyAt,
+      boundBy: e.producer ? e.producer.rec.id : null,
+      inner: levelPath(cur, unsatisfied),
+    });
+    cur = e.prev;
+  }
+  rev.reverse();
+  return rev;
+}
+
+export function criticalPath(parent: TreeNode): CriticalPath {
+  const unsatisfied: string[] = [];
+  const chain = levelPath(parent, unsatisfied);
+  const spanMs = chain.length
+    ? recEnd(chain[chain.length - 1].node.rec) - chain[0].node.rec.start
+    : 0;
+  const onPathMs = chain.reduce((a, p) => a + p.node.durationMs, 0);
+  return { chain, spanMs, onPathMs, unsatisfied: [...new Set(unsatisfied)] };
+}
+
 // ── A TIMING SESSION: one record set per rep, and the caller's own preserved ──
 //
 // A harness that measures N reps needs a fresh record set per rep and must
@@ -410,7 +553,20 @@ export function formatSpanTree(join: JoinResult, table: StageTable): string {
       + ` (${pct}%, self ${n.selfMs.toFixed(2)}ms)${n.node.sync ? ' SYNC' : ''}`);
     for (const c of n.children) walk(c, depth + 1, n.durationMs);
   };
-  for (const r of join.roots) walk(r, 0, r.durationMs);
+  for (const r of join.roots) {
+    walk(r, 0, r.durationMs);
+    // The dependency view of the same root, appended rather than given its own
+    // console entry point: it is one more reading of one instrument, and a
+    // reader who has the decomposition in front of them is exactly the reader
+    // who wants to know which of those rows are actually in series.
+    //
+    // Suppressed below two nodes because a one-node "chain" says nothing that
+    // the row above it did not already say.
+    const cp = criticalPath(r);
+    if (cp.chain.length >= 2) {
+      lines.push(...formatCriticalPath(cp, r.durationMs).split('\n'));
+    }
+  }
   if (join.orphans.length) {
     lines.push(`!! ${join.orphans.length} record(s) ran OUTSIDE the stage that declares them:`);
     for (const o of join.orphans.slice(0, 8)) {
@@ -421,6 +577,33 @@ export function formatSpanTree(join: JoinResult, table: StageTable): string {
     const ids = [...new Set(join.unknown.map((u) => u.id))];
     lines.push(`note: ${join.unknown.length} record(s) from outside this table (${ids.join(', ')}).`);
     lines.push(`      They did not join, so nothing of theirs is inside the rows above.`);
+  }
+  return lines.join('\n');
+}
+
+// The chain, indented by level. `wait` is the column to read: it is the only
+// number here that the self-time tree cannot produce, and it sits on the EDGE
+// between two stages rather than inside either of them.
+export function formatCriticalPath(cp: CriticalPath, totalMs: number): string {
+  const lines: string[] = [];
+  const pct = totalMs > 0 ? ((cp.spanMs / totalMs) * 100).toFixed(0) : '?';
+  lines.push(`  critical path: ${cp.spanMs.toFixed(2)}ms of ${totalMs.toFixed(2)}ms (${pct}%),`
+    + ` ${cp.chain.length} stage(s) in series`);
+  const walk = (ps: readonly PathNode[], depth: number): void => {
+    for (const p of ps) {
+      const wait = p.readyAt === null
+        ? ''
+        : `  wait ${p.waitMs.toFixed(2)}ms on ${p.boundBy}`;
+      lines.push(`  ${'  '.repeat(depth + 1)}${p.node.node.label}`
+        + ` -- ${p.node.durationMs.toFixed(2)}ms${wait}`);
+      walk(p.inner, depth + 1);
+    }
+  };
+  walk(cp.chain, 0);
+  if (cp.unsatisfied.length) {
+    lines.push(`  !! ${cp.unsatisfied.length} dependency edge(s) whose input had not FINISHED when the`);
+    lines.push(`     consumer started: ${cp.unsatisfied.join(', ')}. Either the \`inputs\` declaration`);
+    lines.push(`     is wrong or those two genuinely overlap.`);
   }
   return lines.join('\n');
 }

@@ -1,9 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
-  type StageRecord, type StageTable, joinRecords, profilerBeginSession,
+  type CriticalPath, type PathNode, type StageRecord, type StageTable,
+  criticalPath, joinRecords, profilerBeginSession,
 } from '../src/sphereLab/profiling/profiler.ts';
-import { POSE_STAGES, POSE_STAGE_TABLE } from '../src/pose/timing/stages.ts';
+import { POSE_STAGE_TABLE } from '../src/pose/timing/stages.ts';
+import { ALL_STAGES } from '../src/sphereLab/profiling/stages.ts';
 import { runPoseOn } from '../src/sphereLab/harness/runPose.ts';
 import { loadInput } from './helpers/fixtures.ts';
 import { wants } from '../src/pose/intermediates.ts';
@@ -148,16 +150,67 @@ test('a stage that STRADDLES its declared parent is an orphan, and only that cas
 
 // ── The declaration itself ──
 
-test('every `within` and `inputs` in the pose table names a stage that exists', () => {
-  const ids = new Set(Object.keys(POSE_STAGES));
-  const bad: string[] = [];
-  for (const [id, node] of Object.entries(POSE_STAGES)) {
-    const n = node as { within: string | null; inputs?: readonly string[] };
-    if (n.within !== null && !ids.has(n.within)) bad.push(`${id}.within -> ${n.within}`);
-    for (const i of n.inputs ?? []) if (!ids.has(i)) bad.push(`${id}.inputs -> ${i}`);
-  }
-  assert.deepEqual(bad, [], `dangling stage references: ${bad.join(', ')}`);
-});
+// Both tables, because ALL_STAGES is where the CROSS-table edges live -- the
+// app declares `app.project <- pose.drain` and overrides `pose.run` to sit
+// inside `app.reconstruct`, and neither reference is visible from the library
+// side. A dangling one there does not fail to compile: the fields are plain
+// strings, and the only symptom is a stage that silently never joins.
+for (const [name, table] of [['pose', POSE_STAGE_TABLE], ['app (ALL_STAGES)', ALL_STAGES]] as const) {
+  test(`every \`within\` and \`inputs\` in the ${name} table names a stage that exists`, () => {
+    const ids = new Set(Object.keys(table));
+    const bad: string[] = [];
+    for (const [id, n] of Object.entries(table)) {
+      if (n.within !== null && !ids.has(n.within)) bad.push(`${id}.within -> ${n.within}`);
+      for (const i of n.inputs ?? []) if (!ids.has(i)) bad.push(`${id}.inputs -> ${i}`);
+    }
+    assert.deepEqual(bad, [], `dangling stage references: ${bad.join(', ')}`);
+  });
+
+  test(`dependency edges in the ${name} table are acyclic`, () => {
+    // Containment has its own check below; `inputs` needs one too, and for a
+    // sharper reason: the backward walk follows these edges, and only the
+    // monotonically-decreasing end times stop a cycle in the DECLARATION from
+    // becoming a cycle in the walk. Keep the declaration acyclic and that
+    // argument does not have to hold on its own.
+    const visiting = new Set<string>(), done = new Set<string>();
+    const visit = (id: string, trail: string[]): void => {
+      if (done.has(id)) return;
+      assert.ok(!visiting.has(id), `dependency cycle: ${[...trail, id].join(' -> ')}`);
+      visiting.add(id);
+      for (const i of table[id].inputs ?? []) visit(i, [...trail, id]);
+      visiting.delete(id);
+      done.add(id);
+    };
+    for (const id of Object.keys(table)) visit(id, []);
+  });
+
+  test(`containment in the ${name} table is acyclic`, () => {
+    for (const id of Object.keys(table)) {
+      const seen = new Set<string>([id]);
+      let cur: string | null = table[id].within;
+      while (cur !== null) {
+        assert.ok(!seen.has(cur), `containment cycle through ${cur}`);
+        seen.add(cur);
+        cur = table[cur].within;
+      }
+    }
+  });
+
+  // A `within` that points at a stage the parent does not otherwise relate to
+  // is fine; a stage declaring its own CONTAINER as a dependency is not -- that
+  // is the pose.votes/pose.residency defect, in declaration form. The join
+  // would leave it permanently unsatisfied, since a parent cannot finish before
+  // the child it contains starts.
+  test(`no stage in the ${name} table declares its own container as an input`, () => {
+    const bad: string[] = [];
+    for (const [id, n] of Object.entries(table)) {
+      const ancestors = new Set<string>();
+      for (let cur = n.within; cur !== null; cur = table[cur]?.within ?? null) ancestors.add(cur);
+      for (const i of n.inputs ?? []) if (ancestors.has(i)) bad.push(`${id}.inputs -> ${i} (its own ancestor)`);
+    }
+    assert.deepEqual(bad, []);
+  });
+}
 
 // ── The declarations against the REAL call graph ──
 //
@@ -220,14 +273,189 @@ test('a real CPU reconstruction joins into ONE tree with no orphans', async () =
   }
 });
 
-test('containment in the pose table is acyclic and bottoms out at pose.run', () => {
-  for (const id of Object.keys(POSE_STAGE_TABLE)) {
-    const seen = new Set<string>([id]);
-    let cur: string | null = POSE_STAGE_TABLE[id].within;
-    while (cur !== null) {
-      assert.ok(!seen.has(cur), `containment cycle through ${cur}`);
-      seen.add(cur);
-      cur = POSE_STAGE_TABLE[cur].within;
-    }
-  }
+// ── THE CRITICAL PATH: joined on `inputs`, not `within` ───────────────────
+//
+// A separate table, because the containment fixture above has no dependency
+// edges to speak of and the cases that matter here are about WHICH edge binds.
+//
+//   head -> mid -> tail            the spine
+//   side                           runs early, feeds tail, and must LOSE to mid
+//   deep                           produced inside `mid`, consumed by `tail`
+//
+const DEP: StageTable = {
+  run: { label: 'run', within: null },
+  head: { label: 'head', within: 'run' },
+  mid: { label: 'mid', within: 'run', inputs: ['head'] },
+  deep: { label: 'deep', within: 'mid' },
+  side: { label: 'side', within: 'run', inputs: ['head'] },
+  tail: { label: 'tail', within: 'run', inputs: ['side', 'deep'] },
+};
+
+function chainIds(cp: CriticalPath): string[] {
+  const out: string[] = [];
+  const walk = (ps: readonly PathNode[]): void => {
+    for (const p of ps) { out.push(p.node.rec.id); walk(p.inner); }
+  };
+  walk(cp.chain);
+  return out;
+}
+
+// ── THE CONTROL FOR THE LIFT ──
+//
+// `tail` declares `deep`, which runs two levels down inside `mid`. A resolver
+// that only looked at SIBLINGS would find no producer for that edge, fall back
+// to `side` (the other input), and report a chain that skips `mid` entirely --
+// which is precisely the class of bug this found in the real table, where the
+// whole 41ms LSD chain fell off the CPU path. So the assertion is not "the
+// chain is right", it is "the deep edge beat the shallow one".
+test('a producer nested inside a sibling still binds, lifted to that sibling', () => {
+  const j = joinRecords([
+    rec('run', 0, 100),
+    rec('head', 0, 10),
+    rec('side', 10, 12),       // ready at 12 -- early, so NOT binding
+    rec('mid', 10, 40), rec('deep', 20, 30),
+    rec('tail', 40, 50),
+  ], DEP);
+  const cp = criticalPath(j.roots[0]);
+  assert.deepEqual(chainIds(cp), ['head', 'mid', 'deep', 'tail']);
+  const tail = cp.chain[cp.chain.length - 1];
+  assert.equal(tail.boundBy, 'deep', 'the binding input is the deep producer, named where it RAN');
+  assert.equal(tail.readyAt, 30, 'readyAt is when the data existed, not when its container finished');
+  assert.equal(tail.waitMs, 10, 'so the 10ms of `mid` after `deep` finished reads as wait');
+  assert.deepEqual(cp.unsatisfied, []);
 });
+
+// The same fixture with the deep producer made EARLY, so `side` binds instead.
+// Without this, a resolver that always preferred the deepest or the last-listed
+// input would pass the test above for the wrong reason.
+test('the binding input is the LATEST-finishing one, whichever that is', () => {
+  const j = joinRecords([
+    rec('run', 0, 100),
+    rec('head', 0, 10),
+    rec('mid', 10, 40), rec('deep', 11, 12),  // ready at 12
+    rec('side', 30, 35),                      // ready at 35 -- now the later one
+    rec('tail', 40, 50),
+  ], DEP);
+  const cp = criticalPath(j.roots[0]);
+  assert.equal(cp.chain[cp.chain.length - 1].boundBy, 'side');
+  assert.deepEqual(chainIds(cp), ['head', 'side', 'tail']);
+});
+
+test('the walk starts at the LAST-FINISHING stage, not the last recorded one', () => {
+  // `side` is recorded after `tail` but finishes first. The floor is set by
+  // whatever ends last, so the walk must begin at `tail` regardless of order.
+  const j = joinRecords([
+    rec('run', 0, 100),
+    rec('head', 0, 10), rec('mid', 10, 20), rec('deep', 12, 15),
+    rec('tail', 20, 60), rec('side', 10, 11),
+  ], DEP);
+  const cp = criticalPath(j.roots[0]);
+  assert.equal(cp.chain[cp.chain.length - 1].node.rec.id, 'tail');
+  assert.equal(cp.spanMs, 60, 'head start 0 to tail end 60');
+});
+
+test('a wait is the gap on the EDGE, not time inside either stage', () => {
+  const j = joinRecords([rec('run', 0, 100), rec('head', 0, 10), rec('mid', 30, 40)], DEP);
+  const cp = criticalPath(j.roots[0]);
+  const mid = cp.chain[1];
+  assert.equal(mid.readyAt, 10);
+  assert.equal(mid.waitMs, 20, 'the 20ms between head ending and mid starting belongs to neither span');
+  assert.equal(cp.chain[0].readyAt, null, 'the head declares no input that ran here');
+  assert.equal(cp.chain[0].waitMs, 0);
+});
+
+// ── THE PAIR THAT MAKES `unsatisfied` MEAN SOMETHING ──
+//
+// Only the second of these two discriminates. A version that reported every
+// unresolved input would pass the first and would then warn on EVERY run --
+// `lsd.gradient` declares `pose.residency`, which by design runs a level above
+// it, and the CPU backend records no `lsd.fitDispatch` at all. A warning that
+// fires constantly is a warning nobody reads.
+test('an input that ran but had not FINISHED is reported', () => {
+  const j = joinRecords([rec('run', 0, 100), rec('head', 0, 50), rec('mid', 10, 40)], DEP);
+  const cp = criticalPath(j.roots[0]);
+  assert.deepEqual(cp.unsatisfied, ['mid <- head']);
+});
+
+test('an input that never recorded is SILENT, and the stage becomes a head', () => {
+  const j = joinRecords([rec('run', 0, 100), rec('mid', 10, 40)], DEP);
+  const cp = criticalPath(j.roots[0]);
+  assert.deepEqual(cp.unsatisfied, [], 'a stage that did not run on this backend is not an anomaly');
+  assert.equal(cp.chain.length, 1);
+  assert.equal(cp.chain[0].readyAt, null);
+});
+
+test('a leaf has no inner path, and a childless root has no chain', () => {
+  const j = joinRecords([rec('run', 0, 100)], DEP);
+  const cp = criticalPath(j.roots[0]);
+  assert.deepEqual(cp.chain, []);
+  assert.equal(cp.spanMs, 0);
+});
+
+// ── THE CRITICAL PATH AGAINST THE REAL CALL GRAPH ──
+//
+// The synthetic tests above check the walk. This checks the DECLARATION, and it
+// is the only thing that can: an `inputs` entry naming a stage that never
+// records on this backend is a perfectly well-typed string, and its only
+// symptom is a chain that quietly stops early.
+//
+// That is not hypothetical -- it is the defect this test was written after.
+// `lsd.fit` was opened inside fitRegionsGPU, so a CPU run recorded none, and
+// `votes.filter`'s declared input vanished. The walk terminated at
+// `votes.filter` and reported 0.25ms of rectangle filtering as the whole of the
+// LSD chain, with the 42ms of `lsd.grow` feeding it nowhere on the path. Every
+// other check in this file was green throughout: the tree was well-formed, the
+// self times were right, and the ranking was correct. Only the chain was wrong.
+//
+// CPU backend, so it runs headless. The GPU-only stages are still owed a device
+// session -- and `lsd.fit`'s inner chain (fitDispatch -> fitUnpack -> wrap) is
+// entirely among them, so the three edges declared there are UNVERIFIED here.
+test('the critical path through a real CPU reconstruction reaches the whole chain', async () => {
+  const input = loadInput();
+  const session = profilerBeginSession();
+  let records;
+  try {
+    await runPoseOn(input, 'cpu', wants('fx', 'regions'));
+    records = session.takeRepRecords();
+  } finally {
+    session.end();
+  }
+
+  const j = joinRecords(records, POSE_STAGE_TABLE);
+  const run = j.roots.find((r) => r.rec.id === 'pose.run')!;
+  const cp = criticalPath(run);
+  const ids = chainIds(cp);
+
+  assert.deepEqual(
+    cp.unsatisfied, [],
+    'a declared input had not finished when its consumer started -- either `inputs` is wrong in '
+    + 'pose/timing/stages.ts, or the two spans overlap and the edge is not a dependency',
+  );
+  // Named explicitly rather than counted: a stage silently dropping off the
+  // chain is exactly the failure above, and a count would have gone from 13 to
+  // 12 without saying which one left.
+  for (const id of ['pose.residency', 'pose.votes', 'pose.composites', 'lsd.gradient',
+    'lsd.grow', 'lsd.fit', 'votes.filter', 'votes.segments', 'pose.fit', 'pose.assembly',
+    'pose.distance', 'gpp.classify', 'gpp.search', 'pose.decode']) {
+    assert.ok(ids.includes(id), `${id} is not on the critical path of a CPU reconstruction`);
+  }
+  assert.equal(ids[0], 'pose.residency', 'the gray upload is what everything else waits on');
+
+  // The pipeline is fully serial on CPU, so the chain should account for very
+  // nearly the whole reconstruction. A real number rather than a token one: if
+  // this ever drops it means either genuine concurrency appeared (interesting)
+  // or an edge stopped resolving (a bug), and both deserve a look.
+  const share = cp.spanMs / run.durationMs;
+  assert.ok(share > 0.9, `critical path covers only ${(share * 100).toFixed(0)}% of the reconstruction`);
+
+  // Waits are gaps between stages, so they cannot exceed the window they sit in.
+  const walkWaits = (ps: readonly PathNode[]): void => {
+    for (const p of ps) {
+      assert.ok(p.waitMs >= 0, `${p.node.rec.id} has a negative wait ${p.waitMs}`);
+      assert.ok(p.waitMs <= cp.spanMs, `${p.node.rec.id} waits longer than the whole chain`);
+      walkWaits(p.inner);
+    }
+  };
+  walkWaits(cp.chain);
+});
+

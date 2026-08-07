@@ -3,7 +3,7 @@ import { computePoseFromCapture, type PoseResult } from '../../pose/poseCompute.
 import { NO_INTERMEDIATES } from '../../pose/intermediates.ts';
 import type { HarnessInput } from './input.ts';
 import {
-  type TreeNode, joinRecords, profilerBeginSession,
+  type PathNode, type TreeNode, criticalPath, joinRecords, profilerBeginSession,
 } from '../profiling/profiler.ts';
 import { POSE_STAGE_TABLE } from '../../pose/timing/stages.ts';
 import {
@@ -190,6 +190,56 @@ interface SpanBreakdown {
   crossOriginIsolated: boolean;
 }
 
+// ── The DEPENDENT chain, which the self-time table structurally cannot show ──
+//
+// The span breakdown above decomposes cost; this one answers what to do about
+// it. A stage OFF the critical path can be made free without the reconstruction
+// getting any faster, and the self-time table gives no way to tell which stages
+// those are -- it ranks by cost, and cost is not leverage.
+//
+// Two readings, and they are different findings:
+//
+//   sharePct near 100 means the level is a serial chain. There is no slack to
+//   exploit and no reordering to do; the only lever is making a stage cheaper.
+//   That is the expected answer for `pose.run` today and it is worth having
+//   MEASURED rather than assumed, because it is the premise every "overlap
+//   these two stages" idea rests on.
+//
+//   waitMs on an edge is a stall the self-time table files under the enclosing
+//   stage. `fit.dispatch` ends at submit, `fit.finish` begins after the readback
+//   resolves; the fence between them belongs to neither span and shows up in
+//   `pose.fit`'s self time with nothing naming it. Here it is an edge with a
+//   producer's name on it, which is the form the perf TODO's readback-stall
+//   finding has always wanted and never had.
+interface CriticalRow {
+  id: string;
+  label: string;
+  depth: number;    // level in the chain, so the row reads as nesting
+  medianMs: number; // median over reps of this stage's DURATION (not self time)
+  waitMs: number;   // median over reps of start - readyAt
+  boundBy: string | null;
+}
+
+interface CriticalPathReport {
+  rows: CriticalRow[];
+  // Median over reps of head-start to tail-end at the TOP level.
+  spanMs: number;
+  sharePct: number; // spanMs against the reconstruction median
+  // Every waitMs on the chain, summed. These do not double-count: a wait at one
+  // level sits BETWEEN two siblings, a wait a level down sits INSIDE one of
+  // them, and neither interval is inside the other. So this is the honest "time
+  // on the critical path spent waiting on a dependency rather than executing".
+  waitTotalMs: number;
+  // The chain's SHAPE changed between reps. The rows below are one rep's, so a
+  // true here means they are not representative -- and it is a finding rather
+  // than a defect: it means two stages are close enough in end time that which
+  // one binds is decided by jitter, i.e. there is real slack somewhere.
+  varied: boolean;
+  // See CriticalPath.unsatisfied -- a declared input that had not finished when
+  // its consumer started.
+  unsatisfied: string[];
+}
+
 // ── Every bus crossing that happens DURING a reconstruction ───────────────
 //
 // Built from the transfer ledger in the TIMED reps (probe off), so the ms column
@@ -318,6 +368,11 @@ interface ReconstructionTimingReport {
   // compared against a nine-rep median would be comparing two different runs.
   spanBreakdown: SpanBreakdown;
 
+  // ── which of those rows are actually in SERIES, every timed rep ──
+  // Same records, joined the other way: `inputs` instead of `within`. This is
+  // what makes a breakdown actionable rather than merely informative.
+  criticalPath: CriticalPathReport;
+
   // ── where the GPU compute actually goes, from its own rep ──
   // The only instrument that can see INSIDE `votes`. Null when the device lacks
   // the optional 'timestamp-query' feature -- which is a different statement
@@ -411,6 +466,22 @@ function flattenSelfTimes(
   for (const n of nodes) {
     out.push({ label: n.node.label, selfMs: n.selfMs, depth, sync: n.node.sync === true });
     flattenSelfTimes(n.children, depth + 1, out);
+  }
+}
+
+// One rep's critical path, flattened depth-first in execution order. Same shape
+// as flattenSelfTimes and for the same reason: position carries the structure,
+// so the rows need no sort.
+function flattenPath(
+  chain: readonly PathNode[], depth: number,
+  out: { id: string; label: string; depth: number; durationMs: number; waitMs: number; boundBy: string | null }[],
+): void {
+  for (const p of chain) {
+    out.push({
+      id: p.node.rec.id, label: p.node.node.label, depth,
+      durationMs: p.node.durationMs, waitMs: p.waitMs, boundBy: p.boundBy,
+    });
+    flattenPath(p.inner, depth + 1, out);
   }
 }
 
@@ -563,6 +634,16 @@ export async function timeReconstruction(
     // affected -- a bare count would make every row suspect.
     const foreignIds = new Set<string>();
     const straddled = new Set<string>();
+    // The critical path, per rep. Durations and waits keyed by stage id so every
+    // number is a median on the same footing as the self-time rows beside it;
+    // the SHAPE is taken from the last rep, with `cpShapes` there to say whether
+    // that was a safe thing to do.
+    const cpSpanMs: number[] = [];
+    const cpDurMs = new Map<string, number[]>();
+    const cpWaitMs = new Map<string, number[]>();
+    const cpUnsatisfied = new Set<string>();
+    const cpShapes = new Set<string>();
+    let cpRows: CriticalRow[] = [];
     // Per-label crossing cost from the CLEAN reps, and the stall grouping. Kept
     // per rep so both get a median instead of resting on whichever rep the probe
     // happened to run.
@@ -624,6 +705,29 @@ export async function timeReconstruction(
           if (!spanMs.has(label)) spanMs.set(label, []);
           spanMs.get(label)!.push(v.ms);
           spanMeta.set(label, { depth: v.depth, count: v.count, sync: v.sync });
+        }
+
+        // The same joined tree walked along `inputs` rather than `within`. Free
+        // here -- no extra reps, no extra recording, just a second reading of
+        // records already taken, which is the argument for the DAG being one
+        // instrument with two views rather than two instruments.
+        const cp = criticalPath(stage);
+        cpSpanMs.push(cp.spanMs);
+        for (const u of cp.unsatisfied) cpUnsatisfied.add(u);
+        const cpFlat: { id: string; label: string; depth: number; durationMs: number; waitMs: number; boundBy: string | null }[] = [];
+        flattenPath(cp.chain, 0, cpFlat);
+        cpShapes.add(cpFlat.map((f) => `${f.depth}:${f.id}`).join('>'));
+        // Overwritten per rep rather than accumulated, matching the stall
+        // grouping above: the chain is structural and expected to be identical
+        // every rep, and `cpShapes` is what turns that expectation into a
+        // reported fact instead of an assumption.
+        cpRows = cpFlat.map((f) => ({
+          id: f.id, label: f.label, depth: f.depth, medianMs: 0, waitMs: 0, boundBy: f.boundBy,
+        }));
+        for (const f of cpFlat) {
+          if (!cpDurMs.has(f.id)) { cpDurMs.set(f.id, []); cpWaitMs.set(f.id, []); }
+          cpDurMs.get(f.id)!.push(f.durationMs);
+          cpWaitMs.get(f.id)!.push(f.waitMs);
         }
       }
 
@@ -742,6 +846,16 @@ export async function timeReconstruction(
     }));
     const sumWhere = (want: boolean) => spanRows.reduce((a, r) => a + (r.sync === want ? r.medianMs : 0), 0);
 
+    // Medians filled in against the shape taken from the last rep. A row whose
+    // id was on the chain in only SOME reps still gets a median -- over the reps
+    // it appeared in -- which is the right answer for a row that is on the shape
+    // being printed, and `varied` is what tells the reader to distrust it.
+    for (const row of cpRows) {
+      row.medianMs = median(cpDurMs.get(row.id) ?? []);
+      row.waitMs = median(cpWaitMs.get(row.id) ?? []);
+    }
+    const cpSpan = median(cpSpanMs);
+
     const crossRows: CrossingRow[] = [...crossMs.entries()].map(([what, xs]) => {
       const m = crossMeta.get(what)!;
       return {
@@ -779,6 +893,14 @@ export async function timeReconstruction(
         foreignIds: [...foreignIds],
         straddled: [...straddled],
         crossOriginIsolated: globalThis.crossOriginIsolated === true,
+      },
+      criticalPath: {
+        rows: cpRows,
+        spanMs: cpSpan,
+        sharePct: poseMedianMs > 0 ? (cpSpan / poseMedianMs) * 100 : 0,
+        waitTotalMs: cpRows.reduce((a, r) => a + r.waitMs, 0),
+        varied: cpShapes.size > 1,
+        unsatisfied: [...cpUnsatisfied],
       },
       allocation,
       gpuTimeline,
@@ -889,6 +1011,43 @@ export function formatReconstructionTiming(r: ReconstructionTimingReport | strin
     if (!vb.crossOriginIsolated) {
       lines.push(`    !! crossOriginIsolated === false -- performance.now() is coarsened to ~100us, so every`);
       lines.push(`       sub-millisecond row above is biased LOW. Hard-reload in a new tab (HMR will not apply COOP/COEP).`);
+    }
+  }
+  // Straight after the decomposition, because it is the same rows read for
+  // leverage rather than for cost: what to make faster, not where time went.
+  {
+    const cp = r.criticalPath;
+    if (cp.rows.length === 0) {
+      lines.push(`  NO CRITICAL PATH -- no stage on the chain declared an input that recorded (see pose/timing/stages.ts)`);
+    } else {
+      lines.push(`  critical path (the DEPENDENT chain, joined on \`inputs\` not \`within\`):`
+        + ` ${cp.spanMs.toFixed(2)}ms = ${cp.sharePct.toFixed(0)}% of the median,`
+        + ` ${cp.waitTotalMs.toFixed(2)}ms of it WAITING`);
+      for (const row of cp.rows) {
+        // The wait column is on the EDGE into this row, so it is blank for a
+        // head. Printed with the producer's id because "waited 4.2ms" without
+        // naming what it waited on is the form the old reports already had, in
+        // the enclosing stage's self time, and it was not actionable.
+        const wait = row.boundBy === null
+          ? ''
+          : `  wait ${row.waitMs.toFixed(2)}ms on ${row.boundBy}`;
+        lines.push(`    ${'  '.repeat(row.depth)}${row.label.padEnd(36 - row.depth * 2)}`
+          + ` ${row.medianMs.toFixed(2).padStart(6)}ms${wait}`);
+      }
+      // Spelled out rather than left to be inferred from a percentage, because
+      // the two readings lead to opposite work.
+      lines.push(cp.sharePct >= 90
+        ? `    ${cp.sharePct.toFixed(0)}% in series: there is no slack to overlap here. The only lever is making a stage cheaper.`
+        : `    ${cp.sharePct.toFixed(0)}% in series: ${(100 - cp.sharePct).toFixed(0)}% of the median is NOT on the chain -- either genuine slack or unmeasured work.`);
+      if (cp.varied) {
+        lines.push(`    !! the chain's SHAPE differed between reps -- the rows above are one rep's. Two stages`);
+        lines.push(`       end close enough together that jitter decides which one binds, so there IS slack there.`);
+      }
+      if (cp.unsatisfied.length) {
+        lines.push(`    !! ${cp.unsatisfied.length} edge(s) whose input had not FINISHED when the consumer started:`);
+        lines.push(`       ${cp.unsatisfied.join(', ')}. Either \`inputs\` is wrong in pose/timing/stages.ts,`);
+        lines.push(`       or those stages genuinely overlap and the edge is not a dependency.`);
+      }
     }
   }
   if (r.gpuTimeline) {

@@ -50,6 +50,11 @@ export interface PoseInput {
   };
 }
 
+// The five stage spans, read straight off the record objects. These do NOT sum
+// to a reconstruction: the gray upload (`pose.residency`) sits ahead of all of
+// them and is deliberately outside `votesMs` -- the decode stage reuses that
+// same residency, so charging its cost to votes was a misattribution. It has
+// its own row in the span breakdown and heads the critical path.
 export interface PoseComputeTiming {
   votesMs: number; fitMs: number; poseMs: number; distanceMs: number; decodeMs: number;
 }
@@ -201,13 +206,6 @@ export async function computePoseFromCapture(
   // reconstruction cost without adding them up and hoping.
   const runSpan = poseSpan('pose.run', { backend, want: want.size });
 
-  // IS `votesMs` -- see the return statement. It is also what makes the
-  // subtree's self times readable as a decomposition of a stage rather than as
-  // free-floating durations: reconstructionTiming subtracts the children from
-  // this span to get the part of the votes stage that is in no child span at
-  // all.
-  const stageSpan = poseSpan('pose.votes');
-
   // Owned here rather than inside computeCompositesAndVotes so `gray` stays on
   // the device long enough for the fused decode at the bottom to reuse it --
   // see that function's own comment. Destroyed in the finally, which is also
@@ -219,6 +217,26 @@ export async function computePoseFromCapture(
   const residencySpan = poseSpan('pose.residency');
   const res = await createLsdChainResidency(gray, w, h, backend);
   spanEnd(residencySpan);
+
+  // IS `votesMs` -- see the return statement. It is also what makes the
+  // subtree's self times readable as a decomposition of a stage rather than as
+  // free-floating durations: reconstructionTiming subtracts the children from
+  // this span to get the part of the votes stage that is in no child span at
+  // all.
+  //
+  // OPENED AFTER THE RESIDENCY, and that is a deliberate change: it used to
+  // open above it, so `pose.votes` physically CONTAINED `pose.residency` while
+  // the stage table declares residency as an INPUT to it. The critical-path
+  // join found that on its first run -- an edge whose producer had not finished
+  // when its consumer started, which is exactly the anomaly `unsatisfied`
+  // exists to report. Two consequences, both improvements: the gray upload gets
+  // its own row at the head of the chain instead of hiding inside the votes
+  // stage's self time, and `votesMs` now means the votes stage rather than the
+  // votes stage plus an upload the DECODE stage also consumes (it reuses this
+  // residency's gray buffer, so charging the whole upload to votes was always a
+  // misattribution). Historical votesMs numbers are not comparable across this
+  // -- they are void anyway, on the config-pinning ruling.
+  const stageSpan = poseSpan('pose.votes');
   try {
     const composited = await computeCompositesAndVotes(input, res, gray, w, h, vFovRad, backend, want.has('rects'));
     const { voteComposites, votes } = composited;

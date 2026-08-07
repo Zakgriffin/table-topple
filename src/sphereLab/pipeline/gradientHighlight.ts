@@ -8,12 +8,20 @@
 
 import { type GradientField } from '../types.ts';
 
+// `field` is the pipeline's, so it is TOP-DOWN, while `out` is a flipY=false
+// preview texture and is bottom-up. The row reversal happens here, at the
+// paint, which is the same rule axesReconstruction.ts follows for the gray
+// itself: the flip goes on the way OUT to display, never on the math going in.
+// See overlays/pipelineField.ts.
 export function paintTopGradientOverlay(color: readonly [number, number, number], field: GradientField, out: Uint8Array) {
-  const { fx, fy } = field;
-  for (let i = 0; i < fx.length; i++) {
-    const o = i * 4;
-    const alpha = Math.min(1, Math.hypot(fx[i], fy[i]));
-    out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2]; out[o + 3] = Math.round(alpha * 255);
+  const { fx, fy, w, h } = field;
+  for (let y = 0; y < h; y++) {
+    const src = y * w, dst = (h - 1 - y) * w;
+    for (let x = 0; x < w; x++) {
+      const o = (dst + x) * 4;
+      const alpha = Math.min(1, Math.hypot(fx[src + x], fy[src + x]));
+      out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2]; out[o + 3] = Math.round(alpha * 255);
+    }
   }
 }
 

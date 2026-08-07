@@ -41,6 +41,17 @@ function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
 // one of these overlays was ALSO hard-gated to the gradient2x2 field view (the
 // view that always recomputes the gray anyway). Now that they render over any
 // view, the omissions became reachable -- see updateLsdOverlay's own comment.
+//
+// NOW A SUPERSET, deliberately. Five of these flags -- the two contamination
+// toggles, showTopGradient, and the two arrows -- no longer read this gray at
+// all: their overlays read the pose run's own fx/fy instead (see
+// overlays/pipelineField.ts). Leaving them listed costs one recomputation of
+// the gray when only they are on; removing one wrongly costs the diagonal
+// streaking artifact described above. The list is worth re-deriving in ONE pass
+// once updateLsdOverlay is converted too -- it and the projected-cam/
+// grid-period-phase overlays are the readers that remain -- and not before,
+// because a half-trimmed superset is harder to reason about than an untrimmed
+// one.
 function overlaysNeedGray(settings: Camera['settings']): boolean {
   return settings.showTrueContamination || settings.showReconstructedContamination
     || settings.showTopGradient

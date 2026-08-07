@@ -13,7 +13,7 @@ import { captureDistortedGrayscale } from './capture.ts';
 import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
-import { type IntermediatesRequest, wants } from './intermediates.ts';
+import { type IntermediateName, type IntermediatesRequest, wants } from './intermediates.ts';
 import { computePoseFromCapture } from './poseCompute.ts';
 import { type ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
@@ -360,11 +360,31 @@ export function drainVisuals(camera: Camera): void {
 //
 // 'decodeGrid' is unconditional: lastDecodeGrid/lastDecodeRotated/
 // lastDecodeCorrectness feed the Projected-Cam view and the pose readout, and
-// the drain always runs, so there is nothing to gate on. Everything else is a
-// per-overlay ask -- see pipeline/intermediates.ts, and step 4b for the
-// overlays that consume them.
-function displayIntermediates(_camera: Camera): IntermediatesRequest {
-  return wants('decodeGrid');
+// the drain always runs, so there is nothing to gate on.
+//
+// fx/fy are asked for only when something draws them. THIS FUNCTION IS THE
+// OTHER HALF OF A CONTRACT: overlays/pipelineField.ts returns null when they
+// were not requested and its consumers then draw nothing, so a toggle listed
+// in one place and not the other fails as a blank overlay rather than as a
+// silent recomputation. The list mirrors preview.ts's overlaysNeedGray, which
+// exists for the same class of mistake one stage earlier -- if you add a
+// toggle whose overlay reads pipelineField(), it belongs in BOTH.
+//
+// Every toggle here also has to invalidate: turning an overlay on cannot paint
+// from a run that was never asked to produce its input, so the handlers call
+// recomputeFromLastCapture rather than the overlay's own updater. That is a
+// real cost change -- flipping one of these re-runs the pose stages instead of
+// recomputing one field on the CPU -- and it is the trade the whole step is
+// making: one pipeline, asked, instead of a second one, duplicated.
+function displayIntermediates(camera: Camera): IntermediatesRequest {
+  const s = camera.settings;
+  const want: IntermediateName[] = ['decodeGrid'];
+  if (s.showTrueContamination || s.showReconstructedContamination
+    || s.showTopGradient
+    || s.showGradientArrow || s.showLevelLineArrow) {
+    want.push('fx', 'fy');
+  }
+  return wants(...want);
 }
 
 async function recomputeStages(camera: Camera) {

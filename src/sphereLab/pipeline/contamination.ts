@@ -43,11 +43,20 @@ export function computeContaminationAlpha(
   return alpha;
 }
 
-export function paintContaminationOverlay(alpha: Float64Array, color: readonly [number, number, number], out: Uint8Array) {
-  for (let i = 0; i < alpha.length; i++) {
-    const o = i * 4;
-    out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2];
-    out[o + 3] = Math.min(255, Math.round(alpha[i] * 255));
+// `alpha` is in the pipeline's TOP-DOWN order (it is computed over the
+// pipeline's own field); `out` is a flipY=false preview texture and is
+// bottom-up. Same rule as paintTopGradientOverlay: the flip goes on the way OUT
+// to display. See overlays/pipelineField.ts.
+export function paintContaminationOverlay(
+  alpha: Float64Array, color: readonly [number, number, number], out: Uint8Array, w: number, h: number,
+) {
+  for (let y = 0; y < h; y++) {
+    const src = y * w, dst = (h - 1 - y) * w;
+    for (let x = 0; x < w; x++) {
+      const o = (dst + x) * 4;
+      out[o] = color[0]; out[o + 1] = color[1]; out[o + 2] = color[2];
+      out[o + 3] = Math.min(255, Math.round(alpha[src + x] * 255));
+    }
   }
 }
 

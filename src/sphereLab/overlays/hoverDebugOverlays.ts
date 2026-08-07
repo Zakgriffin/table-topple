@@ -1,14 +1,14 @@
 import { type Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
-import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
+import { displayRowIndex, flipDy, pipelineField } from './pipelineField.ts';
+import { recomputeFromLastCapture } from '../pipeline/axesReconstruction.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
 import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import { persistConfig } from '../config.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
-import { updateTopGradientOverlay } from './gradientHighlightOverlays.ts';
 import { hashSeedIndexToHueDeg, repaintLsdRawRegionsHighlight, updateLsdOverlay } from './lsdOverlay.ts';
 import { drawOneArrow, svgEl } from './svgUtil.ts';
 
@@ -147,20 +147,21 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
   const i = fieldIndex;
   const fieldCol = i % fieldW, fieldRow = (i / fieldW) | 0;
 
-  // Derives its own field from lastNoisedPreviewGray rather than reading a
-  // cached "whatever was last PAINTED" field, matching how every other overlay
-  // here already works (lsdOverlay, contaminationOverlays,
-  // gradientHighlightOverlays all call computeGradient2x2Field themselves).
-  // The old cached field was only ever populated by the gradient2x2 branch of
-  // paintFieldViewFromGray, so these arrows silently vanished on every other
-  // view -- the sole REAL data dependency behind the field-view gates, as
-  // opposed to the other overlays' purely cosmetic ones.
-  const arrowField = camera.lastNoisedPreviewGray
-    ? computeGradient2x2Field(camera.lastNoisedPreviewGray, fieldW, fieldH)
-    : null;
+  // The POSE RUN's field, not a fresh one. This site was the worst of the four
+  // display recomputations by a wide margin: it rebuilt ~307k pixels of
+  // gradient on every single pointermove in order to read ONE of them.
+  //
+  // `i` above is a DISPLAY index (its row counts up from the bottom of the
+  // through-cam rect), and this field is top-down, so the row has to be
+  // converted -- and fy has to be negated into the display's convention. Both
+  // conversions are named functions in pipelineField.ts rather than inline
+  // arithmetic, because an un-negated fy here is a working arrow pointing the
+  // wrong way, which is the kind of bug that survives review.
+  const arrowField = pipelineField(camera);
   if (arrowsOn && arrowField) {
     const { fx, fy } = arrowField;
-    const gx = fx[i], gy = fy[i];
+    const fi = displayRowIndex(fieldRow, fieldCol, fieldW, fieldH);
+    const gx = fx[fi], gy = flipDy(fy[fi]);
     const mag = Math.hypot(gx, gy);
     if (mag > 0) {
       const px = rect.x + (fieldCol + 0.5) * (rect.w / fieldW);
@@ -214,28 +215,36 @@ toggleHideFieldBtn.addEventListener('click', () => {
   cam.settings.hideField = !cam.settings.hideField;
   toggleHideFieldBtn.classList.toggle('active', cam.settings.hideField);
   updateDistortedPreview(cam);
+  // hideField changes nothing the PIPELINE produces -- it only blanks the
+  // painted field view -- so this one still just repaints.
   updateContaminationOverlays(cam);
 });
+// recomputeFromLastCapture, not updateContaminationOverlays: these overlays
+// read the POSE RUN's fx/fy now (see overlays/pipelineField.ts), and the run
+// only produces them when the toggle was already on -- see
+// axesReconstruction.ts's displayIntermediates. Turning one on therefore has to
+// re-run the stages, which also repaints every overlay through the visual tail.
+// The same applies to all four handlers below.
 toggleTrueContamBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showTrueContamination = !cam.settings.showTrueContamination;
   toggleTrueContamBtn.classList.toggle('active', cam.settings.showTrueContamination);
   updateDistortedPreview(cam);
-  updateContaminationOverlays(cam);
+  recomputeFromLastCapture(cam);
 });
 toggleReconContamBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showReconstructedContamination = !cam.settings.showReconstructedContamination;
   toggleReconContamBtn.classList.toggle('active', cam.settings.showReconstructedContamination);
   updateDistortedPreview(cam);
-  updateContaminationOverlays(cam);
+  recomputeFromLastCapture(cam);
 });
 toggleTopGradientBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showTopGradient = !cam.settings.showTopGradient;
   toggleTopGradientBtn.classList.toggle('active', cam.settings.showTopGradient);
   updateDistortedPreview(cam);
-  updateTopGradientOverlay(cam);
+  recomputeFromLastCapture(cam);
 });
 // These 3 (rectangles/rejected/raw-regions) don't touch the gradient/
 // level-line arrow groups at all -- rectangles draw into their own SVG
@@ -277,16 +286,23 @@ toggleCompositeLineFamiliesBtn.addEventListener('click', () => {
   persistConfig();
   drawCompositeLines(cam); // recolors the SAME lines, doesn't recompute them
 });
+// The two arrow toggles also gained a recompute, for the same reason as the
+// raster overlays above: the arrows read the pose run's fx/fy, which the run
+// only produces when one of these was already on. updateHoverOverlays still
+// runs after it -- the recompute repaints through the visual tail, which does
+// not know where the cursor is.
 toggleGradientArrowBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showGradientArrow = !cam.settings.showGradientArrow;
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
+  recomputeFromLastCapture(cam);
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 });
 toggleLevelLineArrowBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showLevelLineArrow = !cam.settings.showLevelLineArrow;
   toggleLevelLineArrowBtn.classList.toggle('active', cam.settings.showLevelLineArrow);
+  recomputeFromLastCapture(cam);
   updateHoverOverlays(lastHoverClientX, lastHoverClientY);
 });
 // Purely a display-time rotation (see settings.ts's useTrueCardinalOrientation

@@ -3,7 +3,8 @@ import { GRID_STEP, MATH_QUAT } from '../../../sphereLab/constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../../../sphereLab/math/geometry.ts';
 import { tallyPositionVotesGPU } from './decodeTally.gpu.ts';
 import { buildAndTallyDecodeGPU } from './decodeGridBuild.gpu.ts';
-import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
+import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
+import { poseSpan } from '../../timing/stages.ts';
 import { C, ORDER, R, debruijnLookup, torus } from '../../../sphereLab/floorPattern.ts';
 import { type DecodeCellDebug, type DecodeSampleGrid, type DecodeSamplePoint, type PositionDecodeResult, type RecoveredAxes, type VoteResult } from '../../results.ts';
 import { type Backend } from '../../backend.ts';
@@ -506,7 +507,7 @@ export async function runPositionDecode(
   // means. One extra decodeGridLayout call, which does no per-pixel work, is
   // the cheaper of the two.
   if (backend === 'gpu') {
-    const fusedSpan = spanStart('decode (fused GPU build+tally)');
+    const fusedSpan = poseSpan('decode.fused');
     const layout = decodeGridLayout(input, gray, vFovRad);
     const fused = layout ? await buildAndTallyDecodeGPU(layout, gray, w, h, sharedGray) : null;
     if (layout && fused) {
@@ -572,7 +573,7 @@ export async function runPositionDecode(
   // GPU port, but only if it is actually expensive relative to a `gray` upload
   // -- rows x cols is on the order of a thousand ray-casts, which may well be
   // cheaper on CPU than moving the image across. Measure before porting.
-  const buildSpan = spanStart('buildDecodeSampleGrid');
+  const buildSpan = poseSpan('decode.build');
   const grid = buildDecodeSampleGrid(input, gray, w, h, vFovRad);
   spanEnd(buildSpan);
   // The pose below needs `grid` either way, which is exactly why wantGrid is a
@@ -584,7 +585,7 @@ export async function runPositionDecode(
   // one is currently a manual toggle rather than always-on (measured SLOWER
   // than CPU for typical grid sizes, expected to flip in the GPU's favor for
   // larger decode grids).
-  const tallySpan = spanStart(backend === 'cpu' ? 'tallyPositionVotes (CPU)' : 'tallyPositionVotes (GPU)');
+  const tallySpan = poseSpan('decode.tally', { backend });
   const winner = backend === 'gpu'
     ? (await tallyPositionVotesGPU(grid)) ?? tallyPositionVotes(grid)
     : tallyPositionVotes(grid);

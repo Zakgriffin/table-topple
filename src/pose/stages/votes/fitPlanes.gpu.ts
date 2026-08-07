@@ -1,6 +1,7 @@
 import * as THREE from 'three';
 import { jacobiEigenSymmetric, smallestEigenvector } from '../../../linalg.ts';
-import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
+import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
+import { poseSpan } from '../../timing/stages.ts';
 import { type Vote } from '../../results.ts';
 import { createStorageBuffer, getGPUDevice, readFloat32, uploadFloat32, uploadUniform } from '../../gpu/device.ts';
 import { gpuTimelineSlot } from '../../gpu/gpuTimeline.ts';
@@ -62,7 +63,7 @@ export async function fitPairOfPlanesGPU(
     ],
   });
 
-  const dispatchSpan = spanStart('GPU dispatch (ATA reduction)');
+  const dispatchSpan = poseSpan('fit.dispatch');
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass(gpuTimelineSlot('fit:ATA'));
   pass.setPipeline(pipeline);
@@ -87,7 +88,7 @@ export async function fitPairOfPlanesGPU(
     return null;
   }
 
-  const finishSpan = spanStart('CPU finish (sum partials + eigen)');
+  const finishSpan = poseSpan('fit.finish');
   const packed = new Float64Array(21);
   for (let g = 0; g < numWorkgroups; g++) {
     const base = g * 21;

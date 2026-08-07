@@ -15,7 +15,8 @@ import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
 import { type IntermediateName, type IntermediatesRequest, wants } from '../../pose/intermediates.ts';
 import { computePoseFromCapture, type PoseResult } from '../../pose/poseCompute.ts';
-import { type ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
+import { type StageRecord, spanEnd } from '../profiling/profiler.ts';
+import { appSpan } from '../profiling/stages.ts';
 
 // Shared pole-marker/gizmo/floor-overlay/readout tail -- called after EITHER
 // a real local reconstruction (recomputeStages below) or an already-computed
@@ -191,6 +192,20 @@ export function updateChainTransfersReadout(camera: Camera | undefined) {
 // 160ms ago" the wrong question -- what the readouts and mode overlays want
 // is which camera is on screen at PAINT time.
 async function runVisualTail(camera: Camera): Promise<void> {
+  // The tail's own root. It did not need one while structure came from the call
+  // stack -- the tail simply had no parent open, so its spans were roots by
+  // default. With structure declared, `app.project` and `app.overlays` have to
+  // name something, and the drain's `pose.drain` belongs under this rather than
+  // under the pose that handed the handle over a frame ago.
+  const tailSpan = appSpan('app.tail');
+  try {
+    await runVisualTailBody(camera);
+  } finally {
+    spanEnd(tailSpan);
+  }
+}
+
+async function runVisualTailBody(camera: Camera): Promise<void> {
   const isActive = camera === activeCamera();
 
   // FIRST, before anything reads lastDecodeGrid/lastDecodeRotated/
@@ -240,7 +255,7 @@ async function runVisualTail(camera: Camera): Promise<void> {
   if (isActive) updateChainTransfersReadout(camera);
   updateGradientCirclesDebug(camera);
 
-  const projectSpan = spanStart('projectBins (display + decode-marginals bins)');
+  const projectSpan = appSpan('app.project');
   const projectStart = performance.now();
   // Captured outside the `if` (stays null when there's no recovered axes to
   // project) so it can be handed to refreshModeVisualizations below instead
@@ -254,7 +269,7 @@ async function runVisualTail(camera: Camera): Promise<void> {
   const projectMs = performance.now() - projectStart;
   spanEnd(projectSpan);
 
-  const overlaySpan = spanStart('poleMarkers+overlays');
+  const overlaySpan = appSpan('app.overlays');
   // applyPoseVisualizations MUST stay downstream of the projection above, not
   // move back up next to the pose: applyRecoveredFloorOverlay builds the floor
   // quad's geometry out of lastProjectedBins' own u/v extent (see
@@ -297,52 +312,60 @@ function markVisualsDirty(camera: Camera): void {
 // Two things have to be true to START: something is pending, and this camera
 // is not mid-reconstruction.
 //
-// THE SECOND GUARD'S ORIGINAL REASON NO LONGER EXISTS, and it is worth being
-// precise about that rather than deleting the flag on the strength of it.
-// computePoseFromCapture used to mutate lastRecoveredAxes, lastPositionDecode
-// and friends IN PLACE as it went, so painting from a camera halfway through
-// one would mix two frames -- new axes against an old decode, a picture that
-// never existed. The pipeline returns a result now and applyPoseResult swaps it
-// in synchronously, so that interleaving is unreachable rather than guarded.
+// THE PROFILER NO LONGER NEEDS THIS GUARD, AND THE STALENESS ARGUMENT DOES.
+// That is the reverse of what this comment used to say, and getting it the
+// right way round matters, because the flag was about to be deleted on the
+// strength of the old version.
 //
-// The flag STAYS, because reason 3 below never depended on the mutation: the
-// profiler keeps one module-level span stack, and a drain overlapping a capture
-// corrupts the span TREE whatever the pose does with its own fields. That is
-// step 6's problem, not this one's. So read this guard as a profiler guard now,
-// with the staleness argument retired.
+// What the old version claimed: the in-place mutation hazard was gone (true --
+// the pipeline returns a result and applyPoseResult swaps it in synchronously),
+// so the flag survived only to keep the profiler's single span stack honest,
+// and fixing that stack would free it.
+//
+// The stack IS fixed (profiler.ts records flat intervals and joins them against
+// a declared table, so nothing can be reparented into anything). But the
+// staleness argument was retired too early:
+//
+//   applyPoseResult's atomic swap prevents a torn RESULT OBJECT. It does not
+//   prevent a torn SEQUENCE OF READS, and this tail reads camera fields on both
+//   sides of its awaits -- it takes camera.pendingIntermediates, awaits
+//   resolve(), then WRITES intermediates/lastDecodeGrid/lastDecodeRotated/
+//   lastDecodeCorrectness; later it reads lastRecoveredAxes, awaits the
+//   projection, then reads lastPoseTiming. A reconstruction landing mid-tail
+//   writes frame N's decode grid over frame N+1's state.
+//
+// So the window shrank from "the whole reconstruction" to "any instant". It did
+// not reach zero, and this exclusion is what covers it.
+//
+// THE PRECONDITION FOR DROPPING IT is therefore not a profiler fix. It is
+// collapsing the thirteen `last*` pose-result fields into one `camera.pose`, so
+// this function can snapshot a single pointer at the top and be immune to
+// whatever lands underneath it -- and so the visuals mailbox can carry the pose
+// as a PAYLOAD (like pendingCapture and pendingPoseResult already do) instead
+// of being a bare boolean over state smeared across a camera.
 //
 // That exclusion is MUTUAL: runAxesReconstruction and recomputeFromLastCapture
-// both decline to start while visualsDraining is set. Three reasons, in
-// ascending order of how much they matter:
+// both decline to start while visualsDraining is set. Two supporting reasons,
+// neither of which would justify it alone:
 //
 //   1. It costs nothing anyone can feel. The window it blocks is the same
 //      window that was already blocked before deferral existed -- the tail
 //      used to run INSIDE axesCapturing, so "reconstruction + tail" was one
 //      uninterruptible stretch either way. All this does is split the flag
 //      that covers it in two.
-//   2. Overlapping wouldn't have bought much. The tail's cost is display GPU
-//      work on the SAME device queue the pose stages use, so running it
-//      alongside the next reconstruction trades a serial wait for queue
-//      contention. The win here was never parallelism -- it is that the tail
-//      stops being AWAITED on the pose path, and it gets that either way by
-//      running in the idle gap between captures (~340ms of one, at the default
-//      500ms interval against a ~159ms reconstruction).
-//   3. It keeps the profiler honest, which is the reason it is unconditional
-//      rather than a measurement-only mode. profiling/profiler.ts keeps ONE
-//      module-level span stack and openly assumes a single profiled operation
-//      is in flight. A drain that outlived the start of the next capture would
-//      have its inner spans (projectBins' own GPU/CPU children, and
-//      projectSamples' upload/dispatch/finish) reparented under whatever that
-//      capture happened to have open -- they are opened after awaits, so
-//      forcing just the two outer spans to be roots would not have covered it.
-//      Nothing corrupts (spanEnd splices by identity), but a flamechart that
-//      files display work under the pose pipeline is worse than no flamechart:
-//      it is the exact measurement this deferral exists to move.
+//   2. Overlapping wouldn't buy much. The tail's cost is display GPU work on
+//      the SAME device queue the pose stages use, so running it alongside the
+//      next reconstruction trades a serial wait for queue contention. The win
+//      here was never parallelism -- it is that the tail stops being AWAITED on
+//      the pose path, and it gets that either way by running in the idle gap
+//      between captures (~340ms of one, at the default 500ms interval against a
+//      ~159ms reconstruction).
 //
-// Still per-camera, and so is the profiler's assumption: two cameras
-// reconstructing at once would break the span stack regardless of this, since
-// axesCapturing is per-camera too. Not a new problem and not one to solve here
-// -- there is exactly one camera today (see main.ts's animate loop).
+// Still per-camera. Two cameras reconstructing at once is no longer a profiler
+// problem (flat records cannot collide), but it would hit the same read-tearing
+// described above, and axesCapturing is per-camera too. Not a new problem and
+// not one to solve here -- there is exactly one camera today (see main.ts's
+// animate loop).
 //
 // Placement in animate() matters just as much as the guard: this must run
 // BEFORE the auto-capture trigger. runAxesReconstruction sets axesCapturing
@@ -497,14 +520,14 @@ export function runAxesReconstruction(camera: Camera) {
     axesReadout.textContent = 'computing...';
   }
   requestAnimationFrame(async () => {
-    let rootSpan: ProfileSpan | null = null;
+    let rootSpan: StageRecord | null = null;
     try {
-      rootSpan = spanStart('axesReconstruction');
+      rootSpan = appSpan('app.reconstruct', { kind: 'capture' });
       if (isPhysical(camera) && !camera.lastRealCaptureGray) {
         if (isActive) axesReadout.textContent = 'waiting for a real capture -- take a photo on the phone page';
         return;
       }
-      const captureSpan = spanStart('capture+preprocess');
+      const captureSpan = appSpan('app.capture');
       // rawGray is top-down now, from either source (pipeline/capture.ts's
       // captureDistortedGrayscale/ingestRealCapture both flip once at their
       // own source, see their own comments) -- top-down is this whole
@@ -533,7 +556,7 @@ export function runAxesReconstruction(camera: Camera) {
       camera.axesCapturing = false;
       // See PhysicalCamera.idleSpan's own comment -- this brackets exactly
       // the round trip ingestRealCapture is on the other end of closing.
-      if (isPhysical(camera)) camera.idleSpan = spanStart('idle (waiting for next frame)');
+      if (isPhysical(camera)) camera.idleSpan = appSpan('app.idle');
     }
   });
 }
@@ -561,9 +584,9 @@ export function recomputeFromLastCapture(camera: Camera) {
     axesReadout.textContent = 'computing...';
   }
   requestAnimationFrame(async () => {
-    let rootSpan: ProfileSpan | null = null;
+    let rootSpan: StageRecord | null = null;
     try {
-      rootSpan = spanStart('axesReconstruction (recompute)');
+      rootSpan = appSpan('app.reconstruct', { kind: 'recompute' });
       await recomputeStages(camera);
     } finally {
       spanEnd(rootSpan);

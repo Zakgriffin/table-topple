@@ -54,7 +54,10 @@
 //
 // types.ts/state.ts/constants.ts   shared types + tiny bits of module state
 // math/geometry.ts                 pure sphere/ray-casting math
-// profiling/profiler.ts            the one host clock
+// profiling/profiler.ts            the one host clock: flat interval records
+//                                   plus the join that gives them structure
+// profiling/stages.ts              this app's stage table, and where it says
+//                                   how it COMPOSES the library's (not shared)
 //    ^ the four above are the SHARED LEAVES: both this app and src/pose/
 //      depend on them, and the board game depends on constants.ts too, which
 //      is why they did not move into the library.

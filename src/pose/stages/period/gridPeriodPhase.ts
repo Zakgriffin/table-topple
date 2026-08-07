@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { cornerDir } from '../../../sphereLab/math/geometry.ts';
 import { C, R } from '../../../sphereLab/floorPattern.ts';
-import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
+import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
+import { poseSpan } from '../../timing/stages.ts';
 import { sweepResultantsGPU } from './periodSweep.gpu.ts';
 import { type CompositeLine } from '../../results.ts';
 import { type Backend } from '../../backend.ts';
@@ -262,7 +263,7 @@ export async function computeGridPeriodPhase(
   // plane-pair fit itself relies on), then rectify to one scalar via the
   // gnomonic projection of its own two endpoints -- NOT the normal-vector
   // ratio, see this file's header for why the two forms don't mix.
-  const classifySpan = spanStart('classify lines (cornerDir+gnomonic x2 per line)');
+  const classifySpan = poseSpan('gpp.classify');
   const rowSamples: { root: number; value: number; weight: number; p1: GnomonicPoint; p2: GnomonicPoint }[] = [];
   const colSamples: { root: number; value: number; weight: number; p1: GnomonicPoint; p2: GnomonicPoint }[] = [];
   for (const { root, line } of composites) {
@@ -336,7 +337,7 @@ export async function computeGridPeriodPhase(
   // degrades gracefully (~25-35% error) instead of exploding; measured to beat
   // this only at those extremes, deferred as the fallback if an elevated/raked
   // camera regime ever matters. See the A/B bake-off.
-  const searchSpan = spanStart('period search (integer-count + distinctness + golden)');
+  const searchSpan = poseSpan('gpp.search');
   const rowValues = rowSamples.map((s) => s.value), rowWeights = rowSamples.map((s) => s.weight);
   const colValues = colSamples.map((s) => s.value), colWeights = colSamples.map((s) => s.weight);
   // PER-FAMILY extent, then the larger of the two -- NOT the extent of the two
@@ -436,7 +437,7 @@ export async function computeGridPeriodPhase(
   // every one of that family's unit vectors equally and so cannot change its
   // resultant -- it would move the PHASE, which is exactly why the GPU never
   // computes phase and circularFit still runs on CPU for the chosen candidates.
-  const sweepSpan = spanStart(backend === 'cpu' ? 'period sweep (CPU)' : 'period sweep (GPU)');
+  const sweepSpan = poseSpan('gpp.sweep', { backend });
   let scores: Float32Array | null = null;
   if (backend === 'gpu') {
     const total = rowValues.length + colValues.length;

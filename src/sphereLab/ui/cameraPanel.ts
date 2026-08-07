@@ -384,14 +384,20 @@ bindCheckbox('forceCPU', config.global.forceCPU, (v) => {
 
 // ── The profiler toggle ──────────────────────────────────────────────────
 //
+// WHAT THIS TOGGLE DOES, because it is much narrower than it used to be: it
+// gates the DevTools MIRROR and nothing else. Spans themselves record
+// unconditionally -- they are where PoseResult.timing comes from -- and the
+// per-module WebGPU timestamp queries this switch once armed are DELETED (see
+// pose/gpu/gpuTimeline.ts; only the harness arms timestamps now, in a rep of
+// their own). The old comment here still described those queries and their
+// 9.3ms-around-a-0.07ms-kernel failure, which had not been reachable from this
+// checkbox for some time.
+//
 // Bound by hand rather than through bindCheckbox, and that is the whole point
 // of it being here instead of one line above. bindCheckbox PERSISTS to
 // localStorage and restores at bind time, which is correct for a setting and
-// wrong for this: profiling is the one switch on this panel that changes what
-// the pipeline COSTS rather than what it computes. It turns on WebGPU
-// timestamp queries in fitPlanes/decodeTally whose resolve pays its own
-// mapAsync -- the recorded case is a `GPU dispatch` span reading 9.3ms around
-// a kernel that actually ran for 0.07ms. A checkbox that quietly survived a
+// wrong for this: a performance.measure per span is real main-thread work
+// inside whatever is being measured, so a checkbox that quietly survived a
 // reload would tax every measurement taken afterwards, and every conclusion
 // drawn from one. So it starts OFF on every load, always.
 //
@@ -406,8 +412,8 @@ function applyProfilerToggle() {
   // profilerReset also calls performance.clearMeasures(), so resetting each
   // reconstruction would delete earlier captures out of the DevTools recording
   // currently in progress, which is the exact opposite of "switch it on and
-  // every following capture shows up". Turning it OFF leaves the tree intact so
-  // formatFlamechart() still has something to print.
+  // every following capture shows up". Turning it OFF leaves the records intact
+  // so formatFlamechart() still has something to print.
   if (on) profilerReset();
   profilerSetDevToolsMirror(on);
 }

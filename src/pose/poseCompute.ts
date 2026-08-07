@@ -3,7 +3,8 @@ import { GRID_STEP, MATH_QUAT } from '../sphereLab/constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../sphereLab/math/geometry.ts';
 import { FieldResidency, type TransferSummary } from './gpu/fieldResidency.ts';
 import { fitPairOfPlanesGPU } from './stages/votes/fitPlanes.gpu.ts';
-import { spanDurationMs, spanEnd, spanStart } from '../sphereLab/profiling/profiler.ts';
+import { spanDurationMs, spanEnd } from '../sphereLab/profiling/profiler.ts';
+import { poseSpan } from './timing/stages.ts';
 import { type CompositeLine, type PositionDecodeResult, type RecoveredAxes, type Vote } from './results.ts';
 import { type Backend } from './backend.ts';
 import { type PendingDecodeGrid, runPositionDecode } from './stages/decode/decodeGrid.ts';
@@ -127,15 +128,15 @@ async function computeCompositesAndVotes(
     // further down (and, for a real desktop camera, the "color composite
     // lines by row/col family" debug overlay, which reads voteComposites back
     // off the camera afterward).
-    const compositesSpan = spanStart('composites (2x2 gradient field)');
+    const compositesSpan = poseSpan('pose.composites');
     const { composites: voteComposites, rects } = await computeGradient2x2Composites(input.settings, res, w, h, backend, wantMembers);
     spanEnd(compositesSpan);
 
-    // Contains no await, so this span's duration is host CPU and is marked
-    // sync unconditionally. That used to be a branch: the retired per-pixel
-    // "world votes" source awaited a gradient readback here, making its
-    // duration wall time containing a fence.
-    const votesSpan = spanStart('votes (segments)', true);
+    // Contains no await, so this stage's duration is host CPU and is declared
+    // `sync` in the stage table. That used to be a branch: the retired
+    // per-pixel "world votes" source awaited a gradient readback here, making
+    // its duration wall time containing a fence.
+    const votesSpan = poseSpan('votes.segments');
     const votes = computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, input.aspect);
     spanEnd(votesSpan);
 
@@ -191,12 +192,21 @@ export async function computePoseFromCapture(
   let rects: LsdRectangle[] | null = null;
   const vFovRad = getAnalysisVFovRad(input);
 
+  // The root of this reconstruction, and every other span below is declared to
+  // live inside it (see pose/timing/stages.ts). It did not exist while
+  // structure came from the call stack, because the stack supplied a root for
+  // free -- whatever the caller happened to have open. Now that structure is
+  // declared, the library has to state its own top: without this, `pose.fit`
+  // and friends would each be separate roots and no report could say what one
+  // reconstruction cost without adding them up and hoping.
+  const runSpan = poseSpan('pose.run', { backend, want: want.size });
+
   // IS `votesMs` -- see the return statement. It is also what makes the
   // subtree's self times readable as a decomposition of a stage rather than as
   // free-floating durations: reconstructionTiming subtracts the children from
   // this span to get the part of the votes stage that is in no child span at
   // all.
-  const stageSpan = spanStart('votes stage');
+  const stageSpan = poseSpan('pose.votes');
 
   // Owned here rather than inside computeCompositesAndVotes so `gray` stays on
   // the device long enough for the fused decode at the bottom to reuse it --
@@ -206,7 +216,7 @@ export async function computePoseFromCapture(
   // Assembled in the try and DECORATED in the finally -- see there.
   let result: PoseResult | null = null;
 
-  const residencySpan = spanStart('residency create (gray up)');
+  const residencySpan = poseSpan('pose.residency');
   const res = await createLsdChainResidency(gray, w, h, backend);
   spanEnd(residencySpan);
   try {
@@ -224,14 +234,14 @@ export async function computePoseFromCapture(
     // With one implementation left the outer span covered exactly the same
     // interval as this one, i.e. a guaranteed-zero self time in the harness'
     // span tree. `fitMs` reads this span directly now.
-    const fitSpan = spanStart(backend === 'cpu' ? 'fitPairOfPlanes (CPU)' : 'fitPairOfPlanes (GPU)');
+    const fitSpan = poseSpan('pose.fit', { backend });
     const quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null =
       backend === 'gpu'
         ? (await fitPairOfPlanesGPU(votes)) ?? fitPairOfPlanes(votes)
         : fitPairOfPlanes(votes);
     spanEnd(fitSpan);
 
-    const poseAssemblySpan = spanStart('poseAssembly');
+    const poseAssemblySpan = poseSpan('pose.assembly');
     let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
     if (quadricPair) {
       const normalForHandedness = quadricPair.Dnormal.clone();
@@ -255,7 +265,7 @@ export async function computePoseFromCapture(
     // Grid period/phase is the SOLE source of recoveredAxes.distance -- runs
     // unconditionally whenever a quadric pair was found (real distance depends
     // on it).
-    const gppSpan = spanStart('gridPeriodPhase (distance source)');
+    const gppSpan = poseSpan('pose.distance');
     const gpp = rowDirRecovered && colDirRecovered && quadricPair
       ? await computeGridPeriodPhase(
           voteComposites, gray, w, h, MATH_QUAT, vFovRad, input.aspect,
@@ -269,7 +279,7 @@ export async function computePoseFromCapture(
       ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: gpp.height ?? 1 }
       : null;
 
-    const decodeSpan = spanStart('positionDecode');
+    const decodeSpan = poseSpan('pose.decode');
     // Hand down the chain's own gray buffer when there IS one -- the residency has
     // no device on an all-CPU chain, and `gray` is only device-resident if some
     // stage put it there. Null just means decode uploads its own, as before.
@@ -288,9 +298,12 @@ export async function computePoseFromCapture(
     // reconstructionTiming had to assert on (`stageDeltaMs`) to catch drift.
     // One source, so there is nothing left to drift.
     //
-    // Immune to the span tree's reparenting hazard (see profiler.ts's header):
-    // that corrupts a span's PLACE in the tree, never its own start/end, and
-    // these are read straight from the objects.
+    // Read straight off the record objects, which is the only place a
+    // duration ever lived -- and now the only place structure could have come
+    // from either, since the recorder keeps no stack (see profiler.ts). These
+    // numbers used to carry a caveat: a span's PLACE in the tree could be
+    // corrupted by a concurrent operation even though its own start/end never
+    // was. The caveat is retired along with the stack.
     result = {
       voteComposites, votes,
       quadricPair: correctedPair,
@@ -339,6 +352,12 @@ export async function computePoseFromCapture(
     // the result after the try instead would mean either reading the ledger
     // after destroy or summarizing twice.
     if (result) result.chainTransfers = transfers;
+
+    // Closed LAST, in the finally, so a run that threw still contributes an
+    // interval that contains its own children -- otherwise every span opened
+    // before the throw becomes an orphan of a parent that never closed, and
+    // the one report most worth reading is the one from the failure.
+    spanEnd(runSpan);
   }
 }
 
@@ -360,7 +379,7 @@ function makePendingIntermediates(
     async resolve() {
       if (spent) return drained;
       spent = true;
-      const drainSpan = spanStart('intermediates drain');
+      const drainSpan = poseSpan('pose.drain');
       try {
         const out: Intermediates = {};
         // Straight off the residency's own accessors, which already know which

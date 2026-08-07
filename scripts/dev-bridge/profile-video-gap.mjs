@@ -116,21 +116,19 @@ function fmtStats(s, unit = 'ms') {
 // alternating (idle, ingest, axesReconstruction) triples, since a
 // profilerReset() landing mid-cycle or an ingest failure can leave the
 // counts slightly uneven. Aggregate stats per name are robust to that.
-function summarizeRoots(roots) {
-  const byName = new Map();
-  const childByName = new Map();
-  for (const r of roots) {
+// The recorder hands back a FLAT list of {id, start, end} now rather than a
+// tree of named spans (see src/sphereLab/profiling/profiler.ts). That makes
+// this simpler than it was: there is no walk, and no `parent > child` key
+// either, because a stage id is already unique -- `ingest.decode` says which
+// decode it is without being qualified by its parent's name.
+function summarizeRecords(records) {
+  const byId = new Map();
+  for (const r of records) {
     const dur = r.end - r.start;
     if (!(dur > 0)) continue; // an idleSpan orphaned by a mid-cycle reset never got an .end
-    (byName.get(r.name) ?? byName.set(r.name, []).get(r.name)).push(dur);
-    for (const c of r.children ?? []) {
-      const cdur = c.end - c.start;
-      if (!(cdur > 0)) continue;
-      const key = `${r.name} > ${c.name}`;
-      (childByName.get(key) ?? childByName.set(key, []).get(key)).push(cdur);
-    }
+    (byId.get(r.id) ?? byId.set(r.id, []).get(r.id)).push(dur);
   }
-  return { byName, childByName };
+  return byId;
 }
 
 async function main() {
@@ -169,9 +167,9 @@ async function main() {
   console.log(`\n>>> Switch the phone to VIDEO mode and start streaming now. Capturing for ${SECONDS}s... <<<\n`);
   await sleep(SECONDS * 1000);
 
-  const { roots, cams } = await evalCode(`
+  const { records, cams } = await evalCode(`
     (() => {
-      const roots = window.__gapMod.prof.getFlamechartJSON();
+      const records = window.__gapMod.prof.getRecords();
       const cams = Array.from(window.__gapMod.store.cameras.values())
         .filter((c) => c.type === 'physical')
         .map((c) => ({
@@ -182,18 +180,18 @@ async function main() {
           transitMsHistory: c.transitMsHistory,
           payloadBytesHistory: c.payloadBytesHistory,
         }));
-      return { roots, cams };
+      return { records, cams };
     })()
   `);
 
-  const { byName, childByName } = summarizeRoots(roots);
-  const idle = stats(byName.get('idle (waiting for next frame)') ?? []);
-  const ingest = stats(byName.get('ingest (decode+preprocess)') ?? []);
-  const recon = stats(byName.get('axesReconstruction') ?? []);
-  const decode = stats(childByName.get('ingest (decode+preprocess) > image decode') ?? []);
-  const readback = stats(childByName.get('ingest (decode+preprocess) > pixel readback + grayscale') ?? []);
+  const byId = summarizeRecords(records);
+  const idle = stats(byId.get('app.idle') ?? []);
+  const ingest = stats(byId.get('ingest.run') ?? []);
+  const recon = stats(byId.get('app.reconstruct') ?? []);
+  const decode = stats(byId.get('ingest.decode') ?? []);
+  const readback = stats(byId.get('ingest.readback') ?? []);
 
-  console.log('── Per-cycle breakdown (root-level spans, whole capture window) ──');
+  console.log('── Per-cycle breakdown (whole capture window) ──');
   console.log(`idle (waiting for next frame):      ${fmtStats(idle)}`);
   console.log(`ingest (decode+preprocess), total:  ${fmtStats(ingest)}`);
   console.log(`  > image decode:                   ${fmtStats(decode)}`);

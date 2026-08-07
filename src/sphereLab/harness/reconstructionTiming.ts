@@ -3,8 +3,9 @@ import { computePoseFromCapture, type PoseResult } from '../../pose/poseCompute.
 import { NO_INTERMEDIATES } from '../../pose/intermediates.ts';
 import type { HarnessInput } from './input.ts';
 import {
-  type ProfileSpan, checkNesting, profilerBeginSession, spanDurationMs,
+  type TreeNode, joinRecords, profilerBeginSession,
 } from '../profiling/profiler.ts';
+import { POSE_STAGE_TABLE } from '../../pose/timing/stages.ts';
 import {
   type AllocationSample, allocationProbeResult, getGPUDevice, setAllocationProbe,
   setTransferProbe, type TransferSample, transferLedger, transferLedgerReset,
@@ -89,28 +90,31 @@ interface TransferGroup {
   queuedAheadMs: number | null;
 }
 
-// ── Reading the votes stage out of the span tree ──────────────────────────
+// ── Reading the reconstruction out of the joined span tree ────────────────
 //
-// The perf TODO's "split the votes stage into sub-timings" item. What it is
-// after is a subtraction with no answer today: `votes` is ~11.7ms, gpuTimeline
-// says ~4.7ms of that is device execution and the transfer ledger says ~0.3ms is
-// bytes, leaving ~7ms attributed to nothing at all.
+// The perf TODO's "split the votes stage into sub-timings" item, grown to cover
+// the whole pose. What it is after is a subtraction that had no answer: `votes`
+// is ~11.7ms, gpuTimeline says ~4.7ms of that is device execution and the
+// transfer ledger says ~0.3ms is bytes, leaving ~7ms attributed to nothing.
 //
-// This reports it off the profiler's own span tree rather than from a parallel
-// instrument. The tree was always the right structure and was briefly thought
-// unreachable from here, because turning it on also turned on per-module GPU
-// timestamp queries costing a mapAsync each -- those queries are now deleted
-// outright (see gpuTimeline.ts) and spans record unconditionally, so there is
-// no configuration to arrange at all.
+// Rooted at `pose.run` rather than at the votes stage. That is only possible
+// because the library declares its own root now -- structure used to come from
+// the call stack, so everything after the votes stage was a sibling under
+// whatever the CALLER had open, and a table rooted above it would have shown
+// rows whose parents were not in the tree.
 //
-// ── SELF TIME is the measurement, and it is why a tree beats a flat list ──
+// ── SELF TIME is the measurement, and the UNION is what makes it sound ──
 //
-// selfMs = a span's own duration minus the sum of its children's. So the
-// unattributed time appears AS A ROW -- the self time of `votes stage` and of
-// `composites (2x2 gradient field)` -- localized to the function it is actually
-// in, rather than as one global remainder computed by subtracting a sum. Nothing
-// has to be kept disjoint by hand, and there is no invariant to violate: adding
-// a child span later just moves time out of its parent's self row.
+// selfMs = a span's own duration minus the time covered by its children, where
+// covered is the UNION of their intervals rather than the SUM of their
+// durations. So the unattributed time appears AS A ROW, localized to the
+// function it is actually in, rather than as one global remainder.
+//
+// The union is not a refinement, it is the correctness condition. Two children
+// awaited concurrently in one Promise.all overlap; summing them double-counts
+// and could push a parent's self time NEGATIVE, which this module used to
+// detect and suppress. Contained intervals cannot out-cover their container, so
+// the row is non-negative by construction. See profiler.ts's TreeNode.selfMs.
 //
 // ── WHAT THIS IS BLIND TO, which decides how to read it ──
 //
@@ -126,67 +130,58 @@ interface TransferGroup {
 // That half is what makes the hypothesis testable; the awaiting half is
 // meaningful only in aggregate.
 //
-// Which spans are which is declared at the span (ProfileSpan.sync), not by a
-// list of names here. This module used to carry that list, covering four spans
-// defined in four other modules, and it could not be right about one of them.
+// Which spans are which is declared in the STAGE TABLE (StageNode.sync), not by
+// a list of names here. This module used to carry that list, covering four
+// spans defined in four other modules, and it could not be right about one of
+// them.
 interface SpanRow {
   label: string;
   medianMs: number; // median over reps of this label's SELF time
   count: number;    // spans carrying this label per reconstruction
   depth: number;    // indent in the tree, so the table reads as structure
-  // Straight off ProfileSpan.sync, declared at the span itself -- see its
+  // Straight off StageNode.sync, declared once in the stage table -- see its
   // comment. True means no await inside, so the number is host CPU.
   sync: boolean;
 }
 
-// Labels belonging to OTHER operations -- the display tail, the capture path,
-// a whole competing reconstruction. None of them can legitimately appear while
-// this harness is running, because it calls computePoseFromCapture directly and
-// nothing else should be recording.
-//
-// This check exists because profiler.ts keeps ONE shared span stack and its
-// header says what that costs: a second operation running concurrently gets its
-// spans REPARENTED under whatever the first has open. The pose path suspends at
-// every readback, so if an auto-capture fires during one of those awaits, its
-// entire tree lands inside `votes stage` and gets subtracted from its self time
-// -- silently, and in the direction that makes the answer look attributed. That
-// is precisely the shape of failure worth spending ten lines to detect rather
-// than trusting a run to be quiet.
-const FOREIGN_SPANS = [
-  'axesReconstruction', 'capture+preprocess', 'projectBins', 'poleMarkers+overlays',
-  'idle (waiting for next frame)', 'ingest (decode+preprocess)', 'image decode',
-];
-
-interface VotesBreakdown {
+interface SpanBreakdown {
   rows: SpanRow[]; // tree order (pre-order, by start time), not sorted by cost
   syncMs: number;  // sum of the sync rows -- real host CPU work
   asyncMs: number; // sum of the awaiting rows -- fence + kernel + rAF, mixed; a sum only
-  // Foreign span labels seen in any rep. NON-EMPTY MEANS THE BREAKDOWN IS VOID:
-  // another operation was recording into the same span stack and its cost is
-  // inside these rows. Turn auto-capture off and re-run.
-  foreign: string[];
-  // ── Two IMPOSSIBLE-VALUE checks, reported rather than rendered ──
+  // ── What used to be here, and why three of the four checks are GONE ──
   //
-  // `stageDeltaMs` used to live here: `votes stage` span duration minus the
-  // stage's own votesMs, asserting the two had not drifted apart. It is gone
-  // because they are now the SAME NUMBER -- poseCompute returns
-  // spanDurationMs(stageSpan) -- so there is no longer anything to drift.
+  // `foreign`, `negativeSelf` and `nestingViolations` all existed to report
+  // ways the SPAN STACK could lie, and the stack is gone (see profiler.ts):
   //
-  // These two replace it, and unlike it they catch faults that are live:
+  //   - `foreign` listed labels belonging to other operations, because a
+  //     concurrent capture's spans got REPARENTED into `votes stage` and were
+  //     subtracted from its self time. Records join by DECLARED id now, so a
+  //     foreign record cannot land inside a pose stage at all. It is reported
+  //     below as context, not as grounds for voiding the table.
+  //   - `negativeSelf` caught self times below zero, whose known cause was a
+  //     Promise.all's two concurrent awaits recorded as parent/child. Children
+  //     are subtracted as a UNION of intervals now, which cannot exceed a
+  //     parent that contains them.
+  //   - `nestingViolations` ran checkNesting over the subtree. A child is only
+  //     attached when its interval is contained in its parent's, so the
+  //     violation it looked for is unrepresentable.
   //
-  // Labels whose SELF TIME came out negative. A span cannot be shorter than its
-  // children, so any row here means the tree's structure is wrong for that row
-  // -- the known cause being a Promise.all's two concurrent awaits, which the
-  // single span stack records as parent/child even though their durations
-  // OVERLAP. Such a row's percentage is meaningless and it is suppressed from
-  // the table rather than printed as a small negative number that reads like a
-  // rounding artifact.
-  negativeSelf: string[];
-  // Parent/child pairs where the child outlasts the parent -- profiler.ts's
-  // checkNesting, run over the votes subtree. Same root cause as above and the
-  // same consequence: a non-empty list means the DECOMPOSITION is not to be
-  // trusted, even where individual durations are.
-  nestingViolations: string[];
+  // `stageDeltaMs` went earlier and for a different reason: `votes stage`'s
+  // duration and the stage's own votesMs are the SAME NUMBER now, read off one
+  // record, so there is nothing left to drift.
+  //
+  // Two REAL checks remain. Both can still fire, and neither is about the
+  // recorder:
+  //
+  // Records from outside the pose table -- another subsystem recording while
+  // the harness ran. Harmless to the arithmetic, but it means the machine was
+  // not quiet, which is worth knowing before believing a median.
+  foreignIds: string[];
+  // Records whose declared parent OVERLAPPED them without containing them.
+  // Not a recorder artifact: it means a stage straddled its own parent's
+  // boundary, so either the declaration in pose/timing/stages.ts is wrong or a
+  // span is unbalanced. See joinRecords.
+  straddled: string[];
   // performance.now() is coarsened to ~100us without cross-origin isolation and
   // ~5us with it. The sync spans are expected to be in the hundreds of
   // microseconds, so a non-isolated run does not merely add noise -- it biases
@@ -308,7 +303,7 @@ interface ReconstructionTimingReport {
   // separates readbacks from STALLS, which is not the same count.
   crossings: CrossingReport;
 
-  // ── where the HOST time inside `votes` goes, from EVERY timed rep ──
+  // ── where the HOST time in a whole reconstruction goes, EVERY timed rep ──
   //
   // Unlike the three probes below, this rides along in the timed reps, because
   // recording it costs nothing this run can resolve: spans are a
@@ -321,7 +316,7 @@ interface ReconstructionTimingReport {
   // is that a single sample moves -- 4.65ms was one rep and the ranking it
   // produced changed three times under measurement fixes. A one-rep breakdown
   // compared against a nine-rep median would be comparing two different runs.
-  votesBreakdown: VotesBreakdown;
+  spanBreakdown: SpanBreakdown;
 
   // ── where the GPU compute actually goes, from its own rep ──
   // The only instrument that can see INSIDE `votes`. Null when the device lacks
@@ -397,48 +392,35 @@ async function poseOnce(input: HarnessInput, gray: Float64Array, w: number, h: n
   return computePoseFromCapture(input, gray, w, h, backend, NO_INTERMEDIATES);
 }
 
-// One rep's span tree, flattened to (label, selfMs, depth) in pre-order.
+// One rep's joined tree, flattened to (label, selfMs, depth) in pre-order.
 //
 // Sorted by start time at each level so the output reads top-to-bottom in the
-// order the work happened -- the same choice formatFlamechart makes, and the
-// reason the rows do not need a cost sort: this table is read as a decomposition,
-// where position carries meaning, not as a ranking.
+// order the work happened -- the same choice formatSpanTree makes, and the
+// reason the rows do not need a cost sort: this table is read as a
+// decomposition, where position carries meaning, not as a ranking.
 //
-// Only the subtree under `votes stage` is walked. The other stages have no child
-// spans worth decomposing yet, and including them would put rows in the table
-// whose parents are not shown.
+// The whole `pose.run` tree is walked now, not just the votes subtree. That is
+// new, and it is the point of the library declaring its own root: before, the
+// stages after `votes stage` were siblings under whatever the caller happened
+// to have open, so a table rooted anywhere would have shown rows whose parents
+// were missing. There is a real root to walk from now.
 function flattenSelfTimes(
-  spans: readonly ProfileSpan[], depth: number,
+  nodes: readonly TreeNode[], depth: number,
   out: { label: string; selfMs: number; depth: number; sync: boolean }[],
 ): void {
-  // Every child counts now. There used to be a filter here dropping spans of
-  // kind 'gpu' -- synthetic placements of GPU kernel durations on the host
-  // timeline, which would have double-counted device time against host time.
-  // That mechanism is deleted (device time lives in gpuTimeline, on its own
-  // clock, in its own table), so the filter has nothing left to exclude and its
-  // absence cannot silently corrupt the arithmetic.
-  for (const s of [...spans].sort((a, b) => a.start - b.start)) {
-    let childMs = 0;
-    for (const c of s.children) childMs += spanDurationMs(c);
-    out.push({ label: s.name, selfMs: spanDurationMs(s) - childMs, depth, sync: s.sync });
-    flattenSelfTimes(s.children, depth + 1, out);
+  for (const n of nodes) {
+    out.push({ label: n.node.label, selfMs: n.selfMs, depth, sync: n.node.sync === true });
+    flattenSelfTimes(n.children, depth + 1, out);
   }
 }
 
-function findSpan(spans: readonly ProfileSpan[], name: string): ProfileSpan | null {
-  for (const s of spans) {
-    if (s.name === name) return s;
-    const hit = findSpan(s.children, name);
+function findNode(nodes: readonly TreeNode[], id: string): TreeNode | null {
+  for (const n of nodes) {
+    if (n.rec.id === id) return n;
+    const hit = findNode(n.children, id);
     if (hit) return hit;
   }
   return null;
-}
-
-function collectForeign(spans: readonly ProfileSpan[], into: Set<string>): void {
-  for (const s of spans) {
-    if (FOREIGN_SPANS.some((f) => s.name.startsWith(f))) into.add(s.name);
-    collectForeign(s.children, into);
-  }
 }
 
 // Readbacks whose wait windows overlap were queued behind the same submit and
@@ -576,12 +558,11 @@ export async function timeReconstruction(
     // timings it decomposes.
     const spanMs = new Map<string, number[]>();
     const spanMeta = new Map<string, { depth: number; count: number; sync: boolean }>();
-    const foreign = new Set<string>();
-    // Impossible values, collected across reps. Sets rather than counts because
-    // WHICH label is broken is what tells a reader whether the row they care
-    // about is affected -- a bare count would make every row suspect.
-    const negativeSelf = new Set<string>();
-    const nestingViolations = new Set<string>();
+    // Collected across reps. Sets rather than counts because WHICH id is
+    // involved is what tells a reader whether the row they care about is
+    // affected -- a bare count would make every row suspect.
+    const foreignIds = new Set<string>();
+    const straddled = new Set<string>();
     // Per-label crossing cost from the CLEAN reps, and the stall grouping. Kept
     // per rep so both get a median instead of resting on whichever rep the probe
     // happened to run.
@@ -592,7 +573,7 @@ export async function timeReconstruction(
     let stallOf = new Map<string, number[]>();
 
     // Discard everything the warm-up accumulated, so rep 0's tree is rep 0's.
-    session.takeRepTree();
+    session.takeRepRecords();
 
     for (let rep = 0; rep < reps; rep++) {
       transferLedgerReset();
@@ -601,17 +582,20 @@ export async function timeReconstruction(
       const timing = pose.timing;
       poseMsAll.push(performance.now() - t0);
 
-      // Taken, not read: this rep's tree comes out and the next rep starts on a
-      // fresh one, so no rep can see another's spans. (The warm-up's trees are
+      // Taken, not read: this rep's records come out and the next rep starts on
+      // a fresh set, so no rep can see another's. (The warm-up's records are
       // discarded by the take just before the loop.)
       //
-      // Walked from the `votes stage` span rather than from the roots, so the
-      // table is exactly the stage being decomposed. Absent only if spans somehow
-      // did not record, in which case the rows stay empty rather than reporting
-      // zeros as though they were measurements.
-      const roots = session.takeRepTree();
-      collectForeign(roots, foreign);
-      const stage = findSpan(roots, 'votes stage');
+      // Joined against the LIBRARY's table alone, not the app's merged one.
+      // That is deliberate and it is what makes `foreignIds` mean something:
+      // this harness calls computePoseFromCapture directly, so any record that
+      // fails to join belongs to something else that was running -- an
+      // auto-capture, a preview projection -- and the run was not quiet.
+      const recs = session.takeRepRecords();
+      const join = joinRecords(recs, POSE_STAGE_TABLE);
+      for (const u of join.unknown) foreignIds.add(u.id);
+      for (const o of join.orphans) straddled.add(o.id);
+      const stage = findNode(join.roots, 'pose.run');
       if (stage) {
         const flat: { label: string; selfMs: number; depth: number; sync: boolean }[] = [];
         flattenSelfTimes([stage], 0, flat);
@@ -630,19 +614,16 @@ export async function timeReconstruction(
           else perRep.set(f.label, { ms: f.selfMs, depth: f.depth, count: 1, sync: f.sync });
         }
         for (const [label, v] of perRep) {
-          // Recorded and then EXCLUDED, rather than pushed and rendered. A
-          // negative self time is not a small measurement, it is proof the tree
-          // is wrong for this label -- so letting it into the median would put a
-          // fabricated number in the table and let it drag `asyncMs` down with
-          // it. The label survives in negativeSelf so the report can say which
-          // row is missing and why.
-          if (v.ms < 0) { negativeSelf.add(label); continue; }
+          // No negative-self filter here any more. There used to be one, and it
+          // was load-bearing: self times were parent-minus-SUM-of-children, so
+          // a Promise.all's overlapping awaits could make a row negative and it
+          // had to be suppressed before it dragged `asyncMs` down. Children are
+          // subtracted as a union of contained intervals now, so a negative is
+          // not merely unlikely, it is unrepresentable -- and a filter for an
+          // impossible value is a filter nobody can tell is broken.
           if (!spanMs.has(label)) spanMs.set(label, []);
           spanMs.get(label)!.push(v.ms);
           spanMeta.set(label, { depth: v.depth, count: v.count, sync: v.sync });
-        }
-        for (const v of checkNesting([stage])) {
-          nestingViolations.add(`${v.child} (${v.childMs.toFixed(2)}ms) inside ${v.parent} (${v.parentMs.toFixed(2)}ms)`);
         }
       }
 
@@ -791,13 +772,12 @@ export async function timeReconstruction(
         stalls: stallCounts.length ? median(stallCounts) : 0,
         stallMs: stallMsAll.length ? median(stallMsAll) : 0,
       },
-      votesBreakdown: {
+      spanBreakdown: {
         rows: spanRows,
         syncMs: sumWhere(true),
         asyncMs: sumWhere(false),
-        foreign: [...foreign],
-        negativeSelf: [...negativeSelf],
-        nestingViolations: [...nestingViolations],
+        foreignIds: [...foreignIds],
+        straddled: [...straddled],
         crossOriginIsolated: globalThis.crossOriginIsolated === true,
       },
       allocation,
@@ -870,38 +850,37 @@ export function formatReconstructionTiming(r: ReconstructionTimingReport | strin
   // Printed BEFORE the kernel table on purpose: the kernels are a known ~28% and
   // this is the instrument aimed at the majority that is not.
   {
-    const vb = r.votesBreakdown;
-    const s = r.stageMedianMs.votes;
+    const vb = r.spanBreakdown;
+    // Percentages are against the WHOLE reconstruction now, not against the
+    // votes stage: the tree is rooted at `pose.run`, so a row's share of the
+    // votes stage would be meaningless for the rows outside it.
+    const s = r.poseMedianMs;
     if (vb.rows.length === 0) {
-      lines.push(`  votes ${s.toFixed(1)}ms -- NO SPAN BREAKDOWN (the 'votes stage' span did not record)`);
+      lines.push(`  NO SPAN BREAKDOWN -- the 'pose.run' record did not join (see profiler.ts)`);
     } else {
-      lines.push(`  votes ${s.toFixed(1)}ms, by span SELF time (median over reps; indent = nesting):`);
+      lines.push(`  reconstruction by span SELF time (median over reps; indent = declared nesting):`);
       for (const row of vb.rows) {
         const pct = s > 0 ? (row.medianMs / s) * 100 : 0;
         // A parent's self time is the time inside it that no child accounts for
-        // -- which for `votes stage` and `composites` IS the unattributed time
-        // the whole exercise is about, so it is labelled rather than left to be
-        // inferred from the indentation.
+        // -- which for `pose.votes` and `pose.composites` IS the unattributed
+        // time the whole exercise is about, so it is labelled rather than left
+        // to be inferred from the indentation.
         const kind = row.sync ? 'SYNC (host CPU)' : 'awaits (fence+kernel+rAF)';
         const tail = row.count > 1 ? `  x${row.count}` : '';
         lines.push(`    ${'  '.repeat(row.depth)}${(row.label + ' [self]').padEnd(34 - row.depth * 2)}`
           + ` ${row.medianMs.toFixed(2).padStart(6)}ms ${pct.toFixed(0).padStart(3)}%  ${kind}${tail}`);
       }
       lines.push(`    sync total ${vb.syncMs.toFixed(2)}ms (real host CPU) | awaiting total ${vb.asyncMs.toFixed(2)}ms (mixed, read as a sum only)`);
-      if (vb.negativeSelf.length) {
-        lines.push(`    !! ${vb.negativeSelf.length} row(s) had NEGATIVE self time and were suppressed: ${vb.negativeSelf.join(', ')}`);
-        lines.push(`       A span cannot be shorter than its children. Concurrent awaits in one Promise.all are`);
-        lines.push(`       recorded as parent/child by the single span stack, so their durations overlap. Read`);
-        lines.push(`       those readbacks as ONE stall (see the crossings table), not as separate rows.`);
-      }
-      if (vb.nestingViolations.length) {
-        lines.push(`    !! nesting is INVALID -- the decomposition above does not partition the stage:`);
-        for (const v of vb.nestingViolations) lines.push(`       ${v}`);
+      if (vb.straddled.length) {
+        lines.push(`    !! ${vb.straddled.length} stage(s) STRADDLED their declared parent: ${vb.straddled.join(', ')}`);
+        lines.push(`       Not a recorder artifact -- either pose/timing/stages.ts declares the wrong \`within\``);
+        lines.push(`       for these, or a span is unbalanced. Their time is missing from the rows above.`);
       }
     }
-    if (vb.foreign.length) {
-      lines.push(`    !! BREAKDOWN VOID -- another operation recorded into the same span stack: ${vb.foreign.join(', ')}`);
-      lines.push(`       Its cost is inside the rows above. Turn auto-capture off and re-run.`);
+    if (vb.foreignIds.length) {
+      lines.push(`    note: ${vb.foreignIds.length} id(s) recorded from outside the pose table: ${vb.foreignIds.join(', ')}`);
+      lines.push(`          They did NOT join, so no cost of theirs is inside the rows above -- but the machine`);
+      lines.push(`          was not quiet, so treat the wall-clock median with more suspicion than usual.`);
     }
     // Loud, because a false here silently biases every sync row DOWNWARD rather
     // than adding noise -- the failure that made the allocation probe read

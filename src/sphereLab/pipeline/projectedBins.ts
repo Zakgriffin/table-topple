@@ -3,7 +3,8 @@ import { type Camera } from '../camera/model.ts';
 import { MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { projectSamplesGPU } from './projectSamples.gpu.ts';
-import { spanEnd, spanStart } from '../profiling/profiler.ts';
+import { spanEnd } from '../profiling/profiler.ts';
+import { appSpan } from '../profiling/stages.ts';
 import { type ProjectedBins, type ProjectedSamplesDense } from '../types.ts';
 import { type GradientField } from '../../pose/results.ts';
 import { type Backend } from '../../pose/backend.ts';
@@ -226,7 +227,7 @@ async function computeProjectedBinsGPU(camera: Camera): Promise<ProjectedSampleR
 // centralizes the backend check once instead of duplicating the
 // GPU-with-CPU-fallback ternary at each call site.
 export async function computeProjectedBinsAuto(camera: Camera, backend: Backend): Promise<ProjectedSampleResult> {
-  const s = spanStart(backend === 'cpu' ? 'projectBins (CPU)' : 'projectBins (GPU stage 1 + CPU bucket)');
+  const s = appSpan('project.bins', { backend });
   const result = backend === 'gpu'
     ? (await computeProjectedBinsGPU(camera)) ?? computeProjectedBinsCPU(camera)
     : computeProjectedBinsCPU(camera);

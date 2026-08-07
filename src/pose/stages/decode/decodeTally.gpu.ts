@@ -1,7 +1,8 @@
 import { ORDER, R, C, debruijnLookup } from '../../../sphereLab/floorPattern.ts';
 import { rotatedDims } from './decodeGrid.ts';
 import { type DecodeSampleGrid, type VoteResult } from '../../results.ts';
-import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
+import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
+import { poseSpan } from '../../timing/stages.ts';
 import { createStorageBuffer, dispatchCount, getGPUDevice, readUint32, uploadUint32, uploadUniform } from '../../gpu/device.ts';
 import { gpuTimelineSlot } from '../../gpu/gpuTimeline.ts';
 import { DECODE_TALLY_WGSL } from './decodeTally.wgsl.ts';
@@ -147,7 +148,7 @@ export async function tallyFromDeviceGrid(
   const tallyBuf = createStorageBuffer(device, 4 * R * C * 4); // zero-initialized per WebGPU spec
   const totalWindowsBuf = createStorageBuffer(device, 4);
 
-  const dispatchSpan = spanStart('GPU dispatch (4 orientations)');
+  const dispatchSpan = poseSpan('decode.tallyDispatch');
   const encoder = device.createCommandEncoder();
   const uniformBufs: GPUBuffer[] = [];
   for (let o = 0; o < 4; o++) {

@@ -2,7 +2,8 @@ import { createStorageBuffer, readFloat32, uploadUniform } from '../../gpu/devic
 import { FieldResidency } from '../../gpu/fieldResidency.ts';
 import { gpuTimelineSlot } from '../../gpu/gpuTimeline.ts';
 import { LSD_FIT_WGSL } from './lsdFit.wgsl.ts';
-import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
+import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
+import { poseSpan } from '../../timing/stages.ts';
 
 const pipelineCache = new WeakMap<GPUDevice, GPUComputePipeline>();
 function getPipeline(device: GPUDevice): GPUComputePipeline {
@@ -87,7 +88,7 @@ export async function fitAndTestRegionsGPU(
 ): Promise<LsdFitResult[] | null> {
   const device = res.device;
   if (!device) return null;
-  const dispatchSpan = spanStart('lsdFit dispatch+fence');
+  const dispatchSpan = poseSpan('lsd.fitDispatch');
   const rs = res.regionsGPU();
   // No `regionCount === 0` early return any more -- the host does not know the
   // count here, by design. An empty capture falls out correctly anyway:
@@ -187,7 +188,7 @@ export async function fitAndTestRegionsGPU(
   // is the same hypothesis rather than a confound). Measure before rewriting: the
   // fix, if one is warranted, is to filter on `accepted` here or to hand the flat
   // Float32Array down and skip the array entirely.
-  const unpackSpan = spanStart('lsdFit unpack (objects)', true);
+  const unpackSpan = poseSpan('lsd.fitUnpack');
   const results: LsdFitResult[] = new Array(regionCount);
   for (let i = 0; i < regionCount; i++) {
     const o = i * 10;

@@ -2,7 +2,8 @@ import * as THREE from 'three';
 import { type Camera } from '../camera/model.ts';
 import { MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
-import { spanEnd, spanStart } from '../profiling/profiler.ts';
+import { spanEnd } from '../profiling/profiler.ts';
+import { appSpan } from '../profiling/stages.ts';
 import { type ProjectedSamplesDense } from '../types.ts';
 import { createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, readUint32, uploadFloat32, uploadUniform } from '../../pose/gpu/device.ts';
 import { GRADIENT_WGSL, PROJECT_SAMPLES_WGSL } from './projectSamples.wgsl.ts';
@@ -78,7 +79,7 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   const gray = camera.lastNoisedPreviewGray;
   const fxBuf = createStorageBuffer(device, n * 4);
   const fyBuf = createStorageBuffer(device, n * 4);
-  const uploadSpan = spanStart('CPU→GPU upload phase (gray + uniforms)');
+  const uploadSpan = appSpan('project.upload');
   let grayBuf: GPUBuffer | null = null;
   if (gray) {
     grayBuf = uploadFloat32(device, new Float32Array(gray), 0, 'project:gray');
@@ -89,7 +90,7 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   ));
   spanEnd(uploadSpan);
 
-  const dispatchSpan = spanStart('GPU dispatch (gradient + project)');
+  const dispatchSpan = appSpan('project.dispatch');
   const encoder = device.createCommandEncoder();
   if (grayBuf) {
     const gradBindGroup = device.createBindGroup({
@@ -152,7 +153,7 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
     return null;
   }
 
-  const finishSpan = spanStart('CPU finish (unpack + min/max)');
+  const finishSpan = appSpan('project.finish');
   const uArr = new Float32Array(n), vArr = new Float32Array(n), cxArr = new Float32Array(n), cyArr = new Float32Array(n);
   const validArr = new Uint8Array(n);
   let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity;

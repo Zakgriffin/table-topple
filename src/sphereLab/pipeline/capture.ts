@@ -3,7 +3,8 @@ import { type Camera, type FrameMeta, type PhysicalCamera, type SimulatedCamera 
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer, scene } from '../scene/renderer.ts';
-import { spanEnd, spanStart } from '../profiling/profiler.ts';
+import { spanEnd } from '../profiling/profiler.ts';
+import { appSpan } from '../profiling/stages.ts';
 import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
@@ -210,9 +211,9 @@ export async function ingestRealCapture(
   if (camera.encodeMsHistory.length > 50) camera.encodeMsHistory.shift();
   if (camera.transitMsHistory.length > 50) camera.transitMsHistory.shift();
   if (camera.payloadBytesHistory.length > 50) camera.payloadBytesHistory.shift();
-  const rootSpan = spanStart('ingest (decode+preprocess)');
+  const rootSpan = appSpan('ingest.run');
 
-  const decodeSpan = spanStart('image decode');
+  const decodeSpan = appSpan('ingest.decode');
   const img = new Image();
   const objectUrl = URL.createObjectURL(pending.blob);
   try {
@@ -228,7 +229,7 @@ export async function ingestRealCapture(
   const w = img.naturalWidth, h = img.naturalHeight;
   if (w !== camera.rtSize.w || h !== camera.rtSize.h) resizeCaptureBuffers(camera, { w, h });
 
-  const readbackSpan = spanStart('pixel readback + grayscale');
+  const readbackSpan = appSpan('ingest.readback');
   const tmpCanvas = document.createElement('canvas');
   tmpCanvas.width = w; tmpCanvas.height = h;
   const tctx = tmpCanvas.getContext('2d')!;

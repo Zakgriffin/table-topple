@@ -7,7 +7,7 @@ import type { PoseComputeTiming } from '../../pose/poseCompute.ts';
 import { type TransferSummary } from '../../pose/gpu/fieldResidency.ts';
 import { type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type RecoveredAxes, type Vote } from '../../pose/results.ts';
 import { type ProjectedBins } from '../types.ts';
-import { type ProfileSpan } from '../profiling/profiler.ts';
+import { type StageRecord } from '../profiling/profiler.ts';
 import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './settings.ts';
 
 // requestVideoFrameCallback's metadata for one decoded video frame, captured
@@ -319,7 +319,7 @@ export interface PhysicalCamera extends CameraBase {
   // own. Never null in practice now that spans record unconditionally; the
   // type stays nullable because nothing has opened one yet before the first
   // reconstruction completes.
-  idleSpan: ProfileSpan | null;
+  idleSpan: StageRecord | null;
   // Approximate phone-side "pull the current video frame onto a canvas"
   // duration (canvas resize + drawImage, NOT the JPEG encode itself) for
   // the most recently ingested frame -- pendingCapture.pulledAt -

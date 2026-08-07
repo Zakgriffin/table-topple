@@ -2,7 +2,8 @@ import { FieldResidency } from '../../gpu/fieldResidency.ts';
 import { computeGradient2x2FieldGPU } from '../gradient/gradient2x2.gpu.ts';
 import { fitAndTestRegionsGPU } from './lsdFit.gpu.ts';
 import { growRegionsCCLGPU } from './growRegions.gpu.ts';
-import { spanEnd, spanStart } from '../../../sphereLab/profiling/profiler.ts';
+import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
+import { poseSpan } from '../../timing/stages.ts';
 import { type GradientField } from '../../results.ts';
 import { type Backend } from '../../backend.ts';
 import { computeGradient2x2Field } from '../gradient/gradientField.ts';
@@ -113,42 +114,54 @@ async function fitRegionsGPU(
   res: FieldResidency, w: number, h: number, settings: LsdSettings, wantMembers: boolean,
 ): Promise<LsdRectangle[] | null> {
   const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
-  // Concurrent when both are wanted, not sequential: fitAndTestRegionsGPU binds
-  // the region CSR synchronously before its first await, so starting it first
-  // and letting the members readback run alongside puts that transfer under the
-  // kernel instead of after it. Promise.all rather than two bare awaits so a
-  // failure in either one can't leave the other rejecting unobserved.
-  const [gpuResults, regions] = await Promise.all([
-    fitAndTestRegionsGPU(res, w, h, settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon),
-    wantMembers ? res.regionsCPU() : Promise.resolve(null),
-  ]);
-  if (!gpuResults) return null;
+  // The stage span this function never had. It exists so the Promise.all below
+  // has somewhere to BE: its two branches genuinely overlap, and with no span
+  // around them their children were siblings of the whole composites stage,
+  // which put concurrent work next to sequential work with nothing saying
+  // which was which. Contained here, the overlap is visible as exactly what it
+  // is -- two children whose intervals intersect, subtracted from this parent
+  // as a union rather than as a sum (see profiler.ts's TreeNode.selfMs).
+  const fitSpan = poseSpan('lsd.fit', { wantMembers });
+  try {
+    // Concurrent when both are wanted, not sequential: fitAndTestRegionsGPU binds
+    // the region CSR synchronously before its first await, so starting it first
+    // and letting the members readback run alongside puts that transfer under the
+    // kernel instead of after it. Promise.all rather than two bare awaits so a
+    // failure in either one can't leave the other rejecting unobserved.
+    const [gpuResults, regions] = await Promise.all([
+      fitAndTestRegionsGPU(res, w, h, settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon),
+      wantMembers ? res.regionsCPU() : Promise.resolve(null),
+    ]);
+    if (!gpuResults) return null;
 
-  // Counted off the fitter rather than off `regions`, which may not be here at
-  // all now. fitAndTestRegionsGPU allocates `new Array(regionCount)` -- the same
-  // count regionsCPU() returns -- so rectangle numbering downstream is
-  // unchanged, and `regions[i]` still lines up index for index when present.
-  // The SECOND object array of the same length in as many statements, and that
-  // is the point of measuring it separately: fitAndTestRegionsGPU has just built
-  // one LsdFitResult per region straight off the readback, and this immediately
-  // re-wraps every one of them into an LsdRectangle. ~5200 regions is ~10400
-  // short-lived objects per frame, of which compositesFromLsdRectangles keeps
-  // 893. Whether that costs anything worth fixing is what this span and
-  // 'lsdFit unpack (objects)' answer -- separately, so the two loops can be
-  // judged apart rather than as one lump.
-  const wrapSpan = spanStart('rectangle wrap (objects)', true);
-  const results: LsdRectangle[] = [];
-  for (let i = 0; i < gpuResults.length; i++) {
-    const g = gpuResults[i];
-    results.push({
-      cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
-      accepted: g.accepted, nfaLog10: g.nfaLog10,
-      lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon),
-      rawMembers: regions ? regions[i].members : NO_MEMBERS,
-    });
+    // Counted off the fitter rather than off `regions`, which may not be here at
+    // all now. fitAndTestRegionsGPU allocates `new Array(regionCount)` -- the same
+    // count regionsCPU() returns -- so rectangle numbering downstream is
+    // unchanged, and `regions[i]` still lines up index for index when present.
+    // The SECOND object array of the same length in as many statements, and that
+    // is the point of measuring it separately: fitAndTestRegionsGPU has just built
+    // one LsdFitResult per region straight off the readback, and this immediately
+    // re-wraps every one of them into an LsdRectangle. ~5200 regions is ~10400
+    // short-lived objects per frame, of which compositesFromLsdRectangles keeps
+    // 893. Whether that costs anything worth fixing is what this span and
+    // `lsd.fitUnpack` answer -- separately, so the two loops can be judged apart
+    // rather than as one lump.
+    const wrapSpan = poseSpan('lsd.wrap');
+    const results: LsdRectangle[] = [];
+    for (let i = 0; i < gpuResults.length; i++) {
+      const g = gpuResults[i];
+      results.push({
+        cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
+        accepted: g.accepted, nfaLog10: g.nfaLog10,
+        lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon),
+        rawMembers: regions ? regions[i].members : NO_MEMBERS,
+      });
+    }
+    spanEnd(wrapSpan);
+    return results;
+  } finally {
+    spanEnd(fitSpan);
   }
-  spanEnd(wrapSpan);
-  return results;
 }
 
 // Fully-CPU path, and the source of truth every GPU stage is verified against.
@@ -199,7 +212,7 @@ async function computeLsdRectanglesAuto(
   const growArgs = [
     w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
   ] as const;
-  const growSpan = spanStart('grow+collect regions');
+  const growSpan = poseSpan('lsd.grow');
   const grown = backend === 'gpu' ? await growRegionsCCLGPU(res, ...growArgs, backend === 'gpu') : null;
   if (!grown) {
     // Either the toggle is off or the GPU grower bailed; on both paths it
@@ -241,7 +254,7 @@ async function computeLsdRectanglesAuto(
 // uploaded those same two arrays again a moment later.
 async function runGradient2x2Stage(res: FieldResidency, w: number, h: number, backend: Backend): Promise<void> {
   const useGPU = backend === 'gpu' && res.device !== null;
-  const s = spanStart(useGPU ? 'gradient2x2 (GPU)' : 'gradient2x2 (CPU)');
+  const s = poseSpan('lsd.gradient', { backend: useGPU ? 'gpu' : 'cpu' });
   if (!(useGPU && await computeGradient2x2FieldGPU(res, w, h))) {
     // gray is CPU-resident by construction (createLsdChainResidency put it
     // there), so this is a lookup and never a readback.

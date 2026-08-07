@@ -7,7 +7,6 @@
 // nothing should touch navigator.gpu until the GPU path is actually asked
 // for.
 
-import { spanEnd, spanStart } from '../../sphereLab/profiling/profiler.ts';
 
 let devicePromise: Promise<GPUDevice | null> | null = null;
 
@@ -143,7 +142,6 @@ async function bareRead(device: GPUDevice, buffer: GPUBuffer): Promise<number> {
 // computation that has not been ported.
 
 export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage = 0, label = 'UNLABELLED f32'): GPUBuffer {
-  const s = spanStart(`CPU→GPU upload (${data.byteLength}B)`);
   const t0 = performance.now();
   const buffer = device.createBuffer({
     size: data.byteLength,
@@ -153,12 +151,10 @@ export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage 
   new Float32Array(buffer.getMappedRange()).set(data);
   buffer.unmap();
   ledger.push({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs: null, queueDrainMs: null });
-  spanEnd(s);
   return buffer;
 }
 
 export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 0, label = 'UNLABELLED u32'): GPUBuffer {
-  const s = spanStart(`CPU→GPU upload (${data.byteLength}B)`);
   const t0 = performance.now();
   const buffer = device.createBuffer({
     size: data.byteLength,
@@ -168,7 +164,6 @@ export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 
   new Uint32Array(buffer.getMappedRange()).set(data);
   buffer.unmap();
   ledger.push({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs: null, queueDrainMs: null });
-  spanEnd(s);
   return buffer;
 }
 
@@ -284,8 +279,14 @@ export function createStorageBuffer(device: GPUDevice, byteLength: number, extra
 // vec3 doesn't) -- every uniform struct in this pipeline is written out as
 // plain vec4-or-scalar fields specifically to avoid that trap, so a bare
 // byte copy here is always safe.
+// Ledgered like the other two uploads, which it was not before. It carried a
+// profiler span instead -- the ONE crossing in this file whose cost appeared in
+// the flamechart and nowhere in the crossings table, so "every bus crossing
+// during a reconstruction" was one short of true. Uniforms are tens of bytes
+// against megabyte payloads, so the number is small; the point is that the
+// table is now exhaustive rather than nearly so.
 export function uploadUniform(device: GPUDevice, data: ArrayBuffer): GPUBuffer {
-  const s = spanStart(`CPU→GPU upload uniform (${data.byteLength}B)`);
+  const t0 = performance.now();
   const buffer = device.createBuffer({
     size: Math.ceil(data.byteLength / 16) * 16,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -293,7 +294,7 @@ export function uploadUniform(device: GPUDevice, data: ArrayBuffer): GPUBuffer {
   });
   new Uint8Array(buffer.getMappedRange()).set(new Uint8Array(data));
   buffer.unmap();
-  spanEnd(s);
+  ledger.push({ what: 'uniforms', kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs: null, queueDrainMs: null });
   return buffer;
 }
 
@@ -305,7 +306,6 @@ export function uploadUniform(device: GPUDevice, data: ArrayBuffer): GPUBuffer {
 // and are expected to disagree, since a readback blocks until everything queued
 // ahead of it has executed.
 export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED f32'): Promise<Float32Array> {
-  const s = spanStart(`GPU→CPU readback (${byteLength}B)`);
   // Both probes BEFORE the timed read, so the real read is measured against a
   // drained queue and its excess over bareFenceMs is byte cost alone.
   const queueDrainMs = probeEnabled ? await bareRead(device, buffer) : null;
@@ -320,12 +320,10 @@ export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLeng
   staging.unmap();
   staging.destroy();
   ledger.push({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs, queueDrainMs });
-  spanEnd(s);
   return result;
 }
 
 export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED u32'): Promise<Uint32Array> {
-  const s = spanStart(`GPU→CPU readback (${byteLength}B)`);
   const queueDrainMs = probeEnabled ? await bareRead(device, buffer) : null;
   const bareFenceMs = probeEnabled ? await bareRead(device, buffer) : null;
   const t0 = performance.now();
@@ -338,7 +336,6 @@ export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLengt
   staging.unmap();
   staging.destroy();
   ledger.push({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs, queueDrainMs });
-  spanEnd(s);
   return result;
 }
 

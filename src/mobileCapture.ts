@@ -19,6 +19,7 @@ import { toGrayscale } from './decode.ts';
 import { config, fetchConfigFile } from './sphereLab/config.ts';
 import { globalState } from './sphereLab/state.ts';
 import { backendFromForceCPU } from './sphereLab/pipeline/backend.ts';
+import { wants } from './sphereLab/pipeline/intermediates.ts';
 // Only the data-side rebuild is needed here now. The board's world EXTENT
 // (C/R/GRID_STEP) is read by gameOverlay.ts instead, which is the only thing
 // on this page that still draws anything at board scale.
@@ -2103,18 +2104,23 @@ async function captureComputeAndSendPose() {
       lastVoteComposites: null, lastVotes: null, lastQuadricPair: null, lastGridPeriodPhase: null,
       lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
       lastPositionDecode: null, lastChainTransfers: null,
-      // Never deferred on the phone: buildDebugPayload below reads
-      // lastDecodeGrid synchronously and there is no visual drain here to
-      // resolve a handle in. See computePoseFromCapture's deferDecodeGrid.
-      pendingDecodeGrid: null,
+      pendingIntermediates: null, intermediates: null,
     };
     const t0 = performance.now();
     // The phone's globalState is THIS page's own module instance, kept in sync
     // by settingsSync (see below) -- converted to a Backend right here so the
     // pipeline itself never reads it. Same conversion the desktop does.
+    // Asks for the decode grid and drains it RIGHT HERE rather than deferring:
+    // buildDebugPayload below reads lastDecodeGrid synchronously and this page
+    // has no visual mailbox to resolve a handle in later. The request has to be
+    // explicit now -- an unasked-for grid is not brought down at all -- which is
+    // the point: this page's need is stated at the call site instead of being a
+    // default that another caller's parameter happened to preserve.
     const timing = await computePoseFromCapture(
-      state, grayTopDown, cw, ch, backendFromForceCPU(globalState.forceCPU),
+      state, grayTopDown, cw, ch, backendFromForceCPU(globalState.forceCPU), wants('decodeGrid'),
     );
+    await state.pendingIntermediates?.resolve();
+    state.pendingIntermediates = null;
     const totalMs = performance.now() - t0;
     const pd = state.lastPositionDecode;
     recordPose({

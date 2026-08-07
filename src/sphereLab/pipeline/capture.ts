@@ -308,12 +308,13 @@ export async function ingestRemotePose(
   if (msg.w !== camera.rtSize.w || msg.h !== camera.rtSize.h) resizeCaptureBuffers(camera, { w: msg.w, h: msg.h });
 
   // A pose from the phone REPLACES whatever a local reconstruction was in the
-  // middle of showing, so a decode-grid readback still parked from that local
-  // capture is now stale by definition -- resolving it later would paint this
-  // frame's remote pose against the previous local frame's decode. Dropped
-  // rather than resolved, which also frees its ~0.45MB of device buffers.
-  camera.pendingDecodeGrid?.release();
-  camera.pendingDecodeGrid = null;
+  // middle of showing, so intermediates still parked from that local capture
+  // are stale by definition -- resolving them later would paint this frame's
+  // remote pose against the previous local frame's decode. Dropped rather than
+  // resolved, which also frees the chain's device buffers.
+  camera.pendingIntermediates?.release();
+  camera.pendingIntermediates = null;
+  camera.intermediates = null;
 
   camera.lastRecoveredAxes = msg.recoveredAxes ? {
     Drow: new THREE.Vector3().fromArray(msg.recoveredAxes.Drow),

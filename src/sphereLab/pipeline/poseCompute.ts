@@ -8,7 +8,8 @@ import { type CompositeLine, type DecodeCellDebug, type DecodeSampleGrid, type P
 import { type Backend } from './backend.ts';
 import { type PendingDecodeGrid, runPositionDecode } from './decodeGrid.ts';
 import { computeGridPeriodPhase, type GridPeriodPhaseResult } from './gridPeriodPhase.ts';
-import { createLsdChainResidency } from './lsdSegments.ts';
+import { type Intermediates, type IntermediatesRequest, NO_INTERMEDIATES, type PendingIntermediates } from './intermediates.ts';
+import { createLsdChainResidency, type GrownRegion, type LsdRectangle } from './lsdSegments.ts';
 import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes, type LsdCompositeSettings } from './votes.ts';
 
 // ── Shared pure pose-recovery orchestrator ────────────────────────────────
@@ -46,10 +47,16 @@ export interface PoseComputeState {
   lastDecodeRotated: DecodeSampleGrid | null;
   lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
   lastPositionDecode: PositionDecodeResult | null;
-  // Set only when the caller asked to defer the decode grid's readback (see
-  // computePoseFromCapture's `deferDecodeGrid`). Whoever set it owns resolving
-  // or releasing it; left unresolved it holds ~0.45MB of GPU buffers.
-  pendingDecodeGrid: PendingDecodeGrid | null;
+  // Set exactly when the caller asked for intermediates (see
+  // pipeline/intermediates.ts). Whoever holds it owns resolving or releasing
+  // it; left unresolved it holds the chain's device buffers until device loss.
+  // Null for the empty request, which is what makes "asking for nothing costs
+  // nothing" literally true: there is no handle and nothing to drain.
+  pendingIntermediates: PendingIntermediates | null;
+  // Filled by that handle's resolve(). Null until then, and null forever for a
+  // caller that asked for nothing -- deliberately not an empty object, so
+  // "nobody asked" and "asked and got nothing back" are distinguishable.
+  intermediates: Intermediates | null;
   // What the LSD chain's toggle configuration actually cost the bus on the
   // last frame, straight off the residency's own ledger. Recorded rather than
   // derived because "how many crossings does this configuration imply" is not
@@ -78,7 +85,7 @@ export interface PoseComputeTiming {
 async function computeCompositesAndVotes(
   state: PoseComputeState, res: FieldResidency, gray: Float64Array, w: number, h: number, vFovRad: number,
   backend: Backend,
-): Promise<{ voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[] }> {
+): Promise<{ voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[]; rects: LsdRectangle[] }> {
   {
     // Composite lines (one per accepted LSD rectangle, over the 2x2 gradient
     // field) computed exactly once here and
@@ -88,7 +95,7 @@ async function computeCompositesAndVotes(
     // lines by row/col family" debug overlay, which reads
     // state.lastVoteComposites back off the camera afterward).
     const compositesSpan = spanStart('composites (2x2 gradient field)');
-    const voteComposites = await computeGradient2x2Composites(state.settings, res, w, h, backend);
+    const { composites: voteComposites, rects } = await computeGradient2x2Composites(state.settings, res, w, h, backend);
     spanEnd(compositesSpan);
 
     // Contains no await, so this span's duration is host CPU and is marked
@@ -99,7 +106,7 @@ async function computeCompositesAndVotes(
     const votes = computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, state.aspect);
     spanEnd(votesSpan);
 
-    return { voteComposites, votes };
+    return { voteComposites, votes, rects };
   }
 }
 
@@ -116,19 +123,39 @@ async function computeCompositesAndVotes(
 // so a pose, a timing, or a verify delta did not carry the configuration that
 // produced it and could not be re-derived. See pipeline/backend.ts.
 //
-// `deferDecodeGrid` moves the decode grid's 0.45MB readback off the pose path
-// and onto state.pendingDecodeGrid for the caller to drain. It is a PARAMETER
-// rather than a globalState read on purpose: this function has three callers and
-// only one of them can honour it. axesReconstruction has the visual mailbox and
-// passes true; mobileCapture reads state.lastDecodeGrid
-// synchronously the moment this returns (buildDebugPayload) and has no drain at
-// all; reconstructionTiming releases without resolving, because it is measuring
-// the pose path and the readback is no longer on it. A globalState flag would
-// have silently deferred on the phone, where nothing would ever resolve it.
+// `want` is what the CALLER asks to be handed back, as a set of names -- see
+// pipeline/intermediates.ts for the whole argument. It replaces the single
+// `deferDecodeGrid` boolean, whose own comment was the tell that deferral was a
+// per-call-site convention: "this function has three callers and only one of
+// them can honour it."
+//
+// The empty request is the fast path AND the default, and it is exact: no
+// handle is created, the residency is destroyed in the finally exactly as
+// before, and the decode grid is never brought down at all. That last part is a
+// real behaviour change from `deferDecodeGrid=false`, which always read the
+// 0.45MB grid back. It is not the view-conditional SKIP that was tried and
+// rejected here (see runPositionDecode) -- that had the pipeline guessing what
+// display might want, leaving lastDecodeGrid null behind a caller's back. This
+// is the caller SAYING so up front, which is the difference between a guess and
+// a contract: axesReconstruction and mobileCapture both ask for 'decodeGrid',
+// so nothing either of them reads has changed.
 export async function computePoseFromCapture(
   state: PoseComputeState, gray: Float64Array, w: number, h: number, backend: Backend,
-  deferDecodeGrid = false,
+  want: IntermediatesRequest = NO_INTERMEDIATES,
 ): Promise<PoseComputeTiming> {
+  // A previous run's handle can still be here if its owner never drained it.
+  // Released BEFORE this run overwrites the pointer, since nothing else holds
+  // it and its buffers would otherwise live until device loss. This used to sit
+  // inside runPositionDecode, which could only ever release the decode grid's
+  // half of it.
+  state.pendingIntermediates?.release();
+  state.pendingIntermediates = null;
+  state.intermediates = null;
+
+  // Both are filled inside the try and read in the finally, so the residency
+  // reaches the handle even on the error unwind rather than leaking.
+  let pendingGrid: PendingDecodeGrid | null = null;
+  let rects: LsdRectangle[] | null = null;
   const vFovRad = getAnalysisVFovRad(state);
 
   // IS `votesMs` -- see the return statement. It is also what makes the
@@ -147,7 +174,9 @@ export async function computePoseFromCapture(
   const res = await createLsdChainResidency(gray, w, h, backend);
   spanEnd(residencySpan);
   try {
-    const { voteComposites, votes } = await computeCompositesAndVotes(state, res, gray, w, h, vFovRad, backend);
+    const composited = await computeCompositesAndVotes(state, res, gray, w, h, vFovRad, backend);
+    const { voteComposites, votes } = composited;
+    rects = composited.rects;
     state.lastVoteComposites = voteComposites;
     state.lastVotes = votes;
     spanEnd(stageSpan);
@@ -212,7 +241,9 @@ export async function computePoseFromCapture(
     // no device on an all-CPU chain, and `gray` is only device-resident if some
     // stage put it there. Null just means decode uploads its own, as before.
     const sharedGray = res.device && res.hasGPU('gray') ? res.gpu('gray') : null;
-    await runPositionDecode(state, gray, w, h, vFovRad, sharedGray, backend, deferDecodeGrid);
+    pendingGrid = await runPositionDecode(
+      state, gray, w, h, vFovRad, sharedGray, backend, want.has('decodeGrid'),
+    );
     spanEnd(decodeSpan);
 
     // Read off the span objects held above, not off a parallel set of
@@ -235,7 +266,66 @@ export async function computePoseFromCapture(
   } finally {
     // Read BEFORE destroy, and in the finally rather than the happy path, so a
     // configuration that threw still reports the traffic it managed to incur.
+    //
+    // Frozen HERE, at the end of the pose, even when a handle carries the
+    // residency onward: this number is what the POSE PATH cost, and that is the
+    // question the readout answers. Transfers a later drain incurs on the
+    // caller's behalf are that caller's cost, not the pipeline's, and they are
+    // visible as their own profiler spans.
     state.lastChainTransfers = res.summary();
-    res.destroy();
+    if (want.size === 0) {
+      // The empty request, unchanged from before any of this existed. No
+      // handle, no readback, nothing for anyone to remember to drain.
+      pendingGrid?.release();
+      res.destroy();
+    } else {
+      state.pendingIntermediates = makePendingIntermediates(state, res, want, pendingGrid, rects);
+    }
   }
+}
+
+// Ownership of the residency (and of the decode grid's own handle, when there
+// is one) moves in here. Both are destroyed exactly once, by whichever of
+// resolve/release runs first -- see PendingIntermediates on why both have to be
+// safe twice and in either order.
+function makePendingIntermediates(
+  state: PoseComputeState, res: FieldResidency, want: IntermediatesRequest,
+  pendingGrid: PendingDecodeGrid | null, rects: LsdRectangle[] | null,
+): PendingIntermediates {
+  let spent = false;
+  const destroy = () => { pendingGrid?.release(); res.destroy(); };
+  return {
+    async resolve() {
+      if (spent) return;
+      spent = true;
+      const drainSpan = spanStart('intermediates drain');
+      try {
+        const out: Intermediates = {};
+        // Straight off the residency's own accessors, which already know which
+        // side each field is on and transfer only if the sides differ. A field
+        // the chain happened to leave on the CPU costs nothing to hand over.
+        if (want.has('fx')) out.fx = await res.cpuF64('fx');
+        if (want.has('fy')) out.fy = await res.cpuF64('fy');
+        if (want.has('regionId')) out.regionId = await res.cpuI32('regionId');
+        if (want.has('regions')) out.regions = await res.regionsCPU() as GrownRegion[];
+        // Not from the residency: stage 4's rectangles are a host-side array
+        // the chain returns and then had nowhere to put. Captured during the
+        // run and simply held until now.
+        if (want.has('rects') && rects) out.rects = rects;
+        state.intermediates = out;
+        // Populates lastDecodeGrid/lastDecodeRotated/lastDecodeCorrectness, and
+        // releases its own device buffers on the way. Last, so a throw reading
+        // a field above still leaves the grid's memory to the destroy below.
+        await pendingGrid?.resolve();
+      } finally {
+        spanEnd(drainSpan);
+        destroy();
+      }
+    },
+    release() {
+      if (spent) return;
+      spent = true;
+      destroy();
+    },
+  };
 }

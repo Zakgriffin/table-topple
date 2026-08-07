@@ -66,9 +66,9 @@ export function poseStateFor(input: HarnessInput): PoseComputeState {
     lastVoteComposites: null, lastVotes: null, lastQuadricPair: null, lastGridPeriodPhase: null,
     lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
     lastPositionDecode: null, lastChainTransfers: null,
-    // A caller that wants the decode grid's readback deferred has to opt in and
-    // own the handle -- see poseCompute's deferDecodeGrid.
-    pendingDecodeGrid: null,
+    // A caller that wants intermediates asks for them by name and owns the
+    // handle that comes back -- see pipeline/intermediates.ts.
+    pendingIntermediates: null, intermediates: null,
   };
 }
 

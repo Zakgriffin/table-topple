@@ -189,7 +189,8 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
 
   const base: Omit<CameraBase, 'id' | 'name' | 'color'> = {
     lastRecoveredAxes: null, lastPositionDecode: null, lastDecodeGrid: null, lastDecodeRotated: null,
-    lastDecodeCorrectness: null, pendingDecodeGrid: null, lastProjectedBins: null, lastChainTransfers: null, lastVotes: [], lastVoteComposites: null,
+    lastDecodeCorrectness: null, pendingIntermediates: null,
+    intermediates: null, lastProjectedBins: null, lastChainTransfers: null, lastVotes: [], lastVoteComposites: null,
     lastQuadricPair: null,
     axesComputed: false, axesCapturing: false, lastAxesCapture: 0, lastAxesCaptureGray: null,
     visualsDirty: false, visualsDraining: false, lastPoseTiming: null,

@@ -13,6 +13,7 @@ import { captureDistortedGrayscale } from './capture.ts';
 import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './decodeGrid.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
+import { type IntermediatesRequest, wants } from './intermediates.ts';
 import { computePoseFromCapture } from './poseCompute.ts';
 import { type ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
@@ -193,19 +194,19 @@ async function runVisualTail(camera: Camera): Promise<void> {
   const isActive = camera === activeCamera();
 
   // FIRST, before anything reads lastDecodeGrid/lastDecodeRotated/
-  // lastDecodeCorrectness. computePoseFromCapture left those null and parked the
-  // readback here (see pipeline/decodeGrid.ts's PendingDecodeGrid) so the pose
-  // did not have to wait 0.45MB for display data; this is the moment they get
-  // filled. updateGradientCirclesDebug, applyPoseVisualizations and every mode
-  // overlay below are downstream of it.
+  // lastDecodeCorrectness or camera.intermediates. computePoseFromCapture left
+  // those null and parked the readback here (see pipeline/intermediates.ts) so
+  // the pose did not have to wait 0.45MB for display data; this is the moment
+  // they get filled. updateGradientCirclesDebug, applyPoseVisualizations and
+  // every mode overlay below are downstream of it.
   //
   // This is the ONE thing in this function that is not idempotent-by-reading-
   // settled-state: it consumes a handle. resolve() is itself idempotent, so a
   // second drain over the same capture is still safe -- it just finds the fields
   // already populated and the handle already spent.
-  const pending = camera.pendingDecodeGrid;
+  const pending = camera.pendingIntermediates;
   if (pending) {
-    camera.pendingDecodeGrid = null;
+    camera.pendingIntermediates = null;
     await pending.resolve();
   }
 
@@ -353,6 +354,19 @@ export function drainVisuals(camera: Camera): void {
 // camera.axesCapturing is already true -- callers (runAxesReconstruction,
 // recomputeFromLastCapture) own the guard/busy-UI/RAF wrapper and the
 // capture step itself.
+// What the DISPLAY half needs handed back from this run, declared here because
+// this is the only caller that has a drain to resolve it in and the only one
+// that knows which overlays are on.
+//
+// 'decodeGrid' is unconditional: lastDecodeGrid/lastDecodeRotated/
+// lastDecodeCorrectness feed the Projected-Cam view and the pose readout, and
+// the drain always runs, so there is nothing to gate on. Everything else is a
+// per-overlay ask -- see pipeline/intermediates.ts, and step 4b for the
+// overlays that consume them.
+function displayIntermediates(_camera: Camera): IntermediatesRequest {
+  return wants('decodeGrid');
+}
+
 async function recomputeStages(camera: Camera) {
   const { gray, w, h } = camera.lastAxesCaptureGray!;
 
@@ -370,13 +384,8 @@ async function recomputeStages(camera: Camera) {
   // confirmed not on the critical path to a pose (distance is already
   // finalized by gridPeriodPhase before that stage would run); they exist
   // only to feed Projected-Cam/World-floor-decal DISPLAY.
-  // `true` = defer the decode grid's readback into the visual drain. Always on
-  // here because the drain always runs; it stays a PARAMETER rather than a
-  // global because computePoseFromCapture's other two callers have no drain to
-  // defer into (mobileCapture reads lastDecodeGrid synchronously, and the
-  // timing harness releases the handle without resolving it).
   camera.lastPoseTiming = await computePoseFromCapture(
-    camera, gray, w, h, backendFromForceCPU(globalState.forceCPU), true,
+    camera, gray, w, h, backendFromForceCPU(globalState.forceCPU), displayIntermediates(camera),
   );
   camera.axesComputed = !!camera.lastQuadricPair;
 

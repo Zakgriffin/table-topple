@@ -7,6 +7,7 @@ import { buildAndTallyDecodeGPU } from '../pipelineGPU/decodeGridBuild.ts';
 import type { Backend } from '../pipeline/backend.ts';
 import type { HarnessInput } from './input.ts';
 import { runPoseOn } from './runPose.ts';
+import { wants } from '../pipeline/intermediates.ts';
 
 // ── Dev harness: does the fused GPU decode match the CPU pair? ───────────
 //
@@ -65,7 +66,9 @@ export async function verifyDecodeGridBuild(
   input: HarnessInput, backend: Backend = 'gpu',
 ): Promise<DecodeGridBuildVerifyReport | string> {
   const { gray, w, h } = input;
-  const camera = await runPoseOn(input, backend);
+  // Asks for the decode grid explicitly: nothing brings it down unless a
+  // caller says so now, and this harness compares against it.
+  const camera = await runPoseOn(input, backend, wants('decodeGrid'));
   const vFovRad = getAnalysisVFovRad(camera);
 
   const layout = decodeGridLayout(camera, gray, vFovRad);

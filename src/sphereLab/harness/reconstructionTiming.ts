@@ -1,5 +1,6 @@
 import { type Backend } from '../pipeline/backend.ts';
 import { computePoseFromCapture, type PoseComputeState } from '../pipeline/poseCompute.ts';
+import { NO_INTERMEDIATES } from '../pipeline/intermediates.ts';
 import { poseStateFor } from './input.ts';
 import type { HarnessInput } from './input.ts';
 import {
@@ -389,16 +390,15 @@ function median(xs: number[]): number {
 // no longer moves. What is being timed is gray in / pose out, and the grid is
 // not part of the pose.
 //
-// Released rather than resolved, since nothing here paints: releasing frees the
-// device buffers without performing the transfer, which is the whole point. A
-// rep that leaked instead would hold ~0.45MB per rep across the sweep.
+// Asks for NOTHING, which is now literally free rather than nearly free. This
+// used to pass deferDecodeGrid=true and then release the handle in a finally --
+// deferring a readback and immediately throwing it away, because that was the
+// only way to keep it off the measured path. An empty request does not build
+// the handle, does not read the grid back, and destroys the residency in
+// computePoseFromCapture's own finally, so there is nothing left here to clean
+// up. See pipeline/intermediates.ts, capability (1).
 async function poseOnce(state: PoseComputeState, gray: Float64Array, w: number, h: number, backend: Backend) {
-  try {
-    return await computePoseFromCapture(state, gray, w, h, backend, true);
-  } finally {
-    state.pendingDecodeGrid?.release();
-    state.pendingDecodeGrid = null;
-  }
+  return computePoseFromCapture(state, gray, w, h, backend, NO_INTERMEDIATES);
 }
 
 // One rep's span tree, flattened to (label, selfMs, depth) in pre-order.

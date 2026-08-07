@@ -5,7 +5,7 @@ import { FieldResidency } from '../pipelineGPU/fieldResidency.ts';
 import { spanEnd, spanStart } from '../profiling/profiler.ts';
 import { type CompositeLine, type Vote } from '../types.ts';
 import { type Backend } from './backend.ts';
-import { computeLsdRectangles, runLsdChain } from './lsdSegments.ts';
+import { computeLsdRectangles, type LsdRectangle, runLsdChain } from './lsdSegments.ts';
 
 
 // Just the LSD tuning knobs computeGradient2x2Composites/
@@ -48,10 +48,16 @@ export interface LsdCompositeSettings {
 // computes the gradient too, on whichever side the toggle says, and holds
 // fx/fy there. Nothing between here and the fitter has to name a side, and the
 // gradient no longer has to land on the CPU just to be passed along.
+// Returns the RECTANGLES alongside the composite lines. Not because this
+// function needs them -- it filters them down to lines and is done -- but
+// because they are stage 4's output and a caller can ask for them (see
+// pipeline/intermediates.ts). They were dropped on the floor here before, which
+// is one of the reasons overlays/lsdOverlay.ts ran a second complete LSD chain:
+// the first one's answer existed and then stopped existing.
 export async function computeGradient2x2Composites(
   settings: LsdCompositeSettings,
   res: FieldResidency, w: number, h: number, backend: Backend,
-): Promise<{ root: number; line: CompositeLine }[]> {
+): Promise<{ composites: { root: number; line: CompositeLine }[]; rects: LsdRectangle[] }> {
   const rects = await runLsdChain(res, w, h, {
     toleranceDeg: settings.lsdToleranceDeg,
     rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
@@ -67,7 +73,7 @@ export async function computeGradient2x2Composites(
   const filterSpan = spanStart('compositesFromLsdRectangles', true);
   const out = compositesFromLsdRectangles(rects, w, h, settings);
   spanEnd(filterSpan);
-  return out;
+  return { composites: out, rects };
 }
 
 // One line per ACCEPTED LSD rectangle -- its own two endpoints, no merging.

@@ -82,12 +82,12 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   const uploadSpan = appSpan('project.upload');
   let grayBuf: GPUBuffer | null = null;
   if (gray) {
-    grayBuf = uploadFloat32(device, new Float32Array(gray), 0, 'project:gray');
+    grayBuf = uploadFloat32(device, new Float32Array(gray), 0, 'project:gray', 'project.upload');
   }
-  const gradDimsBuf = uploadUniform(device, new Uint32Array([w, h, 1, 0]).buffer);
+  const gradDimsBuf = uploadUniform(device, new Uint32Array([w, h, 1, 0]).buffer, 'project.upload');
   const projUniformBuf = uploadUniform(device, buildProjectUniforms(
     w, h, minGrazingCos, distance, vFovRad, camera.aspect, MATH_QUAT, Drow, Dcol, normal,
-  ));
+  ), 'project.upload');
   spanEnd(uploadSpan);
 
   const dispatchSpan = appSpan('project.dispatch');
@@ -134,8 +134,8 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   spanEnd(dispatchSpan);
 
   const [sampleRaw, validRaw] = await Promise.all([
-    readFloat32(device, sampleOutBuf, n * 16, 'project:samples'),
-    readUint32(device, validOutBuf, n * 4, 'project:valid'),
+    readFloat32(device, sampleOutBuf, n * 16, 'project:samples', 'project.bins'),
+    readUint32(device, validOutBuf, n * 4, 'project:valid', 'project.bins'),
   ]);
 
   const buffersToDestroy = [fxBuf, fyBuf, gradDimsBuf, projUniformBuf, sampleOutBuf, validOutBuf];

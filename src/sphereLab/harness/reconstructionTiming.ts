@@ -8,7 +8,7 @@ import {
 import { POSE_STAGE_TABLE } from '../../pose/timing/stages.ts';
 import {
   type AllocationSample, allocationProbeResult, getGPUDevice, setAllocationProbe,
-  setTransferProbe, type TransferSample, transferLedger, transferLedgerReset,
+  setTransferProbe, type TransferSample, transfersFrom,
 } from '../../pose/gpu/device.ts';
 import { type GpuTimelineResult, gpuTimelineArm, gpuTimelineDisarm, gpuTimelineResolve } from '../../pose/gpu/gpuTimeline.ts';
 import { awaitPageFocus } from './lsdChainVerify.ts';
@@ -289,6 +289,21 @@ interface CrossingReport {
   // reconstruction is spent blocked on the device" figure, and strictly less than
   // summing the ms column.
   stallMs: number;
+  // ── The one check the owner threading needs, and nothing else can make ──
+  //
+  // A transfer names its owning stage at the call site (see StageRecord.within),
+  // and that name is a plain string: a typo, or a stage that has already closed
+  // by the time the crossing happens, both produce a record that joins NOWHERE
+  // and silently vanishes from the stage it belongs to. It still appears in the
+  // rows above, so the crossings table looks complete while the decomposition
+  // quietly under-counts.
+  //
+  // A wrong owner is therefore invisible except HERE: an `xfer.*` record that
+  // declared a parent and ended up a root. Empty is the healthy state.
+  //
+  // Transfers with NO declared owner do not appear -- those are roots on
+  // purpose (prefixSum's harness-only readbacks, anything outside a pose).
+  misattributed: string[];
 }
 
 interface ReconstructionTimingReport {
@@ -634,6 +649,7 @@ export async function timeReconstruction(
     // affected -- a bare count would make every row suspect.
     const foreignIds = new Set<string>();
     const straddled = new Set<string>();
+    const misattributed = new Set<string>();
     // The critical path, per rep. Durations and waits keyed by stage id so every
     // number is a median on the same footing as the self-time rows beside it;
     // the SHAPE is taken from the last rep, with `cpShapes` there to say whether
@@ -657,7 +673,6 @@ export async function timeReconstruction(
     session.takeRepRecords();
 
     for (let rep = 0; rep < reps; rep++) {
-      transferLedgerReset();
       const t0 = performance.now();
       const pose = await poseOnce(input, gray, w, h, backend);
       const timing = pose.timing;
@@ -676,6 +691,14 @@ export async function timeReconstruction(
       const join = joinRecords(recs, POSE_STAGE_TABLE);
       for (const u of join.unknown) foreignIds.add(u.id);
       for (const o of join.orphans) straddled.add(o.id);
+      // A crossing that named an owner and became a root anyway -- see
+      // CrossingReport.misattributed. Checked on the ROOTS rather than by
+      // scanning records, because "did not join" is exactly "is a root here".
+      for (const r of join.roots) {
+        if (r.rec.id.startsWith('xfer.') && r.rec.within) {
+          misattributed.add(`${String(r.rec.attrs?.what ?? r.rec.id)} -> ${r.rec.within}`);
+        }
+      }
       const stage = findNode(join.roots, 'pose.run');
       if (stage) {
         const flat: { label: string; selfMs: number; depth: number; sync: boolean }[] = [];
@@ -731,7 +754,11 @@ export async function timeReconstruction(
         }
       }
 
-      const led = transferLedger();
+      // The SAME records the span tree came from, projected back into the
+      // crossing shape -- there is no second store to reset per rep any more,
+      // and so no way for the two to disagree about which rep a crossing
+      // belonged to. See device.ts's transfersFrom.
+      const led = transfersFrom(recs);
       // Counted per rep and kept from the LAST one rather than summed: these
       // are "per reconstruction" quantities, and every rep runs the identical
       // computation, so summing would just multiply by reps.
@@ -788,12 +815,13 @@ export async function timeReconstruction(
     let probe: TransferGroup[] | null = null;
     try {
       setTransferProbe(true);
-      transferLedgerReset();
+      // Discard whatever the timed reps left open, so this rep's records are
+      // this rep's -- the same take that used to be a transferLedgerReset().
+      session.takeRepRecords();
       await poseOnce(input, gray, w, h, backend);
-      probe = groupLedger(transferLedger());
+      probe = groupLedger(transfersFrom(session.takeRepRecords()));
     } finally {
       setTransferProbe(false);
-      transferLedgerReset();
     }
 
     // ── And ONE more rep, for what a buffer costs to exist ──
@@ -885,6 +913,7 @@ export async function timeReconstruction(
         readbacks: fences,
         stalls: stallCounts.length ? median(stallCounts) : 0,
         stallMs: stallMsAll.length ? median(stallMsAll) : 0,
+        misattributed: [...misattributed],
       },
       spanBreakdown: {
         rows: spanRows,
@@ -968,6 +997,12 @@ export function formatReconstructionTiming(r: ReconstructionTimingReport | strin
         + `  ${row.stalls.length ? row.stalls.map((n) => '#' + n).join(',') : '-- (never fences)'}`);
     }
     lines.push(`  do NOT sum the ms column -- rows sharing a stall number overlap; use the ${c.stallMs.toFixed(1)}ms above.`);
+    if (c.misattributed.length) {
+      lines.push(`  !! ${c.misattributed.length} crossing(s) named an owning stage that never contained them:`);
+      lines.push(`     ${c.misattributed.join(', ')}`);
+      lines.push(`     Their cost is MISSING from that stage's decomposition below. Either the owner string at`);
+      lines.push(`     the call site is wrong, or the stage's span closes before the crossing happens.`);
+    }
   }
   // Printed BEFORE the kernel table on purpose: the kernels are a known ~28% and
   // this is the instrument aimed at the majority that is not.

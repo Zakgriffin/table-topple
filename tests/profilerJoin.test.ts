@@ -2,8 +2,9 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   type CriticalPath, type PathNode, type StageRecord, type StageTable,
-  criticalPath, joinRecords, profilerBeginSession,
+  criticalPath, joinRecords, profilerBeginSession, spanEnd, spanStart,
 } from '../src/sphereLab/profiling/profiler.ts';
+import { recordTransfer, transfersFrom } from '../src/pose/gpu/device.ts';
 import { POSE_STAGE_TABLE } from '../src/pose/timing/stages.ts';
 import { ALL_STAGES } from '../src/sphereLab/profiling/stages.ts';
 import { runPoseOn } from '../src/sphereLab/harness/runPose.ts';
@@ -271,6 +272,104 @@ test('a real CPU reconstruction joins into ONE tree with no orphans', async () =
     'gpp.classify', 'gpp.search', 'pose.decode', 'decode.build', 'decode.tally']) {
     assert.ok(ids.has(id), `${id} did not record inside pose.run on a CPU reconstruction`);
   }
+});
+
+// ── THE PER-OCCURRENCE PARENT (StageRecord.within) ────────────────────────
+//
+// Transfers are one call site serving a dozen stages, so their owner is passed
+// per call rather than declared in the table. These check that the override
+// wins in BOTH directions -- a one-sided test would pass under an
+// implementation that only ever ADDED a parent, and the `null` direction is the
+// one that keeps an unattributed transfer out of somebody else's decomposition.
+
+test('a record\'s own `within` overrides the table', () => {
+  // `b` is declared within `root`; this occurrence says `a`.
+  const j = joinRecords([
+    rec('root', 0, 100), rec('a', 10, 60), { ...rec('b', 20, 30), within: 'a' },
+  ], TABLE);
+  const a = j.roots[0].children.find((n) => n.rec.id === 'a')!;
+  assert.deepEqual(a.children.map((c) => c.rec.id), ['b']);
+  assert.equal(j.roots[0].children.length, 1, 'b must not ALSO be a child of root');
+});
+
+test('an explicit `within: null` makes a record a root even when the table names a parent', () => {
+  const j = joinRecords([rec('root', 0, 100), { ...rec('a', 10, 60), within: null }], TABLE);
+  assert.equal(j.roots.length, 2);
+  assert.equal(j.roots[0].selfMs, 100, 'and its time is NOT subtracted from the parent it opted out of');
+});
+
+test('an override naming a stage that does not contain it leaves it a root', () => {
+  // The misattribution case: a transfer names an owner whose span had already
+  // closed. It has to stay OUT of the tree rather than being adopted by
+  // whatever else was open -- that is the whole reparenting argument, applied
+  // to a per-call parent. The harness reports these; see CrossingReport.
+  const j = joinRecords([
+    rec('root', 0, 100), rec('a', 10, 20), { ...rec('b', 50, 60), within: 'a' },
+  ], TABLE);
+  const b = j.roots.find((n) => n.rec.id === 'b')!;
+  assert.ok(b, 'b did not join, so it must be a root');
+  assert.deepEqual(j.orphans, [], 'disjoint, not straddling, so not an orphan either');
+});
+
+// ── The ledger is a VIEW of the record store, not a second store ──
+//
+// recordTransfer needs no device, so this runs headless and covers the whole
+// round trip: a crossing recorded with an owner, joined under that owner, and
+// projected back into the TransferSample shape every consumer reads.
+test('a recorded transfer is one record, attributed and projected back', () => {
+  const session = profilerBeginSession();
+  let recs;
+  try {
+    const outer = spanStart('pose.decode');
+    const t0 = performance.now();
+    recordTransfer({
+      what: 'test:payload', kind: 'readback', dir: 'down', bytes: 4096,
+      ms: 2, startMs: t0, bareFenceMs: null, queueDrainMs: null,
+    }, 'pose.decode');
+    // A real spin, so the owning span really does CONTAIN the crossing. The
+    // join is containment-checked, so a test that recorded a 2ms transfer and
+    // closed the parent immediately would fail for the right reason -- and
+    // faking it by hand-building records would stop testing recordTransfer.
+    while (performance.now() - t0 < 3) { /* hold the stage open */ }
+    spanEnd(outer);
+    recs = session.takeRepRecords();
+  } finally {
+    session.end();
+  }
+
+  const led = transfersFrom(recs);
+  assert.equal(led.length, 1, 'exactly one crossing, from one record');
+  assert.equal(led[0].what, 'test:payload');
+  assert.equal(led[0].kind, 'readback');
+  assert.equal(led[0].bytes, 4096);
+  assert.ok(Math.abs(led[0].ms - 2) < 1e-6, `expected the caller's own 2ms, got ${led[0].ms}`);
+
+  // And it joined INSIDE the stage that claimed it, which is the half that did
+  // not exist while the ledger was a separate array.
+  const j = joinRecords(recs, POSE_STAGE_TABLE);
+  const decode = j.roots.find((n) => n.rec.id === 'pose.decode')!;
+  assert.deepEqual(decode.children.map((c) => c.rec.id), ['xfer.readback']);
+  assert.ok(decode.selfMs < decode.durationMs, 'its cost must come OUT of the stage self time');
+});
+
+test('an unattributed transfer is a root, not adopted by whatever was open', () => {
+  const session = profilerBeginSession();
+  let recs;
+  try {
+    const outer = spanStart('pose.decode');
+    recordTransfer({
+      what: 'test:orphan', kind: 'upload', dir: 'up', bytes: 8,
+      ms: 0.1, startMs: performance.now(), bareFenceMs: null, queueDrainMs: null,
+    });
+    spanEnd(outer);
+    recs = session.takeRepRecords();
+  } finally {
+    session.end();
+  }
+  const j = joinRecords(recs, POSE_STAGE_TABLE);
+  const decode = j.roots.find((n) => n.rec.id === 'pose.decode')!;
+  assert.deepEqual(decode.children, [], 'containment alone must not adopt it');
+  assert.equal(transfersFrom(recs).length, 1, 'but it is still IN the crossings table');
 });
 
 // ── THE CRITICAL PATH: joined on `inputs`, not `within` ───────────────────

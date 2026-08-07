@@ -84,7 +84,7 @@ export async function collectRegionsGPU(
   const device = res.device;
   if (!device) return false;
   const n = res.n;
-  const labelBuf = res.gpu('label'), fxBuf = res.gpu('fx'), fyBuf = res.gpu('fy');
+  const labelBuf = res.gpu('label', 'lsd.grow'), fxBuf = res.gpu('fx', 'lsd.grow'), fyBuf = res.gpu('fy', 'lsd.grow');
 
   device.pushErrorScope('validation');
   const p = getPipelines(device);

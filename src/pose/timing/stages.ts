@@ -31,7 +31,12 @@ import {
 // would be the boundary violation this whole restructure exists to remove.
 export const POSE_STAGES = {
   'pose.run': { label: 'pose (whole reconstruction)', within: null },
-  'pose.residency': { label: 'residency create (gray up)', within: 'pose.run' },
+  // NOT "gray up" any more, which is what it used to say. The upload is LAZY --
+  // createLsdChainResidency only calls provideCPU, and the 1.19MB crossing
+  // happens at the first `res.gpu('gray')`, inside `lsd.gradient`. With
+  // transfers carrying an owner that is now visible in the table rather than
+  // implied by a label, and the label was implying the wrong stage.
+  'pose.residency': { label: 'residency create', within: 'pose.run' },
 
   // ── the votes stage and the LSD chain underneath it ──
   'pose.votes': { label: 'votes stage', within: 'pose.run', inputs: ['pose.residency'] },
@@ -83,6 +88,26 @@ export const POSE_STAGES = {
   // it is a root here rather than part of the pose. The app puts it inside its
   // display tail.
   'pose.drain': { label: 'intermediates drain', within: null },
+
+  // ── bus crossings ──
+  //
+  // Three ids for every transfer in the pipeline, because the WHAT and the byte
+  // count are attributes of an occurrence, not different stages -- the old span
+  // form minted `GPU→CPU readback (1191680B)` as a fresh label per byte size,
+  // which no report could aggregate.
+  //
+  // `within: null` is the DEFAULT, not the answer: a transfer helper is one
+  // call site serving a dozen stages, so its owner is passed per call and
+  // overrides this (see StageRecord.within). A transfer whose caller did not
+  // say lands as a root -- visible in the crossings table, absent from any
+  // stage's decomposition, which is the honest reading of "nobody claimed it".
+  'xfer.readback': { label: 'GPU->CPU readback', within: null },
+  // Uploads never fence: mappedAtCreation is synchronous, so this is allocation
+  // plus memcpy and nothing else can be interleaved into it.
+  'xfer.upload': { label: 'CPU->GPU upload', within: null, sync: true },
+  // f64<->f32 narrowing/widening around a crossing. Pure CPU, and per
+  // fieldResidency's own note the single largest per-crossing cost.
+  'xfer.convert': { label: 'f64<->f32 convert', within: null, sync: true },
 } as const satisfies Readonly<Record<string, StageNode>>;
 
 export type PoseStageId = keyof typeof POSE_STAGES;

@@ -97,8 +97,8 @@ export async function fitAndTestRegionsGPU(
   device.pushErrorScope('validation');
   const pipeline = getPipeline(device);
 
-  const fxBuf = res.gpu('fx');
-  const fyBuf = res.gpu('fy');
+  const fxBuf = res.gpu('fx', 'lsd.fitDispatch');
+  const fyBuf = res.gpu('fy', 'lsd.fitDispatch');
   // The PROVABLE bound, not a cap: this one is only allocated, never copied, so
   // its size costs address space rather than bandwidth. rs.maxRegions is exact
   // (a kept region holds >= minRegionSize pixels), so there is no overflow case.
@@ -113,7 +113,7 @@ export async function fitAndTestRegionsGPU(
   dv.setFloat32(16, rho >= 0 ? rho * rho : -Infinity, true);
   dv.setFloat32(20, toleranceRad, true);
   dv.setFloat32(24, logNTests, true); dv.setFloat32(28, logEpsilon, true);
-  const uniformBuf = uploadUniform(device, uniformData);
+  const uniformBuf = uploadUniform(device, uniformData, 'lsd.fitDispatch');
 
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
@@ -145,8 +145,8 @@ export async function fitAndTestRegionsGPU(
   // count-then-rectangles pair the old code paid.
   const capped = Math.min(RECT_COPY_CAP, rs.maxRegions);
   const [counts, head] = await Promise.all([
-    res.regionCounts(),
-    readFloat32(device, outBuf, capped * RECT_STRIDE_BYTES, 'lsdFit:rects'),
+    res.regionCounts('lsd.fitDispatch'),
+    readFloat32(device, outBuf, capped * RECT_STRIDE_BYTES, 'lsdFit:rects', 'lsd.fitDispatch'),
   ]);
   const regionCount = counts.regionCount;
 
@@ -157,7 +157,7 @@ export async function fitAndTestRegionsGPU(
   let raw = head;
   if (regionCount > capped) {
     console.warn(`fitAndTestRegionsGPU: ${regionCount} regions exceeded RECT_COPY_CAP ${RECT_COPY_CAP} -- second readback taken, consider raising it`);
-    raw = await readFloat32(device, outBuf, regionCount * RECT_STRIDE_BYTES, 'lsdFit:rectsOverflow');
+    raw = await readFloat32(device, outBuf, regionCount * RECT_STRIDE_BYTES, 'lsdFit:rectsOverflow', 'lsd.fitDispatch');
   }
   for (const b of [outBuf, uniformBuf]) b.destroy();
 

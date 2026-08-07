@@ -8,6 +8,8 @@
 // for.
 
 
+import { type StageRecord, spanStart } from '../../sphereLab/profiling/profiler.ts';
+
 let devicePromise: Promise<GPUDevice | null> | null = null;
 
 export function isWebGPUSupported(): boolean {
@@ -71,6 +73,25 @@ export async function getGPUDevice(): Promise<GPUDevice | null> {
 // NARROWING that precedes them happens in the caller, and FieldResidency
 // reports that separately via recordTransfer -- see its own comment.
 
+// ── ONE HOST STORE, and this is a VIEW of it ──
+//
+// This used to be a private array here, filled in parallel with a profiler span
+// over nearly the same window: two instruments on one clock, the exact
+// duplication the consolidation exists to stop. 6a deleted the spans because
+// the ledger was strictly richer -- it had the labels, the bytes, the direction
+// and the probe attribution against a span whose whole name was `(2432B)`.
+//
+// Now the ledger IS profiler records. A crossing opens an `xfer.*` record with
+// the rest as attrs, so there is one clock, one store, one per-rep take, and --
+// the part that was not available before -- a transfer joins INSIDE the stage
+// that owns it, so its fence stops sitting anonymously in that stage's self
+// time. The owner is passed at the call site, since a transfer helper is one
+// call site serving a dozen stages and there is nothing to write in a static
+// table (see StageRecord.within).
+//
+// `TransferSample` survives as the SHAPE consumers already read; transfersFrom()
+// projects records back into it, so the stall grouping and the crossings table
+// did not have to change at all.
 export interface TransferSample {
   what: string;
   // 'readback' is the ONLY kind that fences -- uploads are synchronous
@@ -97,12 +118,55 @@ export interface TransferSample {
   queueDrainMs: number | null;
 }
 
-let ledger: TransferSample[] = [];
 let probeEnabled = false;
 
-export function transferLedgerReset(): void { ledger = []; }
-export function transferLedger(): readonly TransferSample[] { return ledger; }
 export function setTransferProbe(on: boolean): void { probeEnabled = on; }
+
+const XFER_ID = { readback: 'xfer.readback', upload: 'xfer.upload', convert: 'xfer.convert' } as const;
+
+// Every crossing goes through here. `owner` is the stage that asked for it --
+// see StageRecord.within for why it is a per-call argument rather than a table
+// entry, and why passing nothing (a root) is a legitimate answer rather than a
+// missing one.
+function xfer(
+  s: Omit<TransferSample, 'startMs' | 'ms'>, startMs: number, endMs: number, owner: string | undefined,
+): void {
+  const attrs: Record<string, string | number> = { what: s.what, bytes: s.bytes, dir: s.dir };
+  // Omitted rather than recorded as null: SpanAttrs holds no null, and their
+  // ABSENCE is exactly what "the probe was off for this one" means.
+  if (s.bareFenceMs !== null) attrs.bareFenceMs = s.bareFenceMs;
+  if (s.queueDrainMs !== null) attrs.queueDrainMs = s.queueDrainMs;
+  const rec = spanStart(XFER_ID[s.kind], attrs, owner);
+  // Both endpoints are the CALLER's, not this call's. A crossing is timed
+  // around a window this function is not inside -- the probes have to run
+  // BEFORE it, and a conversion is a loop in another module entirely -- so
+  // bracketing `spanStart`/`spanEnd` here would measure the wrong interval and,
+  // for the probe case, would silently fold two 4-byte round trips into it.
+  (rec as { start: number }).start = startMs;
+  rec.end = endMs;
+}
+
+// The crossings in a set of records, in the shape every consumer already reads.
+// Takes records rather than reading the store, so a harness that already takes
+// one set per rep gets its ledger from the same take -- there is no second
+// thing to reset, and no way for the two to fall out of step.
+export function transfersFrom(recs: readonly StageRecord[]): TransferSample[] {
+  const out: TransferSample[] = [];
+  for (const r of recs) {
+    const kind = r.id === XFER_ID.readback ? 'readback' as const
+      : r.id === XFER_ID.upload ? 'upload' as const
+        : r.id === XFER_ID.convert ? 'convert' as const : null;
+    if (!kind || !r.attrs) continue;
+    const a = r.attrs;
+    out.push({
+      what: String(a.what), kind, dir: a.dir === 'up' ? 'up' : 'down',
+      bytes: Number(a.bytes), ms: r.end > 0 ? r.end - r.start : 0, startMs: r.start,
+      bareFenceMs: typeof a.bareFenceMs === 'number' ? a.bareFenceMs : null,
+      queueDrainMs: typeof a.queueDrainMs === 'number' ? a.queueDrainMs : null,
+    });
+  }
+  return out;
+}
 
 // `label` defaults to UNLABELLED rather than to a type name so an unlabelled
 // call site is visible AS a defect in the readout instead of quietly merging
@@ -114,7 +178,9 @@ export function setTransferProbe(on: boolean): void { probeEnabled = on; }
 // For byte-proportional work that happens OUTSIDE these helpers but is part of
 // the same crossing -- currently FieldResidency's f64<->f32 conversions, which
 // are the single largest per-crossing cost and are invisible from in here.
-export function recordTransfer(s: TransferSample): void { ledger.push(s); }
+export function recordTransfer(s: TransferSample, owner?: string): void {
+  xfer(s, s.startMs, s.startMs + s.ms, owner);
+}
 
 // A 4-byte read from `buffer`, used only by probe mode. Every buffer reaching
 // the read helpers is at least 4 bytes and already carries COPY_SRC (it is
@@ -141,7 +207,7 @@ async function bareRead(device: GPUDevice, buffer: GPUBuffer): Promise<number> {
 // host needs the value to size a dispatch, terminate a loop, or finish a
 // computation that has not been ported.
 
-export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage = 0, label = 'UNLABELLED f32'): GPUBuffer {
+export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage = 0, label = 'UNLABELLED f32', owner?: string): GPUBuffer {
   const t0 = performance.now();
   const buffer = device.createBuffer({
     size: data.byteLength,
@@ -150,11 +216,11 @@ export function uploadFloat32(device: GPUDevice, data: Float32Array, extraUsage 
   });
   new Float32Array(buffer.getMappedRange()).set(data);
   buffer.unmap();
-  ledger.push({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs: null, queueDrainMs: null });
+  xfer({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, bareFenceMs: null, queueDrainMs: null }, t0, performance.now(), owner);
   return buffer;
 }
 
-export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 0, label = 'UNLABELLED u32'): GPUBuffer {
+export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 0, label = 'UNLABELLED u32', owner?: string): GPUBuffer {
   const t0 = performance.now();
   const buffer = device.createBuffer({
     size: data.byteLength,
@@ -163,7 +229,7 @@ export function uploadUint32(device: GPUDevice, data: Uint32Array, extraUsage = 
   });
   new Uint32Array(buffer.getMappedRange()).set(data);
   buffer.unmap();
-  ledger.push({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs: null, queueDrainMs: null });
+  xfer({ what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, bareFenceMs: null, queueDrainMs: null }, t0, performance.now(), owner);
   return buffer;
 }
 
@@ -285,7 +351,7 @@ export function createStorageBuffer(device: GPUDevice, byteLength: number, extra
 // during a reconstruction" was one short of true. Uniforms are tens of bytes
 // against megabyte payloads, so the number is small; the point is that the
 // table is now exhaustive rather than nearly so.
-export function uploadUniform(device: GPUDevice, data: ArrayBuffer): GPUBuffer {
+export function uploadUniform(device: GPUDevice, data: ArrayBuffer, owner?: string): GPUBuffer {
   const t0 = performance.now();
   const buffer = device.createBuffer({
     size: Math.ceil(data.byteLength / 16) * 16,
@@ -294,7 +360,7 @@ export function uploadUniform(device: GPUDevice, data: ArrayBuffer): GPUBuffer {
   });
   new Uint8Array(buffer.getMappedRange()).set(new Uint8Array(data));
   buffer.unmap();
-  ledger.push({ what: 'uniforms', kind: 'upload', dir: 'up', bytes: data.byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs: null, queueDrainMs: null });
+  xfer({ what: 'uniforms', kind: 'upload', dir: 'up', bytes: data.byteLength, bareFenceMs: null, queueDrainMs: null }, t0, performance.now(), owner);
   return buffer;
 }
 
@@ -305,7 +371,7 @@ export function uploadUniform(device: GPUDevice, data: ArrayBuffer): GPUBuffer {
 // time, read it beside gpuTimeline.ts's table -- they measure different clocks
 // and are expected to disagree, since a readback blocks until everything queued
 // ahead of it has executed.
-export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED f32'): Promise<Float32Array> {
+export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED f32', owner?: string): Promise<Float32Array> {
   // Both probes BEFORE the timed read, so the real read is measured against a
   // drained queue and its excess over bareFenceMs is byte cost alone.
   const queueDrainMs = probeEnabled ? await bareRead(device, buffer) : null;
@@ -319,11 +385,11 @@ export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLeng
   const result = new Float32Array(staging.getMappedRange().slice(0));
   staging.unmap();
   staging.destroy();
-  ledger.push({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs, queueDrainMs });
+  xfer({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, bareFenceMs, queueDrainMs }, t0, performance.now(), owner);
   return result;
 }
 
-export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED u32'): Promise<Uint32Array> {
+export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED u32', owner?: string): Promise<Uint32Array> {
   const queueDrainMs = probeEnabled ? await bareRead(device, buffer) : null;
   const bareFenceMs = probeEnabled ? await bareRead(device, buffer) : null;
   const t0 = performance.now();
@@ -335,7 +401,7 @@ export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLengt
   const result = new Uint32Array(staging.getMappedRange().slice(0));
   staging.unmap();
   staging.destroy();
-  ledger.push({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, ms: performance.now() - t0, startMs: t0, bareFenceMs, queueDrainMs });
+  xfer({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, bareFenceMs, queueDrainMs }, t0, performance.now(), owner);
   return result;
 }
 

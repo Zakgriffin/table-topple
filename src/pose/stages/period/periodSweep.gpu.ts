@@ -68,15 +68,15 @@ export async function sweepResultantsGPU(
   device.pushErrorScope('validation');
   const { pipeline, bindGroupLayout } = getPipeline(device);
 
-  const scaledBuf = uploadFloat32(device, scaled, 0, 'sweep:scaled');
-  const weightsBuf = uploadFloat32(device, weights, 0, 'sweep:weights');
+  const scaledBuf = uploadFloat32(device, scaled, 0, 'sweep:scaled', 'gpp.sweep');
+  const weightsBuf = uploadFloat32(device, weights, 0, 'sweep:weights', 'gpp.sweep');
   const scoresBuf = createStorageBuffer(device, candidateCount * 4);
 
   const uni = new ArrayBuffer(16);
   const dv = new DataView(uni);
   dv.setUint32(0, rowCount, true); dv.setUint32(4, colCount, true);
   dv.setUint32(8, nMin, true); dv.setUint32(12, nMax, true);
-  const uniBuf = uploadUniform(device, uni);
+  const uniBuf = uploadUniform(device, uni, 'gpp.sweep');
 
   const bg = device.createBindGroup({
     layout: bindGroupLayout,
@@ -99,7 +99,7 @@ export async function sweepResultantsGPU(
   pass.end();
   device.queue.submit([encoder.finish()]);
 
-  const scores = await readFloat32(device, scoresBuf, candidateCount * 4, 'sweep:scores');
+  const scores = await readFloat32(device, scoresBuf, candidateCount * 4, 'sweep:scores', 'gpp.sweep');
   for (const b of [scaledBuf, weightsBuf, scoresBuf, uniBuf]) b.destroy();
 
   const err = await device.popErrorScope();

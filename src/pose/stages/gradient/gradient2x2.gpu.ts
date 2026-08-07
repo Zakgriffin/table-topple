@@ -49,7 +49,7 @@ export async function computeGradient2x2FieldGPU(res: FieldResidency, w: number,
   const pipeline = getPipeline(device);
 
   const n = w * h;
-  const grayBuf = res.gpu('gray');
+  const grayBuf = res.gpu('gray', 'lsd.gradient');
   const fxBuf = createStorageBuffer(device, n * 4);
   const fyBuf = createStorageBuffer(device, n * 4);
   const dimsBuf = uploadUniform(device, new Uint32Array([w, h, 0, 0]).buffer);

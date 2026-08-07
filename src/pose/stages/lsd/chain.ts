@@ -131,7 +131,7 @@ async function fitRegionsGPU(
     // failure in either one can't leave the other rejecting unobserved.
     const [gpuResults, regions] = await Promise.all([
       fitAndTestRegionsGPU(res, w, h, settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon),
-      wantMembers ? res.regionsCPU() : Promise.resolve(null),
+      wantMembers ? res.regionsCPU('lsd.fit') : Promise.resolve(null),
     ]);
     if (!gpuResults) return null;
 
@@ -218,7 +218,7 @@ async function computeLsdRectanglesAuto(
     // published nothing, so the CPU grower owns these slots. Asking the
     // residency for the CPU side of fx/fy is what pulls stage 1's output back
     // down if -- and only if -- it was produced on the device.
-    const cpu = growRegionsCCL(await res.cpuF64('fx'), await res.cpuF64('fy'), ...growArgs);
+    const cpu = growRegionsCCL(await res.cpuF64('fx', 'lsd.grow'), await res.cpuF64('fy', 'lsd.grow'), ...growArgs);
     res.provideCPU('regionId', cpu.regionId);
     res.provideRegionsCPU(cpu.regions);
   }
@@ -251,7 +251,7 @@ async function computeLsdRectanglesAuto(
       const gpu = await fitRegionsGPU(res, w, h, settings, wantMembers);
       if (gpu) return gpu;
     }
-    return fitRegionsCPU(await res.regionsCPU(), await res.cpuF64('fx'), await res.cpuF64('fy'), w, h, settings);
+    return fitRegionsCPU(await res.regionsCPU('lsd.fit'), await res.cpuF64('fx', 'lsd.fit'), await res.cpuF64('fy', 'lsd.fit'), w, h, settings);
   } finally {
     spanEnd(fitSpan);
   }
@@ -272,7 +272,7 @@ async function runGradient2x2Stage(res: FieldResidency, w: number, h: number, ba
   if (!(useGPU && await computeGradient2x2FieldGPU(res, w, h))) {
     // gray is CPU-resident by construction (createLsdChainResidency put it
     // there), so this is a lookup and never a readback.
-    const field = computeGradient2x2Field(await res.cpuF64('gray'), w, h);
+    const field = computeGradient2x2Field(await res.cpuF64('gray', 'lsd.gradient'), w, h);
     res.provideCPU('fx', field.fx);
     res.provideCPU('fy', field.fy);
   }

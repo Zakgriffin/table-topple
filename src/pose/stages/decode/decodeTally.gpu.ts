@@ -60,8 +60,8 @@ function getHashTable(device: GPUDevice): HashTable {
     keys[slot] = key;
     values[slot] = value;
   }
-  const keysBuf = uploadUint32(device, keys, 0, 'tally:keys');
-  const valuesBuf = uploadUint32(device, values, 0, 'tally:values');
+  const keysBuf = uploadUint32(device, keys, 0, 'tally:keys', 'decode.fused');
+  const valuesBuf = uploadUint32(device, values, 0, 'tally:values', 'decode.fused');
   table = { keysBuf, valuesBuf, size };
   hashTableCache.set(device, table);
   return table;
@@ -120,7 +120,7 @@ export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<Vot
       gridData[i * gc + j] = pt.valid ? (1 | (pt.bit << 1)) : 0;
     }
   }
-  const gridBuf = uploadUint32(device, gridData, 0, 'tally:grid');
+  const gridBuf = uploadUint32(device, gridData, 0, 'tally:grid', 'decode.fused');
   try {
     return await tallyFromDeviceGrid(device, gridBuf, gr, gc);
   } finally {
@@ -153,7 +153,7 @@ export async function tallyFromDeviceGrid(
   const uniformBufs: GPUBuffer[] = [];
   for (let o = 0; o < 4; o++) {
     const [rr, cc] = rotatedDims(gr, gc, o);
-    const uniformBuf = uploadUniform(device, buildUniforms(gr, gc, o, tableSize));
+    const uniformBuf = uploadUniform(device, buildUniforms(gr, gc, o, tableSize), 'decode.tallyDispatch');
     uniformBufs.push(uniformBuf);
     const bindGroup = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
@@ -181,8 +181,8 @@ export async function tallyFromDeviceGrid(
   spanEnd(dispatchSpan);
 
   const [tallyRaw, totalWindowsRaw] = await Promise.all([
-    readUint32(device, tallyBuf, 4 * R * C * 4, 'tally:hist'),
-    readUint32(device, totalWindowsBuf, 4, 'tally:totalWindows'),
+    readUint32(device, tallyBuf, 4 * R * C * 4, 'tally:hist', 'decode.fused'),
+    readUint32(device, totalWindowsBuf, 4, 'tally:totalWindows', 'decode.fused'),
   ]);
   for (const b of [tallyBuf, totalWindowsBuf, ...uniformBufs]) b.destroy(); // gridBuf is the caller's
 

@@ -125,8 +125,8 @@ export async function growRegionsCCLGPU(
   const pipelines = getPipelines(device);
 
   const n = w * h;
-  const magBuf = res.gpu('fx');
-  const thetaBuf = res.gpu('fy');
+  const magBuf = res.gpu('fx', 'lsd.grow');
+  const thetaBuf = res.gpu('fy', 'lsd.grow');
   const cosBuf = createStorageBuffer(device, n * 4);
   const sinBuf = createStorageBuffer(device, n * 4);
   const labelBuf = createStorageBuffer(device, n * 4);
@@ -141,7 +141,7 @@ export async function growRegionsCCLGPU(
   // pixel costs no sqrt.
   dv.setFloat32(16, rhoLow >= 0 ? rhoLow * rhoLow : -Infinity, true);
   dv.setFloat32(20, Math.cos((toleranceDeg * Math.PI) / 180), true);
-  const uniBuf = uploadUniform(device, uni);
+  const uniBuf = uploadUniform(device, uni, 'lsd.grow');
 
   const entries: GPUBindGroupEntry[] = [
     { binding: 0, resource: { buffer: uniBuf } },
@@ -201,7 +201,7 @@ export async function growRegionsCCLGPU(
     }
     device.queue.submit([encoder.finish()]);
     roundsRun += batch;
-    const flag = await readUint32(device, changedBuf, 4, 'grow:converged');
+    const flag = await readUint32(device, changedBuf, 4, 'grow:converged', 'lsd.grow');
     // Still batch-granular in the sense that we always RUN a whole batch --
     // convergence at round 7 of 8 costs the 8th round, which is what proves it.
     // So roundsRun stays an upper bound on the rounds that did real work, and
@@ -247,7 +247,7 @@ export async function growRegionsCCLGPU(
   }
   if (!collected) {
     const { regionId, regions } = collectRegionsFromLabels(
-      await res.cpuI32('label'), await res.cpuF64('fx'), await res.cpuF64('fy'),
+      await res.cpuI32('label', 'lsd.grow'), await res.cpuF64('fx', 'lsd.grow'), await res.cpuF64('fy', 'lsd.grow'),
       rhoHigh, n, minRegionSize,
     );
     res.provideCPU('regionId', regionId);
@@ -274,7 +274,7 @@ export async function growRegionsCCLGPUToCPU(
     res.provideCPU('fy', fy);
     const grown = await growRegionsCCLGPU(res, w, h, toleranceDeg, rhoLow, rhoHigh, maxRounds, minRegionSize, collectOnGPU);
     if (!grown) return null;
-    return { regionId: await res.cpuI32('regionId'), regions: await res.regionsCPU(), ...grown };
+    return { regionId: await res.cpuI32('regionId', 'lsd.grow'), regions: await res.regionsCPU('lsd.grow'), ...grown };
   } finally {
     res.destroy();
   }

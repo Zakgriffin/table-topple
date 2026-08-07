@@ -301,7 +301,7 @@ export async function computePoseFromCapture(
     // Hand down the chain's own gray buffer when there IS one -- the residency has
     // no device on an all-CPU chain, and `gray` is only device-resident if some
     // stage put it there. Null just means decode uploads its own, as before.
-    const sharedGray = res.device && res.hasGPU('gray') ? res.gpu('gray') : null;
+    const sharedGray = res.device && res.hasGPU('gray') ? res.gpu('gray', 'pose.decode') : null;
     const decoded = await runPositionDecode(
       { aspect: input.aspect, settings: input.settings, recoveredAxes, gridPeriodPhase: gpp },
       gray, w, h, vFovRad, sharedGray, backend, want.has('decodeGrid'),
@@ -403,10 +403,10 @@ function makePendingIntermediates(
         // Straight off the residency's own accessors, which already know which
         // side each field is on and transfer only if the sides differ. A field
         // the chain happened to leave on the CPU costs nothing to hand over.
-        if (want.has('fx')) out.fx = await res.cpuF64('fx');
-        if (want.has('fy')) out.fy = await res.cpuF64('fy');
-        if (want.has('regionId')) out.regionId = await res.cpuI32('regionId');
-        if (want.has('regions')) out.regions = await res.regionsCPU() as GrownRegion[];
+        if (want.has('fx')) out.fx = await res.cpuF64('fx', 'pose.drain');
+        if (want.has('fy')) out.fy = await res.cpuF64('fy', 'pose.drain');
+        if (want.has('regionId')) out.regionId = await res.cpuI32('regionId', 'pose.drain');
+        if (want.has('regions')) out.regions = await res.regionsCPU('pose.drain') as GrownRegion[];
         // Not from the residency: stage 4's rectangles are a host-side array
         // the chain returns and then had nowhere to put. Captured during the
         // run and simply held until now.

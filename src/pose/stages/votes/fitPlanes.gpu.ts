@@ -44,7 +44,7 @@ export async function fitPairOfPlanesGPU(
     const o = i * 4;
     voteData[o] = votes[i].n.x; voteData[o + 1] = votes[i].n.y; voteData[o + 2] = votes[i].n.z; voteData[o + 3] = votes[i].weight;
   }
-  const voteBuf = uploadFloat32(device, voteData, 0, 'fit:votes');
+  const voteBuf = uploadFloat32(device, voteData, 0, 'fit:votes', 'pose.fit');
 
   const numWorkgroups = Math.ceil(n / WORKGROUP_SIZE_1D);
   const outBuf = createStorageBuffer(device, numWorkgroups * 21 * 4);
@@ -52,7 +52,7 @@ export async function fitPairOfPlanesGPU(
   const uniformData = new ArrayBuffer(8);
   const dv = new DataView(uniformData);
   dv.setUint32(0, n, true); dv.setFloat32(4, maxW, true);
-  const uniformBuf = uploadUniform(device, uniformData);
+  const uniformBuf = uploadUniform(device, uniformData, 'pose.fit');
 
   const bindGroup = device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
@@ -73,7 +73,7 @@ export async function fitPairOfPlanesGPU(
   device.queue.submit([encoder.finish()]);
   spanEnd(dispatchSpan);
 
-  const raw = await readFloat32(device, outBuf, numWorkgroups * 21 * 4, 'fit:ATApartials');
+  const raw = await readFloat32(device, outBuf, numWorkgroups * 21 * 4, 'fit:ATApartials', 'pose.fit');
   for (const b of [voteBuf, outBuf, uniformBuf]) b.destroy();
 
   // Before `raw` is believed. A validation failure is reported asynchronously

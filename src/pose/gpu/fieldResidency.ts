@@ -200,7 +200,7 @@ export class FieldResidency {
   // trip) while a readback must await mapAsync. So a CPU stage reaching for GPU
   // data pays a suspension and a GPU stage reaching for CPU data does not.
 
-  gpu(name: FieldName): GPUBuffer {
+  gpu(name: FieldName, owner?: string): GPUBuffer {
     const device = this.device;
     if (!device) throw new Error(`FieldResidency: gpu('${name}') with no device -- check .device first`);
     const s = this.slot(name);
@@ -227,10 +227,10 @@ export class FieldResidency {
     recordTransfer({
       what: `${name} (f64→f32 narrow)`, kind: 'convert', dir: 'up', bytes: this.n * 4,
       ms: performance.now() - tConv, startMs: tConv, bareFenceMs: null, queueDrainMs: null,
-    });
+    }, owner);
     const buf = kind === 'f32'
-      ? uploadFloat32(device, narrowed as Float32Array, 0, name)
-      : uploadUint32(device, narrowed as Uint32Array, 0, name);
+      ? uploadFloat32(device, narrowed as Float32Array, 0, name, owner)
+      : uploadUint32(device, narrowed as Uint32Array, 0, name, owner);
     this.transfers.push({ what: name, direction: 'up', bytes: this.n * 4 });
     // Cached, not transient. This is the line that removes the duplicate
     // mag/theta upload: the second consumer on this side finds the buffer
@@ -240,7 +240,7 @@ export class FieldResidency {
     return buf;
   }
 
-  async cpu(name: FieldName): Promise<Float64Array | Int32Array> {
+  async cpu(name: FieldName, owner?: string): Promise<Float64Array | Int32Array> {
     const s = this.slot(name);
     if (s.cpu) return s.cpu;
     if (!s.gpu) throw new Error(`FieldResidency: '${name}' read before it was provided`);
@@ -256,8 +256,8 @@ export class FieldResidency {
     // n*4 -- the single most expensive line in a readback, and entirely
     // deletable by storing Float32Array on the CPU side (perf TODO item 2).
     const raw = kind === 'f32'
-      ? await readFloat32(device, s.gpu, bytes, name)
-      : await readUint32(device, s.gpu, bytes, name);
+      ? await readFloat32(device, s.gpu, bytes, name, owner)
+      : await readUint32(device, s.gpu, bytes, name, owner);
     const tConv = performance.now();
     const out = kind === 'f32'
       ? new Float64Array(raw as Float32Array)
@@ -265,7 +265,7 @@ export class FieldResidency {
     recordTransfer({
       what: `${name} (f32→f64 widen)`, kind: 'convert', dir: 'down', bytes,
       ms: performance.now() - tConv, startMs: tConv, bareFenceMs: null, queueDrainMs: null,
-    });
+    }, owner);
     this.transfers.push({ what: name, direction: 'down', bytes });
     s.cpu = out;
     return out;
@@ -273,11 +273,11 @@ export class FieldResidency {
 
   // Typed conveniences, so consumers don't cast at every call site. The
   // narrowing is by field name, which is what the caller actually knows.
-  async cpuF64(name: Exclude<FieldName, 'label' | 'regionId'>): Promise<Float64Array> {
-    return await this.cpu(name) as Float64Array;
+  async cpuF64(name: Exclude<FieldName, 'label' | 'regionId'>, owner?: string): Promise<Float64Array> {
+    return await this.cpu(name, owner) as Float64Array;
   }
-  async cpuI32(name: 'label' | 'regionId'): Promise<Int32Array> {
-    return await this.cpu(name) as Int32Array;
+  async cpuI32(name: 'label' | 'regionId', owner?: string): Promise<Int32Array> {
+    return await this.cpu(name, owner) as Int32Array;
   }
 
   // ── The region set (stage 3b -> stage 4) ──
@@ -376,7 +376,7 @@ export class FieldResidency {
   // already fencing for the rectangles themselves and folds this into the same
   // stall. Memoized, so a caller that needs both counts and members pays once.
   private countsValue: { regionCount: number; memberCount: number } | null = null;
-  async regionCounts(): Promise<{ regionCount: number; memberCount: number }> {
+  async regionCounts(owner?: string): Promise<{ regionCount: number; memberCount: number }> {
     if (this.countsValue) return this.countsValue;
     const rs = this.regionsGPUValue;
     if (rs?.knownCounts) return (this.countsValue = rs.knownCounts);
@@ -388,25 +388,25 @@ export class FieldResidency {
     if (!rs) throw new Error('FieldResidency: region counts read before regions were provided');
     const device = this.device;
     if (!device) throw new Error('FieldResidency: region counts are GPU-resident but there is no device');
-    const raw = await readUint32(device, rs.counts, 8, 'regions:counts');
+    const raw = await readUint32(device, rs.counts, 8, 'regions:counts', owner);
     return (this.countsValue = { regionCount: raw[0], memberCount: raw[1] });
   }
 
-  async regionsCPU(): Promise<GrownRegion[]> {
+  async regionsCPU(owner?: string): Promise<GrownRegion[]> {
     if (this.regionsCPUValue) return this.regionsCPUValue;
     const rs = this.regionsGPUValue;
     if (!rs) throw new Error('FieldResidency: regions read before they were provided');
     const device = this.device;
     if (!device) throw new Error('FieldResidency: regions are GPU-resident but there is no device');
 
-    const { regionCount, memberCount } = await this.regionCounts();
+    const { regionCount, memberCount } = await this.regionCounts(owner);
     const regions: GrownRegion[] = [];
     if (regionCount > 0) {
       const [offRaw, sizeRaw, memRaw, meanRaw] = await Promise.all([
-        readUint32(device, rs.offsets, regionCount * 4, 'regions:offsets'),
-        readUint32(device, rs.sizes, regionCount * 4, 'regions:sizes'),
-        memberCount > 0 ? readUint32(device, rs.members, memberCount * 4, 'regions:members') : Promise.resolve(new Uint32Array(0)),
-        readFloat32(device, rs.meanDirs, regionCount * 8, 'regions:meanDirs'),
+        readUint32(device, rs.offsets, regionCount * 4, 'regions:offsets', owner),
+        readUint32(device, rs.sizes, regionCount * 4, 'regions:sizes', owner),
+        memberCount > 0 ? readUint32(device, rs.members, memberCount * 4, 'regions:members', owner) : Promise.resolve(new Uint32Array(0)),
+        readFloat32(device, rs.meanDirs, regionCount * 8, 'regions:meanDirs', owner),
       ]);
       for (let r = 0; r < regionCount; r++) {
         regions.push({

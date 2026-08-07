@@ -65,6 +65,21 @@ export interface StageRecord {
   // a fresh label per byte count. The id is the stage; the backend and the
   // byte count are attributes of one run of it.
   readonly attrs: SpanAttrs | null;
+  // The declared parent for THIS OCCURRENCE, overriding the table's `within`.
+  // `undefined` means "use the table"; an explicit `null` means "a root".
+  //
+  // This exists for exactly one shape, and it is not a loophole in "structure
+  // is declared": a TRANSFER helper is a single call site serving a dozen
+  // stages, so its owner is a fact about the call, not about the stage. There
+  // is nothing to write in a static table -- `xfer.readback` genuinely has no
+  // one parent. What the caller passes is still a DECLARATION, made at the only
+  // place that knows the answer, and the join treats it identically: declared
+  // parent plus measured containment. Inference is what stays banned, and it is
+  // unavailable anyway now that there is no stack.
+  //
+  // Do NOT reach for this to avoid declaring a stage properly. A stage called
+  // from two places with two different parents is two stages.
+  readonly within?: string | null;
 }
 
 // What a stage DECLARES about itself, once, in a table next to its siblings.
@@ -155,11 +170,22 @@ export function profilerReset(): void {
 // directly (see spanDurationMs) -- that is the contract poseCompute's stage
 // timings rest on, and it is why this cannot go back behind a flag without
 // giving those callers a second source of numbers again.
-export function spanStart(id: string, attrs: SpanAttrs | null = null): StageRecord {
+export function spanStart(
+  id: string, attrs: SpanAttrs | null = null, within?: string | null,
+): StageRecord {
   if (records.length >= MAX_RECORDS) trimClosed();
-  const rec: StageRecord = { id, start: performance.now(), end: 0, attrs };
+  const rec: StageRecord = within === undefined
+    ? { id, start: performance.now(), end: 0, attrs }
+    : { id, start: performance.now(), end: 0, attrs, within };
   records.push(rec);
   return rec;
+}
+
+// The parent this record declares: its own override when it has one, the
+// table's otherwise. One function so the join and the critical path cannot
+// disagree about which of the two wins.
+function declaredParent(rec: StageRecord, table: StageTable): string | null {
+  return rec.within !== undefined ? rec.within : table[rec.id].within;
 }
 
 export function spanEnd(rec: StageRecord | null): void {
@@ -286,7 +312,7 @@ export function joinRecords(recs: readonly StageRecord[], table: StageTable): Jo
 
   const roots: TreeNode[] = [];
   for (const r of known) {
-    const within = table[r.id].within;
+    const within = declaredParent(r, table);
     const candidates = within === null ? undefined : byId.get(within);
     if (within === null || !candidates || candidates.length === 0) {
       roots.push(nodes.get(r)!);
@@ -570,7 +596,8 @@ export function formatSpanTree(join: JoinResult, table: StageTable): string {
   if (join.orphans.length) {
     lines.push(`!! ${join.orphans.length} record(s) ran OUTSIDE the stage that declares them:`);
     for (const o of join.orphans.slice(0, 8)) {
-      lines.push(`   ${o.id} [${o.start.toFixed(1)}, ${o.end.toFixed(1)}] declares within=${table[o.id]?.within}`);
+      const decl = o.within !== undefined ? `${o.within} (per-call)` : `${table[o.id]?.within}`;
+      lines.push(`   ${o.id} [${o.start.toFixed(1)}, ${o.end.toFixed(1)}] declares within=${decl}`);
     }
   }
   if (join.unknown.length) {

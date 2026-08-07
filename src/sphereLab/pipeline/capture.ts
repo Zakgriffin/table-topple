@@ -9,7 +9,7 @@ import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
 import { backendFromForceCPU } from './backend.ts';
 import { type CompositeLine } from '../types.ts';
-import { buildProjectedTexture, computeProjectedBinsAuto, paintProjectedTexture } from './decodeGrid.ts';
+import { buildProjectedTexture, computeProjectedBinsAuto, paintProjectedTexture } from './projectedBins.ts';
 import { type GridPeriodPhaseResult } from './gridPeriodPhase.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
 import { updateDistortedPreview } from './preview.ts';

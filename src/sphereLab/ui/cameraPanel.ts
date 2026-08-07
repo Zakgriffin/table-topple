@@ -13,7 +13,7 @@ import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts'
 import { recomputeFromLastCapture, runAxesReconstruction, updateChainTransfersReadout } from '../pipeline/axesReconstruction.ts';
 import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
 import { backendFromForceCPU } from '../pipeline/backend.ts';
-import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
+import { buildProjectedTexture } from '../pipeline/projectedBins.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { isWebGPUSupported } from '../pipelineGPU/device.ts';
 import { profilerReset, profilerSetDevToolsMirror } from '../profiling/profiler.ts';

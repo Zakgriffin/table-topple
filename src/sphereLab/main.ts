@@ -81,7 +81,7 @@ import {
 } from './scene/throughCam2D.ts';
 import { getAnalysisVFovRad, ingestRealCapture, ingestRemotePose, markCaptureDirty, resizeCaptureBuffers, renderCamRT } from './pipeline/capture.ts';
 import { updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS } from './pipeline/preview.ts';
-import { buildProjectedTexture } from './pipeline/decodeGrid.ts';
+import { buildProjectedTexture } from './pipeline/projectedBins.ts';
 import { drainVisuals, runAxesReconstruction } from './pipeline/axesReconstruction.ts';
 import { refreshModeVisualizations } from './pipeline/modeRefresh.ts';
 import { updateContaminationOverlays } from './overlays/contaminationOverlays.ts';

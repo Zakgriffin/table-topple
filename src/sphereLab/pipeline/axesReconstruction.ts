@@ -10,7 +10,7 @@ import { globalState } from '../state.ts';
 import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
 import { backendFromForceCPU } from './backend.ts';
 import { captureDistortedGrayscale } from './capture.ts';
-import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './decodeGrid.ts';
+import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './projectedBins.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
 import { type IntermediateName, type IntermediatesRequest, wants } from './intermediates.ts';

@@ -7,7 +7,7 @@ import { lastHoverClientX, lastHoverClientY, updateHoverOverlays } from '../over
 import { updateLsdOverlay } from '../overlays/lsdOverlay.ts';
 import { globalState } from '../state.ts';
 import { backendFromForceCPU } from './backend.ts';
-import { buildProjectedTexture, type ProjectedSampleResult } from './decodeGrid.ts';
+import { buildProjectedTexture, type ProjectedSampleResult } from './projectedBins.ts';
 import { updateDistortedPreview } from './preview.ts';
 
 // Single source of truth for "make whichever visualizations `mode` actually

@@ -1,6 +1,6 @@
 import { markCaptureDirty, renderCamRT } from '../pipeline/capture.ts';
 import { backendFromForceCPU } from '../pipeline/backend.ts';
-import { buildProjectedTexture } from '../pipeline/decodeGrid.ts';
+import { buildProjectedTexture } from '../pipeline/projectedBins.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
 import { refreshCameraPanel, renderCameraTabs } from '../ui/cameraPanel.ts';

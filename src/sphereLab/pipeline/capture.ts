@@ -355,20 +355,20 @@ export async function ingestRemotePose(
   // overlays/gridPeriodPhaseOverlays.ts and the composite-line-family
   // hover-debug overlay read lastGridPeriodPhase/lastVoteComposites
   // directly and need no changes to work from device-compute data.
-  // lastLsdRectangles is assigned for the same field-level parity, though
-  // note overlays/lsdOverlay.ts's SVG/raster views don't actually read this
-  // field for rendering (they always recompute locally from
-  // lastNoisedPreviewGray, i.e. Tier 0) -- rawMembers wasn't sent (see
-  // buildDebugPayload's comment), so it's backfilled empty here; nothing
-  // reads it off this field today. Nulled out whenever msg.debug.pipeline
-  // is absent (sendDebugInfo off, or an older phone build still connected)
-  // -- same "don't show a stale frame" principle as lastRemoteDebug above.
+  // The phone's lsdRectangles are NOT unpacked onto the camera any more. They
+  // used to be assigned to lastLsdRectangles "for field-level parity", and that
+  // field's own comment admitted nothing rendered from it -- the overlay always
+  // recomputed its own chain instead. Now that the overlay draws from
+  // camera.intermediates (the LOCAL pose run's rects, with real members),
+  // backfilling a members-less remote copy would put a second, emptier source
+  // of the same thing back on the camera for nothing to read.
+  //
+  // Nulled out whenever msg.debug.pipeline is absent (sendDebugInfo off, or an
+  // older phone build still connected) -- same "don't show a stale frame"
+  // principle as lastRemoteDebug above.
   const pipelineDebug = msg.debug?.pipeline;
   camera.lastGridPeriodPhase = pipelineDebug ? pipelineDebug.gridPeriodPhase : null;
   camera.lastVoteComposites = pipelineDebug ? pipelineDebug.voteComposites : null;
-  camera.lastLsdRectangles = pipelineDebug
-    ? pipelineDebug.lsdRectangles.map((r) => ({ ...r, rawMembers: new Int32Array(0) }))
-    : null;
 
   // No real image reaches the desktop in device-compute mode UNLESS the
   // phone's sendCapturedImage toggle is on (see mobileCapture.ts) -- without

@@ -56,7 +56,7 @@ export interface LsdCompositeSettings {
 // the first one's answer existed and then stopped existing.
 export async function computeGradient2x2Composites(
   settings: LsdCompositeSettings,
-  res: FieldResidency, w: number, h: number, backend: Backend,
+  res: FieldResidency, w: number, h: number, backend: Backend, wantMembers = false,
 ): Promise<{ composites: { root: number; line: CompositeLine }[]; rects: LsdRectangle[] }> {
   const rects = await runLsdChain(res, w, h, {
     toleranceDeg: settings.lsdToleranceDeg,
@@ -66,7 +66,7 @@ export async function computeGradient2x2Composites(
     minRegionSize: settings.lsdMinRegionSize,
     nfaEpsilon: settings.lsdNfaEpsilon,
     nfaTestExponent: settings.lsdNfaTestExponent,
-  }, backend);
+  }, backend, wantMembers);
   // Its own span inside this function's: it walks all ~5200 rectangles and keeps
   // ~893, and until it was split out that walk was indistinguishable from the
   // chain that produced them. Contains no await, so its duration is host CPU.

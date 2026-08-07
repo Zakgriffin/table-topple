@@ -1026,11 +1026,19 @@ export async function createLsdChainResidency(
 // Leaving it off the signature means a future caller that does need members has
 // to notice it is asking for four extra readbacks, rather than passing `true`
 // through a chain of defaults without seeing the bill.
+// `wantMembers` fills each rectangle's rawMembers by bringing the region CSR
+// down. It is a HAND-BACK decision, not an algorithm one -- the members exist on
+// whichever side the collect ran regardless, and nothing on the pose path reads
+// them -- so passing it cannot change a pose. The production path leaves it
+// false and pays nothing; a caller that asked for 'rects' (see
+// pipeline/intermediates.ts) turns it on, because a rectangle with no members
+// cannot be hued by its seed pixel or rasterized.
 export async function runLsdChain(
   res: FieldResidency, w: number, h: number, settings: LsdSettings, backend: Backend,
+  wantMembers = false,
 ): Promise<LsdRectangle[]> {
   await runGradient2x2Stage(res, w, h, backend);
-  return await computeLsdRectanglesAuto(res, w, h, settings, backend);
+  return await computeLsdRectanglesAuto(res, w, h, settings, backend, wantMembers);
 }
 
 // computeLsdRectanglesAuto for callers that already hold a CPU gradient field
@@ -1041,12 +1049,13 @@ export async function runLsdChain(
 // overlay and the phone both compute their gradient on CPU and would gain
 // nothing from threading one through.
 //
-// Asks for rawMembers, and is the ONLY caller that does. Both of its callers
-// are display: overlays/lsdOverlay.ts paints the rejected-region raster and
-// hues each accepted rectangle by `rawMembers[0]`, and mobileCapture's
-// sendDebugInfo pass runs the same function. This is the one place the region
-// CSR still comes down, and it is off the pose path entirely -- neither caller
-// runs during a reconstruction.
+// Asks for rawMembers. ONE caller left: mobileCapture's sendDebugInfo pass.
+// overlays/lsdOverlay.ts used to be the other, and that is the whole of what
+// this function was for on the desktop -- a second complete LSD chain run
+// purely so display could see rectangles the pose path had just computed and
+// thrown away. It asks for them now (see pipeline/intermediates.ts), and
+// runLsdChain takes wantMembers itself, so the desktop never comes through
+// here. Still off the pose path either way.
 export async function computeLsdRectanglesFromField(
   field: GradientField, settings: LsdSettings, backend: Backend,
 ): Promise<LsdRectangle[]> {

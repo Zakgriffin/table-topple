@@ -27,36 +27,35 @@ function paintFieldViewFromGray(camera: Camera, gray: Float64Array) {
   }
 }
 
-// Every overlay that reads camera.lastNoisedPreviewGray directly, rather than
-// the painted field-view colors updateDistortedPreview's own hideField branch
-// gates. If an overlay is on but is NOT listed here, updateDistortedPreview's
+// Which SETTINGS TOGGLES imply an overlay reads camera.lastNoisedPreviewGray.
+// If an overlay is on but is NOT listed here, updateDistortedPreview's
 // early-returns skip recomputing the gray entirely and the overlay silently
 // reads a STALE buffer -- possibly one sized for a previous rtSize.w/h, which
 // then gets indexed at the CURRENT dimensions, reading/writing at
-// systematically wrong offsets (the diagonal "streaking" artifact). It reads
-// as "the overlay is broken", not "the gray is stale", so keep this in sync:
-// ANY new toggle whose overlay touches lastNoisedPreviewGray belongs here.
+// systematically wrong offsets (the diagonal "streaking" artifact). It reads as
+// "the overlay is broken", not "the gray is stale".
 //
-// This used to list only four flags, which was survivable only because every
-// one of these overlays was ALSO hard-gated to the gradient2x2 field view (the
-// view that always recomputes the gray anyway). Now that they render over any
-// view, the omissions became reachable -- see updateLsdOverlay's own comment.
+// ── Re-derived from scratch, and it got SHORTER by seven ──────────────────
 //
-// NOW A SUPERSET, deliberately. Five of these flags -- the two contamination
-// toggles, showTopGradient, and the two arrows -- no longer read this gray at
-// all: their overlays read the pose run's own fx/fy instead (see
-// overlays/pipelineField.ts). Leaving them listed costs one recomputation of
-// the gray when only they are on; removing one wrongly costs the diagonal
-// streaking artifact described above. The list is worth re-deriving in ONE pass
-// once updateLsdOverlay is converted too -- it and the projected-cam/
-// grid-period-phase overlays are the readers that remain -- and not before,
-// because a half-trimmed superset is harder to reason about than an untrimmed
-// one.
+// This listed eight toggles: two contamination, top-gradient, three LSD, and
+// the two hover arrows. Not one of them reads this buffer any more. Every one
+// of those overlays now draws from the POSE RUN's own intermediates -- the
+// top-down fx/fy/regions/regionId/rects it asked for -- rather than
+// recomputing a stage off this row-flipped display copy (see
+// overlays/pipelineField.ts).
+//
+// The two that ARE here were never listed, which was a real gap of exactly the
+// kind the paragraph above describes: the distinctness/product curves read this
+// gray and could be shown on a view that never recomputed it.
+//
+// The remaining readers of lastNoisedPreviewGray are not toggles and were never
+// in this function's scope: preview.ts itself paints the field views from it,
+// and decodeGrid.ts/pipelineGPU/projectSamples.ts read it for projected bins.
+// Verifiable by grep, which is how this list should be checked -- it is a
+// hand-maintained duplicate of "who reads this buffer" and it has rotted once
+// already.
 function overlaysNeedGray(settings: Camera['settings']): boolean {
-  return settings.showTrueContamination || settings.showReconstructedContamination
-    || settings.showTopGradient
-    || settings.showLsdSegments || settings.showLsdRejected || settings.showLsdRawRegions
-    || settings.showGradientArrow || settings.showLevelLineArrow;
+  return settings.showDistinctnessCurve || settings.showProductCurve;
 }
 
 export function updateDistortedPreview(camera: Camera) {

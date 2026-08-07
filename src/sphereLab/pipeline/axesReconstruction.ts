@@ -379,11 +379,20 @@ export function drainVisuals(camera: Camera): void {
 function displayIntermediates(camera: Camera): IntermediatesRequest {
   const s = camera.settings;
   const want: IntermediateName[] = ['decodeGrid'];
+  // fx/fy: the contamination rasters, the top-gradient raster, the hover
+  // arrows, and the LSD edge-connectivity preview.
   if (s.showTrueContamination || s.showReconstructedContamination
     || s.showTopGradient
-    || s.showGradientArrow || s.showLevelLineArrow) {
+    || s.showGradientArrow || s.showLevelLineArrow
+    || s.showLsdRawRegions) {
     want.push('fx', 'fy');
   }
+  // The three LSD debug views. 'rects' also turns on the region-CSR readback
+  // that fills each rectangle's rawMembers (see runLsdChain's wantMembers) --
+  // the rejected raster and the per-rectangle hue are both member-derived, so a
+  // rectangle without them cannot be drawn.
+  if (s.showLsdSegments || s.showLsdRejected) want.push('rects');
+  if (s.showLsdRawRegions) want.push('rects', 'regions', 'regionId');
   return wants(...want);
 }
 

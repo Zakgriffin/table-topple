@@ -196,7 +196,6 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
     visualsDirty: false, visualsDraining: false, lastPoseTiming: null,
     rtSize: { ...rtSize }, aspect, pipRect: { x: 0, y: 0, w: 0, h: 0 }, captureDirty: true, lastPreviewUpdate: 0,
     lastNoisedPreviewGray: null, lastHoverFieldIndex: null,
-    lastLsdRectangles: null, lastLsdGrownRegions: null,
     lastGridPeriodPhase: null,
     gridPeriodPhaseViewMin: null, gridPeriodPhaseViewMax: null,
     distortedPreviewData, distortedPreviewTex, projectedPreviewData, projectedPreviewTex,

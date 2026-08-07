@@ -1,7 +1,7 @@
 import { type Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
-import { displayRowIndex, flipDy, pipelineField } from './pipelineField.ts';
+import { flipDy, pipelineField } from './pipelineField.ts';
 import { recomputeFromLastCapture } from '../pipeline/axesReconstruction.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
@@ -9,7 +9,7 @@ import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, thr
 import { computeThroughRect } from '../ui/layout.ts';
 import { persistConfig } from '../config.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
-import { hashSeedIndexToHueDeg, repaintLsdRawRegionsHighlight, updateLsdOverlay } from './lsdOverlay.ts';
+import { hashSeedIndexToHueDeg, repaintLsdRawRegionsHighlight } from './lsdOverlay.ts';
 import { drawOneArrow, svgEl } from './svgUtil.ts';
 
 // Clears the gradient/level-line arrow groups only -- NOT lsdRectanglesGroup/
@@ -137,7 +137,15 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
   if (clientX >= rect.x && clientX < rect.x + rect.w && clientY >= rect.y && clientY < rect.y + rect.h) {
     const nx = (clientX - rect.x) / rect.w, ny = (clientY - rect.y) / rect.h;
     const fieldCol = Math.min(fieldW - 1, Math.max(0, Math.floor(nx * fieldW)));
-    const fieldRow = Math.min(fieldH - 1, Math.max(0, Math.floor((1 - ny) * fieldH)));
+    // TOP-DOWN, matching the pipeline's own convention: `ny` already counts
+    // down from the top of the rect, so this is the direct mapping and the
+    // 1-ny it replaces was the flip. THIS IS THE ONLY PLACE the pointer is
+    // converted -- camera.lastHoverFieldIndex is a pipeline index from here on,
+    // and every consumer of it (this function's arrows,
+    // repaintLsdRawRegionsHighlight, drawEdgeConnectivityPreview) indexes the
+    // pipeline's own fx/fy/regionId with it directly. See
+    // overlays/pipelineField.ts.
+    const fieldRow = Math.min(fieldH - 1, Math.max(0, Math.floor(ny * fieldH)));
     fieldIndex = fieldRow * fieldW + fieldCol;
   }
   camera.lastHoverFieldIndex = fieldIndex;
@@ -151,21 +159,19 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
   // display recomputations by a wide margin: it rebuilt ~307k pixels of
   // gradient on every single pointermove in order to read ONE of them.
   //
-  // `i` above is a DISPLAY index (its row counts up from the bottom of the
-  // through-cam rect), and this field is top-down, so the row has to be
-  // converted -- and fy has to be negated into the display's convention. Both
-  // conversions are named functions in pipelineField.ts rather than inline
-  // arithmetic, because an un-negated fy here is a working arrow pointing the
-  // wrong way, which is the kind of bug that survives review.
+  // `i` is already a pipeline index (see above), so the field is indexed
+  // directly. fy still has to be negated into the display's bottom-up
+  // convention, because the arrow drawing below negates again to reach screen
+  // space -- a named function rather than inline arithmetic, since an
+  // un-negated fy is a working arrow pointing the wrong way.
   const arrowField = pipelineField(camera);
   if (arrowsOn && arrowField) {
     const { fx, fy } = arrowField;
-    const fi = displayRowIndex(fieldRow, fieldCol, fieldW, fieldH);
-    const gx = fx[fi], gy = flipDy(fy[fi]);
+    const gx = fx[i], gy = flipDy(fy[i]);
     const mag = Math.hypot(gx, gy);
     if (mag > 0) {
       const px = rect.x + (fieldCol + 0.5) * (rect.w / fieldW);
-      const py = rect.y + rect.h - (fieldRow + 0.5) * (rect.h / fieldH);
+      const py = rect.y + (fieldRow + 0.5) * (rect.h / fieldH);
       let hueTheta = Math.atan2(gy, gx);
       if (hueTheta < 0) hueTheta += Math.PI;
       if (hueTheta >= Math.PI) hueTheta -= Math.PI;
@@ -251,26 +257,31 @@ toggleTopGradientBtn.addEventListener('click', () => {
 // group and raw-regions/rejected paint their own raster textures, both
 // handled entirely inside updateLsdOverlay -- so no updateHoverOverlays
 // call is needed after any of them.
+//
+// recomputeFromLastCapture rather than updateLsdOverlay directly, same as the
+// overlays above: these views draw the pose run's own rects/regions, and a run
+// that was not asked for them has none to draw. The recompute repaints through
+// the visual tail.
 toggleLsdSegmentsBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showLsdSegments = !cam.settings.showLsdSegments;
   toggleLsdSegmentsBtn.classList.toggle('active', cam.settings.showLsdSegments);
   persistConfig();
-  updateLsdOverlay(cam);
+  recomputeFromLastCapture(cam);
 });
 toggleLsdRejectedBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showLsdRejected = !cam.settings.showLsdRejected;
   toggleLsdRejectedBtn.classList.toggle('active', cam.settings.showLsdRejected);
   persistConfig();
-  updateLsdOverlay(cam); // may be the first of the 3 toggles turned on
+  recomputeFromLastCapture(cam);
 });
 toggleLsdRawRegionsBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showLsdRawRegions = !cam.settings.showLsdRawRegions;
   toggleLsdRawRegionsBtn.classList.toggle('active', cam.settings.showLsdRawRegions);
   persistConfig();
-  updateLsdOverlay(cam);
+  recomputeFromLastCapture(cam);
 });
 toggleLsdCompositeBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;

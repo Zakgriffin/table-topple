@@ -1,12 +1,8 @@
 import { type Camera } from '../camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
-import { backendFromForceCPU } from '../pipeline/backend.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
-import { computeGradient2x2Field } from '../pipeline/gradientField.ts';
-import {
-  computeEdgeNeighbors, computeLsdRectanglesFromField, growRegionsCCL, type GrownRegion, type LsdRectangle,
-} from '../pipeline/lsdSegments.ts';
-import { globalState } from '../state.ts';
+import { pipelineField } from './pipelineField.ts';
+import { computeEdgeNeighbors, type GrownRegion, type LsdRectangle } from '../pipeline/lsdSegments.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import {
   growthCandidateGroup, lsdReadout, lsdRectanglesGroup, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn,
@@ -50,15 +46,27 @@ export function hashSeedIndexToHueDeg(seedIndex: number): number {
 // are still tiny/degenerate, and silently hiding all of them showed a sparse,
 // biased sample of "whatever happened to grow fastest" instead of the real
 // per-pixel label state. See this session's chat.
-function paintRawGrownRegions(regions: readonly GrownRegion[], out: Uint8Array) {
+function paintRawGrownRegions(regions: readonly GrownRegion[], out: Uint8Array, w: number, h: number) {
   out.fill(0);
   for (const region of regions) {
     const [hr, hg, hb] = hsvToRgb(hashSeedIndexToHueDeg(region.members[0]), 1, 1);
     for (let mi = 0; mi < region.members.length; mi++) {
-      const o = region.members[mi] * 4;
-      out[o] = hr; out[o + 1] = hg; out[o + 2] = hb; out[o + 3] = 220;
+      paintMember(out, region.members[mi], w, h, hr, hg, hb, 220);
     }
   }
+}
+
+// Member indices are the PIPELINE's, i.e. top-down; `out` is a flipY=false
+// preview texture and is bottom-up. One place for that reversal so the three
+// member-rasterizing loops in this file cannot disagree about it. Same rule as
+// everywhere else: the flip goes on the way OUT to display.
+function paintMember(
+  out: Uint8Array, member: number, w: number, h: number,
+  r: number, g: number, b: number, a: number,
+) {
+  const y = (member / w) | 0, x = member % w;
+  const o = ((h - 1 - y) * w + x) * 4;
+  out[o] = r; out[o + 1] = g; out[o + 2] = b; out[o + 3] = a;
 }
 
 // Edge-connectivity preview: for the pixel under the cursor, draws a short
@@ -83,10 +91,10 @@ function paintRawGrownRegions(regions: readonly GrownRegion[], out: Uint8Array) 
 function drawEdgeConnectivityPreview(camera: Camera) {
   while (growthCandidateGroup.firstChild) growthCandidateGroup.removeChild(growthCandidateGroup.firstChild);
   if (!camera.settings.showLsdRawRegions) return;
-  const cached = camera.lastLsdGrownRegions;
+  const field = pipelineField(camera);
   const hoverIndex = camera.lastHoverFieldIndex;
-  if (!cached || hoverIndex === null) return;
-  const { fx, fy } = cached;
+  if (!field || hoverIndex === null) return;
+  const { fx, fy } = field;
   const settings = camera.settings;
   // Same eligibility test the grower applies, just spelled with the gradient
   // directly now that there is no magnitude array to look it up in.
@@ -102,9 +110,11 @@ function drawEdgeConnectivityPreview(camera: Camera) {
   const cellW = rect.w / fieldW, cellH = rect.h / fieldH;
   // col/row, not fx/fy -- these are FIELD COORDINATES, and naming them fx/fy
   // would shadow the gradient arrays this function now reads.
+  // Top-down rows (the pipeline's, and camera.lastHoverFieldIndex's) map
+  // straight down the screen -- see drawRectanglesSvg's own toScreen.
   const toScreen = (col: number, row: number) => ({
     x: rect.x + (col + 0.5) * cellW,
-    y: rect.y + rect.h - (row + 0.5) * cellH,
+    y: rect.y + (row + 0.5) * cellH,
   });
   const origin = toScreen(fieldCol, fieldRow);
 
@@ -144,34 +154,33 @@ function drawEdgeConnectivityPreview(camera: Camera) {
 export function repaintLsdRawRegionsHighlight(camera: Camera) {
   drawEdgeConnectivityPreview(camera);
   if (!camera.settings.showLsdRawRegions) return;
-  const cached = camera.lastLsdGrownRegions;
-  if (!cached) return;
-  const { regionId, regions } = cached;
+  const regions = camera.intermediates?.regions;
+  const regionId = camera.intermediates?.regionId;
+  if (!regions || !regionId) return;
+  const w = camera.rtSize.w, h = camera.rtSize.h;
 
   const hoverIndex = camera.lastHoverFieldIndex;
   const hoveredRegion = hoverIndex !== null ? regionId[hoverIndex] : -1;
 
   if (hoveredRegion === -1) {
-    paintRawGrownRegions(regions, camera.lsdRawRegionsData);
+    paintRawGrownRegions(regions, camera.lsdRawRegionsData, w, h);
   } else {
     const out = camera.lsdRawRegionsData;
     out.fill(0);
     const region = regions[hoveredRegion];
     const [hr, hg, hb] = hsvToRgb(hashSeedIndexToHueDeg(region.members[0]), 1, 1);
     for (let mi = 0; mi < region.members.length; mi++) {
-      const o = region.members[mi] * 4;
-      out[o] = hr; out[o + 1] = hg; out[o + 2] = hb; out[o + 3] = 220;
+      paintMember(out, region.members[mi], w, h, hr, hg, hb, 220);
     }
   }
   camera.lsdRawRegionsTex.needsUpdate = true;
 }
-function paintRejectedRaster(rects: readonly LsdRectangle[], out: Uint8Array) {
+function paintRejectedRaster(rects: readonly LsdRectangle[], out: Uint8Array, w: number, h: number) {
   out.fill(0);
   for (const r of rects) {
     if (r.accepted) continue;
     for (let mi = 0; mi < r.rawMembers.length; mi++) {
-      const o = r.rawMembers[mi] * 4;
-      out[o] = 255; out[o + 1] = 40; out[o + 2] = 40; out[o + 3] = 200;
+      paintMember(out, r.rawMembers[mi], w, h, 255, 40, 40, 200);
     }
   }
 }
@@ -188,9 +197,12 @@ function drawRectanglesSvg(camera: Camera, rects: readonly LsdRectangle[]) {
 
   const rect = computeThroughRect(camera);
   const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
-  const toScreen = (fx: number, fy: number) => ({
-    x: rect.x + (fx + 0.5) * (rect.w / fieldW),
-    y: rect.y + rect.h - (fy + 0.5) * (rect.h / fieldH),
+  // Rectangle centres are in the pipeline's TOP-DOWN field coordinates, so the
+  // row maps straight down the screen -- the `rect.h -` this replaces was the
+  // bottom-up flip the old, separately-computed field needed.
+  const toScreen = (col: number, row: number) => ({
+    x: rect.x + (col + 0.5) * (rect.w / fieldW),
+    y: rect.y + (row + 0.5) * (rect.h / fieldH),
   });
 
   for (const r of rects) {
@@ -221,86 +233,59 @@ function drawRectanglesSvg(camera: Camera, rects: readonly LsdRectangle[]) {
   }
 }
 
-// Recomputes the from-scratch traditional LSD pipeline (pipeline/
-// lsdSegments.ts) and repaints its 3 independent debug views (accepted
-// rectangles + rejected candidates, both SVG; raw region pixels, raster).
+// Repaints the three independent LSD debug views -- accepted rectangles and
+// rejected candidates (SVG), raw region pixels (raster) -- from the POSE RUN's
+// own stage 3b/4 output.
 //
-// Async now that computeLsdRectanglesFromField can go through a GPU round trip
-// (see lsdSegments.ts/lsdFit.ts) -- every caller here fires this off without
-// awaiting it (a live "redraw when ready" refresh, same pattern
-// runAxesReconstruction's own RAF callback already uses), which on its own
-// would let a slow call's stale result clobber a faster, NEWER call's result
-// if two land out of start order (e.g. a fast slider drag). lsdOverlaySeq
-// guards against that: only the most-recently-STARTED call is allowed to
-// actually apply its result.
-let lsdOverlaySeq = 0;
-export async function updateLsdOverlay(camera: Camera) {
+// It used to run a SECOND COMPLETE LSD CHAIN here. It rebuilt the gradient
+// field, ran growRegionsCCL for the raw-regions view, and then called
+// computeLsdRectanglesFromField -- grow, collect and fit all over again, on the
+// row-flipped display gray, under a backend it read off globalState. The
+// rectangles on screen were therefore never the rectangles the pose was
+// computed from; they were a mirrored near-duplicate that happened to look the
+// same. All of that is gone: axesReconstruction.ts asks for
+// 'regions'/'regionId'/'rects' when one of these toggles is on, and this
+// function draws what came back.
+//
+// It is synchronous again as a result. The async/lsdOverlaySeq machinery
+// existed because computeLsdRectanglesFromField could go through a GPU round
+// trip, so a slow call could land after a newer, faster one and clobber it.
+// There is no call to race any more -- the data is already on the camera.
+//
+// Nothing here recomputes when the intermediates are absent, for the reason
+// spelled out in overlays/pipelineField.ts: a fallback would put the duplicated
+// chain straight back, on the path where it is hardest to notice.
+export function updateLsdOverlay(camera: Camera) {
   const settings = camera.settings;
   if (!settings.showLsdSegments && !settings.showLsdRejected && !settings.showLsdRawRegions) {
     while (lsdRectanglesGroup.firstChild) lsdRectanglesGroup.removeChild(lsdRectanglesGroup.firstChild);
     return;
   }
-  // Not gated on fieldView -- this overlay computes its own field from
-  // lastNoisedPreviewGray just below, so gradient2x2 was never a real
-  // dependency, only a cosmetic assumption about what you'd want it drawn
-  // over. See pipeline/preview.ts's overlaysNeedGray, which is what actually
-  // guarantees that gray is fresh on every view now.
-  if (!camera.lastNoisedPreviewGray) return;
-  const w = camera.rtSize.w, h = camera.rtSize.h;
-  const field = computeGradient2x2Field(camera.lastNoisedPreviewGray, w, h);
+  const rects = camera.intermediates?.rects;
+  if (!rects) return;
 
-  // Pure CPU and synchronous (unlike the fit/NFA pass below, which can go
-  // through a GPU round trip) -- painted immediately, before the await, so
-  // this view never waits on a GPU dispatch and can never land out of order
-  // the way that result can (see lsdOverlaySeq's own comment): plain
-  // synchronous JS code always runs in call order.
   if (settings.showLsdRawRegions) {
-    const { fx, fy } = field;
-    const { regionId, regions, roundsRun, converged } = growRegionsCCL(
-      fx, fy, w, h, settings.lsdToleranceDeg, settings.lsdRhoNoiseThreshold, settings.lsdRhoHighThreshold,
-      settings.lsdCclSteps, settings.lsdMinRegionSize,
-    );
-    camera.lastLsdGrownRegions = { regionId, regions, fx, fy, roundsRun, converged };
-    repaintLsdRawRegionsHighlight(camera); // respects whatever camera.lastHoverFieldIndex already is, not just a fresh "every region" paint
+    // Respects whatever camera.lastHoverFieldIndex already is, rather than
+    // forcing a fresh "every region" paint.
+    repaintLsdRawRegionsHighlight(camera);
   }
-
-  const seq = ++lsdOverlaySeq;
-  // NOTE (library-extraction step 4): this whole function is one of the four
-  // display-side recomputations -- it rebuilds the gradient field above and runs
-  // a SECOND complete LSD chain here, because the pose path's residency is
-  // destroyed before display can reach it. The backend is threaded through
-  // rather than read ambiently so that when this is replaced by a request for
-  // the pose run's own intermediates, the two are provably running the same
-  // configuration.
-  const rects = await computeLsdRectanglesFromField(field, {
-    toleranceDeg: settings.lsdToleranceDeg,
-    rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
-    rhoHighThreshold: settings.lsdRhoHighThreshold,
-    cclSteps: settings.lsdCclSteps,
-    minRegionSize: settings.lsdMinRegionSize,
-    nfaEpsilon: settings.lsdNfaEpsilon,
-    nfaTestExponent: settings.lsdNfaTestExponent,
-  }, backendFromForceCPU(globalState.forceCPU));
-  if (seq !== lsdOverlaySeq) return; // a newer call started while this one was in flight -- its result wins instead
-  camera.lastLsdRectangles = rects;
-
   if (settings.showLsdRejected) {
-    paintRejectedRaster(rects, camera.lsdRejectedData);
+    paintRejectedRaster(rects, camera.lsdRejectedData, camera.rtSize.w, camera.rtSize.h);
     camera.lsdRejectedTex.needsUpdate = true;
   }
   drawRectanglesSvg(camera, rects);
 
   const accepted = rects.filter((r) => r.accepted);
-  // The growth half of the readout is only populated when the raw-regions
-  // view is on, since that's the only branch above that runs growRegionsCCL
-  // separately (the rectangle path runs its own copy internally and doesn't
-  // report rounds back). "capped" is the case worth seeing: it means the
-  // CCL-steps scrubber stopped the loop short of the fixpoint, so the regions
-  // on screen are mid-growth and NOT what production would produce.
-  const grown = camera.lastLsdGrownRegions;
-  const growthPart = settings.showLsdRawRegions && grown
-    ? `${grown.regions.length} regions in ${grown.roundsRun} round${grown.roundsRun === 1 ? '' : 's'}`
-      + `${grown.converged ? ' (converged)' : ' (CAPPED -- mid-growth, not the real result)'} -- `
+  // The growth half of the readout no longer reports a ROUND COUNT. roundsRun
+  // and converged are growRegionsCCL return values that the chain discards, so
+  // reporting them would mean publishing a new intermediate for a debug string.
+  // The part that MATTERED is still here and comes straight off the setting:
+  // lsdCclSteps != 0 means the scrubber stopped the loop short of the fixpoint,
+  // so the regions on screen are mid-growth and NOT what production produces.
+  const regions = camera.intermediates?.regions;
+  const growthPart = settings.showLsdRawRegions && regions
+    ? `${regions.length} regions`
+      + `${settings.lsdCclSteps === 0 ? '' : ` (CAPPED at ${settings.lsdCclSteps} steps -- mid-growth, not the real result)`} -- `
     : '';
   lsdReadout.textContent = growthPart
     + `${accepted.length} accepted, ${rects.length - accepted.length} rejected`;

@@ -84,7 +84,7 @@ export interface PoseComputeTiming {
 // checking against the transfer ledger rather than asserting.
 async function computeCompositesAndVotes(
   state: PoseComputeState, res: FieldResidency, gray: Float64Array, w: number, h: number, vFovRad: number,
-  backend: Backend,
+  backend: Backend, wantMembers: boolean,
 ): Promise<{ voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[]; rects: LsdRectangle[] }> {
   {
     // Composite lines (one per accepted LSD rectangle, over the 2x2 gradient
@@ -95,7 +95,7 @@ async function computeCompositesAndVotes(
     // lines by row/col family" debug overlay, which reads
     // state.lastVoteComposites back off the camera afterward).
     const compositesSpan = spanStart('composites (2x2 gradient field)');
-    const { composites: voteComposites, rects } = await computeGradient2x2Composites(state.settings, res, w, h, backend);
+    const { composites: voteComposites, rects } = await computeGradient2x2Composites(state.settings, res, w, h, backend, wantMembers);
     spanEnd(compositesSpan);
 
     // Contains no await, so this span's duration is host CPU and is marked
@@ -174,7 +174,7 @@ export async function computePoseFromCapture(
   const res = await createLsdChainResidency(gray, w, h, backend);
   spanEnd(residencySpan);
   try {
-    const composited = await computeCompositesAndVotes(state, res, gray, w, h, vFovRad, backend);
+    const composited = await computeCompositesAndVotes(state, res, gray, w, h, vFovRad, backend, want.has('rects'));
     const { voteComposites, votes } = composited;
     rects = composited.rects;
     state.lastVoteComposites = voteComposites;

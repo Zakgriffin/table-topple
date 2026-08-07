@@ -3,7 +3,6 @@ import { type CompositeLine } from '../types.ts';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import type { Intermediates, PendingIntermediates } from '../pipeline/intermediates.ts';
 import { type GridPeriodPhaseResult } from '../pipeline/gridPeriodPhase.ts';
-import { type GrownRegion, type LsdRectangle } from '../pipeline/lsdSegments.ts';
 import type { PoseComputeTiming } from '../pipeline/poseCompute.ts';
 import { type TransferSummary } from '../pipelineGPU/fieldResidency.ts';
 import { type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type ProjectedBins, type RecoveredAxes, type Vote } from '../types.ts';
@@ -126,33 +125,6 @@ export interface CameraBase {
   // import back into hoverDebugOverlays.ts (which already imports FROM
   // lsdOverlay.ts).
   lastHoverFieldIndex: number | null;
-  // The from-scratch traditional LSD pipeline's own debug output (pipeline/
-  // lsdSegments.ts) -- accepted rectangles AND rejected/retried candidates
-  // (see LsdRectangle's own `accepted`/`retries` fields), so the debug
-  // overlay can show both, not just the survivors.
-  lastLsdRectangles: LsdRectangle[] | null;
-  // growRegionsCCL's own raw output (pre-fit, pre-NFA) for the SAME call
-  // updateLsdOverlay's showLsdRawRegions branch already makes -- cached here
-  // purely so hover highlighting (overlays/lsdOverlay.ts's
-  // repaintLsdRawRegionsHighlight) can look up "which region owns this pixel" on
-  // every pointermove without re-running growRegionsCCL itself.
-  // mag/theta are the full fields, kept so the edge-connectivity hover view
-  // (overlays/lsdOverlay.ts's drawEdgeConnectivityPreview) can re-run
-  // growRegionsCCL's OWN edge predicate for the single hovered pixel on every
-  // pointermove without recomputing the gradient field. They replaced a
-  // regionSumCos/regionSumSin/strideDivider trio that existed only to feed the
-  // JFA grower's growth-candidate arrows -- that view needed per-region
-  // aggregate direction and per-pixel stride state to reconstruct where a
-  // pixel would jump next; the predicate is a plain pairwise test between
-  // 8-neighbors now, so the raw fields are all it takes.
-  // roundsRun/converged report what the round loop actually did, so the
-  // readout can distinguish "reached the fixpoint in 9 rounds" from "still
-  // mid-growth because the CCL-steps scrubber is capping it".
-  lastLsdGrownRegions: {
-    regionId: Int32Array; regions: GrownRegion[];
-    fx: Float64Array; fy: Float64Array;
-    roundsRun: number; converged: boolean;
-  } | null;
   lastGridPeriodPhase: GridPeriodPhaseResult | null;
   // Interactive pan/zoom state for the period/phase debug plot (overlays/
   // gridPeriodPhaseOverlays.ts) -- null means "no interaction yet, use the

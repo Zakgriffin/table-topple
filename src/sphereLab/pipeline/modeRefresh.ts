@@ -40,7 +40,7 @@ export async function refreshModeVisualizations(
   if (mode === 'through') {
     updateContaminationOverlays(camera);
     updateTopGradientOverlay(camera);
-    await updateLsdOverlay(camera);
+    updateLsdOverlay(camera);
     updateHoverOverlays(lastHoverClientX, lastHoverClientY);
     // The grid period/phase SVG plot lives in the Through-Cam toggle panel
     // (#contamToggles, sphere-lab.html), not Projected-Cam's, despite what

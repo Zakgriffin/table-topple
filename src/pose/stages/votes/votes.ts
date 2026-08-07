@@ -10,9 +10,9 @@ import type { LsdRectangle } from '../lsd/types.ts';
 // Just the LSD tuning knobs computeGradient2x2Composites/
 // compositesFromLsdRectangles actually read off `settings` -- narrowed off
 // the full CameraSettingsCommon (which also carries dozens of display-only
-// toggles a real Camera has but a bare phone-side PoseComputeState never
+// toggles a real Camera has but a bare phone-side PoseInput never
 // will) so both functions stay callable with either a real camera's
-// settings OR pose/poseCompute.ts's PoseComputeState.settings, which
+// settings OR pose/poseCompute.ts's PoseInput['settings'], which
 // only carries this subset. A real CameraSettingsCommon still satisfies
 // this structurally (extra fields are fine), so every existing desktop call
 // site is unaffected.

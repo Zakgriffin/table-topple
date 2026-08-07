@@ -83,18 +83,18 @@ test('grown region count and sizes are unchanged (golden, fixtures/default)', ()
 });
 
 // One whole reconstruction, CPU backend, from the fixture. ~60ms in node, so it
-// runs once and every assertion below reads the same state.
-const state = await runPoseOn(input, 'cpu');
+// runs once and every assertion below reads the same result.
+const { pose } = await runPoseOn(input, 'cpu');
 
 test('a CPU reconstruction recovers a pose at all', () => {
-  assert.ok(state.lastVotes && state.lastVotes.length > 0, 'no votes');
-  assert.ok(state.lastRecoveredAxes, 'no recovered axes');
-  assert.ok(state.lastGridPeriodPhase, 'no grid period/phase');
-  assert.ok(state.lastPositionDecode, 'no position decode');
+  assert.ok(pose.votes.length > 0, 'no votes');
+  assert.ok(pose.recoveredAxes, 'no recovered axes');
+  assert.ok(pose.gridPeriodPhase, 'no grid period/phase');
+  assert.ok(pose.positionDecode, 'no position decode');
 });
 
 test('the recovered axes are an orthonormal frame with a positive distance', () => {
-  const a = state.lastRecoveredAxes!;
+  const a = pose.recoveredAxes!;
   for (const [name, v] of [['Drow', a.Drow], ['Dcol', a.Dcol], ['Dnormal', a.Dnormal]] as const) {
     assert.ok(closeTo(v.length(), 1, 1e-9), `${name} is not unit (|${name}| = ${v.length()})`);
   }
@@ -115,7 +115,7 @@ test('the decode agrees with the torus well above chance', () => {
   // winner means nothing. The 60s are a good local patch, not a warning. So the
   // bar is set just clear of the floor: this asserts "the decode found real
   // structure", which is the thing that silently stops being true.
-  const pd = state.lastPositionDecode!;
+  const pd = pose.positionDecode!;
   assert.ok(pd.consistency > 0.55, `consistency ${pd.consistency} is at or near the chance floor`);
   assert.ok(Number.isFinite(pd.camPos.x) && Number.isFinite(pd.camPos.y) && Number.isFinite(pd.camPos.z));
   assert.ok(closeTo(pd.recoveredCamQuat.length(), 1, 1e-9), 'the recovered camera quaternion is not unit');
@@ -124,11 +124,11 @@ test('the decode agrees with the torus well above chance', () => {
 test('the recovered pose is unchanged (golden, fixtures/default, backend=cpu)', () => {
   // Recorded 2026-08-06 from this code on this fixture. See the header: this
   // says UNCHANGED, not CORRECT.
-  const a = state.lastRecoveredAxes!;
-  const pd = state.lastPositionDecode!;
-  assert.equal(state.lastVotes!.length, 273);
+  const a = pose.recoveredAxes!;
+  const pd = pose.positionDecode!;
+  assert.equal(pose.votes.length, 273);
   assert.ok(closeTo(a.distance, 10.764384913521246), `distance ${a.distance}`);
-  assert.ok(closeTo(state.lastGridPeriodPhase!.period, 0.09289894481048244), `period ${state.lastGridPeriodPhase!.period}`);
+  assert.ok(closeTo(pose.gridPeriodPhase!.period, 0.09289894481048244), `period ${pose.gridPeriodPhase!.period}`);
   for (const [name, got, want] of [
     ['camPos.x', pd.camPos.x, 59.47930056578264],
     ['camPos.y', pd.camPos.y, 10.764384913521246],

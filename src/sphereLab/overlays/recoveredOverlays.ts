@@ -25,7 +25,13 @@ export function updateRecoveredFloorOutline(camera: Camera) {
     camera.recoveredFloorOutline.visible = false;
     return;
   }
-  const corners = projectImageCornersToPlane(camera);
+  // Explicit inputs rather than a whole Camera -- see decodeGrid.ts's
+  // DecodeInput. gridPeriodPhase is unused by this particular projection, but
+  // it is part of what the stage declares it reads.
+  const corners = projectImageCornersToPlane({
+    aspect: camera.aspect, settings: camera.settings,
+    recoveredAxes: camera.lastRecoveredAxes, gridPeriodPhase: camera.lastGridPeriodPhase,
+  });
   if (!corners) {
     camera.recoveredFloorOutline.visible = false;
     return;

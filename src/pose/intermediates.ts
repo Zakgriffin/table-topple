@@ -1,4 +1,5 @@
 import type { GrownRegion, LsdRectangle } from './stages/lsd/types.ts';
+import type { DecodeCellDebug, DecodeSampleGrid } from './results.ts';
 // ── Asking the pipeline for its intermediates, as DATA ────────────────────
 //
 // The problem, in the user's own diagnosis: this project has repeatedly spent
@@ -54,10 +55,16 @@ export type IntermediateName =
   // Stage 4: the fitted rectangles with their NFA scores and accept flags.
   | 'rects'
   // The decode sample grid -- 0.45MB, and the one intermediate that already had
-  // a deferral mechanism of its own (the old PendingDecodeGrid). Populates
-  // lastDecodeGrid / lastDecodeRotated / lastDecodeCorrectness rather than
-  // landing in `Intermediates`, because those three fields already exist and
-  // several consumers already read them.
+  // a deferral mechanism of its own (the old PendingDecodeGrid). It lands in
+  // `Intermediates` like every other name here, as decodeGrid/decodeRotated/
+  // decodeCorrectness.
+  //
+  // It used to be the exception: asking for 'decodeGrid' wrote three fields on
+  // the caller's state object while asking for 'fx' filled a slot in this
+  // type. That split existed only because those three fields predated this
+  // request type and several consumers already read them off a Camera. With
+  // the pose a RETURN VALUE there is no state object to write to, so the
+  // exception had nowhere left to live.
   | 'decodeGrid';
 
 export type IntermediatesRequest = ReadonlySet<IntermediateName>;
@@ -93,6 +100,14 @@ export interface Intermediates {
   regionId?: Int32Array;
   regions?: GrownRegion[];
   rects?: LsdRectangle[];
+  // All three arrive together or not at all -- one request name ('decodeGrid')
+  // covers them because the rotation and the correctness array are derived from
+  // the grid and are worthless without it. The grid is in the DECODE lattice's
+  // own (i,j); `decodeRotated` is that grid turned by the winning cardinal
+  // orientation, which is the frame `decodeCorrectness` indexes.
+  decodeGrid?: DecodeSampleGrid;
+  decodeRotated?: DecodeSampleGrid;
+  decodeCorrectness?: (DecodeCellDebug | null)[][];
 }
 
 // ── The drain-once handle ─────────────────────────────────────────────────
@@ -107,11 +122,21 @@ export interface Intermediates {
 // holds the handle must resolve or release it. Left unresolved it holds the
 // chain's device buffers until device loss.
 //
-// `resolve` is IDEMPOTENT and `release` is safe to call twice, in either order,
+// `resolve` RETURNS what it drained rather than writing it somewhere, which is
+// the same change the pose itself made (see poseCompute.ts's PoseResult): a
+// handle that filled in fields on a shared object had to be told where to put
+// them, and that pointer was the last thing keeping the pipeline coupled to its
+// caller's model.
+//
+// `resolve` is IDEMPOTENT -- a second call re-hands the SAME object rather than
+// draining twice -- and `release` is safe to call twice, in either order,
 // because callers use them differently: a phone or a headless test resolves
 // immediately, while the desktop parks this on the camera and drains it a frame
 // later -- possibly never, if a newer reconstruction supersedes it first, which
-// is exactly when release-without-resolve has to be free.
+// is exactly when release-without-resolve has to be free. Resolving an already
+// RELEASED handle hands back an empty set: the buffers are gone, and the
+// alternative (throwing) would make the two orders differ for a caller whose
+// whole point is not having to know which ran first.
 //
 // NOT view-conditional, and that distinction is the whole reason this is a
 // deferral rather than a skip: whoever holds this WILL resolve it, so every
@@ -119,6 +144,6 @@ export interface Intermediates {
 // is the REQUEST -- and that is the caller's declaration, made before the run,
 // not the pipeline guessing what a view might want mid-flight.
 export interface PendingIntermediates {
-  resolve(): Promise<void>;
+  resolve(): Promise<Intermediates>;
   release(): void;
 }

@@ -281,7 +281,7 @@ wss.on('connection', (ws) => {
     }
 
     // Browser -> a specific phone: pushes the current pipeline-tunable
-    // settings (globalState.useGPU*/boardSize + the 16 PoseComputeState
+    // settings (globalState.useGPU*/boardSize + the 16 PoseInput
     // settings fields) so a phone computing its own pose stays in sync with
     // whatever the desktop's sliders (the source of truth) currently say --
     // see this session's on-device-pose-recovery plan. Routed the same way

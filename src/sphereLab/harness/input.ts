@@ -2,7 +2,7 @@ import { decodeGray, fixtureSettings } from '../fixture.ts';
 import type { Fixture } from '../fixture.ts';
 // Type-only, so this module stays pure and node can import it -- see
 // fixture.ts's header for why that matters and what enforces it.
-import type { PoseComputeState } from '../../pose/poseCompute.ts';
+import type { PoseInput } from '../../pose/poseCompute.ts';
 
 // ── What a harness runs ON ────────────────────────────────────────────────
 //
@@ -32,7 +32,7 @@ import type { PoseComputeState } from '../../pose/poseCompute.ts';
 // capture, they now run on the real orientation. Deltas from before this change
 // are not comparable to deltas after it, which costs nothing: every historical
 // number here is void for the config-pinning reason anyway.
-export type PipelineSettings = PoseComputeState['settings'];
+export type PipelineSettings = PoseInput['settings'];
 
 export interface HarnessInput {
   // Where this came from, carried into reports so a result names its input.
@@ -48,29 +48,16 @@ export interface HarnessInput {
   settings: PipelineSettings;
 }
 
-// A blank PoseComputeState wired to this input, ready for
-// computePoseFromCapture to fill in. Twelve null fields a caller would
-// otherwise hand-roll -- mobileCapture.ts and reconstructionTiming.ts already
-// hand-roll one each, which is the limit before adding a field means hunting
-// for the sites that forgot it.
+// `poseStateFor` USED TO BE HERE, and its deletion is the clearest single
+// measure of what step 5f bought. It built a blank twelve-null-field
+// PoseComputeState for computePoseFromCapture to mutate -- boilerplate
+// mobileCapture.ts and reconstructionTiming.ts each hand-rolled their own copy
+// of, which was the reason to share it.
 //
-// A DETACHED state, never the live Camera, even though a Camera structurally
-// satisfies PoseComputeState. Passing the camera would work and would also
-// overwrite whatever the app is displaying, and leave the last run's results
-// behind afterwards -- reconstructionTiming.ts's freshState was built for
-// exactly that reason and this is that function, shared.
-export function poseStateFor(input: HarnessInput): PoseComputeState {
-  return {
-    aspect: input.aspect,
-    settings: input.settings,
-    lastVoteComposites: null, lastVotes: null, lastQuadricPair: null, lastGridPeriodPhase: null,
-    lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
-    lastPositionDecode: null, lastChainTransfers: null,
-    // A caller that wants intermediates asks for them by name and owns the
-    // handle that comes back -- see pose/intermediates.ts.
-    pendingIntermediates: null, intermediates: null,
-  };
-}
+// There is nothing left to build. A HarnessInput already carries `aspect` and
+// `settings`, so it satisfies PoseInput as it stands, and the results come back
+// as a return value. The "detached state, never the live Camera" caution it
+// carried is likewise moot: there is no state to detach.
 
 export function inputFromFixture(fixture: Fixture): HarnessInput {
   return {

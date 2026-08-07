@@ -24,7 +24,7 @@ import { computeGradientField } from '../../pose/stages/gradient/gradientField.t
 // DataTexture), `rtSize`, and `lastNoisedPreviewGray`, which is the ROW-FLIPPED
 // display copy rather than the top-down buffer the pipeline runs on. None of
 // that can exist on the library side of the boundary. Meanwhile everything left
-// in decodeGrid.ts takes the narrow `PoseCameraLike` and touches none of it.
+// in decodeGrid.ts takes the narrow `DecodeInput` and touches none of it.
 //
 // So this extraction is what lets decodeGrid.ts stop importing `Camera` at all,
 // and that single edge is what was dragging camera/model.ts (and, through it,

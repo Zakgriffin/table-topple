@@ -7,7 +7,6 @@ import { buildAndTallyDecodeGPU } from '../../pose/stages/decode/decodeGridBuild
 import type { Backend } from '../../pose/backend.ts';
 import type { HarnessInput } from './input.ts';
 import { runPoseOn } from './runPose.ts';
-import { wants } from '../../pose/intermediates.ts';
 
 // ── Dev harness: does the fused GPU decode match the CPU pair? ───────────
 //
@@ -59,23 +58,27 @@ interface DecodeGridBuildVerifyReport {
 // and a grid period/phase, so there is nothing to check without them. It used
 // to read those off whatever the app had last displayed -- see runPose.ts.
 //
-// `camera` below is that detached run's state, not a Camera. It only ever
-// needed the PoseCameraLike fields (aspect, two settings, the last* results),
-// which a PoseComputeState carries by construction.
+// It asks for NO intermediates, and that is a correction rather than a
+// simplification: it used to request 'decodeGrid', which cost a 0.45MB readback
+// it then never looked at. Both grids it compares are its own -- the CPU one it
+// builds here, and the device one from its own buildAndTallyDecodeGPU call.
+// What it needs from the run is only the pose the decode stage consumes.
 export async function verifyDecodeGridBuild(
   input: HarnessInput, backend: Backend = 'gpu',
 ): Promise<DecodeGridBuildVerifyReport | string> {
   const { gray, w, h } = input;
-  // Asks for the decode grid explicitly: nothing brings it down unless a
-  // caller says so now, and this harness compares against it.
-  const camera = await runPoseOn(input, backend, wants('decodeGrid'));
-  const vFovRad = getAnalysisVFovRad(camera);
+  const { pose } = await runPoseOn(input, backend);
+  const decodeInput = {
+    aspect: input.aspect, settings: input.settings,
+    recoveredAxes: pose.recoveredAxes, gridPeriodPhase: pose.gridPeriodPhase,
+  };
+  const vFovRad = getAnalysisVFovRad(input);
 
-  const layout = decodeGridLayout(camera, gray, vFovRad);
+  const layout = decodeGridLayout(decodeInput, gray, vFovRad);
   if (!layout) return 'reconstruction produced no decode layout (no recovered axes or no grid period/phase) on this input';
 
   const cpuStart = performance.now();
-  const cpuGrid = buildDecodeSampleGrid(camera, gray, w, h, vFovRad);
+  const cpuGrid = buildDecodeSampleGrid(decodeInput, gray, w, h, vFovRad);
   if (!cpuGrid) return 'CPU builder returned null';
   const winnerCpu = tallyPositionVotes(cpuGrid);
   const cpuMs = performance.now() - cpuStart;

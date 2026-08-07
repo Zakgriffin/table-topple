@@ -1,7 +1,6 @@
 import { type Backend } from '../../pose/backend.ts';
-import { computePoseFromCapture, type PoseComputeState } from '../../pose/poseCompute.ts';
+import { computePoseFromCapture, type PoseResult } from '../../pose/poseCompute.ts';
 import { NO_INTERMEDIATES } from '../../pose/intermediates.ts';
-import { poseStateFor } from './input.ts';
 import type { HarnessInput } from './input.ts';
 import {
   type ProfileSpan, checkNesting, profilerBeginSession, spanDurationMs,
@@ -46,16 +45,13 @@ import { awaitPageFocus } from './lsdChainVerify.ts';
 //   visuals mailbox and is no longer awaited on the pose path, so including it
 //   would re-couple exactly what 97bf24b decoupled.
 //
-// ── Why it runs on a DETACHED state object ──
+// ── Reps cannot contaminate each other, and it is no longer a precaution ──
 //
-// computePoseFromCapture mutates its argument in place -- lastRecoveredAxes,
-// lastPositionDecode, lastDecodeGrid and friends. A real Camera structurally
-// satisfies PoseComputeState, so passing one would work and would ALSO
-// overwrite whatever the app is currently displaying, and leave the last rep's
-// state behind afterwards. So each rep gets a fresh, null-initialized state
-// carrying only the camera's `settings` and `aspect`. This is the same shape
-// mobileCapture.ts builds for on-device pose recovery, which is the existing
-// proof that the pipeline runs standalone against one.
+// computePoseFromCapture used to MUTATE its argument, so this harness built a
+// fresh null-initialized state per rep -- otherwise it would have overwritten
+// whatever the app was displaying and left the last rep's results behind. The
+// pipeline returns its result now, so each rep's answer is its own object and
+// there is nothing to detach from. `input` goes straight in as the PoseInput.
 //
 // ── The `ok` column is not decoration ──
 //
@@ -397,8 +393,8 @@ function median(xs: number[]): number {
 // the handle, does not read the grid back, and destroys the residency in
 // computePoseFromCapture's own finally, so there is nothing left here to clean
 // up. See pose/intermediates.ts, capability (1).
-async function poseOnce(state: PoseComputeState, gray: Float64Array, w: number, h: number, backend: Backend) {
-  return computePoseFromCapture(state, gray, w, h, backend, NO_INTERMEDIATES);
+async function poseOnce(input: HarnessInput, gray: Float64Array, w: number, h: number, backend: Backend) {
+  return computePoseFromCapture(input, gray, w, h, backend, NO_INTERMEDIATES);
 }
 
 // One rep's span tree, flattened to (label, selfMs, depth) in pre-order.
@@ -504,7 +500,6 @@ export async function timeReconstruction(
   input: HarnessInput, reps = 9, backend: Backend = 'gpu',
 ): Promise<ReconstructionTimingReport> {
   const { gray, w, h } = input;
-  const freshState = () => poseStateFor(input);
 
   // One session, and it owns the whole protocol: swap the caller's tree aside,
   // force the DevTools mirror off for the duration, hand back a fresh tree per
@@ -546,7 +541,7 @@ export async function timeReconstruction(
       let improved = false;
       for (let i = 0; i < WARMUP_BATCH && warmupMs.length < WARMUP_MAX; i++) {
         const t = performance.now();
-        await poseOnce(freshState(), gray, w, h, backend);
+        await poseOnce(input, gray, w, h, backend);
         const ms = performance.now() - t;
         warmupMs.push(ms);
         if (ms < best * (1 - WARMUP_IMPROVE)) { best = Math.min(best, ms); improved = true; }
@@ -557,7 +552,7 @@ export async function timeReconstruction(
 
     const poseMsAll: number[] = [];
     const stages = { votes: [] as number[], fit: [] as number[], pose: [] as number[], distance: [] as number[], decode: [] as number[] };
-    let last: PoseComputeState | null = null;
+    let last: PoseResult | null = null;
     let fences = 0, transferBytes = 0, transferMs = 0;
 
     // The capture+preprocess loop that used to sit here is GONE with the switch
@@ -600,10 +595,10 @@ export async function timeReconstruction(
     session.takeRepTree();
 
     for (let rep = 0; rep < reps; rep++) {
-      const state = freshState();
       transferLedgerReset();
       const t0 = performance.now();
-      const timing = await poseOnce(state, gray, w, h, backend);
+      const pose = await poseOnce(input, gray, w, h, backend);
+      const timing = pose.timing;
       poseMsAll.push(performance.now() - t0);
 
       // Taken, not read: this rep's tree comes out and the next rep starts on a
@@ -698,7 +693,7 @@ export async function timeReconstruction(
       stages.pose.push(timing.poseMs);
       stages.distance.push(timing.distanceMs);
       stages.decode.push(timing.decodeMs);
-      last = state;
+      last = pose;
     }
 
     // ── The discriminating experiment: ONE rep with probe mode on ──
@@ -709,7 +704,7 @@ export async function timeReconstruction(
     try {
       setTransferProbe(true);
       transferLedgerReset();
-      await poseOnce(freshState(), gray, w, h, backend);
+      await poseOnce(input, gray, w, h, backend);
       probe = groupLedger(transferLedger());
     } finally {
       setTransferProbe(false);
@@ -729,7 +724,7 @@ export async function timeReconstruction(
     if (probeDevice) {
       try {
         setAllocationProbe(probeDevice, true);
-        await poseOnce(freshState(), gray, w, h, backend);
+        await poseOnce(input, gray, w, h, backend);
       } finally {
         setAllocationProbe(probeDevice, false);
         allocation = allocationProbeResult();
@@ -745,7 +740,7 @@ export async function timeReconstruction(
     let gpuTimeline: GpuTimelineResult | null = null;
     if (probeDevice && gpuTimelineArm(probeDevice)) {
       try {
-        await poseOnce(freshState(), gray, w, h, backend);
+        await poseOnce(input, gray, w, h, backend);
         gpuTimeline = await gpuTimelineResolve();
       } finally {
         gpuTimelineDisarm();
@@ -753,7 +748,7 @@ export async function timeReconstruction(
     }
 
     const poseMedianMs = median(poseMsAll);
-    const pd = last?.lastPositionDecode ?? null;
+    const pd = last?.positionDecode ?? null;
 
     // Map insertion order is the pre-order tree walk, so no sort is needed to
     // make the table read as structure.
@@ -808,9 +803,9 @@ export async function timeReconstruction(
       allocation,
       gpuTimeline,
       ok: !!pd,
-      votes: last?.lastVotes?.length ?? 0,
+      votes: last?.votes.length ?? 0,
       consistency: pd ? pd.consistency : null,
-      distance: last?.lastRecoveredAxes?.distance ?? null,
+      distance: last?.recoveredAxes?.distance ?? null,
       warmupMs,
       warmedUp,
       profilerWasOn: session.mirrorWasOn,

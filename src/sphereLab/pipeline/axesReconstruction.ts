@@ -14,7 +14,7 @@ import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleRe
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
 import { type IntermediateName, type IntermediatesRequest, wants } from '../../pose/intermediates.ts';
-import { computePoseFromCapture } from '../../pose/poseCompute.ts';
+import { computePoseFromCapture, type PoseResult } from '../../pose/poseCompute.ts';
 import { type ProfileSpan, spanEnd, spanStart } from '../profiling/profiler.ts';
 
 // Shared pole-marker/gizmo/floor-overlay/readout tail -- called after EITHER
@@ -201,13 +201,22 @@ async function runVisualTail(camera: Camera): Promise<void> {
   // every mode overlay below are downstream of it.
   //
   // This is the ONE thing in this function that is not idempotent-by-reading-
-  // settled-state: it consumes a handle. resolve() is itself idempotent, so a
-  // second drain over the same capture is still safe -- it just finds the fields
-  // already populated and the handle already spent.
+  // settled-state: it consumes a handle. resolve() is itself idempotent -- a
+  // second call re-hands the same object rather than draining twice -- so a
+  // second drain over the same capture paints the same thing.
+  //
+  // The payload is RETURNED now rather than written onto the camera by the
+  // handle, so this is the second half of applyPoseResult's seam: the same
+  // renaming, for the fields that could not be settled until the readback
+  // landed.
   const pending = camera.pendingIntermediates;
   if (pending) {
     camera.pendingIntermediates = null;
-    await pending.resolve();
+    const got = await pending.resolve();
+    camera.intermediates = got;
+    camera.lastDecodeGrid = got.decodeGrid ?? null;
+    camera.lastDecodeRotated = got.decodeRotated ?? null;
+    camera.lastDecodeCorrectness = got.decodeCorrectness ?? null;
   }
 
   // Painting projectedPreviewTex is a real GPU texture upload -- worth
@@ -286,11 +295,21 @@ function markVisualsDirty(camera: Camera): void {
 // most ticks.
 //
 // Two things have to be true to START: something is pending, and this camera
-// is not mid-reconstruction. The second is the staleness guard, and it is the
-// important one: computePoseFromCapture mutates lastRecoveredAxes,
-// lastPositionDecode and friends IN PLACE as it goes, so painting from a
-// camera that is halfway through one would mix two frames -- new axes against
-// an old decode -- and produce a picture that never existed.
+// is not mid-reconstruction.
+//
+// THE SECOND GUARD'S ORIGINAL REASON NO LONGER EXISTS, and it is worth being
+// precise about that rather than deleting the flag on the strength of it.
+// computePoseFromCapture used to mutate lastRecoveredAxes, lastPositionDecode
+// and friends IN PLACE as it went, so painting from a camera halfway through
+// one would mix two frames -- new axes against an old decode, a picture that
+// never existed. The pipeline returns a result now and applyPoseResult swaps it
+// in synchronously, so that interleaving is unreachable rather than guarded.
+//
+// The flag STAYS, because reason 3 below never depended on the mutation: the
+// profiler keeps one module-level span stack, and a drain overlapping a capture
+// corrupts the span TREE whatever the pose does with its own fields. That is
+// step 6's problem, not this one's. So read this guard as a profiler guard now,
+// with the staleness argument retired.
 //
 // That exclusion is MUTUAL: runAxesReconstruction and recomputeFromLastCapture
 // both decline to start while visualsDraining is set. Three reasons, in
@@ -396,27 +415,68 @@ function displayIntermediates(camera: Camera): IntermediatesRequest {
   return wants(...want);
 }
 
+// ── The one place a pose result lands on a Camera ─────────────────────────
+//
+// This is the seam. The pipeline returns a PoseResult; the app keeps a Camera
+// whose `last*` fields mean "the most recent run's", which is a statement about
+// the app's own bookkeeping and not something the library should have an
+// opinion on. Renaming happens HERE, once, instead of the library adopting the
+// UI's vocabulary -- which is what it did when it wrote these fields itself.
+//
+// It is also where the staleness hazard used to live. The stages mutated these
+// as they went, so a repaint landing mid-reconstruction could read new axes
+// against an old decode. Every field moves in one synchronous block now, with
+// no await between the first and the last, so there is no halfway state for
+// anything to observe.
+//
+// The three decode fields are NOT set here: they arrive with the drain, since
+// the grid may still be on the device. Cleared, though, and that is deliberate
+// -- leaving the previous run's grid up next to this run's pose is exactly the
+// mixture this function exists to prevent.
+function applyPoseResult(camera: Camera, result: PoseResult): void {
+  camera.lastVoteComposites = result.voteComposites;
+  camera.lastVotes = result.votes;
+  camera.lastQuadricPair = result.quadricPair;
+  camera.lastGridPeriodPhase = result.gridPeriodPhase;
+  camera.lastRecoveredAxes = result.recoveredAxes;
+  camera.lastPositionDecode = result.positionDecode;
+  camera.lastChainTransfers = result.chainTransfers;
+  camera.lastPoseTiming = result.timing;
+
+  camera.pendingIntermediates = result.pending;
+  camera.intermediates = null;
+  camera.lastDecodeGrid = null;
+  camera.lastDecodeRotated = null;
+  camera.lastDecodeCorrectness = null;
+
+  camera.axesComputed = !!result.quadricPair;
+}
+
 async function recomputeStages(camera: Camera) {
   const { gray, w, h } = camera.lastAxesCaptureGray!;
 
   // Every stage from the 2x2-gradient composite lines through
-  // runPositionDecode now lives in pose/poseCompute.ts's
-  // computePoseFromCapture -- a pure function operating on the same field
-  // names (a real Camera structurally satisfies its PoseComputeState), so
-  // it can also run standalone on the phone (see this session's
-  // on-device-pose-recovery plan). Mutates camera.lastVoteComposites/
-  // lastVotes/lastQuadricPair/lastGridPeriodPhase/lastRecoveredAxes/
-  // lastDecodeGrid/lastDecodeRotated/lastDecodeCorrectness/lastPositionDecode
-  // in place, exactly like this function's own inline stages used to.
-  // computeProjectedBinsAuto/paintProjectedTexture (in
-  // runVisualTail) are deliberately NOT part of that shared prefix --
+  // runPositionDecode lives in pose/poseCompute.ts's computePoseFromCapture --
+  // a pure function of a capture plus the two camera parameters a real Camera
+  // structurally satisfies (PoseInput), so it can also run standalone on the
+  // phone and headless in node. computeProjectedBinsAuto/paintProjectedTexture
+  // (in runVisualTail) are deliberately NOT part of that shared prefix --
   // confirmed not on the critical path to a pose (distance is already
   // finalized by gridPeriodPhase before that stage would run); they exist
   // only to feed Projected-Cam/World-floor-decal DISPLAY.
-  camera.lastPoseTiming = await computePoseFromCapture(
+  // A handle this camera never drained (a newer reconstruction superseded it
+  // before runVisualTail ran) would hold the chain's device buffers until
+  // device loss. Released BEFORE the run below rather than after it, so the two
+  // sets of buffers never coexist -- computePoseFromCapture used to do exactly
+  // this, at exactly this moment, by reaching into the state object it was
+  // about to overwrite. It has no such pointer now, so the holder frees it.
+  camera.pendingIntermediates?.release();
+  camera.pendingIntermediates = null;
+
+  const result = await computePoseFromCapture(
     camera, gray, w, h, backendFromForceCPU(globalState.forceCPU), displayIntermediates(camera),
   );
-  camera.axesComputed = !!camera.lastQuadricPair;
+  applyPoseResult(camera, result);
 
   // The pose is final here; everything past this point is display. Deferred,
   // that display work stops being awaited inside the reconstruction's own

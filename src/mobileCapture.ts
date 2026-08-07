@@ -35,7 +35,8 @@ import { getAnalysisVFovRad } from './sphereLab/math/geometry.ts';
 import { computeGradient2x2Field } from './pose/stages/gradient/gradientField.ts';
 import { computeLsdRectanglesFromField } from './pose/stages/lsd/chain.ts';
 import type { LsdRectangle } from './pose/stages/lsd/types.ts';
-import { computePoseFromCapture, type PoseComputeState } from './pose/poseCompute.ts';
+import { computePoseFromCapture, type PoseInput, type PoseResult } from './pose/poseCompute.ts';
+import type { Intermediates } from './pose/intermediates.ts';
 // Shared with the desktop rather than restated here, so the wire shape and
 // the recorded shape cannot drift apart -- this page PRODUCES the value that
 // camera/model.ts types on the receiving end.
@@ -196,12 +197,12 @@ arOverlayCheckbox.addEventListener('change', () => setAROverlayEnabled(arOverlay
 // Resolves a local computePoseFromCapture result (device-compute mode) into
 // the same ARCameraPose shape a poseSync message already arrives in -- see
 // updateOverlayCamera's own comment on why it stays agnostic to the source.
-function buildLocalARCameraPose(state: PoseComputeState): ARCameraPose | null {
-  const decode = state.lastPositionDecode;
+function buildLocalARCameraPose(input: PoseInput, pose: PoseResult): ARCameraPose | null {
+  const decode = pose.positionDecode;
   if (!decode) return null;
   return {
     camPos: decode.camPos, recoveredCamQuat: decode.recoveredCamQuat,
-    aspect: state.aspect, fovDeg: THREE.MathUtils.radToDeg(getAnalysisVFovRad(state)),
+    aspect: input.aspect, fovDeg: THREE.MathUtils.radToDeg(getAnalysisVFovRad(input)),
   };
 }
 
@@ -792,7 +793,7 @@ fpsSlider.addEventListener('input', () => {
 // normal use, because the desktop's on-connect settingsSync overwrites all of
 // it within a second of the phone connecting, and only shows up in the narrow
 // window before that push lands.
-let cameraSettings: PoseComputeState['settings'] = { ...config.camera.common };
+let cameraSettings: PoseInput['settings'] = { ...config.camera.common };
 // Tracks the last boardSize a settingsSync actually applied, so
 // rebuildFloorPatternData (which rebuilds the whole De Bruijn lookup table --
 // not cheap) only runs when boardSize genuinely changed, not on every
@@ -2011,33 +2012,33 @@ function captureAndSendFrame() {
 // flood-fill membership list) is deliberately excluded from the wire
 // shape -- it scales with image resolution, not region count, and nothing
 // on the desktop actually reads camera.lastLsdRectangles.rawMembers today.
-function buildDebugPayload(state: PoseComputeState, lsdRects: LsdRectangle[]) {
-  const grid = state.lastDecodeGrid;
+function buildDebugPayload(pose: PoseResult, drained: Intermediates, lsdRects: LsdRectangle[]) {
+  const grid = drained.decodeGrid;
   let validCount = 0, totalCount = 0;
   if (grid) {
     for (const row of grid.points) for (const pt of row) { totalCount++; if (pt.valid) validCount++; }
   }
   let correctCount = 0, wrongCount = 0;
-  if (state.lastDecodeCorrectness) {
-    for (const row of state.lastDecodeCorrectness) for (const cell of row) {
+  if (drained.decodeCorrectness) {
+    for (const row of drained.decodeCorrectness) for (const cell of row) {
       if (!cell) continue;
       if (cell.correct) correctCount++; else wrongCount++;
     }
   }
-  const gpp = state.lastGridPeriodPhase;
+  const gpp = pose.gridPeriodPhase;
   return {
-    compositeLineCount: state.lastVoteComposites?.length ?? 0,
-    voteCount: state.lastVotes?.length ?? 0,
+    compositeLineCount: pose.voteComposites.length,
+    voteCount: pose.votes.length,
     gridPeriodPhase: gpp ? {
       period: gpp.period, phiRow: gpp.phiRow, phiCol: gpp.phiCol, height: gpp.height,
       chosenPeriod: gpp.debug.chosenPeriod, bracket: gpp.debug.bracket,
       rowLineCount: gpp.rowLines.length, colLineCount: gpp.colLines.length,
     } : null,
     decodeGrid: grid ? { rows: grid.rows, cols: grid.cols, validCount, totalCount } : null,
-    decodeCorrectness: state.lastDecodeCorrectness ? { correctCount, wrongCount } : null,
+    decodeCorrectness: drained.decodeCorrectness ? { correctCount, wrongCount } : null,
     pipeline: {
-      gridPeriodPhase: state.lastGridPeriodPhase,
-      voteComposites: state.lastVoteComposites,
+      gridPeriodPhase: pose.gridPeriodPhase,
+      voteComposites: pose.voteComposites,
       lsdRectangles: lsdRects.map((r) => ({
         cx: r.cx, cy: r.cy, theta: r.theta, length: r.length, width: r.width,
         accepted: r.accepted, nfaLog10: r.nfaLog10, lineScore: r.lineScore,
@@ -2099,39 +2100,34 @@ async function captureComputeAndSendPose() {
     const topDown = sendCtx.getImageData(0, 0, cw, ch).data;
     const grayTopDown = toGrayscale(topDown, cw, ch);
 
-    const state: PoseComputeState = {
-      aspect: cw / ch,
-      settings: cameraSettings,
-      lastVoteComposites: null, lastVotes: null, lastQuadricPair: null, lastGridPeriodPhase: null,
-      lastRecoveredAxes: null, lastDecodeGrid: null, lastDecodeRotated: null, lastDecodeCorrectness: null,
-      lastPositionDecode: null, lastChainTransfers: null,
-      pendingIntermediates: null, intermediates: null,
-    };
+    // The twelve-null-field state literal that used to be built here is gone:
+    // the pipeline reads exactly these two fields and returns everything else.
+    const poseInput = { aspect: cw / ch, settings: cameraSettings };
     const t0 = performance.now();
     // The phone's globalState is THIS page's own module instance, kept in sync
     // by settingsSync (see below) -- converted to a Backend right here so the
     // pipeline itself never reads it. Same conversion the desktop does.
     // Asks for the decode grid and drains it RIGHT HERE rather than deferring:
-    // buildDebugPayload below reads lastDecodeGrid synchronously and this page
-    // has no visual mailbox to resolve a handle in later. The request has to be
-    // explicit now -- an unasked-for grid is not brought down at all -- which is
-    // the point: this page's need is stated at the call site instead of being a
-    // default that another caller's parameter happened to preserve.
-    const timing = await computePoseFromCapture(
-      state, grayTopDown, cw, ch, backendFromForceCPU(globalState.forceCPU), wants('decodeGrid'),
+    // buildDebugPayload below needs it and this page has no visual mailbox to
+    // resolve a handle in later. The request has to be explicit -- an
+    // unasked-for grid is not brought down at all -- which is the point: this
+    // page's need is stated at the call site instead of being a default that
+    // another caller's parameter happened to preserve.
+    const pose = await computePoseFromCapture(
+      poseInput, grayTopDown, cw, ch, backendFromForceCPU(globalState.forceCPU), wants('decodeGrid'),
     );
-    await state.pendingIntermediates?.resolve();
-    state.pendingIntermediates = null;
+    const drained = (await pose.pending?.resolve()) ?? {};
+    const timing = pose.timing;
     const totalMs = performance.now() - t0;
-    const pd = state.lastPositionDecode;
+    const pd = pose.positionDecode;
     recordPose({
       tDrawn, frameMeta: frameMetaAtDraw, computeMs: totalMs,
       ok: !!pd,
       synced: settingsSyncedAt !== null, boardSize: knownBoardSize,
       camPos: pd ? pd.camPos.toArray() : null,
       camQuat: pd ? pd.recoveredCamQuat.toArray() : null,
-      distance: state.lastRecoveredAxes ? state.lastRecoveredAxes.distance : null,
-      dnormal: state.lastRecoveredAxes ? state.lastRecoveredAxes.Dnormal.toArray() : null,
+      distance: pose.recoveredAxes ? pose.recoveredAxes.distance : null,
+      dnormal: pose.recoveredAxes ? pose.recoveredAxes.Dnormal.toArray() : null,
       consistency: pd ? pd.consistency : null,
       votes: pd ? pd.votes : null, totalWindows: pd ? pd.totalWindows : null,
     });
@@ -2174,7 +2170,7 @@ async function captureComputeAndSendPose() {
     // failed decode still knows them -- and a failed decode is exactly when
     // the render loop needs them to keep drawing.
     lastArIntrinsics = {
-      aspect: state.aspect, fovDeg: THREE.MathUtils.radToDeg(getAnalysisVFovRad(state)),
+      aspect: poseInput.aspect, fovDeg: THREE.MathUtils.radToDeg(getAnalysisVFovRad(poseInput)),
     };
     // With correction ON the render loop owns the camera and updates it at
     // 60fps, so writing a pose here would only be overwritten a few
@@ -2182,23 +2178,23 @@ async function captureComputeAndSendPose() {
     // decode passes null -- which hides the overlay. That contrast IS the
     // A/B: off, the overlay drops out whenever a decode fails; on, it
     // coasts through.
-    if (!useImuCorrection) updateOverlayCamera(buildLocalARCameraPose(state));
+    if (!useImuCorrection) updateOverlayCamera(buildLocalARCameraPose(poseInput, pose));
     else if (imuTracker.hasFix()) imuStats.predicted++;
 
     if (ws && ws.readyState === WebSocket.OPEN) {
       const msg: any = {
         type: 'poseResult', w: cw, h: ch,
-        recoveredAxes: state.lastRecoveredAxes ? {
-          Drow: state.lastRecoveredAxes.Drow.toArray(), Dcol: state.lastRecoveredAxes.Dcol.toArray(),
-          Dnormal: state.lastRecoveredAxes.Dnormal.toArray(), distance: state.lastRecoveredAxes.distance,
+        recoveredAxes: pose.recoveredAxes ? {
+          Drow: pose.recoveredAxes.Drow.toArray(), Dcol: pose.recoveredAxes.Dcol.toArray(),
+          Dnormal: pose.recoveredAxes.Dnormal.toArray(), distance: pose.recoveredAxes.distance,
         } : null,
-        positionDecode: state.lastPositionDecode ? {
-          row: state.lastPositionDecode.row, col: state.lastPositionDecode.col,
-          consistency: state.lastPositionDecode.consistency, votes: state.lastPositionDecode.votes,
-          totalWindows: state.lastPositionDecode.totalWindows,
-          camPos: state.lastPositionDecode.camPos.toArray(),
-          recoveredCamQuat: state.lastPositionDecode.recoveredCamQuat.toArray(),
-          orientation: state.lastPositionDecode.orientation,
+        positionDecode: pd ? {
+          row: pd.row, col: pd.col,
+          consistency: pd.consistency, votes: pd.votes,
+          totalWindows: pd.totalWindows,
+          camPos: pd.camPos.toArray(),
+          recoveredCamQuat: pd.recoveredCamQuat.toArray(),
+          orientation: pd.orientation,
         } : null,
       };
       // Both off by default, independently toggled -- see their own
@@ -2219,7 +2215,7 @@ async function captureComputeAndSendPose() {
           nfaEpsilon: cameraSettings.lsdNfaEpsilon,
           nfaTestExponent: cameraSettings.lsdNfaTestExponent,
         }, backendFromForceCPU(globalState.forceCPU));
-        msg.debug = buildDebugPayload(state, lsdRects);
+        msg.debug = buildDebugPayload(pose, drained, lsdRects);
       }
       // Raw bytes now (poseResultWire.ts), not a base64 dataUrl -- toBlob's
       // callback is awaited HERE, inside captureComputeAndSendPose's own
@@ -2245,7 +2241,7 @@ async function captureComputeAndSendPose() {
     // session's on-device-pose-recovery plan).
     const fps = totalMs > 0 ? 1000 / totalMs : 0;
     poseReadoutEl.textContent = `pose ${totalMs.toFixed(0)}ms (${fps.toFixed(1)}fps)  votes ${timing.votesMs.toFixed(0)} fit ${timing.fitMs.toFixed(0)} pose ${timing.poseMs.toFixed(0)} dist ${timing.distanceMs.toFixed(0)} decode ${timing.decodeMs.toFixed(0)}`
-      + (state.lastPositionDecode ? '' : '  [no fix]');
+      + (pd ? '' : '  [no fix]');
   } finally {
     devicePoseComputing = false;
   }

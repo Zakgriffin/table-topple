@@ -4,7 +4,7 @@ import { cornerDir, getAnalysisVFovRad } from '../sphereLab/math/geometry.ts';
 import { FieldResidency, type TransferSummary } from './gpu/fieldResidency.ts';
 import { fitPairOfPlanesGPU } from './stages/votes/fitPlanes.gpu.ts';
 import { spanDurationMs, spanEnd, spanStart } from '../sphereLab/profiling/profiler.ts';
-import { type CompositeLine, type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type RecoveredAxes, type Vote } from './results.ts';
+import { type CompositeLine, type PositionDecodeResult, type RecoveredAxes, type Vote } from './results.ts';
 import { type Backend } from './backend.ts';
 import { type PendingDecodeGrid, runPositionDecode } from './stages/decode/decodeGrid.ts';
 import { computeGridPeriodPhase, type GridPeriodPhaseResult } from './stages/period/gridPeriodPhase.ts';
@@ -26,48 +26,80 @@ import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes, typ
 // would run); they exist only to feed Projected-Cam/World-floor-decal
 // DISPLAY, so axesReconstruction.ts keeps calling them separately, only for
 // desktop display purposes. Likewise the pole-marker/gizmo/readout tail
-// (axesReconstruction.ts's own overlaySpan) stays there, driven off
-// lastQuadricPair/lastRecoveredAxes/lastPositionDecode after this returns.
-export interface PoseComputeState {
+// (axesReconstruction.ts's own overlaySpan) stays there, driven off the
+// quadricPair/recoveredAxes/positionDecode this hands back.
+
+// ── What the pipeline READS ───────────────────────────────────────────────
+//
+// The camera parameters a reconstruction runs under, and nothing else. A real
+// `Camera` satisfies this structurally, as does a HarnessInput -- which is the
+// whole point of it being this small: a caller does not have to build a
+// pipeline-shaped object to run the pipeline.
+//
+// It was called `PoseComputeState` and carried the fourteen result fields as
+// well, because the pipeline wrote its output BY MUTATING it. That is the
+// tangle this step exists to undo: with inputs and outputs in one type, the
+// library's output type was a subset of the UI's camera model, "is this field
+// an input or a result?" had no answer, and every field existed and was
+// written on every run whether anyone wanted it or not.
+export interface PoseInput {
   aspect: number;
   settings: LsdCompositeSettings & {
     horizFovDeg: number; gridPeriodPhaseGapLowerBound: number; minGrazingCos: number;
   };
-  lastVoteComposites: { root: number; line: CompositeLine }[] | null;
-  lastVotes: Vote[] | null;
-  // Raw fit result (Drow/Dcol/Dnormal only, no distance) BEFORE period-search
-  // gating -- axesReconstruction.ts's pole markers render off
-  // rowDirRecovered/colDirRecovered even when gridPeriodPhase fails and
-  // lastRecoveredAxes ends up null. Needed as its own field so that behavior
-  // survives the refactor instead of silently regressing -- see
-  // camera/model.ts's CameraBase.lastQuadricPair, added for the same reason.
-  lastQuadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
-  lastGridPeriodPhase: GridPeriodPhaseResult | null;
-  lastRecoveredAxes: RecoveredAxes | null;
-  lastDecodeGrid: DecodeSampleGrid | null;
-  lastDecodeRotated: DecodeSampleGrid | null;
-  lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
-  lastPositionDecode: PositionDecodeResult | null;
-  // Set exactly when the caller asked for intermediates (see
-  // pose/intermediates.ts). Whoever holds it owns resolving or releasing
-  // it; left unresolved it holds the chain's device buffers until device loss.
-  // Null for the empty request, which is what makes "asking for nothing costs
-  // nothing" literally true: there is no handle and nothing to drain.
-  pendingIntermediates: PendingIntermediates | null;
-  // Filled by that handle's resolve(). Null until then, and null forever for a
-  // caller that asked for nothing -- deliberately not an empty object, so
-  // "nobody asked" and "asked and got nothing back" are distinguishable.
-  intermediates: Intermediates | null;
-  // What the LSD chain's toggle configuration actually cost the bus on the
-  // last frame, straight off the residency's own ledger. Recorded rather than
-  // derived because "how many crossings does this configuration imply" is not
-  // answerable by reading the toggles: it depends on which stages fell back to
-  // CPU, and on which optional readbacks a consumer happened to ask for.
-  lastChainTransfers: TransferSummary | null;
 }
 
 export interface PoseComputeTiming {
   votesMs: number; fitMs: number; poseMs: number; distanceMs: number; decodeMs: number;
+}
+
+// ── What the pipeline RETURNS ─────────────────────────────────────────────
+//
+// One object, built fresh per run, with no `last` in any name -- these are not
+// "the most recent" anything, they are THIS call's answer. A caller that keeps
+// them around is the one for whom they become "last", and that is its own
+// bookkeeping rather than the library's (see axesReconstruction.ts's
+// applyPoseResult, the single site where they land on a Camera).
+//
+// The staleness hazard that shaped the old design is gone by construction
+// rather than by guard. Mutating in place meant a repaint could catch a camera
+// halfway through a reconstruction and paint new axes against an old decode --
+// a picture that never existed -- so the fields had to be nulled in a specific
+// order inside the stages and a mutual-exclusion flag had to keep repaints out
+// of the window entirely. An atomic swap of one returned object cannot be
+// observed halfway.
+export interface PoseResult {
+  // Not nullable, unlike everything below them: a run that got as far as
+  // returning cast its votes, even if the fit that consumes them degenerated.
+  // The old state object had them nullable because it existed BEFORE the run
+  // as well as after.
+  voteComposites: { root: number; line: CompositeLine }[];
+  votes: Vote[];
+  // Raw fit result (Drow/Dcol/Dnormal only, no distance) BEFORE period-search
+  // gating -- axesReconstruction.ts's pole markers render off it even when
+  // gridPeriodPhase fails and `recoveredAxes` ends up null. Its own field so
+  // that behavior survives instead of silently regressing.
+  quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
+  gridPeriodPhase: GridPeriodPhaseResult | null;
+  recoveredAxes: RecoveredAxes | null;
+  positionDecode: PositionDecodeResult | null;
+  // What the LSD chain's toggle configuration actually cost the bus on this
+  // run, straight off the residency's own ledger. Recorded rather than
+  // derived because "how many crossings does this configuration imply" is not
+  // answerable by reading the toggles: it depends on which stages fell back to
+  // CPU, and on which optional readbacks a consumer happened to ask for.
+  chainTransfers: TransferSummary | null;
+  timing: PoseComputeTiming;
+  // Set exactly when the caller asked for intermediates (see
+  // pose/intermediates.ts), and null otherwise -- which is what makes "asking
+  // for nothing costs nothing" literally true: there is no handle and nothing
+  // to drain. Whoever holds it owns resolving or releasing it; left unresolved
+  // it holds the chain's device buffers until device loss.
+  //
+  // The drained payload is the resolve() call's RETURN VALUE, not a field
+  // here. A result object that filled itself in later would be exactly the
+  // mutable shared state this type replaced, one level down.
+  pending: PendingIntermediates | null;
 }
 
 // Stages 1-4 plus vote casting, over a FieldResidency the CALLER now owns.
@@ -84,7 +116,7 @@ export interface PoseComputeTiming {
 // no reader past this point -- but "no reader" turned out to be a claim worth
 // checking against the transfer ledger rather than asserting.
 async function computeCompositesAndVotes(
-  state: PoseComputeState, res: FieldResidency, gray: Float64Array, w: number, h: number, vFovRad: number,
+  input: PoseInput, res: FieldResidency, gray: Float64Array, w: number, h: number, vFovRad: number,
   backend: Backend, wantMembers: boolean,
 ): Promise<{ voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[]; rects: LsdRectangle[] }> {
   {
@@ -93,10 +125,10 @@ async function computeCompositesAndVotes(
     // shared by every downstream consumer that needs them -- vote casting
     // below and row/col family classification in computeGridPeriodPhase
     // further down (and, for a real desktop camera, the "color composite
-    // lines by row/col family" debug overlay, which reads
-    // state.lastVoteComposites back off the camera afterward).
+    // lines by row/col family" debug overlay, which reads voteComposites back
+    // off the camera afterward).
     const compositesSpan = spanStart('composites (2x2 gradient field)');
-    const { composites: voteComposites, rects } = await computeGradient2x2Composites(state.settings, res, w, h, backend, wantMembers);
+    const { composites: voteComposites, rects } = await computeGradient2x2Composites(input.settings, res, w, h, backend, wantMembers);
     spanEnd(compositesSpan);
 
     // Contains no await, so this span's duration is host CPU and is marked
@@ -104,18 +136,18 @@ async function computeCompositesAndVotes(
     // "world votes" source awaited a gradient readback here, making its
     // duration wall time containing a fence.
     const votesSpan = spanStart('votes (segments)', true);
-    const votes = computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, state.aspect);
+    const votes = computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, input.aspect);
     spanEnd(votesSpan);
 
     return { voteComposites, votes, rects };
   }
 }
 
-// Mutates `state` in place exactly like recomputeStages used to mutate
-// `camera` -- same field names, same functions, same order:
-// the LSD chain (stages 1-4, see runLsdChain) -> computeGradient2x2Composites ->
-// computeSegmentVotes -> fitPairOfPlanes[GPU] -> handedness assembly ->
-// computeGridPeriodPhase -> assemble RecoveredAxes -> runPositionDecode.
+// One reconstruction, start to finish, RETURNED. The order is what
+// recomputeStages used to run inline: the LSD chain (stages 1-4, see
+// runLsdChain) -> computeGradient2x2Composites -> computeSegmentVotes ->
+// fitPairOfPlanes[GPU] -> handedness assembly -> computeGridPeriodPhase ->
+// assemble RecoveredAxes -> runPositionDecode.
 //
 // `backend` is now a PARAMETER at every branch point rather than a
 // globalState.forceCPU read inside each one. It used to be argued that no
@@ -136,28 +168,28 @@ async function computeCompositesAndVotes(
 // real behaviour change from `deferDecodeGrid=false`, which always read the
 // 0.45MB grid back. It is not the view-conditional SKIP that was tried and
 // rejected here (see runPositionDecode) -- that had the pipeline guessing what
-// display might want, leaving lastDecodeGrid null behind a caller's back. This
-// is the caller SAYING so up front, which is the difference between a guess and
-// a contract: axesReconstruction and mobileCapture both ask for 'decodeGrid',
-// so nothing either of them reads has changed.
+// display might want, leaving a null grid behind a caller's back. This is the
+// caller SAYING so up front, which is the difference between a guess and a
+// contract: axesReconstruction and mobileCapture both ask for 'decodeGrid', so
+// nothing either of them reads has changed.
+//
+// RELEASING A PREVIOUS RUN'S HANDLE IS THE CALLER'S JOB NOW, and it has to be:
+// this function used to find the stale handle on the state object it was about
+// to overwrite and release it there. With nothing shared between two calls
+// there is no stale pointer here to find, so a caller that keeps handles
+// around (axesReconstruction, which parks one on the Camera for a frame)
+// releases the one it is replacing. That is a real transfer of responsibility
+// rather than a deletion -- the alternative is the pipeline reaching into its
+// caller's storage, which is what this whole step removes.
 export async function computePoseFromCapture(
-  state: PoseComputeState, gray: Float64Array, w: number, h: number, backend: Backend,
+  input: PoseInput, gray: Float64Array, w: number, h: number, backend: Backend,
   want: IntermediatesRequest = NO_INTERMEDIATES,
-): Promise<PoseComputeTiming> {
-  // A previous run's handle can still be here if its owner never drained it.
-  // Released BEFORE this run overwrites the pointer, since nothing else holds
-  // it and its buffers would otherwise live until device loss. This used to sit
-  // inside runPositionDecode, which could only ever release the decode grid's
-  // half of it.
-  state.pendingIntermediates?.release();
-  state.pendingIntermediates = null;
-  state.intermediates = null;
-
+): Promise<PoseResult> {
   // Both are filled inside the try and read in the finally, so the residency
   // reaches the handle even on the error unwind rather than leaking.
   let pendingGrid: PendingDecodeGrid | null = null;
   let rects: LsdRectangle[] | null = null;
-  const vFovRad = getAnalysisVFovRad(state);
+  const vFovRad = getAnalysisVFovRad(input);
 
   // IS `votesMs` -- see the return statement. It is also what makes the
   // subtree's self times readable as a decomposition of a stage rather than as
@@ -171,15 +203,16 @@ export async function computePoseFromCapture(
   // see that function's own comment. Destroyed in the finally, which is also
   // what makes it safe to hand a raw GPUBuffer to runPositionDecode: nothing
   // outlives this call.
+  // Assembled in the try and DECORATED in the finally -- see there.
+  let result: PoseResult | null = null;
+
   const residencySpan = spanStart('residency create (gray up)');
   const res = await createLsdChainResidency(gray, w, h, backend);
   spanEnd(residencySpan);
   try {
-    const composited = await computeCompositesAndVotes(state, res, gray, w, h, vFovRad, backend, want.has('rects'));
+    const composited = await computeCompositesAndVotes(input, res, gray, w, h, vFovRad, backend, want.has('rects'));
     const { voteComposites, votes } = composited;
     rects = composited.rects;
-    state.lastVoteComposites = voteComposites;
-    state.lastVotes = votes;
     spanEnd(stageSpan);
 
     // Same fallback pattern as every other GPU sub-pipeline: fitPairOfPlanes
@@ -202,7 +235,7 @@ export async function computePoseFromCapture(
     let rowDirRecovered: THREE.Vector3 | null = null, colDirRecovered: THREE.Vector3 | null = null;
     if (quadricPair) {
       const normalForHandedness = quadricPair.Dnormal.clone();
-      if (cornerDir(0, 0, MATH_QUAT, vFovRad, state.aspect).dot(normalForHandedness) > 0) normalForHandedness.negate();
+      if (cornerDir(0, 0, MATH_QUAT, vFovRad, input.aspect).dot(normalForHandedness) > 0) normalForHandedness.negate();
       rowDirRecovered = quadricPair.Drow.clone();
       colDirRecovered = quadricPair.Dcol.clone();
       const handedness = rowDirRecovered.clone().cross(colDirRecovered).dot(normalForHandedness);
@@ -212,28 +245,27 @@ export async function computePoseFromCapture(
     // pole markers actually rendered pre-refactor off their own local
     // rowDirRecovered/colDirRecovered vars) but BEFORE gridPeriodPhase's
     // period-search gating -- so pole markers still have something to render
-    // off even when gridPeriodPhase fails below and lastRecoveredAxes ends up
-    // null. Deliberately NOT the raw pre-handedness-correction quadricPair.
-    state.lastQuadricPair = (quadricPair && rowDirRecovered && colDirRecovered)
+    // off even when gridPeriodPhase fails below and recoveredAxes ends up null.
+    // Deliberately NOT the raw pre-handedness-correction quadricPair.
+    const correctedPair = (quadricPair && rowDirRecovered && colDirRecovered)
       ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal }
       : null;
     spanEnd(poseAssemblySpan);
 
-    // Grid period/phase is the SOLE source of state.lastRecoveredAxes.distance
-    // -- runs unconditionally whenever a quadric pair was found (real distance
-    // depends on it).
+    // Grid period/phase is the SOLE source of recoveredAxes.distance -- runs
+    // unconditionally whenever a quadric pair was found (real distance depends
+    // on it).
     const gppSpan = spanStart('gridPeriodPhase (distance source)');
     const gpp = rowDirRecovered && colDirRecovered && quadricPair
       ? await computeGridPeriodPhase(
-          voteComposites, gray, w, h, MATH_QUAT, vFovRad, state.aspect,
+          voteComposites, gray, w, h, MATH_QUAT, vFovRad, input.aspect,
           rowDirRecovered, colDirRecovered, quadricPair.Dnormal, GRID_STEP,
-          state.settings.minGrazingCos, backend,
+          input.settings.minGrazingCos, backend,
         )
       : null;
-    state.lastGridPeriodPhase = gpp;
     spanEnd(gppSpan);
 
-    state.lastRecoveredAxes = rowDirRecovered && colDirRecovered && quadricPair && gpp
+    const recoveredAxes = rowDirRecovered && colDirRecovered && quadricPair && gpp
       ? { Drow: rowDirRecovered, Dcol: colDirRecovered, Dnormal: quadricPair.Dnormal, distance: gpp.height ?? 1 }
       : null;
 
@@ -242,9 +274,11 @@ export async function computePoseFromCapture(
     // no device on an all-CPU chain, and `gray` is only device-resident if some
     // stage put it there. Null just means decode uploads its own, as before.
     const sharedGray = res.device && res.hasGPU('gray') ? res.gpu('gray') : null;
-    pendingGrid = await runPositionDecode(
-      state, gray, w, h, vFovRad, sharedGray, backend, want.has('decodeGrid'),
+    const decoded = await runPositionDecode(
+      { aspect: input.aspect, settings: input.settings, recoveredAxes, gridPeriodPhase: gpp },
+      gray, w, h, vFovRad, sharedGray, backend, want.has('decodeGrid'),
     );
+    pendingGrid = decoded.pendingGrid;
     spanEnd(decodeSpan);
 
     // Read off the span objects held above, not off a parallel set of
@@ -257,13 +291,26 @@ export async function computePoseFromCapture(
     // Immune to the span tree's reparenting hazard (see profiler.ts's header):
     // that corrupts a span's PLACE in the tree, never its own start/end, and
     // these are read straight from the objects.
-    return {
-      votesMs: spanDurationMs(stageSpan),
-      fitMs: spanDurationMs(fitSpan),
-      poseMs: spanDurationMs(poseAssemblySpan),
-      distanceMs: spanDurationMs(gppSpan),
-      decodeMs: spanDurationMs(decodeSpan),
+    result = {
+      voteComposites, votes,
+      quadricPair: correctedPair,
+      gridPeriodPhase: gpp,
+      recoveredAxes,
+      positionDecode: decoded.decode,
+      // Both are filled by the finally below, which runs before this object
+      // reaches the caller. Placeholders rather than optional fields so the
+      // type stays honest about what a caller receives.
+      chainTransfers: null,
+      pending: null,
+      timing: {
+        votesMs: spanDurationMs(stageSpan),
+        fitMs: spanDurationMs(fitSpan),
+        poseMs: spanDurationMs(poseAssemblySpan),
+        distanceMs: spanDurationMs(gppSpan),
+        decodeMs: spanDurationMs(decodeSpan),
+      },
     };
+    return result;
   } finally {
     // Read BEFORE destroy, and in the finally rather than the happy path, so a
     // configuration that threw still reports the traffic it managed to incur.
@@ -273,15 +320,25 @@ export async function computePoseFromCapture(
     // question the readout answers. Transfers a later drain incurs on the
     // caller's behalf are that caller's cost, not the pipeline's, and they are
     // visible as their own profiler spans.
-    state.lastChainTransfers = res.summary();
-    if (want.size === 0) {
-      // The empty request, unchanged from before any of this existed. No
-      // handle, no readback, nothing for anyone to remember to drain.
+    const transfers = res.summary();
+
+    // ONE question decides the residency's fate: is there both something to
+    // hand back and something to hand it back ON? A non-empty request whose run
+    // THREW has no result to carry a handle, so those buffers are freed here
+    // rather than handed to a drain nobody will ever be given the chance to
+    // call. Otherwise the empty request destroys as it always did.
+    if (result && want.size > 0) {
+      result.pending = makePendingIntermediates(res, want, pendingGrid, rects);
+    } else {
       pendingGrid?.release();
       res.destroy();
-    } else {
-      state.pendingIntermediates = makePendingIntermediates(state, res, want, pendingGrid, rects);
     }
+
+    // Decorating the object the `return` above already evaluated, which works
+    // because it is a reference and the caller has not seen it yet. Assembling
+    // the result after the try instead would mean either reading the ledger
+    // after destroy or summarizing twice.
+    if (result) result.chainTransfers = transfers;
   }
 }
 
@@ -290,14 +347,18 @@ export async function computePoseFromCapture(
 // resolve/release runs first -- see PendingIntermediates on why both have to be
 // safe twice and in either order.
 function makePendingIntermediates(
-  state: PoseComputeState, res: FieldResidency, want: IntermediatesRequest,
+  res: FieldResidency, want: IntermediatesRequest,
   pendingGrid: PendingDecodeGrid | null, rects: LsdRectangle[] | null,
 ): PendingIntermediates {
   let spent = false;
+  // Held so a second resolve() re-hands the SAME arrays rather than draining a
+  // residency that is already destroyed. Starts as the empty set, which is also
+  // what a resolve() after a release() gets -- see PendingIntermediates.
+  let drained: Intermediates = {};
   const destroy = () => { pendingGrid?.release(); res.destroy(); };
   return {
     async resolve() {
-      if (spent) return;
+      if (spent) return drained;
       spent = true;
       const drainSpan = spanStart('intermediates drain');
       try {
@@ -313,11 +374,18 @@ function makePendingIntermediates(
         // the chain returns and then had nowhere to put. Captured during the
         // run and simply held until now.
         if (want.has('rects') && rects) out.rects = rects;
-        state.intermediates = out;
-        // Populates lastDecodeGrid/lastDecodeRotated/lastDecodeCorrectness, and
-        // releases its own device buffers on the way. Last, so a throw reading
-        // a field above still leaves the grid's memory to the destroy below.
-        await pendingGrid?.resolve();
+        // Last, so a throw reading a field above still leaves the grid's memory
+        // to the destroy below. Folded into the SAME object as everything else:
+        // the decode grid used to be the one requestable thing that landed on
+        // the caller's state instead of here (see IntermediateName).
+        const grid = await pendingGrid?.resolve();
+        if (grid) {
+          out.decodeGrid = grid.grid;
+          out.decodeRotated = grid.rotated;
+          out.decodeCorrectness = grid.correctness;
+        }
+        drained = out;
+        return drained;
       } finally {
         spanEnd(drainSpan);
         destroy();

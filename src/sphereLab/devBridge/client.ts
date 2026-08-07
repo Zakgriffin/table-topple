@@ -49,8 +49,8 @@ export function sendToDevBridge(obj: unknown) {
   if (devBridgeSocket && devBridgeSocket.readyState === WebSocket.OPEN) devBridgeSocket.send(JSON.stringify(obj));
 }
 
-// Builds the 16-field PoseComputeState.settings payload for one physical
-// camera's phone -- see pose/poseCompute.ts's PoseComputeState and this
+// Builds the 16-field PoseInput['settings'] payload for one physical
+// camera's phone -- see pose/poseCompute.ts's PoseInput and this
 // session's on-device-pose-recovery plan.
 function buildCameraSettingsPayload(cam: PhysicalCamera) {
   const s = cam.settings;

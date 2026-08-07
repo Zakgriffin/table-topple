@@ -261,7 +261,7 @@ function rerunOnRealCaptureSettingChange() {
   // result being displayed, just never a clean look at it.
   if (cam && isPhysical(cam) && cam.computeMode === 'desktop' && cam.lastRealCaptureGray) runAxesReconstruction(cam);
 }
-// Per-camera-settings sliders (the 16 fields making up PoseComputeState.settings,
+// Per-camera-settings sliders (the 16 fields making up PoseInput['settings'],
 // see pose/poseCompute.ts) push a fresh settingsSync to THAT camera's own
 // phone only -- source of truth stays the desktop's own sliders (see this
 // session's on-device-pose-recovery plan). No-op for a simulated camera

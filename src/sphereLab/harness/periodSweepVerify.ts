@@ -73,7 +73,7 @@ function findPeakPeriods(samples: { period: number; score: number }[]): number[]
 export async function verifyPeriodSweep(
   input: HarnessInput, backend: Backend = 'gpu',
 ): Promise<PeriodSweepVerifyReport | string> {
-  const gpp = (await runPoseOn(input, backend)).lastGridPeriodPhase;
+  const gpp = (await runPoseOn(input, backend)).pose.gridPeriodPhase;
   if (!gpp) return 'reconstruction produced no grid period/phase result on this input';
   const { coarseSamples } = gpp.debug;
   if (coarseSamples.length < 3) return 'too few coarse samples to compare';

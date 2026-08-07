@@ -1,11 +1,10 @@
 import type { Backend } from '../../pose/backend.ts';
-import { type IntermediatesRequest, NO_INTERMEDIATES } from '../../pose/intermediates.ts';
+import { type Intermediates, type IntermediatesRequest, NO_INTERMEDIATES } from '../../pose/intermediates.ts';
 import { computePoseFromCapture } from '../../pose/poseCompute.ts';
-import type { PoseComputeState } from '../../pose/poseCompute.ts';
-import { poseStateFor } from './input.ts';
+import type { PoseResult } from '../../pose/poseCompute.ts';
 import type { HarnessInput } from './input.ts';
 
-// One whole reconstruction on a harness input, into a detached state.
+// One whole reconstruction on a harness input, drained.
 //
 // The late-stage verifies (decodeGridBuild, periodSweep) do not check a
 // function of the raw pixels -- they check a stage that consumes the OUTPUT of
@@ -18,16 +17,17 @@ import type { HarnessInput } from './input.ts';
 // Running it here instead costs one reconstruction (tens of ms) and buys the
 // property that matters: the verify's answer is a function of its argument.
 //
-// The request is RESOLVED here rather than handed on, so a caller gets a
-// settled state and never has to know a handle existed. verifyDecodeGridBuild
-// asks for 'decodeGrid' this way -- it reads lastDecodeGrid, which is null
-// unless someone asked.
+// The request is RESOLVED here rather than handed on, so a caller gets settled
+// data and never has to know a handle existed. verifyDecodeGridBuild asks for
+// 'decodeGrid' this way -- the grid is absent from `intermediates` unless
+// someone asked.
+//
+// `input` is passed straight through as the PoseInput: a HarnessInput carries
+// `aspect` and `settings`, which is the whole of what the pipeline reads.
 export async function runPoseOn(
   input: HarnessInput, backend: Backend, want: IntermediatesRequest = NO_INTERMEDIATES,
-): Promise<PoseComputeState> {
-  const state = poseStateFor(input);
-  await computePoseFromCapture(state, input.gray, input.w, input.h, backend, want);
-  await state.pendingIntermediates?.resolve();
-  state.pendingIntermediates = null;
-  return state;
+): Promise<{ pose: PoseResult; intermediates: Intermediates }> {
+  const pose = await computePoseFromCapture(input, input.gray, input.w, input.h, backend, want);
+  const intermediates = (await pose.pending?.resolve()) ?? {};
+  return { pose, intermediates };
 }

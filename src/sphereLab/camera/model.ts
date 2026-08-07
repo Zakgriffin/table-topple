@@ -45,18 +45,19 @@ export interface CameraBase {
   lastDecodeGrid: DecodeSampleGrid | null;
   lastDecodeRotated: DecodeSampleGrid | null;
   lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
-  // The requested intermediates' deferred readback, parked here by
-  // computePoseFromCapture and drained by pipeline/axesReconstruction.ts's
-  // runVisualTail. Non-null only between a reconstruction finishing and its
-  // visual tail running, and only when something was actually asked for.
+  // The requested intermediates' deferred readback. Comes back on the
+  // PoseResult and is parked here by pipeline/axesReconstruction.ts's
+  // applyPoseResult, then drained by its runVisualTail. Non-null only between a
+  // reconstruction finishing and its visual tail running, and only when
+  // something was actually asked for.
   pendingIntermediates: PendingIntermediates | null;
   // What that drain handed back -- the pose run's own fx/fy/regionId/regions/
-  // rects, for the overlays that used to recompute them. See
+  // rects/decode grid, for the overlays that used to recompute them. See
   // pose/intermediates.ts.
   intermediates: Intermediates | null;
   lastProjectedBins: ProjectedBins | null;
   // Bus traffic the LSD chain incurred on this camera's last frame -- see
-  // pose/poseCompute.ts's PoseComputeState for why it is recorded rather
+  // pose/poseCompute.ts's PoseResult for why it is recorded rather
   // than derived from the toggles. Drives the readout under the GPU toggles.
   lastChainTransfers: TransferSummary | null;
   lastVotes: Vote[];

@@ -9,40 +9,44 @@ import { type DecodeCellDebug, type DecodeSampleGrid, type DecodeSamplePoint, ty
 import { type Backend } from '../../backend.ts';
 import { type GridPeriodPhaseResult } from '../period/gridPeriodPhase.ts';
 
-// Minimal shape projectImageCornersToPlane/projectedUVScale/
-// buildDecodeSampleGrid/runPositionDecode actually need -- narrowed off the
-// full `Camera` (which also carries THREE objects/GPU textures no bare data
-// object has) so these stay callable from pose/poseCompute.ts's
-// PoseComputeState, a plain object literal with none of that -- see this
-// session's on-device-pose-recovery plan. Declared locally (not imported
-// from poseCompute.ts) since that file imports runPositionDecode FROM here;
-// PoseComputeState satisfies this structurally without either file needing
-// to import the other's type.
+// Everything this stage needs from the stages BEFORE it, and nothing else.
 //
-// `Camera` itself is no longer imported here AT ALL, and that is the point of
-// the projectedBins.ts split rather than a side effect of it: the projection
-// stage was the only thing in this file that needed one, and its
+// This used to be `PoseCameraLike`, and the difference is not cosmetic. That
+// interface was eight fields: these four inputs plus lastDecodeGrid/
+// lastDecodeRotated/lastDecodeCorrectness/lastPositionDecode, which are this
+// stage's own OUTPUTS -- it was handed a place to write them and wrote them by
+// mutation. So a reader could not tell the stage's inputs from its results, and
+// the type was a second structural declaration of the caller's whole model
+// (poseCompute.ts's PoseComputeState, which a real Camera also satisfied).
+// Outputs are returned now, so what is left is genuinely the input.
+//
+// `Camera` itself is not imported here AT ALL, and that is the point of the
+// projectedBins.ts split rather than a side effect of it: the projection stage
+// was the only thing in this file that needed one, and its
 // `import { type Camera }` was a real runtime module load under
 // verbatimModuleSyntax -- which is what put camera/model.ts and
 // camera/settings.ts inside the pose pipeline's runtime import closure.
-interface PoseCameraLike {
+export interface DecodeInput {
   aspect: number;
   settings: { horizFovDeg: number; minGrazingCos: number };
-  lastRecoveredAxes: RecoveredAxes | null;
-  lastGridPeriodPhase: GridPeriodPhaseResult | null;
-  lastDecodeGrid: DecodeSampleGrid | null;
-  lastDecodeRotated: DecodeSampleGrid | null;
-  lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
-  lastPositionDecode: PositionDecodeResult | null;
+  recoveredAxes: RecoveredAxes | null;
+  gridPeriodPhase: GridPeriodPhaseResult | null;
+}
+
+// The grid, its rotation into the winning cardinal orientation, and the
+// per-cell correctness indexed in that rotated frame. Purely display -- the
+// pose is finished without any of it.
+export interface DecodeGridPayload {
+  grid: DecodeSampleGrid;
+  rotated: DecodeSampleGrid;
+  correctness: (DecodeCellDebug | null)[][];
 }
 
 // ── The decode grid's readback, handed BACK to the caller ─────────────────
 //
 // The fused GPU decode produces the pose from `winner` plus two correctness
 // counts (8 bytes); the GRID itself -- 0.45MB across decode:gridGeom and
-// decode:gridPacked -- feeds only lastDecodeGrid/lastDecodeRotated/
-// lastDecodeCorrectness, which is display. So the pose does not have to wait
-// for it.
+// decode:gridPacked -- is display. So the pose does not have to wait for it.
 //
 // This is now ONE HALF of a general mechanism rather than the whole of a
 // special case: runPositionDecode RETURNS it, and computePoseFromCapture folds
@@ -51,10 +55,27 @@ interface PoseCameraLike {
 // this stage owned a field on everyone's state object and the release-the-stale-
 // one logic lived here, where it could only ever see the decode's own buffers.
 //
+// BOTH BACKENDS HAND ONE BACK NOW when the grid was requested, and that is a
+// change: the CPU route has nothing to defer -- it built the grid on the host
+// and never crossed a bus -- so it used to write the three fields directly and
+// return null. Which meant "did I get a grid?" was answered differently
+// depending on the backend, at the caller. It hands back an
+// already-settled handle instead, so there is ONE way to collect the payload
+// and the two routes differ only in what resolving it costs.
+//
 // `resolve` is IDEMPOTENT and `release` is safe to call twice, in either order.
 export interface PendingDecodeGrid {
-  resolve(): Promise<void>;
+  resolve(): Promise<DecodeGridPayload | null>;
   release(): void;
+}
+
+// What the decode stage produces: the pose, plus a handle to the display grid
+// when one was asked for. Two fields rather than a bare result because they
+// have different lifetimes -- the pose is final on return, the grid may still
+// be on the device.
+export interface DecodeOutput {
+  decode: PositionDecodeResult | null;
+  pendingGrid: PendingDecodeGrid | null;
 }
 
 // ── Grid rotation helpers (pure) ─────────────────────────────────────────
@@ -203,11 +224,11 @@ function solveRecoveredCamQuat(Drow: THREE.Vector3, Dcol: THREE.Vector3, orienta
 // both the camera height (distance) and the same grazing-angle normal-flip
 // projectSamplesCPU applies above, since that flip changes u/v's sign but
 // not gnomonic()'s (gnomonic always uses the raw, unflipped Dnormal).
-export function projectedUVScale(camera: PoseCameraLike): number | null {
-  if (!camera.lastRecoveredAxes) return null;
-  const { Dnormal, distance } = camera.lastRecoveredAxes;
-  const vFovRad = getAnalysisVFovRad(camera);
-  const flipped = cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(Dnormal) > 0;
+export function projectedUVScale(input: DecodeInput): number | null {
+  if (!input.recoveredAxes) return null;
+  const { Dnormal, distance } = input.recoveredAxes;
+  const vFovRad = getAnalysisVFovRad(input);
+  const flipped = cornerDir(0, 0, MATH_QUAT, vFovRad, input.aspect).dot(Dnormal) > 0;
   return flipped ? -distance : distance;
 }
 
@@ -221,16 +242,16 @@ export function projectedUVScale(camera: PoseCameraLike): number | null {
 // bounds check every surviving cell already does for its own pixel read is
 // the same containment test, computed a different way, under the same
 // grazing-cutoff assumption this function itself relies on).
-export function projectImageCornersToPlane(camera: PoseCameraLike): { u: number; v: number }[] | null {
-  if (!camera.lastRecoveredAxes) return null;
-  const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
-  const vFovRad = getAnalysisVFovRad(camera);
+export function projectImageCornersToPlane(input: DecodeInput): { u: number; v: number }[] | null {
+  if (!input.recoveredAxes) return null;
+  const { Drow, Dcol, Dnormal, distance } = input.recoveredAxes;
+  const vFovRad = getAnalysisVFovRad(input);
   const normal = Dnormal.clone();
-  if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
-  const minGrazingCos = camera.settings.minGrazingCos;
+  if (cornerDir(0, 0, MATH_QUAT, vFovRad, input.aspect).dot(normal) > 0) normal.negate();
+  const minGrazingCos = input.settings.minGrazingCos;
   const corners: { u: number; v: number }[] = [];
   for (const [ndcU, ndcV] of [[-1, -1], [1, -1], [1, 1], [-1, 1]] as const) {
-    const rayDir = cornerDir(ndcU, ndcV, MATH_QUAT, vFovRad, camera.aspect);
+    const rayDir = cornerDir(ndcU, ndcV, MATH_QUAT, vFovRad, input.aspect);
     const denom = rayDir.dot(normal);
     if (denom >= -minGrazingCos) return null;
     const t = -distance / denom;
@@ -258,19 +279,19 @@ export function projectImageCornersToPlane(camera: PoseCameraLike): { u: number;
 // quadrilateral, so this reduces to the same min/max the 4 corners gave --
 // no behavior change there. Returns null only when almost nothing projects
 // (a genuinely degenerate, near-horizon-only view).
-function projectedUVBounds(camera: PoseCameraLike): { minU: number; maxU: number; minV: number; maxV: number } | null {
-  if (!camera.lastRecoveredAxes) return null;
-  const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
-  const vFovRad = getAnalysisVFovRad(camera);
+function projectedUVBounds(input: DecodeInput): { minU: number; maxU: number; minV: number; maxV: number } | null {
+  if (!input.recoveredAxes) return null;
+  const { Drow, Dcol, Dnormal, distance } = input.recoveredAxes;
+  const vFovRad = getAnalysisVFovRad(input);
   const normal = Dnormal.clone();
-  if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
-  const minGrazingCos = camera.settings.minGrazingCos;
+  if (cornerDir(0, 0, MATH_QUAT, vFovRad, input.aspect).dot(normal) > 0) normal.negate();
+  const minGrazingCos = input.settings.minGrazingCos;
   const N = 48; // image sampling resolution; extremes lie on the boundary, so this over-covers slightly, which is safe (per-cell cutoff still drops far cells)
   let minU = Infinity, maxU = -Infinity, minV = Infinity, maxV = -Infinity, count = 0;
   for (let iy = 0; iy <= N; iy++) {
     for (let ix = 0; ix <= N; ix++) {
       const ndcU = (ix / N) * 2 - 1, ndcV = (iy / N) * 2 - 1;
-      const rayDir = cornerDir(ndcU, ndcV, MATH_QUAT, vFovRad, camera.aspect);
+      const rayDir = cornerDir(ndcU, ndcV, MATH_QUAT, vFovRad, input.aspect);
       const denom = rayDir.dot(normal);
       if (denom >= -minGrazingCos) continue;
       const t = -distance / denom;
@@ -302,15 +323,15 @@ export interface DecodeGridLayout {
 }
 
 export function decodeGridLayout(
-  camera: PoseCameraLike, gray: Float64Array, vFovRad: number,
+  input: DecodeInput, gray: Float64Array, vFovRad: number,
 ): DecodeGridLayout | null {
-  if (!camera.lastRecoveredAxes || !camera.lastGridPeriodPhase) return null;
-  const gpp = camera.lastGridPeriodPhase;
-  const bounds = projectedUVBounds(camera);
+  if (!input.recoveredAxes || !input.gridPeriodPhase) return null;
+  const gpp = input.gridPeriodPhase;
+  const bounds = projectedUVBounds(input);
   if (!bounds) return null;
-  const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
+  const { Drow, Dcol, Dnormal, distance } = input.recoveredAxes;
   const normal = Dnormal.clone();
-  if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
+  if (cornerDir(0, 0, MATH_QUAT, vFovRad, input.aspect).dot(normal) > 0) normal.negate();
   const invQuat = MATH_QUAT.clone().invert();
   const halfV = vFovRad / 2;
   // binarize() materializes a full-image Uint8Array, but this grid only ever
@@ -325,7 +346,7 @@ export function decodeGridLayout(
   // phiCol/phiRow are gnomonic xRow/xCol-space phases (pose/stages/period/gridPeriodPhase.ts);
   // u = uvScale*xRow, v = uvScale*xCol is the same conversion projectedUVScale's
   // own doc comment establishes, so this reuses it rather than re-deriving it.
-  const uvScale = projectedUVScale(camera);
+  const uvScale = projectedUVScale(input);
   if (uvScale === null) return null;
   const uBoundaryRaw = uvScale * gpp.phiCol;
   const vBoundaryRaw = uvScale * gpp.phiRow;
@@ -340,8 +361,8 @@ export function decodeGridLayout(
   const zeroJ = Math.min(cols - 1, Math.max(0, Math.round(-uPhase / GRID_STEP) - kMinU));
 
   return {
-    Drow, Dcol, normal, invQuat, distance, halfV, aspect: camera.aspect, binThreshold,
-    minGrazingCos: camera.settings.minGrazingCos,
+    Drow, Dcol, normal, invQuat, distance, halfV, aspect: input.aspect, binThreshold,
+    minGrazingCos: input.settings.minGrazingCos,
     uPhase, vPhase, kMinU, kMinV, rows, cols, zeroI, zeroJ,
   };
 }
@@ -356,8 +377,8 @@ export function decodeGridCellUV(layout: DecodeGridLayout, i: number, j: number)
   };
 }
 
-export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number): DecodeSampleGrid | null {
-  const layout = decodeGridLayout(camera, gray, vFovRad);
+export function buildDecodeSampleGrid(input: DecodeInput, gray: Float64Array, w: number, h: number, vFovRad: number): DecodeSampleGrid | null {
+  const layout = decodeGridLayout(input, gray, vFovRad);
   if (!layout) return null;
   const {
     Drow, Dcol, normal, invQuat, distance, halfV, binThreshold, minGrazingCos,
@@ -387,7 +408,7 @@ export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array
       rayDir.copy(p).normalize();
       const grazingOk = rayDir.dot(normal) < -minGrazingCos;
       local.copy(p).applyQuaternion(invQuat);
-      const ndcU = -local.x / (local.z * Math.tan(halfV) * camera.aspect);
+      const ndcU = -local.x / (local.z * Math.tan(halfV) * input.aspect);
       const ndcV = -local.y / (local.z * Math.tan(halfV));
       const px = ((ndcU + 1) / 2) * w, py = ((1 - ndcV) / 2) * h;
       const valid = grazingOk && Number.isFinite(px) && Number.isFinite(py) && px >= 0 && px < w && py >= 0 && py < h;
@@ -412,7 +433,7 @@ export function buildDecodeSampleGrid(camera: PoseCameraLike, gray: Float64Array
 // Decodes the camera's absolute world position -- see pre-Stage-A history
 // for the full derivation.
 export async function runPositionDecode(
-  camera: PoseCameraLike, gray: Float64Array, w: number, h: number, vFovRad: number,
+  input: DecodeInput, gray: Float64Array, w: number, h: number, vFovRad: number,
   // The LSD chain's device-resident gray, when the chain ran on GPU and its
   // residency is still alive. Purely an optimization -- null means decode
   // uploads its own copy exactly as it always did.
@@ -420,20 +441,21 @@ export async function runPositionDecode(
   backend: Backend,
   // Whether the CALLER asked for the decode grid at all (want.has('decodeGrid')
   // upstream). It decides two things at once, and they are the same decision:
-  // whether the 0.45MB grid is brought down, and whether
-  // lastDecodeGrid/lastDecodeRotated/lastDecodeCorrectness end up populated.
+  // whether the 0.45MB grid is brought down, and whether a handle comes back at
+  // all.
   //
-  // False leaves all three NULL on BOTH backends. That parity is deliberate:
-  // the CPU route builds the grid regardless (the pose needs it) so it could
-  // "helpfully" keep it for free, and then a CPU run and a GPU run of the same
-  // request would differ in what they left behind -- exactly the behavioural
-  // split between the two routes that got an earlier version of this rejected.
+  // False returns pendingGrid: null on BOTH backends. That parity is
+  // deliberate: the CPU route builds the grid regardless (the pose needs it) so
+  // it could "helpfully" keep it for free, and then a CPU run and a GPU run of
+  // the same request would differ in what they left behind -- exactly the
+  // behavioural split between the two routes that got an earlier version of
+  // this rejected.
   //
   // True on the GPU route returns a handle rather than awaiting the readback
   // here; releasing a previous run's handle is computePoseFromCapture's job
   // now, since it is what owns the pointer.
   wantGrid = false,
-): Promise<PendingDecodeGrid | null> {
+): Promise<DecodeOutput> {
   let pendingGrid: PendingDecodeGrid | null = null;
   // ── Fused GPU path: grid built on device, tally consumes it in place ────
   //
@@ -480,31 +502,17 @@ export async function runPositionDecode(
   //   fall-through recomputes an answer it already has.
   //
   // That redundancy is deliberate and worth keeping: the alternative is
-  // returning early here, which means duplicating the four assignments that
-  // define the give-up state (lastDecodeGrid/lastDecodeRotated/
-  // lastPositionDecode/lastDecodeCorrectness all cleared). Two places that must
-  // agree on what "no decode this frame" means is a worse failure mode than one
-  // extra decodeGridLayout call, which does no per-pixel work.
+  // returning early here, which means duplicating what "no decode this frame"
+  // means. One extra decodeGridLayout call, which does no per-pixel work, is
+  // the cheaper of the two.
   if (backend === 'gpu') {
     const fusedSpan = spanStart('decode (fused GPU build+tally)');
-    const layout = decodeGridLayout(camera, gray, vFovRad);
+    const layout = decodeGridLayout(input, gray, vFovRad);
     const fused = layout ? await buildAndTallyDecodeGPU(layout, gray, w, h, sharedGray) : null;
     if (layout && fused) {
+      let decode: PositionDecodeResult | null = null;
       try {
-        // Fills the three display fields off the device-side grid. Closed over
-        // rather than inlined so the deferred and immediate paths run the SAME
-        // code -- a deferral that quietly did something slightly different from
-        // what it replaced would be indistinguishable from a bug in the pose.
-        const applyGrid = async () => {
-          const built = await fused.readGrid();
-          camera.lastDecodeGrid = built;
-          const rot = rotateGrid(built, fused.winner.orientation);
-          camera.lastDecodeRotated = rot;
-          camera.lastDecodeCorrectness =
-            buildCorrectnessArray(rot, fused.winner.anchorRow, fused.winner.anchorCol).correctness;
-        };
-
-        // The pose needs NONE of that. The reference cell is unchanged by
+        // The pose needs NONE of the grid. The reference cell is unchanged by
         // rotation -- only its INDEX moves -- so its u/v are the original
         // lattice's (zeroI, zeroJ), computed here in f64 rather than read back;
         // the counts came down with the winner. Hoisted above the grid work so
@@ -512,36 +520,38 @@ export async function runPositionDecode(
         // pose at exactly the same point the immediate one does.
         const ref = decodeGridCellUV(layout, layout.zeroI, layout.zeroJ);
         const [rzI, rzJ] = rotatedZeroIndex(layout.rows, layout.cols, layout.zeroI, layout.zeroJ, fused.winner.orientation);
-        finishPositionDecode(
-          camera, vFovRad, fused.winner, ref.u, ref.v, rzI, rzJ,
+        decode = finishPositionDecode(
+          input, vFovRad, fused.winner, ref.u, ref.v, rzI, rzJ,
           fused.correctCount, fused.wrongCount,
         );
 
-        // STALE FIELDS ARE CLEARED FIRST, either way, and never left showing
-        // the previous frame. When the grid was requested the drain is a frame
-        // or two away, and an overlay repainting in between would otherwise mix
-        // this frame's pose with the last frame's decode -- the exact "picture
-        // that never existed" drainVisuals' own guard exists to prevent. When
-        // it was not requested, these are simply the answer.
-        camera.lastDecodeGrid = null;
-        camera.lastDecodeRotated = null;
-        camera.lastDecodeCorrectness = null;
+        // THE STALE-FIELD CLEARING THAT USED TO BE HERE IS GONE, and its
+        // absence is the point rather than an omission. It nulled three fields
+        // on the caller's object so an overlay repainting between the pose and
+        // the drain could not mix this frame's pose with the last frame's
+        // decode -- the "picture that never existed". With the payload
+        // RETURNED there is no shared field to be stale: a caller holds last
+        // frame's grid until it swaps in this frame's, and the two never
+        // interleave.
         if (wantGrid) {
           let done = false;
+          let payload: DecodeGridPayload | null = null;
           pendingGrid = {
             resolve: async () => {
-              if (done) return;
+              if (done) return payload;
               done = true;
-              try { await applyGrid(); } finally { fused.release(); }
+              try {
+                const built = await fused.readGrid();
+                const rotated = rotateGrid(built, fused.winner.orientation);
+                payload = {
+                  grid: built, rotated,
+                  correctness: buildCorrectnessArray(rotated, fused.winner.anchorRow, fused.winner.anchorCol).correctness,
+                };
+                return payload;
+              } finally { fused.release(); }
             },
             release: () => { done = true; fused.release(); },
           };
-        } else {
-          // Nobody asked, so the grid never crosses the bus. The three fields
-          // were already nulled above and stay that way.
-          camera.lastDecodeGrid = null;
-          camera.lastDecodeRotated = null;
-          camera.lastDecodeCorrectness = null;
         }
       } finally {
         // Only the un-requested path frees here; the requested one handed
@@ -551,7 +561,7 @@ export async function runPositionDecode(
         if (!pendingGrid) fused.release();
         spanEnd(fusedSpan);
       }
-      return pendingGrid;
+      return { decode, pendingGrid };
     }
     spanEnd(fusedSpan);
     // fall through to CPU
@@ -563,14 +573,11 @@ export async function runPositionDecode(
   // -- rows x cols is on the order of a thousand ray-casts, which may well be
   // cheaper on CPU than moving the image across. Measure before porting.
   const buildSpan = spanStart('buildDecodeSampleGrid');
-  const grid = buildDecodeSampleGrid(camera, gray, w, h, vFovRad);
+  const grid = buildDecodeSampleGrid(input, gray, w, h, vFovRad);
   spanEnd(buildSpan);
-  // Kept only if it was asked for -- see wantGrid. The pose below needs `grid`
-  // either way, which is exactly why this is a decision about what to LEAVE
-  // BEHIND rather than about what to compute.
-  camera.lastDecodeGrid = wantGrid ? grid : null;
-  camera.lastDecodeRotated = null;
-  if (!grid) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return null; }
+  // The pose below needs `grid` either way, which is exactly why wantGrid is a
+  // decision about what to HAND BACK rather than about what to compute.
+  if (!grid) return { decode: null, pendingGrid: null };
   // Same GPU-source-of-truth-verified-by-CPU-fallback pattern as every other
   // GPU sub-pipeline (axesReconstruction.ts's gradient2x2Field/projectBins/
   // fitPairOfPlanes) -- see tallyPositionVotesGPU's own header for why this
@@ -582,21 +589,26 @@ export async function runPositionDecode(
     ? (await tallyPositionVotesGPU(grid)) ?? tallyPositionVotes(grid)
     : tallyPositionVotes(grid);
   spanEnd(tallySpan);
-  if (!winner) { camera.lastPositionDecode = null; camera.lastDecodeCorrectness = null; return null; }
+  if (!winner) return { decode: null, pendingGrid: null };
 
   const rotated = rotateGrid(grid, winner.orientation);
   const { correctness, correctCount, wrongCount } = buildCorrectnessArray(rotated, winner.anchorRow, winner.anchorCol);
-  // correctCount/wrongCount feed the pose below, so the array is built either
-  // way; only whether it is kept depends on the request.
-  camera.lastDecodeRotated = wantGrid ? rotated : null;
-  camera.lastDecodeCorrectness = wantGrid ? correctness : null;
   const refPt = rotated.points[rotated.zeroI][rotated.zeroJ];
-  finishPositionDecode(
-    camera, vFovRad, winner, refPt.u, refPt.v, rotated.zeroI, rotated.zeroJ, correctCount, wrongCount,
+  const decode = finishPositionDecode(
+    input, vFovRad, winner, refPt.u, refPt.v, rotated.zeroI, rotated.zeroJ, correctCount, wrongCount,
   );
-  // The CPU route has no deferred readback to hand back -- it never crossed a
-  // bus in the first place.
-  return null;
+  // correctCount/wrongCount feed the pose above, so the array is built either
+  // way; only whether it is handed back depends on the request.
+  //
+  // Already settled -- nothing crossed a bus, so there is nothing to wait for.
+  // It is still a HANDLE rather than a bare payload so that a caller has one
+  // shape to collect from on both backends; see PendingDecodeGrid's header.
+  return {
+    decode,
+    pendingGrid: wantGrid
+      ? { resolve: async () => ({ grid, rotated, correctness }), release: () => {} }
+      : null,
+  };
 }
 
 // Per-cell correctness for the projected-cam overlay, plus the two counts that
@@ -631,14 +643,14 @@ export function buildCorrectnessArray(
 // it recomputes u/v arithmetically (decodeGridCellUV) and maps the index with
 // rotatedZeroIndex. That is precisely what lets it skip the grid readback.
 function finishPositionDecode(
-  camera: PoseCameraLike, vFovRad: number, winner: VoteResult,
+  input: DecodeInput, vFovRad: number, winner: VoteResult,
   refPtU: number, refPtV: number, rotZeroI: number, rotZeroJ: number,
   correctCount: number, wrongCount: number,
-) {
+): PositionDecodeResult {
   const consistency = correctCount + wrongCount > 0 ? correctCount / (correctCount + wrongCount) : 0;
-  const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes!; // a non-null grid/layout guarantees this
+  const { Drow, Dcol, Dnormal, distance } = input.recoveredAxes!; // a non-null grid/layout guarantees this
   const normal = Dnormal.clone();
-  if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normal) > 0) normal.negate();
+  if (cornerDir(0, 0, MATH_QUAT, vFovRad, input.aspect).dot(normal) > 0) normal.negate();
   const refTorusRow = ((winner.anchorRow + rotZeroI) % R + R) % R;
   const refTorusCol = ((winner.anchorCol + rotZeroJ) % C + C) % C;
 
@@ -650,7 +662,7 @@ function finishPositionDecode(
     .addScaledVector(DrowWorld, refPtU).addScaledVector(DcolWorld, refPtV).addScaledVector(normalWorld, -distance);
 
   const worldPosTrue = new THREE.Vector3((refTorusCol + 0.5 - C / 2) * GRID_STEP, 0, (refTorusRow + 0.5 - R / 2) * GRID_STEP);
-  camera.lastPositionDecode = {
+  return {
     row: refTorusRow, col: refTorusCol, consistency, votes: winner.votes, totalWindows: winner.totalWindows,
     camPos: worldPosTrue.sub(hitRelWorld),
     recoveredCamQuat,

@@ -400,7 +400,13 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
   const showLattice = camera.settings.showSampleLattice && gpp;
   if (!showLines && !showLattice) { hideGridPeriodPhaseProjected(); return; }
   const bins = camera.lastProjectedBins;
-  const uvScale = projectedUVScale(camera);
+  // The decode stage takes its inputs explicitly now rather than reading
+  // `last*` off whatever object it was handed -- see decodeGrid.ts's
+  // DecodeInput. A Camera is still where they live on this side.
+  const uvScale = projectedUVScale({
+    aspect: camera.aspect, settings: camera.settings,
+    recoveredAxes: camera.lastRecoveredAxes, gridPeriodPhase: gpp,
+  });
   if (!bins || uvScale === null) { hideGridPeriodPhaseProjected(); return; }
 
   canvas.style.display = 'block';

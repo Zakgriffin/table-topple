@@ -210,8 +210,8 @@ function animate() {
     // pixel data (lastProjectedBins); recoveredFloorOutline (pose+FOV only,
     // see this session's on-device-pose-recovery plan) shows whenever pose
     // data exists at all, in EITHER compute mode.
-    camera.recoveredFloorOverlay.visible = globalState.mode === 'world' && camera.settings.showRecoveredFloor && !!camera.lastPositionDecode && !!camera.lastProjectedBins;
-    camera.recoveredFloorOutline.visible = globalState.mode === 'world' && camera.settings.showRecoveredFloor && !!camera.lastPositionDecode;
+    camera.recoveredFloorOverlay.visible = globalState.mode === 'world' && camera.settings.showRecoveredFloor && !!camera.pose?.positionDecode && !!camera.lastProjectedBins;
+    camera.recoveredFloorOutline.visible = globalState.mode === 'world' && camera.settings.showRecoveredFloor && !!camera.pose?.positionDecode;
 
     if (isPhysical(camera)) {
       // On-connect settingsSync push -- mirrors lastReportedPipelined's own
@@ -334,14 +334,15 @@ function animate() {
     if (active) {
       // "use true cardinal orientation" (settings.ts) -- purely a display
       // rotation by however many 90-degree steps decode found the pattern
-      // actually sitting at (camera.lastPositionDecode.orientation), so
+      // actually sitting at (camera.pose.positionDecode.orientation), so
       // rotating 1 or 3 steps swaps which of the camera's own aspect/
       // 1/aspect the ROTATED content's true shape needs, same as rotating a
       // photo 90 degrees swaps its width/height. +2 (180 degrees) corrects
       // an empirically-confirmed offset between decode's orientation index
       // and the actual on-screen rotation direction (see this session's chat).
-      const rotationSteps = active.settings.useTrueCardinalOrientation && active.lastPositionDecode
-        ? (active.lastPositionDecode.orientation + 2) % 4 : 0;
+      const decode = active.pose?.positionDecode;
+      const rotationSteps = active.settings.useTrueCardinalOrientation && decode
+        ? (decode.orientation + 2) % 4 : 0;
       // The bucket grid's OWN aspect (bins.w/bins.h), not active.aspect (the
       // viewport's) -- pose/stages/decode/decodeGrid.ts's squareCellBucketDims sizes
       // bucketW/bucketH from the recovered floor extent's aspect ratio

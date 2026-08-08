@@ -28,7 +28,7 @@ export function clearArrowOverlays() {
 
 
 
-// Draws camera.lastVoteComposites -- the composite lines actually fed to
+// Draws the pose's own voteComposites -- the composite lines actually fed to
 // fitPairOfPlanes and classified by pose/stages/period/gridPeriodPhase.ts (pipeline/
 // votes.ts's computeGradient2x2Composites). Drawing this exact same array
 // (rather than an independently-recomputed copy) guarantees a line's root
@@ -40,12 +40,12 @@ export function clearArrowOverlays() {
 // period/phase fit itself assigns integer indices in), so this literally
 // shows the sequence the fit will register each line as. Gray for any line
 // gridPeriodPhase itself skipped (e.g. a degenerate gnomonic projection).
-// Draws camera.lastVoteComposites -- the composite lines actually fed to
+// Draws the pose's own voteComposites -- the composite lines actually fed to
 // fitPairOfPlanes and classified by pose/stages/period/gridPeriodPhase.ts (pipeline/
 // votes.ts's computeGradient2x2Composites) -- as SVG lines in
 // lsdCompositeGroup. Populated once per REAL capture (not live-recomputed
 // per LSD slider tweak, unlike the rectangle/rejected/raw-region views in
-// overlays/lsdOverlay.ts): lastVoteComposites' pixel coords come from the
+// overlays/lsdOverlay.ts): their pixel coords come from the
 // row-flipped `gray` axesReconstruction.ts feeds the vote/grid-period-phase
 // pipeline (its own flipRowsF64, kept separate from
 // camera.lastNoisedPreviewGray), and recomputing that same row-flip
@@ -64,7 +64,8 @@ export function clearArrowOverlays() {
 function drawCompositeLines(camera: Camera) {
   while (lsdCompositeGroup.firstChild) lsdCompositeGroup.removeChild(lsdCompositeGroup.firstChild);
   const settings = camera.settings;
-  if (!settings.showLsdComposite || !camera.lastVoteComposites) return;
+  const composites = camera.pose?.voteComposites;
+  if (!settings.showLsdComposite || !composites) return;
   const rect = computeThroughRect(camera);
   const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
   const toScreen = (fx: number, fy: number) => {
@@ -76,7 +77,7 @@ function drawCompositeLines(camera: Camera) {
   };
 
   let rowRank: Map<number, number> | null = null, colRank: Map<number, number> | null = null;
-  const gpp = camera.lastGridPeriodPhase;
+  const gpp = camera.pose?.gridPeriodPhase;
   if (settings.showCompositeLineFamilies && gpp) {
     const sortedRow = [...gpp.rowLines].sort((a, b) => a.value - b.value);
     rowRank = new Map(sortedRow.map((s, i) => [s.root, sortedRow.length > 1 ? i / (sortedRow.length - 1) : 1]));
@@ -84,7 +85,7 @@ function drawCompositeLines(camera: Camera) {
     colRank = new Map(sortedCol.map((s, i) => [s.root, sortedCol.length > 1 ? i / (sortedCol.length - 1) : 1]));
   }
 
-  for (const { root, line } of camera.lastVoteComposites) {
+  for (const { root, line } of composites) {
     const a = toScreen(line.x1, line.y1), b = toScreen(line.x2, line.y2);
     let strokeColor: string;
     if (rowRank || colRank) {

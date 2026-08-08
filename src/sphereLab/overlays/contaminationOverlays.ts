@@ -40,8 +40,9 @@ export function updateContaminationOverlays(camera: Camera) {
     camera.trueContamTex.needsUpdate = true;
   }
   if (settings.showReconstructedContamination) {
-    if (camera.lastRecoveredAxes) {
-      const alpha = computeContaminationAlpha(field, magnitude, camera.lastRecoveredAxes.Drow, camera.lastRecoveredAxes.Dcol, MATH_QUAT, vFovRad, camera.aspect);
+    const axes = camera.pose?.recoveredAxes;
+    if (axes) {
+      const alpha = computeContaminationAlpha(field, magnitude, axes.Drow, axes.Dcol, MATH_QUAT, vFovRad, camera.aspect);
       paintContaminationOverlay(alpha, RECON_CONTAM_COLOR, camera.reconContamData, w, h);
       toggleReconContamBtn.textContent = 'reconstructed contamination overlay (orange)';
     } else {

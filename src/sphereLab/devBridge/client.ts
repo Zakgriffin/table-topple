@@ -100,7 +100,7 @@ export function pushSettingsSync(cam: PhysicalCamera) {
 // scene/floor.ts's own floorMesh, C*GRID_STEP x R*GRID_STEP at world
 // origin), so there's nothing per-capture about it worth sending.
 export function pushPoseSync(cam: PhysicalCamera) {
-  const decode = cam.lastPositionDecode;
+  const decode = cam.pose?.positionDecode;
   if (!decode) {
     sendToDevBridge({ type: 'poseSync', captureId: cam.connectionId, fix: null });
     return;

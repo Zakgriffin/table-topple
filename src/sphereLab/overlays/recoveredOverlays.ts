@@ -8,7 +8,7 @@ import { globalState } from '../state.ts';
 // The World-view recovered-floor quad's OUTLINE ONLY -- a 4-point closed
 // THREE.LineLoop, positioned from pose+FOV alone (projectImageCornersToPlane,
 // already narrowed off a bare data shape in Step 1b -- needs no pixels at
-// all). Guards on lastRecoveredAxes/lastPositionDecode only, both present in
+// all). Guards on the pose's recoveredAxes/positionDecode only, both present in
 // EITHER compute mode (see this session's on-device-pose-recovery plan), so
 // this is what actually satisfies "always draw the outline" -- unlike
 // applyRecoveredFloorOverlay below (the projected-image FILL), which stays
@@ -21,7 +21,9 @@ import { globalState } from '../state.ts';
 // center + orientation the way an axis-aligned PlaneGeometry could) instead
 // of collapsing to a single center/size/orientation.
 export function updateRecoveredFloorOutline(camera: Camera) {
-  if (!camera.lastRecoveredAxes || !camera.lastPositionDecode) {
+  const axes = camera.pose?.recoveredAxes;
+  const decode = camera.pose?.positionDecode;
+  if (!axes || !decode) {
     camera.recoveredFloorOutline.visible = false;
     return;
   }
@@ -30,17 +32,17 @@ export function updateRecoveredFloorOutline(camera: Camera) {
   // it is part of what the stage declares it reads.
   const corners = projectImageCornersToPlane({
     aspect: camera.aspect, settings: camera.settings,
-    recoveredAxes: camera.lastRecoveredAxes, gridPeriodPhase: camera.lastGridPeriodPhase,
+    recoveredAxes: axes, gridPeriodPhase: camera.pose?.gridPeriodPhase ?? null,
   });
   if (!corners) {
     camera.recoveredFloorOutline.visible = false;
     return;
   }
-  const { Drow: DrowMath, Dcol: DcolMath, Dnormal, distance } = camera.lastRecoveredAxes;
+  const { Drow: DrowMath, Dcol: DcolMath, Dnormal, distance } = axes;
   const normalMath = Dnormal.clone();
   const vFovRad = getAnalysisVFovRad(camera);
   if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normalMath) > 0) normalMath.negate();
-  const { recoveredCamQuat, camPos } = camera.lastPositionDecode;
+  const { recoveredCamQuat, camPos } = decode;
   const Drow = DrowMath.clone().applyQuaternion(recoveredCamQuat);
   const Dcol = DcolMath.clone().applyQuaternion(recoveredCamQuat);
   const normal = normalMath.clone().applyQuaternion(recoveredCamQuat);
@@ -62,7 +64,9 @@ export function updateRecoveredFloorOutline(camera: Camera) {
 // Rebuilds the recovered-floor overlay's geometry/position/orientation --
 // called once per fresh decode, not per frame.
 export function applyRecoveredFloorOverlay(camera: Camera) {
-  if (!camera.lastPositionDecode || !camera.lastRecoveredAxes || !camera.lastProjectedBins) {
+  const axes = camera.pose?.recoveredAxes;
+  const decode = camera.pose?.positionDecode;
+  if (!decode || !axes || !camera.lastProjectedBins) {
     // No real pixel data to fill the quad with -- e.g. device-compute mode,
     // where the phone never sends an image at all (see this session's
     // on-device-pose-recovery plan). Explicit, rather than just returning
@@ -71,11 +75,11 @@ export function applyRecoveredFloorOverlay(camera: Camera) {
     camera.recoveredFloorOverlay.visible = false;
     return;
   }
-  const { Drow: DrowMath, Dcol: DcolMath, Dnormal, distance } = camera.lastRecoveredAxes;
+  const { Drow: DrowMath, Dcol: DcolMath, Dnormal, distance } = axes;
   const normalMath = Dnormal.clone();
   const vFovRad = getAnalysisVFovRad(camera);
   if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normalMath) > 0) normalMath.negate();
-  const { recoveredCamQuat } = camera.lastPositionDecode;
+  const { recoveredCamQuat } = decode;
   const Drow = DrowMath.clone().applyQuaternion(recoveredCamQuat);
   const Dcol = DcolMath.clone().applyQuaternion(recoveredCamQuat);
   const normal = normalMath.clone().applyQuaternion(recoveredCamQuat);
@@ -89,7 +93,7 @@ export function applyRecoveredFloorOverlay(camera: Camera) {
   camera.recoveredFloorOverlayMat.opacity = camera.settings.recoveredFloorOpacity;
 
   const centerU = (minU + maxU) / 2, centerV = (minV + maxV) / 2;
-  camera.recoveredFloorOverlay.position.copy(camera.lastPositionDecode.camPos)
+  camera.recoveredFloorOverlay.position.copy(decode.camPos)
     .addScaledVector(Drow, centerU)
     .addScaledVector(Dcol, centerV)
     .addScaledVector(normal, -distance);
@@ -108,10 +112,11 @@ export function applyRecoveredFloorOverlay(camera: Camera) {
 // Same shape/size as the ground-truth gizmoBody, in green, at the DECODED
 // position AND orientation from runPositionDecode.
 export function updateRecoveredCamGizmo(camera: Camera) {
-  if (camera.lastPositionDecode) {
-    camera.recoveredCamGizmo.position.copy(camera.lastPositionDecode.camPos);
-    camera.recoveredCamGizmo.quaternion.copy(camera.lastPositionDecode.recoveredCamQuat);
+  const decode = camera.pose?.positionDecode;
+  if (decode) {
+    camera.recoveredCamGizmo.position.copy(decode.camPos);
+    camera.recoveredCamGizmo.quaternion.copy(decode.recoveredCamQuat);
   }
-  camera.recoveredCamGizmo.visible = globalState.mode === 'world' && camera.settings.showGizmoBody && !!camera.lastPositionDecode;
+  camera.recoveredCamGizmo.visible = globalState.mode === 'world' && camera.settings.showGizmoBody && !!decode;
 }
 

@@ -474,9 +474,9 @@ export async function runPositionDecode(
   //
   // Read the distinction carefully, because the obvious version of this was
   // tried and rejected. SKIPPING the readback when no view wants it was the
-  // rejected one: it leaves lastDecodeGrid/lastDecodeRotated/
-  // lastDecodeCorrectness null outside Projected-Cam mode, and consumers read
-  // those fields synchronously -- mobileCapture's AR readout among them -- so it
+  // rejected one: it leaves decodeGrid/decodeRotated/decodeCorrectness absent
+  // outside Projected-Cam mode, and consumers read
+  // those synchronously -- mobileCapture's AR readout among them -- so it
   // buys ~1.3ms in exchange for a real behavioural difference between the CPU
   // and GPU routes. That trade is still refused.
   //

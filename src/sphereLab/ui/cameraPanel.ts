@@ -378,8 +378,8 @@ bindCheckbox('forceCPU', config.global.forceCPU, (v) => {
 // needed (unlike forceCPU above).
 // Same story -- this only picks WHEN the display tail runs, never what it
 // computes, so there is nothing to recompute on a flip. Turning it off leaves
-// any already-posted mailbox slot to be drained normally (markVisualsDirty and
-// drainVisuals are both unconditional; only the caller in recomputeStages
+// any already-posted mailbox slot to be drained normally (posting the payload
+// and drainVisuals are both unconditional; only the caller in recomputeStages
 // consults the flag), so a camera can't be stranded mid-repaint by a toggle.
 
 // ── The profiler toggle ──────────────────────────────────────────────────
@@ -471,7 +471,7 @@ function refreshLsd() {
 // camera.lastNoisedPreviewGray) -- a separate, already-correct concern from
 // the PRODUCTION composite lines these same settings feed (stage 3, see
 // pose/stages/votes/votes.ts's computeGradient2x2Composites), so recomputeFromLastCapture
-// is also needed here or camera.lastVoteComposites/lastGridPeriodPhase go stale.
+// is also needed here or the pose's voteComposites/gridPeriodPhase go stale.
 bindSlider('lsdToleranceDeg', config.camera.common.lsdToleranceDeg, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdToleranceDeg = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => `${v.toFixed(1)}°`);
 bindSlider('lsdRhoNoiseThreshold', config.camera.common.lsdRhoNoiseThreshold, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
 bindSlider('lsdRhoHighThreshold', config.camera.common.lsdRhoHighThreshold, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoHighThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));

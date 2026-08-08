@@ -188,15 +188,11 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
   sphereAnchor.add(axisVectorsLines);
 
   const base: Omit<CameraBase, 'id' | 'name' | 'color'> = {
-    lastRecoveredAxes: null, lastPositionDecode: null, lastDecodeGrid: null, lastDecodeRotated: null,
-    lastDecodeCorrectness: null, pendingIntermediates: null,
-    intermediates: null, lastProjectedBins: null, lastChainTransfers: null, lastVotes: [], lastVoteComposites: null,
-    lastQuadricPair: null,
-    axesComputed: false, axesCapturing: false, lastAxesCapture: 0, lastAxesCaptureGray: null,
-    visualsDirty: false, visualsDraining: false, lastPoseTiming: null,
+    pose: null, lastProjectedBins: null,
+    axesCapturing: false, lastAxesCapture: 0, lastAxesCaptureGray: null,
+    pendingVisuals: null, visualsDraining: false,
     rtSize: { ...rtSize }, aspect, pipRect: { x: 0, y: 0, w: 0, h: 0 }, captureDirty: true, lastPreviewUpdate: 0,
     lastNoisedPreviewGray: null, lastHoverFieldIndex: null,
-    lastGridPeriodPhase: null,
     gridPeriodPhaseViewMin: null, gridPeriodPhaseViewMax: null,
     distortedPreviewData, distortedPreviewTex, projectedPreviewData, projectedPreviewTex,
     trueContamData, trueContamTex, reconContamData, reconContamTex, topGradientData, topGradientTex,

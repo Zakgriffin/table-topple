@@ -167,7 +167,7 @@ export const CameraSettingsCommonSchema = Type.Object({
   showCompositeLineFamilies: Type.Boolean(),
   showSampleLattice: Type.Boolean(),
   // Purely a display-time rotation of the Projected-Cam view (WebGL texture
-  // + debug overlay) by camera.lastPositionDecode.orientation * 90 degrees,
+  // + debug overlay) by camera.pose.positionDecode.orientation * 90 degrees,
   // so "up" matches the pattern's true cardinal orientation instead of
   // whichever of the 4 the raw sample buffer happened to land in -- doesn't
   // touch the decode pipeline itself, see main.ts's projected-mode branch.

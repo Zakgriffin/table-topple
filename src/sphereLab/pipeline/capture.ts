@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { type Camera, type FrameMeta, type PhysicalCamera, type SimulatedCamera } from '../camera/model.ts';
+import { type Camera, type CameraPose, type FrameMeta, type PhysicalCamera, type SimulatedCamera } from '../camera/model.ts';
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer, scene } from '../scene/renderer.ts';
@@ -249,7 +249,7 @@ export async function ingestRealCapture(
 // this session's on-device-pose-recovery plan and mobileCapture.ts's
 // computePoseFromCapture call) -- deserializes the plain-array-serialized
 // Vector3/Quaternion fields back into THREE objects and assigns directly
-// onto camera.lastRecoveredAxes/lastPositionDecode, no pipeline call at all
+// into ONE camera.pose, published in a single assignment, no pipeline call at all
 // (the phone already did that work). `debug`/`imageBytes` are both optional,
 // riding along only when the phone's own sendDebugInfo/sendCapturedImage
 // toggles are on (both default off) -- see mobileCapture.ts's own comments;
@@ -283,10 +283,9 @@ export interface RemotePoseMessage {
     decodeCorrectness: { correctCount: number; wrongCount: number } | null;
     // The phone's own pipeline intermediates, verbatim -- see
     // mobileCapture.ts's buildDebugPayload and this session's "Ship
-    // auxiliary pipeline intermediates" plan. Assigned directly onto
-    // camera.lastGridPeriodPhase/lastVoteComposites/lastLsdRectangles
-    // below, the same fields a desktop-compute capture already
-    // populates.
+    // auxiliary pipeline intermediates" plan. Assigned onto camera.pose's
+    // own gridPeriodPhase/voteComposites below, the same fields a
+    // desktop-compute capture already populates.
     pipeline?: {
       gridPeriodPhase: GridPeriodPhaseResult | null;
       voteComposites: { root: number; line: CompositeLine }[] | null;
@@ -312,64 +311,82 @@ export async function ingestRemotePose(
   // middle of showing, so intermediates still parked from that local capture
   // are stale by definition -- resolving them later would paint this frame's
   // remote pose against the previous local frame's decode. Dropped rather than
-  // resolved, which also frees the chain's device buffers.
-  camera.pendingIntermediates?.release();
-  camera.pendingIntermediates = null;
-  camera.intermediates = null;
+  // resolved, which also frees the chain's device buffers. Dropping the whole
+  // mailbox slot is what makes that true for the POSE as well: a tail that ran
+  // afterwards would repaint the local pose over this one.
+  camera.pendingVisuals?.pending?.release();
+  camera.pendingVisuals = null;
 
-  camera.lastRecoveredAxes = msg.recoveredAxes ? {
+  const recoveredAxes = msg.recoveredAxes ? {
     Drow: new THREE.Vector3().fromArray(msg.recoveredAxes.Drow),
     Dcol: new THREE.Vector3().fromArray(msg.recoveredAxes.Dcol),
     Dnormal: new THREE.Vector3().fromArray(msg.recoveredAxes.Dnormal),
     distance: msg.recoveredAxes.distance,
   } : null;
-  camera.lastPositionDecode = msg.positionDecode ? {
-    row: msg.positionDecode.row, col: msg.positionDecode.col, consistency: msg.positionDecode.consistency,
-    votes: msg.positionDecode.votes, totalWindows: msg.positionDecode.totalWindows,
-    camPos: new THREE.Vector3().fromArray(msg.positionDecode.camPos),
-    recoveredCamQuat: new THREE.Quaternion().fromArray(msg.positionDecode.recoveredCamQuat),
-    orientation: msg.positionDecode.orientation,
-  } : null;
-  // lastQuadricPair (Drow/Dcol/Dnormal BEFORE gridPeriodPhase gating, see
-  // camera/model.ts's own comment) is never transmitted over the wire --
-  // whenever lastRecoveredAxes is non-null, gridPeriodPhase already
-  // succeeded on the phone, so its Drow/Dcol/Dnormal are EXACTLY
-  // lastQuadricPair's own (see pose/poseCompute.ts's assembly of both
-  // fields from the same rowDirRecovered/colDirRecovered/quadricPair.Dnormal)
-  // -- reconstructing it here needs no extra wire data.
-  camera.lastQuadricPair = camera.lastRecoveredAxes ? {
-    Drow: camera.lastRecoveredAxes.Drow.clone(),
-    Dcol: camera.lastRecoveredAxes.Dcol.clone(),
-    Dnormal: camera.lastRecoveredAxes.Dnormal.clone(),
-  } : null;
-  camera.axesComputed = !!camera.lastQuadricPair;
+  // Tier 1 of this session's "Ship auxiliary pipeline intermediates" plan: the
+  // phone's own pipeline intermediates, landing on the exact same pose fields a
+  // desktop-compute capture already populates -- overlays/
+  // gridPeriodPhaseOverlays.ts and the composite-line-family hover-debug
+  // overlay read gridPeriodPhase/voteComposites and need no changes to work
+  // from device-compute data.
+  //
+  // The phone's lsdRectangles are NOT unpacked. They used to be assigned to a
+  // lastLsdRectangles field whose own comment admitted nothing rendered from it
+  // -- the overlay always recomputed its own chain instead. Now that the
+  // overlay draws from the pose's own rects (the LOCAL run's, with real
+  // members), backfilling a members-less remote copy would put a second,
+  // emptier source of the same thing back on the camera for nothing to read.
+  //
+  // Null whenever msg.debug.pipeline is absent (sendDebugInfo off, or an older
+  // phone build still connected) -- and that is now automatic rather than five
+  // careful clears, which is the point of building ONE object: there is no
+  // field left over from the previous frame to forget to overwrite.
+  const pipelineDebug = msg.debug?.pipeline;
+  // THE REMOTE POSE IS A WHOLE POSE OR IT IS NOTHING. Assembled here and
+  // published in one assignment, exactly like a local run's (see
+  // axesReconstruction.ts's applyPoseResult).
+  //
+  // Three fields are genuinely absent on this path rather than defaulted:
+  // `votes` (the phone sends its recovered axes, not the vote vectors they
+  // were fit from), `chainTransfers` and `timing` (there was no local run to
+  // have measured). They used to be separate camera fields this function never
+  // wrote, so each showed the last LOCAL reconstruction's value instead --
+  // stale data that no reader could tell from fresh.
+  const pose: CameraPose = {
+    voteComposites: pipelineDebug?.voteComposites ?? [],
+    votes: [],
+    // quadricPair (Drow/Dcol/Dnormal BEFORE gridPeriodPhase gating, see
+    // pose/poseCompute.ts's PoseResult) is never transmitted over the wire --
+    // whenever recoveredAxes is non-null, gridPeriodPhase already succeeded on
+    // the phone, so its Drow/Dcol/Dnormal are EXACTLY quadricPair's own (see
+    // poseCompute.ts's assembly of both fields from the same
+    // rowDirRecovered/colDirRecovered/quadricPair.Dnormal) -- reconstructing it
+    // here needs no extra wire data.
+    quadricPair: recoveredAxes ? {
+      Drow: recoveredAxes.Drow.clone(),
+      Dcol: recoveredAxes.Dcol.clone(),
+      Dnormal: recoveredAxes.Dnormal.clone(),
+    } : null,
+    gridPeriodPhase: pipelineDebug?.gridPeriodPhase ?? null,
+    recoveredAxes,
+    positionDecode: msg.positionDecode ? {
+      row: msg.positionDecode.row, col: msg.positionDecode.col, consistency: msg.positionDecode.consistency,
+      votes: msg.positionDecode.votes, totalWindows: msg.positionDecode.totalWindows,
+      camPos: new THREE.Vector3().fromArray(msg.positionDecode.camPos),
+      recoveredCamQuat: new THREE.Quaternion().fromArray(msg.positionDecode.recoveredCamQuat),
+      orientation: msg.positionDecode.orientation,
+    } : null,
+    chainTransfers: null,
+    timing: null,
+    intermediates: {},
+  };
+  camera.pose = pose;
 
   // Diagnostic-only debug summary (see mobileCapture.ts's buildDebugPayload)
   // -- null whenever sendDebugInfo is off, INCLUDING clearing a prior
   // frame's leftover value if the toggle just got switched off, same
   // "don't show stale data" principle as everything else in this function.
   camera.lastRemoteDebug = msg.debug ?? null;
-
-  // Tier 1 of this session's "Ship auxiliary pipeline intermediates" plan:
-  // the phone's own pipeline intermediates, assigned verbatim onto the
-  // exact same camera fields a desktop-compute capture already populates --
-  // overlays/gridPeriodPhaseOverlays.ts and the composite-line-family
-  // hover-debug overlay read lastGridPeriodPhase/lastVoteComposites
-  // directly and need no changes to work from device-compute data.
-  // The phone's lsdRectangles are NOT unpacked onto the camera any more. They
-  // used to be assigned to lastLsdRectangles "for field-level parity", and that
-  // field's own comment admitted nothing rendered from it -- the overlay always
-  // recomputed its own chain instead. Now that the overlay draws from
-  // camera.intermediates (the LOCAL pose run's rects, with real members),
-  // backfilling a members-less remote copy would put a second, emptier source
-  // of the same thing back on the camera for nothing to read.
-  //
-  // Nulled out whenever msg.debug.pipeline is absent (sendDebugInfo off, or an
-  // older phone build still connected) -- same "don't show a stale frame"
-  // principle as lastRemoteDebug above.
-  const pipelineDebug = msg.debug?.pipeline;
-  camera.lastGridPeriodPhase = pipelineDebug ? pipelineDebug.gridPeriodPhase : null;
-  camera.lastVoteComposites = pipelineDebug ? pipelineDebug.voteComposites : null;
 
   // No real image reaches the desktop in device-compute mode UNLESS the
   // phone's sendCapturedImage toggle is on (see mobileCapture.ts) -- without
@@ -415,7 +432,7 @@ export async function ingestRemotePose(
     // Strictly inside this `if (msg.imageBytes)` branch (see this session's
     // "Ship auxiliary pipeline intermediates" plan): with sendCapturedImage
     // off, msg.imageBytes is undefined and none of this runs at all.
-    if (camera.lastRecoveredAxes) {
+    if (pose.recoveredAxes) {
       const projResult = await computeProjectedBinsAuto(camera, backendFromForceCPU(globalState.forceCPU));
       // Painting the texture is a real GPU upload -- same showProjected
       // gating recomputeStages uses, so it's skipped for a camera that

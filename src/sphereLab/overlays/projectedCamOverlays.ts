@@ -8,19 +8,20 @@ import { positionReadout, sampleLatticeCanvas, sampleLatticeCtx } from '../ui/do
 export function updatePositionReadoutText(camera: Camera) {
   if (!positionReadout) return;
   let decodeLines: string;
-  if (camera.lastPositionDecode) {
-    const rec = camera.lastPositionDecode.camPos;
+  const decode = camera.pose?.positionDecode;
+  if (decode) {
+    const rec = decode.camPos;
     if (isPhysical(camera)) {
       decodeLines =
-        `torus cell: row ${camera.lastPositionDecode.row}  col ${camera.lastPositionDecode.col}\n` +
-        `consistency: ${(camera.lastPositionDecode.consistency * 100).toFixed(1)}%\n` +
+        `torus cell: row ${decode.row}  col ${decode.col}\n` +
+        `consistency: ${(decode.consistency * 100).toFixed(1)}%\n` +
         `recovered camPos: (${rec.x.toFixed(2)}, ${rec.y.toFixed(2)}, ${rec.z.toFixed(2)})`;
     } else {
       const errPos = rec.distanceTo(camera.camPos);
-      const errOrientationDeg = THREE.MathUtils.radToDeg(camera.camQuat.angleTo(camera.lastPositionDecode.recoveredCamQuat));
+      const errOrientationDeg = THREE.MathUtils.radToDeg(camera.camQuat.angleTo(decode.recoveredCamQuat));
       decodeLines =
-        `torus cell: row ${camera.lastPositionDecode.row}  col ${camera.lastPositionDecode.col}\n` +
-        `consistency: ${(camera.lastPositionDecode.consistency * 100).toFixed(1)}%\n` +
+        `torus cell: row ${decode.row}  col ${decode.col}\n` +
+        `consistency: ${(decode.consistency * 100).toFixed(1)}%\n` +
         `recovered camPos: (${rec.x.toFixed(2)}, ${rec.y.toFixed(2)}, ${rec.z.toFixed(2)})\n` +
         `true camPos: (${camera.camPos.x.toFixed(2)}, ${camera.camPos.y.toFixed(2)}, ${camera.camPos.z.toFixed(2)})\n` +
         `error: ${errPos.toFixed(3)} world units\n` +
@@ -44,7 +45,8 @@ function hideSampleLattice() {
 // current value rather than anything meant for this function specifically.
 export function drawSampleLattice(camera: Camera, x: number, y: number, w: number, h: number) {
   if (!camera.settings.showSampleLattice) { hideSampleLattice(); return; }
-  const grid = camera.lastDecodeRotated;
+  const grid = camera.pose?.intermediates.decodeRotated;
+  const correctness = camera.pose?.intermediates.decodeCorrectness;
   if (!grid || !camera.lastProjectedBins) { hideSampleLattice(); return; }
   const { maxU, binWidthU, minV, binWidthV, w: bw, h: bh } = camera.lastProjectedBins;
 
@@ -68,7 +70,7 @@ export function drawSampleLattice(camera: Camera, x: number, y: number, w: numbe
       if (bu < 0 || bu >= bw || bv < 0 || bv >= bh) continue;
       const cx = (bu / bw) * sampleLatticeCanvas.width;
       const cy = (1 - bv / bh) * sampleLatticeCanvas.height;
-      const debug = camera.lastDecodeCorrectness ? camera.lastDecodeCorrectness[i][j] : null;
+      const debug = correctness ? correctness[i][j] : null;
       ctx.beginPath();
       ctx.arc(cx, cy, radius, 0, Math.PI * 2);
       ctx.fillStyle = debug ? (debug.bit ? '#000' : '#fff') : '#888';

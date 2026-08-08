@@ -155,8 +155,8 @@ function drawEdgeConnectivityPreview(camera: Camera) {
 export function repaintLsdRawRegionsHighlight(camera: Camera) {
   drawEdgeConnectivityPreview(camera);
   if (!camera.settings.showLsdRawRegions) return;
-  const regions = camera.intermediates?.regions;
-  const regionId = camera.intermediates?.regionId;
+  const regions = camera.pose?.intermediates.regions;
+  const regionId = camera.pose?.intermediates.regionId;
   if (!regions || !regionId) return;
   const w = camera.rtSize.w, h = camera.rtSize.h;
 
@@ -262,7 +262,7 @@ export function updateLsdOverlay(camera: Camera) {
     while (lsdRectanglesGroup.firstChild) lsdRectanglesGroup.removeChild(lsdRectanglesGroup.firstChild);
     return;
   }
-  const rects = camera.intermediates?.rects;
+  const rects = camera.pose?.intermediates.rects;
   if (!rects) return;
 
   if (settings.showLsdRawRegions) {
@@ -283,7 +283,7 @@ export function updateLsdOverlay(camera: Camera) {
   // The part that MATTERED is still here and comes straight off the setting:
   // lsdCclSteps != 0 means the scrubber stopped the loop short of the fixpoint,
   // so the regions on screen are mid-growth and NOT what production produces.
-  const regions = camera.intermediates?.regions;
+  const regions = camera.pose?.intermediates.regions;
   const growthPart = settings.showLsdRawRegions && regions
     ? `${regions.length} regions`
       + `${settings.lsdCclSteps === 0 ? '' : ` (CAPPED at ${settings.lsdCclSteps} steps -- mid-growth, not the real result)`} -- `

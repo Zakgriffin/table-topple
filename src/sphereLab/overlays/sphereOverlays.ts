@@ -17,14 +17,14 @@ export function updateGradientCirclesDebug(camera: Camera) {
   // hundreds of thousands of votes on a real capture -- showTopCircles
   // defaults to off specifically because of this.
   if (!camera.settings.showTopCircles && !camera.settings.showAxisVectors) return;
-  const chosen = camera.lastVotes;
+  const chosen = camera.pose?.votes ?? [];
   // vote.n lives in MATH_QUAT's fixed math frame (see PositionDecodeResult's
   // comment) -- rotate into true world space by the same anchorQuat
   // updateSphereOverlays uses (true camQuat for simulated cameras, so this
   // stays anchored to the *true* pose per the debug-visibility decision;
   // recoveredCamQuat for physical, which have no ground truth) before these
   // land as positions on sphereAnchor's children.
-  const anchorQuat = isSimulated(camera) ? camera.camQuat : (camera.lastPositionDecode?.recoveredCamQuat ?? null);
+  const anchorQuat = isSimulated(camera) ? camera.camQuat : (camera.pose?.positionDecode?.recoveredCamQuat ?? null);
   if (chosen.length === 0 || !anchorQuat) {
     camera.gradientCirclesGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(0), 3));
     camera.axisVectorsGeo.setAttribute('position', new THREE.Float32BufferAttribute(new Float32Array(0), 3));
@@ -143,13 +143,13 @@ export function updateSphereOverlays(camera: Camera, vFovRad: number) {
   camera.circlesGroup.visible = settings.showCircles;
   camera.sphereShell.visible = settings.showSphere;
 
-  // axesComputed only reflects orientation-fit success; the poles' actual
+  // quadricPair only reflects orientation-fit success; the poles' actual
   // position is only ever written on a successful position decode (see
-  // runPositionDecode's caller) -- gating on axesComputed alone leaves them
+  // runPositionDecode's caller) -- gating on the fit alone leaves them
   // visible at a stale/default (0,0,0) whenever decode fails independently,
   // same failure updateRecoveredCamGizmo/applyRecoveredFloorOverlay already
-  // guard against via lastPositionDecode.
-  const recoveredPolesVisible = settings.showRecoveredPoles && camera.axesComputed && !!camera.lastPositionDecode;
+  // guard against via positionDecode.
+  const recoveredPolesVisible = settings.showRecoveredPoles && !!camera.pose?.quadricPair && !!camera.pose.positionDecode;
   camera.recoveredRowPoleA.visible = recoveredPolesVisible;
   camera.recoveredRowPoleB.visible = recoveredPolesVisible;
   camera.recoveredColPoleA.visible = recoveredPolesVisible;
@@ -170,8 +170,8 @@ export function updateSphereOverlays(camera: Camera, vFovRad: number) {
       camera.colPoleB.position.copy(COL_DIR).multiplyScalar(-SPHERE_RADIUS);
     }
   } else {
-    anchorPos = camera.lastPositionDecode?.camPos ?? new THREE.Vector3();
-    anchorQuat = camera.lastPositionDecode?.recoveredCamQuat ?? null;
+    anchorPos = camera.pose?.positionDecode?.camPos ?? new THREE.Vector3();
+    anchorQuat = camera.pose?.positionDecode?.recoveredCamQuat ?? null;
   }
   camera.sphereAnchor.position.copy(anchorPos);
 

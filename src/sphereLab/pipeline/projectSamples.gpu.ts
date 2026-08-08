@@ -53,7 +53,8 @@ function buildProjectUniforms(
 // castAndBucketProjectedSamples). Returns null if WebGPU isn't available;
 // caller falls back to the CPU version, which stays the source of truth.
 export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSamplesDense | null> {
-  if (!camera.lastRecoveredAxes) return null;
+  const axes = camera.pose?.recoveredAxes;
+  if (!axes) return null;
   const device = await getGPUDevice();
   if (!device) return null;
   // The most exposed of these modules, and the reason is structural: TWO
@@ -65,7 +66,7 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   device.pushErrorScope('validation');
   const { gradient, project } = getPipelines(device);
 
-  const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
+  const { Drow, Dcol, Dnormal, distance } = axes;
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const vFovRad = getAnalysisVFovRad(camera);
   const normal = Dnormal.clone();

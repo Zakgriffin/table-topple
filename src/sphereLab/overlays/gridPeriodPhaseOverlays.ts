@@ -71,7 +71,7 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
   const W = Math.max(200, svg.clientWidth), H = vbH;
   svg.setAttribute('viewBox', `0 0 ${W} ${H}`);
 
-  const gpp = camera.lastGridPeriodPhase;
+  const gpp = camera.pose?.gridPeriodPhase;
   if (!gpp) {
     svg.appendChild(svgText(8, H / 2, 'no data yet -- capture now', { fill: '#888', 'font-size': 11, 'font-family': 'sans-serif' }));
     return;
@@ -196,7 +196,7 @@ export function drawGridPeriodPhasePlot(camera: Camera) {
   // mean grayscale difference with a data-dependent scale, so a raw product
   // would just be distinctness with a slight tilt.
   const wantDistinct = camera.settings.showDistinctnessCurve, wantProduct = camera.settings.showProductCurve;
-  const axes = camera.lastRecoveredAxes;
+  const axes = camera.pose?.recoveredAxes;
   if ((wantDistinct || wantProduct) && axes && camera.lastNoisedPreviewGray) {
     // Deliberately coarser than TRANSLUCENT_SAMPLES: each sample reverse-
     // projects a 13x13 cell patch (~169 grayscale reads), and unlike the
@@ -313,9 +313,10 @@ bindHistogramToggle(toggleProductCurveBtn,
 // comment on why that state lives there, not in settings) and redraws.
 gridPeriodPhasePlotSvg.addEventListener('wheel', (e) => {
   const cam = activeCamera();
-  if (!cam || !cam.lastGridPeriodPhase) return;
+  const gpp = cam?.pose?.gridPeriodPhase;
+  if (!cam || !gpp) return;
   e.preventDefault();
-  const [min, max] = getViewRange(cam, cam.lastGridPeriodPhase);
+  const [min, max] = getViewRange(cam, gpp);
   const rect = gridPeriodPhasePlotSvg.getBoundingClientRect();
   const cursorFrac = Math.min(1, Math.max(0, (e.clientX - rect.left) / rect.width));
   const cursorValue = min + cursorFrac * (max - min);
@@ -329,8 +330,9 @@ let dragStartClientX: number | null = null;
 let dragStartMin = 0, dragStartMax = 0;
 gridPeriodPhasePlotSvg.addEventListener('mousedown', (e) => {
   const cam = activeCamera();
-  if (!cam || !cam.lastGridPeriodPhase) return;
-  [dragStartMin, dragStartMax] = getViewRange(cam, cam.lastGridPeriodPhase);
+  const gpp = cam?.pose?.gridPeriodPhase;
+  if (!cam || !gpp) return;
+  [dragStartMin, dragStartMax] = getViewRange(cam, gpp);
   dragStartClientX = e.clientX;
   gridPeriodPhasePlotSvg.style.cursor = 'grabbing';
 });
@@ -395,7 +397,7 @@ export function hideGridPeriodPhaseProjected() {
 // lands rotated consistently without needing its own rotated coordinates.
 export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: number, w: number, h: number, rotationSteps = 0) {
   const canvas = gridPeriodPhaseProjectedCanvas, ctx = gridPeriodPhaseProjectedCtx;
-  const gpp = camera.lastGridPeriodPhase;
+  const gpp = camera.pose?.gridPeriodPhase ?? null;
   const showLines = !!gpp;
   const showLattice = camera.settings.showSampleLattice && gpp;
   if (!showLines && !showLattice) { hideGridPeriodPhaseProjected(); return; }
@@ -405,7 +407,7 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
   // DecodeInput. A Camera is still where they live on this side.
   const uvScale = projectedUVScale({
     aspect: camera.aspect, settings: camera.settings,
-    recoveredAxes: camera.lastRecoveredAxes, gridPeriodPhase: gpp,
+    recoveredAxes: camera.pose?.recoveredAxes ?? null, gridPeriodPhase: gpp,
   });
   if (!bins || uvScale === null) { hideGridPeriodPhaseProjected(); return; }
 
@@ -453,13 +455,14 @@ export function drawGridPeriodPhaseProjected(camera: Camera, x: number, y: numbe
     // spread -- that used to draw a dot for every cell in a rectangle padded
     // around the line detections, regardless of whether decode considered it
     // inside the actual visible quad, which drifted from (and could draw
-    // well outside) the true bounds. camera.lastDecodeRotated is preferred
-    // (its indices line up with lastDecodeCorrectness), falling back to
-    // lastDecodeGrid (pre-rotation -- same u/v values either way, since
-    // rotation only permutes array indices, see decodeGrid.ts's readRotated)
-    // so the lattice still shows something before a De Bruijn match is found.
-    const grid = camera.lastDecodeRotated ?? camera.lastDecodeGrid;
-    const correctness = camera.lastDecodeRotated ? camera.lastDecodeCorrectness : null;
+    // well outside) the true bounds. decodeRotated is preferred (its indices
+    // line up with decodeCorrectness), falling back to decodeGrid
+    // (pre-rotation -- same u/v values either way, since rotation only
+    // permutes array indices, see decodeGrid.ts's readRotated) so the lattice
+    // still shows something before a De Bruijn match is found.
+    const got = camera.pose?.intermediates;
+    const grid = got?.decodeRotated ?? got?.decodeGrid;
+    const correctness = got?.decodeRotated ? got.decodeCorrectness : null;
     if (grid) {
       for (let i = 0; i < grid.rows; i++) {
         for (let j = 0; j < grid.cols; j++) {

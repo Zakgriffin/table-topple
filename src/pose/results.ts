@@ -44,7 +44,7 @@ export interface PositionDecodeResult {
   camPos: THREE.Vector3;
   // The camera's TRUE world orientation, solved entirely from the pattern --
   // see solveRecoveredCamQuat. Anything placed into the actual 3D scene
-  // needs this to convert lastRecoveredAxes' Drow/Dcol/Dnormal (expressed in
+  // needs this to convert recoveredAxes' Drow/Dcol/Dnormal (expressed in
   // MATH_QUAT's fixed math frame) into true world space first.
   recoveredCamQuat: THREE.Quaternion;
   // Which of the 4 cardinal rotations (see stages/decode/decodeGrid.ts's

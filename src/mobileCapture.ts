@@ -835,7 +835,7 @@ function applySettingsSync(msg: any) {
 // table is built at module load from ORDER5_CANDIDATE's own cropSize of 256,
 // so a board that is actually 128 gets decoded against a completely
 // different torus. It does not error -- it returns ~chance-level matches
-// that still pass the gate for `lastPositionDecode` being non-null.
+// that still pass the gate for `positionDecode` being non-null.
 //
 // This cost a full 60-second dataset on 2026-08-05: 12% "success" rate,
 // consistency 0.515, 2 votes of 2924 windows, position jumping hundreds of

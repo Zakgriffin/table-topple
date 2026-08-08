@@ -1,11 +1,7 @@
 import * as THREE from 'three';
-import { type CompositeLine } from '../../pose/results.ts';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import type { Intermediates, PendingIntermediates } from '../../pose/intermediates.ts';
-import { type GridPeriodPhaseResult } from '../../pose/stages/period/gridPeriodPhase.ts';
-import type { PoseComputeTiming } from '../../pose/poseCompute.ts';
-import { type TransferSummary } from '../../pose/gpu/fieldResidency.ts';
-import { type DecodeCellDebug, type DecodeSampleGrid, type PositionDecodeResult, type RecoveredAxes, type Vote } from '../../pose/results.ts';
+import type { PoseComputeTiming, PoseResult } from '../../pose/poseCompute.ts';
 import { type ProjectedBins } from '../types.ts';
 import { type StageRecord } from '../profiling/profiler.ts';
 import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './settings.ts';
@@ -33,48 +29,73 @@ export interface FrameMeta {
 // header note); every per-camera THREE object/buffer lives on this object
 // rather than as a module-level singleton.
 
+// ── The pose, as the app DISPLAYS it ─────────────────────────────────────
+//
+// ONE object, where there used to be thirteen `last*` fields on the camera.
+// The library hands back a PoseResult built fresh per run (pose/
+// poseCompute.ts); the app then DESTRUCTURED it into thirteen separate
+// mutations -- eight at the seam, five more when the deferred readback landed
+// -- which put the result straight back into the shape it was made a return
+// value to escape. An atomically swappable object and an exploded copy of it
+// spread across a camera are not the same thing: the copy can be observed
+// halfway through being replaced, and pipeline/axesReconstruction.ts's visual
+// tail reads camera fields on both sides of its awaits.
+//
+// TWO DIFFERENCES FROM PoseResult, both because this type answers "what is on
+// screen" rather than "what did that call return":
+//
+//   - `pending` is GONE. A published pose owns no undrained handle -- the
+//     mailbox (pendingVisuals) carries it until the tail spends it, and this
+//     type is what states that, rather than a comment asking readers not to
+//     touch a spent field.
+//   - `timing` is NULLABLE, because a pose that arrived already computed from
+//     a phone (pipeline/capture.ts's ingestRemotePose) has no local run behind
+//     it to have timed. Same reason `votes` can be empty and `chainTransfers`
+//     null on that path -- a remote pose genuinely does not carry them, and
+//     the old fields showed the previous LOCAL run's instead.
+export type CameraPose = Omit<PoseResult, 'pending' | 'timing'> & {
+  timing: PoseComputeTiming | null;
+  // What the drain pulled back FOR THIS POSE: the run's own fx/fy/regionId/
+  // regions/rects/decode grid, for the overlays that used to recompute them
+  // (see pose/intermediates.ts). Empty until the tail resolves the handle, and
+  // empty forever for a run that asked for nothing.
+  //
+  // Inside the pose rather than beside it, and that is the point: a decode grid
+  // cannot be displayed next to a different run's axes when the two travel in
+  // one pointer.
+  intermediates: Intermediates;
+};
+
+// The deferred-visualization mailbox's payload -- the pose the tail is to
+// paint, plus the handle it has to spend to finish painting it.
+//
+// The pose here is the SAME OBJECT that was published to camera.pose, not a
+// copy, so the tail can ask "is what I was handed still what is on screen?"
+// by identity before it publishes an enriched version over the top.
+export interface PendingVisuals {
+  pose: CameraPose;
+  pending: PendingIntermediates | null;
+}
+
 export interface CameraBase {
   id: string;
   name: string;
   color: THREE.Color;
 
   // -- recovered/decoded state -- already fully source-agnostic (MATH_QUAT-
-  // frame recovery + solveRecoveredCamQuat), unchanged by this stage.
-  lastRecoveredAxes: RecoveredAxes | null;
-  lastPositionDecode: PositionDecodeResult | null;
-  lastDecodeGrid: DecodeSampleGrid | null;
-  lastDecodeRotated: DecodeSampleGrid | null;
-  lastDecodeCorrectness: (DecodeCellDebug | null)[][] | null;
-  // The requested intermediates' deferred readback. Comes back on the
-  // PoseResult and is parked here by pipeline/axesReconstruction.ts's
-  // applyPoseResult, then drained by its runVisualTail. Non-null only between a
-  // reconstruction finishing and its visual tail running, and only when
-  // something was actually asked for.
-  pendingIntermediates: PendingIntermediates | null;
-  // What that drain handed back -- the pose run's own fx/fy/regionId/regions/
-  // rects/decode grid, for the overlays that used to recompute them. See
-  // pose/intermediates.ts.
-  intermediates: Intermediates | null;
+  // frame recovery + solveRecoveredCamQuat).
+  //
+  // The pose currently on screen, or null until this camera has recovered one.
+  // Published in one assignment, twice per reconstruction: once when the pose
+  // itself is final, and again by the visual tail with `intermediates` filled
+  // in (see pipeline/axesReconstruction.ts's applyPoseResult and
+  // runVisualTailBody). Both are whole-object swaps -- there is no moment at
+  // which some of these fields are this run's and the rest are the last one's.
+  //
+  // `axesComputed` was a fourteenth field and is gone too: it only ever meant
+  // `!!quadricPair` (orientation-fit success), and two sites set it by hand.
+  pose: CameraPose | null;
   lastProjectedBins: ProjectedBins | null;
-  // Bus traffic the LSD chain incurred on this camera's last frame -- see
-  // pose/poseCompute.ts's PoseResult for why it is recorded rather
-  // than derived from the toggles. Drives the readout under the GPU toggles.
-  lastChainTransfers: TransferSummary | null;
-  lastVotes: Vote[];
-  // Root-tagged composite lines the votes above were cast from (pipeline/
-  // votes.ts's computeGradient2x2Composites) -- the SAME lines pipeline/
-  // gridPeriodPhase.ts classifies into rowLines/colLines, and what the
-  // "color composite lines by row/col family" debug overlay draws, so a
-  // line's root is guaranteed to mean the same thing in all three places.
-  lastVoteComposites: { root: number; line: CompositeLine }[] | null;
-  // Raw fit result (Drow/Dcol/Dnormal only, no distance) BEFORE period-search
-  // gating -- the pole markers render off this even when gridPeriodPhase
-  // fails and lastRecoveredAxes ends up null (see
-  // pose/poseCompute.ts/applyPoseVisualizations). Its own field, rather
-  // than reusing lastRecoveredAxes, specifically so that degenerate-period
-  // behavior survives the Step 2 refactor instead of silently regressing.
-  lastQuadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
-  axesComputed: boolean;
   axesCapturing: boolean;
   lastAxesCapture: number;
   // Cached output of runAxesReconstruction's own capture stage (a fresh GPU
@@ -93,23 +114,25 @@ export interface CameraBase {
   lastAxesCaptureGray: { gray: Float64Array; w: number; h: number } | null;
   // -- deferred-visualization mailbox --
   //
-  // One slot, freshest-wins, exactly like pendingCapture below, but holding no
-  // payload at all: the display tail is an idempotent function of this
-  // camera's already-settled state, so "there is newer state to paint" is the
-  // whole message. Set at the end of recomputeStages, drained by animate()
-  // once this camera is no longer capturing (pipeline/axesReconstruction.ts's
-  // markVisualsDirty/drainVisuals).
-  visualsDirty: boolean;
+  // One slot, freshest-wins, exactly like pendingCapture below -- and it
+  // carries a PAYLOAD, which pendingCapture and pendingPoseResult always did
+  // and this one did not.
+  //
+  // It was a bare boolean, on the reasoning that the tail is an idempotent
+  // function of this camera's already-settled state, so "there is newer state
+  // to paint" was the whole message. That was true of the PAINTING and false
+  // of the READING: the tail took a handle off the camera, awaited it, and
+  // wrote four fields back, so a reconstruction landing mid-tail put frame N's
+  // decode grid next to frame N+1's pose. The boolean had no payload because
+  // the payload was smeared across thirteen fields; with one pose object there
+  // is something to put in the slot, and the tail reads nothing it was not
+  // handed. Posted at the end of recomputeStages, drained by animate() once
+  // this camera is no longer capturing (pipeline/axesReconstruction.ts).
+  pendingVisuals: PendingVisuals | null;
   // Guards the drain against re-entering itself: the tail awaits real GPU work
   // (the projection, the texture paint), so it spans several animate() ticks
   // and would otherwise be started again on each of them.
   visualsDraining: boolean;
-  // The per-stage timings computePoseFromCapture returned for the frame the
-  // mailbox is holding, kept here rather than passed as an argument because
-  // the drain runs long after its producer returned. Read only to build the
-  // readout's timing line, so a null (nothing captured yet, or a pose that
-  // arrived from a device-compute phone) just means that line is omitted.
-  lastPoseTiming: PoseComputeTiming | null;
 
   // -- capture/analysis buffers, shared shape for both camera types --
   rtSize: { w: number; h: number };
@@ -127,7 +150,6 @@ export interface CameraBase {
   // import back into hoverDebugOverlays.ts (which already imports FROM
   // lsdOverlay.ts).
   lastHoverFieldIndex: number | null;
-  lastGridPeriodPhase: GridPeriodPhaseResult | null;
   // Interactive pan/zoom state for the period/phase debug plot (overlays/
   // gridPeriodPhaseOverlays.ts) -- null means "no interaction yet, use the
   // default bracket-relative view". Deliberately NOT in settings (not
@@ -159,7 +181,7 @@ export interface CameraBase {
   recoveredFloorOverlayMat: THREE.MeshBasicMaterial; recoveredFloorOverlay: THREE.Mesh;
   // The World-view recovered-floor quad's OUTLINE -- a 4-point closed
   // THREE.LineLoop, drawn unconditionally from pose+FOV alone whenever
-  // lastRecoveredAxes/lastPositionDecode exist, in EITHER compute mode (see
+  // pose.recoveredAxes/pose.positionDecode exist, in EITHER compute mode (see
   // overlays/recoveredOverlays.ts's updateRecoveredFloorOutline and this
   // session's on-device-pose-recovery plan). Deliberately separate from
   // recoveredFloorOverlay (the actual projected-image FILL, a textured

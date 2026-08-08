@@ -61,8 +61,9 @@ function getCachedSrcGradientField(camera: Camera, gray: Float64Array, w: number
 // (grazing-angle cutoff, gradient-covector re-expression in the (u,v)
 // frame, the U-mirror that cancels a handedness mismatch).
 function projectSamplesCPU(camera: Camera): ProjectedSamplesDense | null {
-  if (!camera.lastRecoveredAxes) return null;
-  const { Drow, Dcol, Dnormal, distance } = camera.lastRecoveredAxes;
+  const axes = camera.pose?.recoveredAxes;
+  if (!axes) return null;
+  const { Drow, Dcol, Dnormal, distance } = axes;
   const w = camera.rtSize.w, h = camera.rtSize.h;
   const vFovRad = getAnalysisVFovRad(camera);
   const normal = Dnormal.clone();
@@ -194,7 +195,7 @@ function squareCellBucketDims(camera: Camera, extentU: number, extentV: number):
 // grid (stage 2) BEFORE bucketing, which is why it calls projectSamplesCPU and
 // bucketSamples separately rather than in one step.
 function computeProjectedBinsCPU(camera: Camera): ProjectedSampleResult {
-  const proj = camera.lastRecoveredAxes ? projectSamplesCPU(camera) : null;
+  const proj = camera.pose?.recoveredAxes ? projectSamplesCPU(camera) : null;
   if (!proj) { camera.lastProjectedBins = null; return null; }
   const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
   const result = bucketSamples(camera, bucketW, bucketH, proj);
@@ -214,7 +215,7 @@ function computeProjectedBinsCPU(camera: Camera): ProjectedSampleResult {
 // safely go through computeProjectedBinsAuto below instead of
 // picking CPU vs GPU itself.
 async function computeProjectedBinsGPU(camera: Camera): Promise<ProjectedSampleResult> {
-  const proj = camera.lastRecoveredAxes ? await projectSamplesGPU(camera) : null;
+  const proj = camera.pose?.recoveredAxes ? await projectSamplesGPU(camera) : null;
   if (!proj) { camera.lastProjectedBins = null; return null; }
   const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
   const result = bucketSamples(camera, bucketW, bucketH, proj);

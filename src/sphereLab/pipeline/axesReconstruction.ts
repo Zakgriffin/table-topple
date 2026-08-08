@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { type Camera } from '../camera/model.ts';
+import { type Camera, type CameraPose, type PendingVisuals } from '../camera/model.ts';
 import { activeCamera, isPhysical, isSimulated } from '../camera/store.ts';
 import { COL_DIR, ROW_DIR, SPHERE_RADIUS } from '../constants.ts';
 import { angleBetweenDegV } from '../math/geometry.ts';
@@ -22,22 +22,22 @@ import { appSpan } from '../profiling/stages.ts';
 // a real local reconstruction (recomputeStages below) or an already-computed
 // pose arriving from a device-compute phone (pipeline/capture.ts's
 // ingestRemotePose), so both paths render identically off the same
-// lastQuadricPair/lastRecoveredAxes/lastPositionDecode fields instead of
-// duplicating this logic -- see this session's on-device-pose-recovery
-// plan. `extraReadoutLine`, if given, is appended as the readout's last
-// line (recomputeStages passes its per-stage timing breakdown; a
-// device-compute pose has no local timing to report, so ingestRemotePose
-// passes nothing).
+// camera.pose object instead of duplicating this logic -- see this session's
+// on-device-pose-recovery plan. `extraReadoutLine`, if given, is appended as
+// the readout's last line (recomputeStages passes its per-stage timing
+// breakdown; a device-compute pose has no local timing to report, so
+// ingestRemotePose passes nothing).
 export function applyPoseVisualizations(camera: Camera, isActive: boolean, extraReadoutLine?: string) {
   let orientationErrorLine: string | null = null;
-  // Pole markers read camera.lastQuadricPair (added specifically so this
-  // survives even when gridPeriodPhase fails and lastRecoveredAxes ends up
-  // null -- see camera/model.ts's own comment on the field) instead of
-  // locally recomputing rowDirRecovered/colDirRecovered.
-  const rowDirRecovered = camera.lastQuadricPair?.Drow ?? null;
-  const colDirRecovered = camera.lastQuadricPair?.Dcol ?? null;
-  if (camera.lastPositionDecode && rowDirRecovered && colDirRecovered) {
-    const { recoveredCamQuat } = camera.lastPositionDecode;
+  const pose = camera.pose;
+  // Pole markers read the pose's quadricPair (its own field specifically so
+  // this survives even when gridPeriodPhase fails and recoveredAxes ends up
+  // null -- see pose/poseCompute.ts's PoseResult) instead of locally
+  // recomputing rowDirRecovered/colDirRecovered.
+  const rowDirRecovered = pose?.quadricPair?.Drow ?? null;
+  const colDirRecovered = pose?.quadricPair?.Dcol ?? null;
+  if (pose?.positionDecode && rowDirRecovered && colDirRecovered) {
+    const { recoveredCamQuat } = pose.positionDecode;
     const rowDirWorld = rowDirRecovered.clone().applyQuaternion(recoveredCamQuat);
     const colDirWorld = colDirRecovered.clone().applyQuaternion(recoveredCamQuat);
     // Decode's own 4-way disambiguation (tallyPositionVotes, see
@@ -80,34 +80,40 @@ export function applyPoseVisualizations(camera: Camera, isActive: boolean, extra
   updateRecoveredCamGizmo(camera);
   applyRecoveredFloorOverlay(camera);
   // Drawn unconditionally alongside the fill above -- guards on
-  // lastRecoveredAxes/lastPositionDecode only (both present in EITHER
-  // compute mode), unlike applyRecoveredFloorOverlay which still requires
-  // real pixel data (lastProjectedBins).
+  // recoveredAxes/positionDecode only (both present in EITHER compute mode),
+  // unlike applyRecoveredFloorOverlay which still requires real pixel data
+  // (lastProjectedBins).
   updateRecoveredFloorOutline(camera);
 
   if (isActive) {
     const haveGroundTruth = isSimulated(camera);
-    const lines = [`${camera.lastVotes.length} votes  (${camera.lastVotes.length} fed to fit)`];
+    // Zero for a device-compute pose, and honestly so: the phone sends its
+    // recovered axes, not the vote vectors they were fit from. This used to
+    // read a camera field the remote path never wrote, so it showed whatever
+    // the last LOCAL reconstruction on this camera had counted.
+    const voteCount = pose?.votes.length ?? 0;
+    const lines = [`${voteCount} votes  (${voteCount} fed to fit)`];
     if (rowDirRecovered && colDirRecovered) {
       if (orientationErrorLine) lines.push(orientationErrorLine);
     } else {
       lines.push(`degenerate fit`);
     }
-    const gpp = camera.lastGridPeriodPhase;
-    if (camera.lastRecoveredAxes && gpp) {
+    const gpp = pose?.gridPeriodPhase;
+    if (pose?.recoveredAxes && gpp) {
       const trueDist = isSimulated(camera) ? camera.camPos.y : NaN;
-      const dist = camera.lastRecoveredAxes.distance;
+      const dist = pose.recoveredAxes.distance;
       if (haveGroundTruth) {
         const err = (Math.abs(dist - trueDist) / trueDist) * 100;
         lines.push(`distance ${dist.toFixed(2)} (${err.toFixed(1)}% err)  true ${trueDist.toFixed(2)}  period ${gpp.period.toFixed(4)}  [gridPeriodPhase]`);
       } else {
         lines.push(`distance ${dist.toFixed(2)}  period ${gpp.period.toFixed(4)}  [gridPeriodPhase]`);
       }
-    } else if (camera.lastQuadricPair) {
+    } else if (pose?.quadricPair) {
       lines.push(`distance: no period found (gridPeriodPhase)`);
     }
-    if (camera.lastPositionDecode) {
-      lines.push(`decoded torus (row,col): (${camera.lastPositionDecode.row}, ${camera.lastPositionDecode.col})  consistency ${(camera.lastPositionDecode.consistency * 100).toFixed(1)}%  camPos (${camera.lastPositionDecode.camPos.x.toFixed(2)}, ${camera.lastPositionDecode.camPos.y.toFixed(2)}, ${camera.lastPositionDecode.camPos.z.toFixed(2)})`);
+    const decode = pose?.positionDecode;
+    if (decode) {
+      lines.push(`decoded torus (row,col): (${decode.row}, ${decode.col})  consistency ${(decode.consistency * 100).toFixed(1)}%  camPos (${decode.camPos.x.toFixed(2)}, ${decode.camPos.y.toFixed(2)}, ${decode.camPos.z.toFixed(2)})`);
     }
     if (extraReadoutLine) lines.push(extraReadoutLine);
     axesReadout.textContent = lines.join('\n');
@@ -139,7 +145,7 @@ export function updateChainTransfersReadout(camera: Camera | undefined) {
     lsdChainTransfers.textContent = 'LSD chain: select a camera to see its bus traffic.';
     return;
   }
-  const s = camera.lastChainTransfers;
+  const s = camera.pose?.chainTransfers;
   if (!s) {
     lsdChainTransfers.textContent = 'LSD chain: no capture yet.';
     return;
@@ -180,18 +186,23 @@ export function updateChainTransfersReadout(camera: Camera | undefined) {
 // display GPU work used to serialize against the same device queue the pose
 // stages were using. It costs one animation frame (~16ms) of overlay lag.
 //
-// The reason a boolean is enough where a work queue looks like it's needed:
-// this function reads NOTHING but camera state, and that state is already
-// settled by the time it's asked to run. It is idempotent -- running it twice
-// paints the same thing, and running it once after three captures paints the
-// third, not the first. So the mailbox holds no payload and coalescing is
-// free rather than a feature that had to be built.
+// THE MAILBOX CARRIES A PAYLOAD, and it did not always. The old argument for a
+// bare boolean was that this function reads nothing but already-settled camera
+// state, so "there is newer state to paint" is the whole message. That held for
+// the painting and not for the reading: the tail took the intermediates handle
+// off the camera, awaited it, and wrote four fields back, so a reconstruction
+// landing mid-tail wrote frame N's decode grid over frame N+1's state. Now the
+// pose it is to paint arrives as an argument (`posted`), and the only thing it
+// writes back is one pose object -- guarded by identity, see below.
+//
+// Coalescing is still free: freshest-wins on a one-slot mailbox means running
+// once after three captures paints the third, not the first.
 //
 // `isActive` is re-evaluated HERE rather than inherited from whenever the
 // reconstruction started, since deferral makes "was this the active camera
 // 160ms ago" the wrong question -- what the readouts and mode overlays want
 // is which camera is on screen at PAINT time.
-async function runVisualTail(camera: Camera): Promise<void> {
+async function runVisualTail(camera: Camera, posted: PendingVisuals): Promise<void> {
   // The tail's own root. It did not need one while structure came from the call
   // stack -- the tail simply had no parent open, so its spans were roots by
   // default. With structure declared, `app.project` and `app.overlays` have to
@@ -199,39 +210,38 @@ async function runVisualTail(camera: Camera): Promise<void> {
   // under the pose that handed the handle over a frame ago.
   const tailSpan = appSpan('app.tail');
   try {
-    await runVisualTailBody(camera);
+    await runVisualTailBody(camera, posted);
   } finally {
     spanEnd(tailSpan);
   }
 }
 
-async function runVisualTailBody(camera: Camera): Promise<void> {
+async function runVisualTailBody(camera: Camera, posted: PendingVisuals): Promise<void> {
   const isActive = camera === activeCamera();
 
-  // FIRST, before anything reads lastDecodeGrid/lastDecodeRotated/
-  // lastDecodeCorrectness or camera.intermediates. computePoseFromCapture left
-  // those null and parked the readback here (see pose/intermediates.ts) so
-  // the pose did not have to wait 0.45MB for display data; this is the moment
-  // they get filled. updateGradientCirclesDebug, applyPoseVisualizations and
-  // every mode overlay below are downstream of it.
+  // FIRST, before anything reads the pose's intermediates. The pose itself was
+  // published the moment it was final; its per-pixel fields and its decode grid
+  // were left on the device (see pose/intermediates.ts) so the pose did not have
+  // to wait 0.45MB for display data. This is the moment they land, and the
+  // second half of applyPoseResult's seam: the same pose object, republished
+  // with `intermediates` filled in. updateGradientCirclesDebug,
+  // applyPoseVisualizations and every mode overlay below are downstream of it.
   //
   // This is the ONE thing in this function that is not idempotent-by-reading-
   // settled-state: it consumes a handle. resolve() is itself idempotent -- a
   // second call re-hands the same object rather than draining twice -- so a
-  // second drain over the same capture paints the same thing.
+  // second drain over the same payload paints the same thing.
   //
-  // The payload is RETURNED now rather than written onto the camera by the
-  // handle, so this is the second half of applyPoseResult's seam: the same
-  // renaming, for the fields that could not be settled until the readback
-  // landed.
-  const pending = camera.pendingIntermediates;
-  if (pending) {
-    camera.pendingIntermediates = null;
-    const got = await pending.resolve();
-    camera.intermediates = got;
-    camera.lastDecodeGrid = got.decodeGrid ?? null;
-    camera.lastDecodeRotated = got.decodeRotated ?? null;
-    camera.lastDecodeCorrectness = got.decodeCorrectness ?? null;
+  // THE IDENTITY CHECK IS THE POINT OF THE PAYLOAD. Publishing is the only
+  // thing here that can write over a newer pose, so it happens only while the
+  // pose this drain was handed is still the one on screen. Unreachable today
+  // (drainVisuals and the two reconstruction entry points exclude each other),
+  // and that exclusion is exactly what this makes droppable: without it, a
+  // reconstruction that landed while the readback was in flight would otherwise
+  // get its axes overwritten by the previous frame's, decode grid and all.
+  if (posted.pending) {
+    const got = await posted.pending.resolve();
+    if (camera.pose === posted.pose) camera.pose = { ...posted.pose, intermediates: got };
   }
 
   // Painting projectedPreviewTex is a real GPU texture upload -- worth
@@ -262,7 +272,7 @@ async function runVisualTailBody(camera: Camera): Promise<void> {
   // of that call recomputing the exact same (possibly GPU) result a second
   // time -- see modeRefresh.ts's own comment on precomputedProjection.
   let projResult: ProjectedSampleResult = null;
-  if (camera.lastRecoveredAxes) {
+  if (camera.pose?.recoveredAxes) {
     projResult = await computeProjectedBinsAuto(camera, backendFromForceCPU(globalState.forceCPU));
     if (showProjected) paintProjectedTexture(camera, projResult);
   }
@@ -276,7 +286,9 @@ async function runVisualTailBody(camera: Camera): Promise<void> {
   // overlays/recoveredOverlays.ts), so hoisting it would size this frame's
   // floor from the PREVIOUS frame's bins. That coupling is the reason the
   // whole tail defers as one unit instead of only its expensive half.
-  const t = camera.lastPoseTiming;
+  // The payload's own timings, not a camera field: this line describes the run
+  // being painted, and the drain runs long after that run returned.
+  const t = posted.pose.timing;
   let timingLine: string | undefined;
   if (t) {
     timingLine = `votes ${t.votesMs.toFixed(0)}ms  fit ${t.fitMs.toFixed(0)}ms  pose ${t.poseMs.toFixed(0)}ms  distance ${t.distanceMs.toFixed(0)}ms  project ${projectMs.toFixed(0)}ms  decode ${t.decodeMs.toFixed(0)}ms`;
@@ -300,10 +312,6 @@ async function runVisualTailBody(camera: Camera): Promise<void> {
   }
 }
 
-// Posts to the mailbox.
-function markVisualsDirty(camera: Camera): void {
-  camera.visualsDirty = true;
-}
 
 // Drains the mailbox for one camera. Called from animate() every tick, for
 // every camera -- cheap to the point of free when nothing is dirty, which is
@@ -312,48 +320,36 @@ function markVisualsDirty(camera: Camera): void {
 // Two things have to be true to START: something is pending, and this camera
 // is not mid-reconstruction.
 //
-// THE PROFILER NO LONGER NEEDS THIS GUARD, AND THE STALENESS ARGUMENT DOES.
-// That is the reverse of what this comment used to say, and getting it the
-// right way round matters, because the flag was about to be deleted on the
-// strength of the old version.
+// NEITHER OF THIS GUARD'S ORIGINAL TWO REASONS SURVIVES, AND IT IS STILL HERE.
+// Both halves of that are deliberate, so the history is worth keeping straight:
 //
-// What the old version claimed: the in-place mutation hazard was gone (true --
-// the pipeline returns a result and applyPoseResult swaps it in synchronously),
-// so the flag survived only to keep the profiler's single span stack honest,
-// and fixing that stack would free it.
+//   1. THE PROFILER's shared span stack, which a drain overlapping a capture
+//      used to corrupt. Gone -- profiler.ts records flat intervals and joins
+//      them against a declared table, so nothing can be reparented into
+//      anything.
+//   2. STALENESS. The tail used to take the intermediates handle off the
+//      camera, await resolve(), and write four fields back, then read
+//      lastRecoveredAxes across another await and lastPoseTiming across a
+//      third. A reconstruction landing mid-tail wrote frame N's decode grid
+//      over frame N+1's state. Gone too: the tail is handed its pose as a
+//      payload and reads no camera pose field across an await, and its one
+//      write is guarded by identity (see runVisualTailBody).
 //
-// The stack IS fixed (profiler.ts records flat intervals and joins them against
-// a declared table, so nothing can be reparented into anything). But the
-// staleness argument was retired too early:
-//
-//   applyPoseResult's atomic swap prevents a torn RESULT OBJECT. It does not
-//   prevent a torn SEQUENCE OF READS, and this tail reads camera fields on both
-//   sides of its awaits -- it takes camera.pendingIntermediates, awaits
-//   resolve(), then WRITES intermediates/lastDecodeGrid/lastDecodeRotated/
-//   lastDecodeCorrectness; later it reads lastRecoveredAxes, awaits the
-//   projection, then reads lastPoseTiming. A reconstruction landing mid-tail
-//   writes frame N's decode grid over frame N+1's state.
-//
-// So the window shrank from "the whole reconstruction" to "any instant". It did
-// not reach zero, and this exclusion is what covers it.
-//
-// THE PRECONDITION FOR DROPPING IT is therefore not a profiler fix. It is
-// collapsing the thirteen `last*` pose-result fields into one `camera.pose`, so
-// this function can snapshot a single pointer at the top and be immune to
-// whatever lands underneath it -- and so the visuals mailbox can carry the pose
-// as a PAYLOAD (like pendingCapture and pendingPoseResult already do) instead
-// of being a bare boolean over state smeared across a camera.
+// So what remains is not a correctness argument at all -- it is the two
+// supporting reasons below, which never justified it alone and are the reason
+// dropping it was never expected to be a win. Dropping it is a ONE-LINE change
+// here and in the two entry points, and it should be made against a MEASUREMENT
+// on a real device, not on the strength of the hazard having gone away:
 //
 // That exclusion is MUTUAL: runAxesReconstruction and recomputeFromLastCapture
-// both decline to start while visualsDraining is set. Two supporting reasons,
-// neither of which would justify it alone:
+// both decline to start while visualsDraining is set.
 //
-//   1. It costs nothing anyone can feel. The window it blocks is the same
+//   A. It costs nothing anyone can feel. The window it blocks is the same
 //      window that was already blocked before deferral existed -- the tail
 //      used to run INSIDE axesCapturing, so "reconstruction + tail" was one
 //      uninterruptible stretch either way. All this does is split the flag
 //      that covers it in two.
-//   2. Overlapping wouldn't buy much. The tail's cost is display GPU work on
+//   B. Overlapping wouldn't buy much. The tail's cost is display GPU work on
 //      the SAME device queue the pose stages use, so running it alongside the
 //      next reconstruction trades a serial wait for queue contention. The win
 //      here was never parallelism -- it is that the tail stops being AWAITED on
@@ -361,11 +357,11 @@ function markVisualsDirty(camera: Camera): void {
 //      between captures (~340ms of one, at the default 500ms interval against a
 //      ~159ms reconstruction).
 //
-// Still per-camera. Two cameras reconstructing at once is no longer a profiler
-// problem (flat records cannot collide), but it would hit the same read-tearing
-// described above, and axesCapturing is per-camera too. Not a new problem and
-// not one to solve here -- there is exactly one camera today (see main.ts's
-// animate loop).
+// Still per-camera, and that is now simply correct rather than a limitation:
+// two cameras reconstructing at once collide in neither the profiler (flat
+// records) nor the pose (each publishes its own camera's own field), and
+// axesCapturing is per-camera too. There is exactly one camera today anyway
+// (see main.ts's animate loop).
 //
 // Placement in animate() matters just as much as the guard: this must run
 // BEFORE the auto-capture trigger. runAxesReconstruction sets axesCapturing
@@ -374,10 +370,11 @@ function markVisualsDirty(camera: Camera): void {
 // the capture wins every time (interval shorter than a reconstruction) the
 // drain never runs at all.
 export function drainVisuals(camera: Camera): void {
-  if (!camera.visualsDirty || camera.visualsDraining || camera.axesCapturing) return;
-  camera.visualsDirty = false;
+  const posted = camera.pendingVisuals;
+  if (!posted || camera.visualsDraining || camera.axesCapturing) return;
+  camera.pendingVisuals = null;
   camera.visualsDraining = true;
-  runVisualTail(camera)
+  runVisualTail(camera, posted)
     .catch((e) => console.error('[visuals] deferred refresh failed:', e))
     .finally(() => {
       camera.visualsDraining = false;
@@ -385,10 +382,12 @@ export function drainVisuals(camera: Camera): void {
       // axesCapturing between this drain starting and finishing. Kept as the
       // invariant's own tripwire rather than deleted as dead code: if either
       // capture-side guard is ever relaxed, this is what stops a half-repainted
-      // frame from being the LAST thing painted, by re-arming for a clean pass
-      // over one settled state. Cheap enough that proving it unnecessary is not
-      // worth as much as it costing nothing to be wrong about.
-      if (camera.axesCapturing) camera.visualsDirty = true;
+      // frame from being the LAST thing painted, by re-arming for a clean pass.
+      // `??=`, not `=`: a newer reconstruction that posted while this drain ran
+      // owns the slot, and re-arming with the payload we already spent would
+      // put the OLDER pose back in front of it. Re-running on the spent payload
+      // is free and paints the same thing -- resolve() is idempotent.
+      if (camera.axesCapturing) camera.pendingVisuals ??= posted;
     });
 }
 
@@ -400,9 +399,9 @@ export function drainVisuals(camera: Camera): void {
 // this is the only caller that has a drain to resolve it in and the only one
 // that knows which overlays are on.
 //
-// 'decodeGrid' is unconditional: lastDecodeGrid/lastDecodeRotated/
-// lastDecodeCorrectness feed the Projected-Cam view and the pose readout, and
-// the drain always runs, so there is nothing to gate on.
+// 'decodeGrid' is unconditional: the decodeGrid/decodeRotated/decodeCorrectness
+// intermediates feed the Projected-Cam view and the pose readout, and the drain
+// always runs, so there is nothing to gate on.
 //
 // fx/fy are asked for only when something draws them. THIS FUNCTION IS THE
 // OTHER HALF OF A CONTRACT: overlays/pipelineField.ts returns null when they
@@ -440,39 +439,30 @@ function displayIntermediates(camera: Camera): IntermediatesRequest {
 
 // ── The one place a pose result lands on a Camera ─────────────────────────
 //
-// This is the seam. The pipeline returns a PoseResult; the app keeps a Camera
-// whose `last*` fields mean "the most recent run's", which is a statement about
-// the app's own bookkeeping and not something the library should have an
-// opinion on. Renaming happens HERE, once, instead of the library adopting the
-// UI's vocabulary -- which is what it did when it wrote these fields itself.
+// This is the seam, and it is now one assignment. The pipeline returns a
+// PoseResult; the app publishes it as camera.pose, the pose that is on screen
+// -- a statement about the app's own bookkeeping the library should have no
+// opinion on. What crosses here is the DIFFERENCE between those two ideas (see
+// camera/model.ts's CameraPose): the undrained handle stays behind in the
+// mailbox, `intermediates` starts empty, and `timing` widens to nullable
+// because the remote path has none.
 //
-// It is also where the staleness hazard used to live. The stages mutated these
-// as they went, so a repaint landing mid-reconstruction could read new axes
-// against an old decode. Every field moves in one synchronous block now, with
-// no await between the first and the last, so there is no halfway state for
-// anything to observe.
+// It used to unpack the result into thirteen separate mutations, which was the
+// staleness hazard's actual home: an atomically swappable object and an
+// exploded copy of it spread across a camera are not the same thing. There is
+// no halfway state to observe now because there is nothing to be halfway
+// through.
 //
-// The three decode fields are NOT set here: they arrive with the drain, since
-// the grid may still be on the device. Cleared, though, and that is deliberate
-// -- leaving the previous run's grid up next to this run's pose is exactly the
-// mixture this function exists to prevent.
+// The intermediates are NOT filled here: they may still be on the device, and
+// they arrive with the drain, which republishes this same object with them in
+// it. Starting empty is the point -- the previous run's decode grid can no
+// longer be read next to this run's axes, because it is not in this object.
 function applyPoseResult(camera: Camera, result: PoseResult): void {
-  camera.lastVoteComposites = result.voteComposites;
-  camera.lastVotes = result.votes;
-  camera.lastQuadricPair = result.quadricPair;
-  camera.lastGridPeriodPhase = result.gridPeriodPhase;
-  camera.lastRecoveredAxes = result.recoveredAxes;
-  camera.lastPositionDecode = result.positionDecode;
-  camera.lastChainTransfers = result.chainTransfers;
-  camera.lastPoseTiming = result.timing;
-
-  camera.pendingIntermediates = result.pending;
-  camera.intermediates = null;
-  camera.lastDecodeGrid = null;
-  camera.lastDecodeRotated = null;
-  camera.lastDecodeCorrectness = null;
-
-  camera.axesComputed = !!result.quadricPair;
+  const { pending, ...rest } = result;
+  const pose: CameraPose = { ...rest, intermediates: {} };
+  camera.pose = pose;
+  // Posts to the mailbox. The pose is final; the tail is what is deferred.
+  camera.pendingVisuals = { pose, pending };
 }
 
 async function recomputeStages(camera: Camera) {
@@ -487,25 +477,25 @@ async function recomputeStages(camera: Camera) {
   // confirmed not on the critical path to a pose (distance is already
   // finalized by gridPeriodPhase before that stage would run); they exist
   // only to feed Projected-Cam/World-floor-decal DISPLAY.
-  // A handle this camera never drained (a newer reconstruction superseded it
-  // before runVisualTail ran) would hold the chain's device buffers until
-  // device loss. Released BEFORE the run below rather than after it, so the two
-  // sets of buffers never coexist -- computePoseFromCapture used to do exactly
-  // this, at exactly this moment, by reaching into the state object it was
-  // about to overwrite. It has no such pointer now, so the holder frees it.
-  camera.pendingIntermediates?.release();
-  camera.pendingIntermediates = null;
+  // A payload this camera never drained (a newer reconstruction superseded it
+  // before runVisualTail ran) still owns the chain's device buffers, and would
+  // hold them until device loss. Released BEFORE the run below rather than
+  // after it, so the two sets of buffers never coexist --
+  // computePoseFromCapture used to do exactly this, at exactly this moment, by
+  // reaching into the state object it was about to overwrite. It has no such
+  // pointer now, so the holder frees it.
+  camera.pendingVisuals?.pending?.release();
+  camera.pendingVisuals = null;
 
   const result = await computePoseFromCapture(
     camera, gray, w, h, backendFromForceCPU(globalState.forceCPU), displayIntermediates(camera),
   );
+  // Publishes the pose AND posts the tail's payload -- the pose is final here,
+  // and everything past this point is display. Deferred, that display work
+  // stops being awaited inside the reconstruction's own window, where it
+  // serialized ~20ms of GPU work against the same device queue the pose stages
+  // were using.
   applyPoseResult(camera, result);
-
-  // The pose is final here; everything past this point is display. Deferred,
-  // that display work stops being awaited inside the reconstruction's own
-  // window, where it serialized ~20ms of GPU work against the same device
-  // queue the pose stages were using.
-  markVisualsDirty(camera);
 }
 
 export function runAxesReconstruction(camera: Camera) {

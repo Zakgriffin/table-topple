@@ -1,7 +1,6 @@
 import * as THREE from 'three';
 import { GRID_STEP, MATH_QUAT } from '../../../sphereLab/constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../../../sphereLab/math/geometry.ts';
-import { tallyPositionVotesGPU } from './decodeTally.gpu.ts';
 import { buildAndTallyDecodeGPU } from './decodeGridBuild.gpu.ts';
 import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
 import { poseSpan } from '../../timing/stages.ts';
@@ -545,16 +544,22 @@ export async function runPositionDecode(
   // The pose below needs `grid` either way -- which is why reading it was never
   // a decision about what to COMPUTE.
   if (!grid) return { decode: null, readGrid: null };
-  // Same GPU-source-of-truth-verified-by-CPU-fallback pattern as every other
-  // GPU sub-pipeline (axesReconstruction.ts's gradient2x2Field/projectBins/
-  // fitPairOfPlanes) -- see tallyPositionVotesGPU's own header for why this
-  // one is currently a manual toggle rather than always-on (measured SLOWER
-  // than CPU for typical grid sizes, expected to flip in the GPU's favor for
-  // larger decode grids).
-  const tallySpan = poseSpan('decode.tally', { backend });
-  const winner = backend === 'gpu'
-    ? (await tallyPositionVotesGPU(grid)) ?? tallyPositionVotes(grid)
-    : tallyPositionVotes(grid);
+  // CPU, unconditionally, on BOTH backends -- this is the fallback, and there is
+  // nothing left for a GPU tally to do here.
+  //
+  // It used to try `tallyPositionVotesGPU(grid)` first: pack this CPU-built grid,
+  // upload it, tally on device. That route is deleted (see decodeTally.gpu.ts's
+  // retirement note) because it was only ever reached AFTER the GPU decode had
+  // returned null, and every way that happens -- no device, a validation error,
+  // an undecodable frame -- makes a second GPU attempt fail or find the same
+  // nothing. It was measured genuinely faster, but from before decode.build was
+  // ported, when starting from a host-built grid was the normal case.
+  // `backend: 'cpu'` is now a constant rather than the caller's setting, and it
+  // says the true thing: the attr names WHICH IMPLEMENTATION RAN, and on this
+  // path that is always the CPU one, whatever backend the reconstruction asked
+  // for. Passing `backend` through would report a GPU tally that did not happen.
+  const tallySpan = poseSpan('decode.tally', { backend: 'cpu' });
+  const winner = tallyPositionVotes(grid);
   spanEnd(tallySpan);
   if (!winner) return { decode: null, readGrid: null };
 

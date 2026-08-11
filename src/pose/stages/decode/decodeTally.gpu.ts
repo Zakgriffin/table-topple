@@ -1,9 +1,8 @@
 import { ORDER, R, C, debruijnLookup } from '../../../sphereLab/floorPattern.ts';
 import { rotatedDims } from './decodeGrid.ts';
-import { type DecodeSampleGrid, type VoteResult } from '../../results.ts';
-import { dispatchCount, getGPUDevice, readSliceU32, uploadUint32, writeSlice } from '../../gpu/device.ts';
+import { type VoteResult } from '../../results.ts';
+import { dispatchCount, uploadUint32 } from '../../gpu/device.ts';
 import { type Alloc, type Arena, type Slice, allocZeroed, bind, sliceRange } from '../../gpu/arena.ts';
-import { poseArena } from '../lsd/chain.ts';
 import { gpuTimelineSlot } from '../../gpu/gpuTimeline.ts';
 import { DECODE_ARGMAX_WGSL, DECODE_TALLY_WGSL } from './decodeTally.wgsl.ts';
 
@@ -132,48 +131,31 @@ function buildUniforms(gr: number, gc: number, orient: number, tableSize: number
   return buf;
 }
 
-// GPU-resident counterpart to pose/stages/decode/decodeGrid.ts's tallyPositionVotes --
-// see decodeTally.wgsl.ts's header for the design (dense u32 atomic
-// histogram over the bounded (orientation, anchorRow, anchorCol) key space,
-// no float-atomics workaround needed since this is pure counting). Returns
-// null if WebGPU isn't available; caller falls back to the CPU version,
-// which stays the source of truth.
+// ── RETIRED: the CPU-build + GPU-tally hybrid ────────────────────────────
 //
-// The crossover this used to speculate about has now been MEASURED (live, over
-// the dev bridge, simulated camera, 2026-08-02) and the prediction held:
+// `tallyPositionVotesGPU` packed a CPU-BUILT grid, uploaded it, and tallied it
+// here; `tallyFromDeviceGrid` was the submit-and-read wrapper under it. Both are
+// deleted, and the reason is worth keeping because it is not "unused code":
 //
-//        grid          this path   tallyPositionVotes (CPU)
-//        60x59           1.60ms      0.85ms
-//        270x276         1.86ms     18.20ms
+// It was the CPU fallback's tally, so it ran only when the GPU decode had
+// ALREADY returned null -- and every way that happens makes this route
+// pointless. No device: it returns null immediately. Validation error: same
+// device, same shaders, same failure. No anchor scored a vote: it re-tallies a
+// rebuilt grid and finds the same nothing. Null layout: the CPU build returns
+// null first and nothing reaches it. A fallback whose only trigger condition is
+// "the thing it depends on just failed".
 //
-// i.e. this is essentially FLAT in grid size while the CPU version is linear,
-// so it wins ~10x as soon as the grid is large and costs under a millisecond
-// when it isn't. Winners agreed exactly at both sizes. That is why
-// this runs as the fused decode's fallback.
+// Its justification -- measured, real, and quoted here so it is not
+// re-discovered as new: at 270x276 this path was 1.86ms against 18.20ms for
+// tallyPositionVotes, essentially flat in grid size where the CPU is linear.
+// That was from BEFORE decode.build was ported. Once the build moved to the
+// device, a route that starts from a host-built grid had nothing left to serve.
 //
-// An older version of this comment claimed ~40-70ms here vs ~0.4-1ms on CPU,
-// off a much smaller (~22x29) saved capture. Those numbers do not reproduce --
-// the readback latency it blamed (a "4-byte readback observed anywhere from
-// ~5ms to ~55ms") is not visible at all now. Treat that note as superseded.
-export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<VoteResult | null> {
-  const device = await getGPUDevice();
-  if (!device) return null;
-  const gr = grid.rows, gc = grid.cols;
-  const gridData = new Uint32Array(gr * gc);
-  for (let i = 0; i < gr; i++) {
-    for (let j = 0; j < gc; j++) {
-      const pt = grid.points[i][j];
-      gridData[i * gc + j] = pt.valid ? (1 | (pt.bit << 1)) : 0;
-    }
-  }
-  // Into an arena slice like everything else, so the two entry points hand
-  // `tallyFromDeviceGrid` the same kind of thing. Freed by the next
-  // reconstruction's reset rather than by a finally.
-  const arena = poseArena(device);
-  const gridSlice = arena.alloc(gridData.byteLength, 'tally.gridUpload');
-  writeSlice(arena, gridSlice, gridData, 'tally:grid', 'decode.fused');
-  return await tallyFromDeviceGrid(device, arena, gridSlice, gr, gc);
-}
+// Decode is now exactly two implementations: buildAndTallyDecodeGPU (the four
+// stages composed into one encoder) and the CPU pair it is verified against.
+// If a differential harness ever wants the tally in isolation, it should
+// compose `encodeDecodeTally` + `encodeDecodeArgmax` itself, as a bridge in the
+// harness -- the same shape chain.ts's growCollectGPUToCPU has.
 
 // ── The tally, ENCODE-ONLY ───────────────────────────────────────────────
 //
@@ -300,34 +282,3 @@ export function encodeDecodeArgmax(
   return { result, dispatchArgs };
 }
 
-// The unfused route's tally: encode, submit, read the 32-byte result. Used when
-// the grid came from the CPU builder, so there is nothing to share an encoder
-// with. It reads the SAME block the fused path does and simply leaves the
-// correctness slots at zero, because it encodes no correctness pass.
-//
-// What it no longer does is read the histogram. That was 4*R*C u32 -- 331KB at
-// the default board -- brought down so the host could scan it for a maximum.
-export async function tallyFromDeviceGrid(
-  device: GPUDevice, arena: Arena, gridSlice: Slice, gr: number, gc: number,
-): Promise<VoteResult | null> {
-  // Scoped HERE rather than in the entry point above, so a validation failure
-  // becomes a null and the caller's CPU fallback, in one place.
-  device.pushErrorScope('validation');
-  const enc = device.createCommandEncoder();
-  const { hist, totalWindows } = encodeDecodeTally(arena, arena.alloc, enc, { grid: gridSlice, gr, gc });
-  const { result } = encodeDecodeArgmax(arena, arena.alloc, enc, { hist, totalWindows, gr, gc });
-  device.queue.submit([enc.finish()]);
-
-  const raw = await readSliceU32(arena, result, DECODE_RESULT_BYTES, 'decode:result', 'decode.tally');
-
-  // Checked BEFORE the result is believed. An all-zero block reads as "no
-  // anchor won", which is an ordinary undecodable frame -- so without this a
-  // validation failure would be indistinguishable from one, silently, with
-  // nothing in the console.
-  const err = await device.popErrorScope();
-  if (err) {
-    console.error('tallyFromDeviceGrid: WebGPU validation error, falling back to CPU --', err.message);
-    return null;
-  }
-  return unpackDecodeResult(raw)?.winner ?? null;
-}

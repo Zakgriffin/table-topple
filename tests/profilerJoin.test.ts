@@ -229,10 +229,10 @@ test('a real CPU reconstruction joins into ONE tree with no orphans', async () =
   const session = profilerBeginSession();
   let records;
   try {
-    // Intermediates requested so the drain records too -- `pose.drain` is
-    // declared a root in the library table and this is what proves it does not
-    // accidentally land inside the pose.
-    await runPoseOn(input, 'cpu', true);
+    // runPoseOn drains unconditionally -- there is nothing to request -- so
+    // `pose.drain` records here. It is declared a root in the library table and
+    // this is what proves it does not accidentally land inside the pose.
+    await runPoseOn(input, 'cpu');
     records = session.takeRepRecords();
   } finally {
     session.end();
@@ -513,7 +513,7 @@ test('the critical path through a real CPU reconstruction reaches the whole chai
   const session = profilerBeginSession();
   let records;
   try {
-    await runPoseOn(input, 'cpu', true);
+    await runPoseOn(input, 'cpu');
     records = session.takeRepRecords();
   } finally {
     session.end();

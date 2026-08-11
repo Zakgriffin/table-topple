@@ -15,9 +15,9 @@ import { svgEl } from './svgUtil.ts';
 // angle -- so two distinct flood-fill blobs that happen to share a similar
 // direction (e.g. two separate rows of the grid) still render as visibly
 // different colors, which is exactly what these debug views are for
-// (inspecting flood-fill/fragmentation behavior, not direction). rawMembers[0]
-// is just some deterministic, stable-given-the-same-settings member pixel to
-// hash off of -- growRegionsCCL (pose/stages/lsd/) collects a
+// (inspecting flood-fill/fragmentation behavior, not direction).
+// `region.members[0]` is just some deterministic, stable-given-the-same-settings
+// member pixel to hash off of -- growRegionsCCL (pose/stages/lsd/) collects a
 // region's members in increasing pixel-index order, so this is actually its
 // LOWEST-index member, not a meaningful "seed" (dense JFA seeding has no
 // single privileged seed pixel the way the old serial BFS's seed-first
@@ -176,12 +176,20 @@ export function repaintLsdRawRegionsHighlight(camera: Camera) {
   }
   camera.lsdRawRegionsTex.needsUpdate = true;
 }
-function paintRejectedRaster(rects: readonly LsdRectangle[], out: Uint8Array, w: number, h: number) {
+// Joined by INDEX: `rects[i]` is the fit of `regions[i]` on both backends (see
+// pose/stages/lsd/types.ts). A rectangle used to carry its own copy of this
+// pixel list, which meant the region CSR came down twice whenever this view and
+// the raw-region view were both on.
+function paintRejectedRaster(
+  rects: readonly LsdRectangle[], regions: readonly GrownRegion[],
+  out: Uint8Array, w: number, h: number,
+) {
   out.fill(0);
-  for (const r of rects) {
-    if (r.accepted) continue;
-    for (let mi = 0; mi < r.rawMembers.length; mi++) {
-      paintMember(out, r.rawMembers[mi], w, h, 255, 40, 40, 200);
+  for (let i = 0; i < rects.length; i++) {
+    if (rects[i].accepted) continue;
+    const members = regions[i].members;
+    for (let mi = 0; mi < members.length; mi++) {
+      paintMember(out, members[mi], w, h, 255, 40, 40, 200);
     }
   }
 }
@@ -191,7 +199,9 @@ function paintRejectedRaster(rects: readonly LsdRectangle[], out: Uint8Array, w:
 // Accepted (showLsdSegments) and rejected (showLsdRejected) are drawn
 // independently -- neither requires the other. A small yellow dot marks a
 // rectangle that only passed NFA after at least one retry.
-function drawRectanglesSvg(camera: Camera, rects: readonly LsdRectangle[]) {
+function drawRectanglesSvg(
+  camera: Camera, rects: readonly LsdRectangle[], regions: readonly GrownRegion[],
+) {
   while (lsdRectanglesGroup.firstChild) lsdRectanglesGroup.removeChild(lsdRectanglesGroup.firstChild);
   const settings = camera.settings;
   if (!settings.showLsdSegments && !settings.showLsdRejected) return;
@@ -206,7 +216,8 @@ function drawRectanglesSvg(camera: Camera, rects: readonly LsdRectangle[]) {
     y: rect.y + (row + 0.5) * (rect.h / fieldH),
   });
 
-  for (const r of rects) {
+  for (let i = 0; i < rects.length; i++) {
+    const r = rects[i];
     const draw = r.accepted ? settings.showLsdSegments : settings.showLsdRejected;
     if (!draw) continue;
 
@@ -223,7 +234,10 @@ function drawRectanglesSvg(camera: Camera, rects: readonly LsdRectangle[]) {
 
     let stroke: string, dash: string, width: number;
     if (r.accepted) {
-      const [hr, hg, hb] = hsvToRgb(hashSeedIndexToHueDeg(r.rawMembers[0]), 1, 1);
+      // Same seed the raw-region raster hues its blobs by -- `regions[i]` is
+      // this rectangle's own region -- so a segment and the pixels it was fitted
+      // from are the same color in the two views.
+      const [hr, hg, hb] = hsvToRgb(hashSeedIndexToHueDeg(regions[i].members[0]), 1, 1);
       stroke = `rgb(${hr},${hg},${hb})`; dash = 'none'; width = 2;
     } else {
       stroke = 'rgba(255,40,40,0.85)'; dash = '4,3'; width = 1.5;
@@ -262,8 +276,16 @@ export function updateLsdOverlay(camera: Camera) {
     while (lsdRectanglesGroup.firstChild) lsdRectanglesGroup.removeChild(lsdRectanglesGroup.firstChild);
     return;
   }
+  // BOTH, together. All three views join a rectangle to its region by index
+  // now, so `regions` is drained under exactly the same condition as `rects`
+  // (see axesReconstruction.ts's readDisplayIntermediates) and one without the
+  // other means the pose came from somewhere that has neither -- a remote
+  // device-compute capture, which publishes `rects: []` and no intermediates at
+  // all. Drawing nothing is right there; drawing rectangles hued off the wrong
+  // regions would not be.
   const rects = camera.pose?.intermediates.rects;
-  if (!rects) return;
+  const regions = camera.pose?.intermediates.regions;
+  if (!rects || !regions) return;
 
   if (settings.showLsdRawRegions) {
     // Respects whatever camera.lastHoverFieldIndex already is, rather than
@@ -271,10 +293,10 @@ export function updateLsdOverlay(camera: Camera) {
     repaintLsdRawRegionsHighlight(camera);
   }
   if (settings.showLsdRejected) {
-    paintRejectedRaster(rects, camera.lsdRejectedData, camera.rtSize.w, camera.rtSize.h);
+    paintRejectedRaster(rects, regions, camera.lsdRejectedData, camera.rtSize.w, camera.rtSize.h);
     camera.lsdRejectedTex.needsUpdate = true;
   }
-  drawRectanglesSvg(camera, rects);
+  drawRectanglesSvg(camera, rects, regions);
 
   const accepted = rects.filter((r) => r.accepted);
   // The growth half of the readout no longer reports a ROUND COUNT. roundsRun
@@ -283,8 +305,7 @@ export function updateLsdOverlay(camera: Camera) {
   // The part that MATTERED is still here and comes straight off the setting:
   // lsdCclSteps != 0 means the scrubber stopped the loop short of the fixpoint,
   // so the regions on screen are mid-growth and NOT what production produces.
-  const regions = camera.pose?.intermediates.regions;
-  const growthPart = settings.showLsdRawRegions && regions
+  const growthPart = settings.showLsdRawRegions
     ? `${regions.length} regions`
       + `${settings.lsdCclSteps === 0 ? '' : ` (CAPPED at ${settings.lsdCclSteps} steps -- mid-growth, not the real result)`} -- `
     : '';

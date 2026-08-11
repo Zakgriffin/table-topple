@@ -67,8 +67,12 @@ test('the regions and rects handed back are the collect/fit output', async () =>
   assert.equal(regionId.length, input.w * input.h);
   assert.ok(rects.length > 0, 'no rectangles');
   assert.ok(rects.some((r) => r.accepted), 'no accepted rectangles');
-  // Every rect belongs to a region, so there cannot be more of them.
-  assert.ok(rects.length <= regions.length, `${rects.length} rects from ${regions.length} regions`);
+  // ONE RECT PER REGION, and this is the premise of the index join that
+  // replaced LsdRectangle.rawMembers: three overlays now read `regions[i]` to
+  // find the pixels `rects[i]` was fitted from. It used to be `<=`, because the
+  // CPU fitter dropped regions it could not fit -- which is precisely the shape
+  // that would mis-attribute members rather than fail.
+  assert.equal(rects.length, regions.length, `${rects.length} rects from ${regions.length} regions`);
 });
 
 test('the decode grid is read through a function, not owned through a handle', async () => {
@@ -89,23 +93,33 @@ test('reading intermediates does not change the pose', async () => {
   // existed at all: what you ask for must never be what gets computed, or a
   // debug view and a timing run would disagree.
   //
-  // It is structural now rather than enforced -- a read is a read -- but the
-  // test stays, because "structural" is a claim about code that can stop being
-  // true. What WOULD break it: a future stage that skips work when nobody is
-  // going to read its output. The `wantMembers` argument below is exactly that
-  // shape and is the one thing to watch: it changes what the chain BRINGS BACK,
-  // and this asserts it does not change what the chain COMPUTES.
-  const bare = await computePoseFromCapture(input, input.gray, input.w, input.h, 'cpu', false);
-  const full = await computePoseFromCapture(input, input.gray, input.w, input.h, 'cpu', true);
-  const grid = await full.readGrid!();
+  // THE SHAPE OF THIS TEST CHANGED WITH `wantMembers`. It used to run the
+  // pipeline twice under the two values of that flag and compare the poses,
+  // because a request parameter was the one thing that could make a run differ
+  // from a run. With the flag gone, that version would have been two IDENTICAL
+  // calls agreeing with each other -- the exact false pass its own comment
+  // warned about, arriving by deletion rather than by mistake.
+  //
+  // So it asks the question that is still askable: does DRAINING a result
+  // change it? One run is read (the decode grid, the chain's own fields), the
+  // other is not, and the pose has to be the same either way. That is a weaker
+  // guard than the old one and it is worth saying so -- nothing in the library
+  // takes a request any more, so the property is structural, and what would
+  // break it is a future stage that skips work when nobody will read its
+  // output. There is no such stage today.
+  const bare = await computePoseFromCapture(input, input.gray, input.w, input.h, 'cpu');
+  const drained = await computePoseFromCapture(input, input.gray, input.w, input.h, 'cpu');
+  const grid = await drained.readGrid!();
+  const { fx, regions } = drained.cpuChain!;
 
-  assert.equal(bare.votes.length, full.votes.length);
-  assert.ok(closeTo(bare.recoveredAxes!.distance, full.recoveredAxes!.distance, 0));
-  assert.ok(closeTo(bare.positionDecode!.camPos.x, full.positionDecode!.camPos.x, 0));
-  assert.ok(closeTo(bare.positionDecode!.camPos.z, full.positionDecode!.camPos.z, 0));
-  assert.equal(bare.positionDecode!.consistency, full.positionDecode!.consistency);
+  assert.equal(bare.votes.length, drained.votes.length);
+  assert.ok(closeTo(bare.recoveredAxes!.distance, drained.recoveredAxes!.distance, 0));
+  assert.ok(closeTo(bare.positionDecode!.camPos.x, drained.positionDecode!.camPos.x, 0));
+  assert.ok(closeTo(bare.positionDecode!.camPos.z, drained.positionDecode!.camPos.z, 0));
+  assert.equal(bare.positionDecode!.consistency, drained.positionDecode!.consistency);
   // ...and the reads really did happen, so the comparison above is not two
-  // identical runs agreeing with each other.
+  // untouched runs agreeing with each other.
   assert.ok(grid.grid, 'the decode grid was not read');
-  assert.ok(bare.rects.length > 0 && full.rects.length === bare.rects.length);
+  assert.ok(fx.length > 0 && regions.length > 0, 'the chain was not read');
+  assert.ok(bare.rects.length > 0 && drained.rects.length === bare.rects.length);
 });

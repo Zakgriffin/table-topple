@@ -5,6 +5,8 @@ import {
 import { encodeGradient2x2 } from '../gradient/gradient2x2.gpu.ts';
 import { type RegionSetGPU, encodeCollectRegions } from './collectRegions.gpu.ts';
 import { encodeGrowInit, encodeGrowRound } from './growRegions.gpu.ts';
+// readRegionMembers is here for the HARNESS BRIDGE at the bottom of this file
+// only -- the production chain does not read the region CSR at all any more.
 import { type LsdFitResult, encodeLsdFit, readLsdFitResults, readRegionMembers } from './lsdFit.gpu.ts';
 import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
 import { poseSpan } from '../../timing/stages.ts';
@@ -13,7 +15,7 @@ import { type Backend } from '../../backend.ts';
 import { computeGradient2x2Field } from '../gradient/gradientField.ts';
 import { collectRegionsFromLabels, growRegionsCCL } from './regions.cpu.ts';
 import { fitRegionsCPU, nfaLog10ToLineScore, nfaLogTerms } from './rectangles.cpu.ts';
-import { NO_MEMBERS, type GrownRegion, type LsdRectangle, type LsdSettings } from './types.ts';
+import { type GrownRegion, type LsdRectangle, type LsdSettings } from './types.ts';
 
 // ── LSD (Line Segment Detector, von Gioi/Jakubowicz/Morel/Randall 2010) ───
 // ── from scratch ────────────────────────────────────────────────────────
@@ -101,7 +103,7 @@ const ROUNDS_PER_BATCH = 8;
 
 // Stages 1-4 on GPU: gray in, rectangles out, every intermediate left on device.
 export async function runLsdChainGPU(
-  gray: Float64Array, w: number, h: number, settings: LsdSettings, wantMembers: boolean,
+  gray: Float64Array, w: number, h: number, settings: LsdSettings,
 ): Promise<LsdChainGPU | null> {
   const device = await getGPUDevice();
   if (!device) return null;
@@ -190,7 +192,7 @@ export async function runLsdChainGPU(
   });
   spanEnd(collectSpan);
 
-  const fitSpan = poseSpan('lsd.fit', { wantMembers, backend: 'gpu' });
+  const fitSpan = poseSpan('lsd.fit', { backend: 'gpu' });
   const out = encodeLsdFit(arena, alloc, enc2, {
     fx, fy, regions, w, h,
     rho: settings.rhoNoiseThreshold, toleranceDeg: settings.toleranceDeg, logNTests, logEpsilon,
@@ -213,11 +215,12 @@ export async function runLsdChainGPU(
     return null;
   }
 
-  const members = wantMembers
-    ? await readRegionMembers(arena, regions, regionCount, memberCount, 'lsd.fit')
-    : null;
-  if (members) crossed('regions', 'down', (regionCount * 4 + memberCount) * 4);
-
+  // ONE RECT PER REGION, in region order -- that alignment is what every
+  // member-drawing caller joins on now (see LsdRectangle). The chain used to
+  // read the whole region CSR back HERE, under a `wantMembers` flag, purely so
+  // each rect could carry its own member list; the display path then read the
+  // same CSR a second time to draw the raw-region view. Both reads are the
+  // caller's now, and there is only one of them.
   const rects: LsdRectangle[] = new Array(results.length);
   for (let i = 0; i < results.length; i++) {
     const g = results[i];
@@ -225,7 +228,6 @@ export async function runLsdChainGPU(
       cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
       accepted: g.accepted, nfaLog10: g.nfaLog10,
       lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon),
-      rawMembers: members ? members[i].members : NO_MEMBERS,
     };
   }
   spanEnd(fitSpan);
@@ -282,7 +284,7 @@ export function runLsdChainCPU(
   // Around the fitter, so the span means "fit finished" on both backends and
   // `lsd.fit` aggregates across its `backend` attr -- which was the point of
   // collapsing the two ids into one.
-  const fitSpan = poseSpan('lsd.fit', { wantMembers: true, backend: 'cpu' });
+  const fitSpan = poseSpan('lsd.fit', { backend: 'cpu' });
   const rects = fitRegionsCPU(regions, field.fx, field.fy, w, h, settings);
   spanEnd(fitSpan);
 
@@ -436,8 +438,8 @@ export async function fitRegionsGPUFromCPU(
 }
 
 // For callers that already hold a CPU gradient field and only want rectangles --
-// the phone's sendDebugInfo pass. Asks for members, because a rectangle with no
-// members cannot be hued by its seed pixel or rasterized.
+// the phone's sendDebugInfo pass, which serializes them as flat numbers and
+// never needs the regions they were fitted from.
 export function computeLsdRectanglesFromField(
   field: GradientField, settings: LsdSettings, backend: Backend,
 ): LsdRectangle[] {

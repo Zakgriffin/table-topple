@@ -437,10 +437,17 @@ async function readDisplayIntermediates(camera: Camera, result: PoseResult): Pro
       || s.showTopGradient
       || s.showGradientArrow || s.showLevelLineArrow
       || s.showLsdRawRegions;
-    // The three LSD debug views. The raw-region view additionally needs the
-    // per-pixel labeling and the region member lists.
+    // The three LSD debug views. ALL THREE need the region member lists now,
+    // not just the raw-region one: a rectangle no longer carries its own
+    // members, so the rejected raster and the segment hues join `rects[i]` to
+    // `regions[i]` (see LsdRectangle). That is why these two conditions are the
+    // same condition, and updateLsdOverlay requires both arrays together.
+    //
+    // `regionId` stays gated on the raw-region view alone -- it is a separate
+    // n*4 readback and only the hover highlight looks up a pixel's region.
     const needRects = s.showLsdSegments || s.showLsdRejected || s.showLsdRawRegions;
-    const needRegions = s.showLsdRawRegions;
+    const needRegions = needRects;
+    const needRegionId = s.showLsdRawRegions;
 
     // ── the reads, written out ──
     //
@@ -460,18 +467,21 @@ async function readDisplayIntermediates(camera: Camera, result: PoseResult): Pro
       // over is a pointer copy, which is why the CPU path pays literally nothing
       // for display data.
       if (needField) { out.fx = cpuChain.fx; out.fy = cpuChain.fy; }
-      if (needRegions) { out.regionId = cpuChain.regionId; out.regions = cpuChain.regions as GrownRegion[]; }
+      if (needRegionId) out.regionId = cpuChain.regionId;
+      if (needRegions) out.regions = cpuChain.regions as GrownRegion[];
     } else if (chain) {
       const { arena, n } = chain;
       if (needField) {
         out.fx = new Float64Array(await readSliceF32(arena, chain.fx, n * 4, 'fx', 'pose.drain'));
         out.fy = new Float64Array(await readSliceF32(arena, chain.fy, n * 4, 'fy', 'pose.drain'));
       }
-      if (needRegions) {
+      if (needRegionId) {
         const raw = await readSliceU32(arena, chain.regionId, n * 4, 'regionId', 'pose.drain');
         // BIT REINTERPRETATION, not a numeric convert -- that is what makes the
         // -1 sentinel survive the trip (collect's scatter writes a real -1).
         out.regionId = new Int32Array(raw.buffer.slice(0));
+      }
+      if (needRegions) {
         out.regions = (await readRegionMembers(
           arena, chain.regions, chain.regionCount, chain.memberCount, 'pose.drain',
         )) as GrownRegion[];
@@ -548,12 +558,12 @@ async function recomputeStages(camera: Camera) {
   // all that is left is to stop pointing at them.
   camera.pendingVisuals = null;
 
+  // Nothing is asked for up front any more -- see computePoseFromCapture. The
+  // last thing that was (the region CSR, for each rectangle's member list) is
+  // read in the drain below like everything else, ONCE, now that a rectangle
+  // joins to its region by index instead of carrying a copy.
   const result = await computePoseFromCapture(
     camera, gray, w, h, backendFromForceCPU(globalState.forceCPU),
-    // The one thing still asked for UP FRONT: the region CSR readback that
-    // fills each rectangle's rawMembers has to happen while the chain still
-    // holds the CSR, so it cannot be a later read like the others.
-    camera.settings.showLsdSegments || camera.settings.showLsdRejected || camera.settings.showLsdRawRegions,
   );
   // Publishes the pose AND posts the tail's payload -- the pose is final here,
   // and everything past this point is display. Deferred, that display work

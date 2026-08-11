@@ -61,7 +61,7 @@ export interface LsdCompositeSettings {
 // which used to need the residency to be kept alive by hand.
 export async function computeGradient2x2Composites(
   settings: LsdCompositeSettings,
-  gray: Float64Array, w: number, h: number, backend: Backend, wantMembers = false,
+  gray: Float64Array, w: number, h: number, backend: Backend,
 ): Promise<{
   composites: { root: number; line: CompositeLine }[];
   rects: LsdRectangle[];
@@ -79,7 +79,7 @@ export async function computeGradient2x2Composites(
   };
   // The GPU chain falls back as a WHOLE now rather than per stage -- see
   // chain.ts's header for why that capability was deliberately dropped.
-  const chain = backend === 'gpu' ? await runLsdChainGPU(gray, w, h, lsdSettings, wantMembers) : null;
+  const chain = backend === 'gpu' ? await runLsdChainGPU(gray, w, h, lsdSettings) : null;
   const cpu = chain ? null : runLsdChainCPU(gray, w, h, lsdSettings);
   const rects = chain ? chain.rects : cpu!.rects;
 

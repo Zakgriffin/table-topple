@@ -71,7 +71,12 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let end = start + memberSizes[ri];
   let o = ri * 10u;
   if (end - start < 2u) {
-    outBuf[o + 6u] = 0.0; // too few members -- leave rejected, same as CPU's "degenerate -- no meaningful axis"
+    // Too few members -- no meaningful axis, same verdict as the CPU's
+    // degenerateRect. The WHOLE slot is zeroed, not just the accepted flag:
+    // outBuf is an arena slice, so anything left unwritten is the PREVIOUS
+    // reconstruction's rectangle, and this rect is still returned to the host
+    // and still drawn by the rejected overlay.
+    for (var f = 0u; f < 10u; f = f + 1u) { outBuf[o + f] = 0.0; }
     return;
   }
 

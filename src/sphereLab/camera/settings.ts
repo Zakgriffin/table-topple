@@ -63,10 +63,10 @@ export const CameraSettingsCommonSchema = Type.Object({
   // also draw candidates that failed NFA validation (dashed red), not just
   // accepted rectangles
   showLsdRejected: Type.Boolean(),
-  // Scatters each drawn rectangle's OWN stage-3 raw region membership
-  // (LsdRectangle.rawMembers -- the actual flood-filled pixels, before any
-  // retry tightened/shrank it) as small dots, so the raw growing result can
-  // be compared directly against the fitted rectangle it produced.
+  // Scatters each drawn rectangle's OWN stage-3 raw region membership (the
+  // actual flood-filled pixels of `regions[i]`, the region rectangle i was
+  // fitted from) as small dots, so the raw growing result can be compared
+  // directly against the fitted rectangle it produced.
   showLsdRawRegions: Type.Boolean(),
   // draw the merged composite lines fed by the segments above (the join walk
   // that produced them is deleted; see votes.ts's compositesFromLsdRectangles

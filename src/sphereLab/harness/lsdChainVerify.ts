@@ -98,7 +98,7 @@ interface ChainConfigReport {
   config: ChainConfig;
   n: number; // rectangles returned
   accepted: number;
-  members: number; // total rawMembers across all rectangles
+  members: number; // total member pixels across all grown regions
   // Deltas against the CPU reference. Every one of these should be 0 unless the
   // grower legitimately diverged -- see the header.
   dN: number;
@@ -110,10 +110,10 @@ interface ChainConfigReport {
   maxCenterDelta: number; // px
   maxLengthDelta: number; // px
   maxNfaLog10Delta: number;
-  // What this configuration actually cost the bus, straight off the residency's
-  // own ledger -- free here, because the residency records a transfer at the
-  // point it decides to make one. The production row is the number to watch:
-  // it should be 1 (gray up, nothing down).
+  // What this configuration actually cost the bus, off the chain's own ledger
+  // -- free here, because a crossing is counted where it is made. This is now
+  // the production configuration exactly: the sweep no longer asks for anything
+  // the pose path does not, so the GPU row is what a real reconstruction pays.
   crossings: number;
   bytes: number;
   medianMs: number;
@@ -158,15 +158,14 @@ export async function awaitPageFocus(timeoutMs = 120000): Promise<number> {
 
 const CONFIGS: ChainConfig[] = ['reference (forceCPU)', 'production (GPU)'];
 
-// `members` is passed in rather than summed off rects[].rawMembers, and that is
-// load-bearing rather than cosmetic. The production fitter stopped filling
-// rawMembers in (see pose/stages/lsd/chain.ts's fitRegionsGPU), so summing it
-// here would report 0 for every fit=GPU configuration and a real total for every
-// fit=CPU one -- i.e. this harness's single most alarming-looking column would
-// show a large dMembers on exactly the configurations it exists to clear. That
-// is a false positive manufactured by the instrument, which is worse than no
-// column at all. Sourced from the residency instead, where the number is the
-// same one either side of every toggle.
+// `members` is passed in rather than summed off the rectangles, and the reason
+// outlived the mechanism it was written about: rectangles never carried member
+// lists on the GPU path, and now they carry them on neither. Summing off rects
+// would report 0 for the production row and a real total for the reference one
+// -- this harness's most alarming-looking column showing a large dMembers on
+// exactly the configuration it exists to clear, a false positive manufactured
+// by the instrument. It comes from each backend's own region set instead, where
+// it is the same quantity on both sides.
 function summarize(rects: LsdRectangle[], members: number): { n: number; accepted: number; members: number } {
   let accepted = 0;
   for (const r of rects) if (r.accepted) accepted++;
@@ -205,21 +204,20 @@ export async function verifyLsdChain(input: HarnessInput, reps = 3): Promise<Lsd
   const runOnce = async (t: ChainConfig) => {
     const backend: Backend = t === 'reference (forceCPU)' ? 'cpu' : 'gpu';
     const t0 = performance.now();
-    // `wantMembers` is TRUE here, unlike the pose path -- this sweep reports
-    // member totals. The chain counts that readback in its own ledger, so unlike
-    // the old arrangement (where the harness took the summary BEFORE reading
-    // members, specifically to keep its own cost out of the configuration's
-    // numbers) the crossings column now includes it on the GPU row. That is the
-    // honest reading of what THIS run cost; the production configuration's
-    // crossing count is what `computePoseFromCapture` reports, not this.
-    const gpu = backend === 'gpu' ? await runLsdChainGPU(gray, w, h, settings, true) : null;
+    const gpu = backend === 'gpu' ? await runLsdChainGPU(gray, w, h, settings) : null;
     const cpu = gpu ? null : runLsdChainCPU(gray, w, h, settings);
     const ms = performance.now() - t0;
     const rects = gpu ? gpu.rects : cpu!.rects;
     const summary: TransferSummary = gpu ? gpu.transfers : { crossings: 0, bytes: 0, entries: [] };
-    let members = 0;
-    if (gpu) for (const r of rects) members += r.rawMembers.length;
-    else for (const r of cpu!.regions) members += r.members.length;
+    // The member total costs this sweep NOTHING on either backend now. It used
+    // to ask the chain for `wantMembers`, which pulled the whole region CSR
+    // down -- four readbacks charged to the production row's crossings column,
+    // so the configuration being measured was not quite the configuration that
+    // ships. `memberCount` is the CSR's own total, already read as part of the
+    // two-word counts readback the fit stage takes regardless.
+    const members = gpu
+      ? gpu.memberCount
+      : cpu!.regions.reduce((sum, r) => sum + r.members.length, 0);
     return { rects, ms, summary, members };
   };
 

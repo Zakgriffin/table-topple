@@ -13,28 +13,33 @@
 // comparability rather than correctness.
 export interface GrownRegion { members: Int32Array; meanUx: number; meanUy: number }
 
+// FLAT: nine numbers and a flag, nothing that points anywhere. It used to
+// carry `rawMembers`, its region's whole pixel-index list, which made a
+// rectangle an object rather than a row -- and made "were the members read?" a
+// property of when the rect was BUILT, since the field could only be filled
+// inside the chain while the CSR was still device-resident. That is what the
+// `wantMembers` request parameter existed to answer, and it is why the CSR was
+// read twice per reconstruction whenever a debug view was on.
+//
+// ── THE INDEX JOIN, which replaces it ──
+//
+// `rects[i]` is the fit of `regions[i]`, one rect per grown region, on BOTH
+// backends and in the same order. The GPU fitter dispatches over `regionCount`
+// and writes `out[r]`; the CPU fitter walks its region array in order and emits
+// a slot for every region including the degenerate ones it cannot fit (see
+// fitRegionsCPU). So a caller holding both arrays recovers a rectangle's
+// members with `regions[i].members` and pays nothing for the ones it does not
+// look at.
+//
+// Keep that 1:1 -- it is the join's only premise. A fitter that drops or
+// reorders regions breaks every member-drawing overlay silently, by
+// mis-attributing pixels rather than by failing.
 export interface LsdRectangle {
   cx: number; cy: number; theta: number; length: number; width: number;
   accepted: boolean;
   nfaLog10: number; // log10(NFA) -- more negative = more statistically confident
   lineScore: number; // nfaLog10 squashed to [0, 1] via nfaLog10ToLineScore -- see that function's own comment
-  // Stage 3's grown-region membership (pixel indices into the field) -- the
-  // true, complete flood-fill result this rectangle came from. For debug display
-  // only (overlays/hoverDebugOverlays.ts's raw-region-pixels toggle) -- not
-  // read anywhere in the accept/reject decision itself.
-  //
-  // EMPTY ON THE POSE PATH as of 2026-08-05 -- see NO_MEMBERS below and
-  // fitRegionsGPU's header. Populated only by the CPU fitter, which is what
-  // overlays/lsdOverlay.ts's own from-scratch recomputation runs.
-  rawMembers: Int32Array;
 }
-
-// The one shared empty membership, handed to every rectangle the GPU fitter
-// produces. Shared rather than allocated per rectangle because there are a few
-// thousand per frame and nothing ever writes through it -- and a single identity
-// makes "this rectangle has no members because nobody asked for them" greppable,
-// which `new Int32Array(0)` scattered at four call sites would not be.
-export const NO_MEMBERS = new Int32Array(0);
 
 export interface LsdSettings {
   toleranceDeg: number;

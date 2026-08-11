@@ -148,7 +148,10 @@ export async function readLsdFitResults(
 }
 
 // The region CSR brought down to host arrays. OFF the pose path -- only the
-// display callers and the harnesses want members (see chain.ts's `wantMembers`).
+// display callers and the harnesses want members, and they call this THEMSELVES
+// now, after the chain returns, against the arena slices it left behind. The
+// chain used to make this call on their behalf under a `wantMembers` flag, which
+// meant a caller that also wanted the regions read the same CSR twice.
 export async function readRegionMembers(
   arena: Arena, regions: RegionSetGPU, regionCount: number, memberCount: number, owner?: string,
 ): Promise<{ members: Int32Array; meanUx: number; meanUy: number }[]> {

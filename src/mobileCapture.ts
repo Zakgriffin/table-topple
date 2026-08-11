@@ -2007,10 +2007,11 @@ function captureAndSendFrame() {
 // pose/stages/votes/votes.ts, which discards them after reducing to composite
 // lines) -- a second, explicit LSD pass, mirroring the same
 // recompute-for-debug-display pattern overlays/lsdOverlay.ts's own
-// updateLsdOverlay already uses desktop-side. rawMembers (the per-pixel
-// flood-fill membership list) is deliberately excluded from the wire
-// shape -- it scales with image resolution, not region count, and nothing
-// on the desktop actually reads camera.lastLsdRectangles.rawMembers today.
+// updateLsdOverlay already uses desktop-side. The per-pixel flood-fill
+// membership lists are not on the wire and never were: they scale with image
+// resolution rather than region count, and the desktop draws members only from
+// its OWN local run's regions. A rectangle is nine numbers and a flag now
+// (pose/stages/lsd/types.ts), so the wire shape below is the whole of it.
 function buildDebugPayload(pose: PoseResult, drained: Intermediates, lsdRects: LsdRectangle[]) {
   const grid = drained.decodeGrid;
   let validCount = 0, totalCount = 0;

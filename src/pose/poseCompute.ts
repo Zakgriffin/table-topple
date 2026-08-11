@@ -144,7 +144,7 @@ export interface PoseResult {
 // checking against the transfer ledger rather than asserting.
 async function computeCompositesAndVotes(
   input: PoseInput, gray: Float64Array, w: number, h: number, vFovRad: number,
-  backend: Backend, wantMembers: boolean,
+  backend: Backend,
 ): Promise<{
   voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[];
   rects: LsdRectangle[]; chain: LsdChainGPU | null; cpu: LsdChainCPU | null;
@@ -157,7 +157,7 @@ async function computeCompositesAndVotes(
   // voteComposites back off the camera afterward).
   const compositesSpan = poseSpan('pose.composites');
   const { composites: voteComposites, rects, chain, cpu } =
-    await computeGradient2x2Composites(input.settings, gray, w, h, backend, wantMembers);
+    await computeGradient2x2Composites(input.settings, gray, w, h, backend);
   spanEnd(compositesSpan);
 
   // Contains no await, so this stage's duration is host CPU and is declared
@@ -184,42 +184,24 @@ async function computeCompositesAndVotes(
 // so a pose, a timing, or a verify delta did not carry the configuration that
 // produced it and could not be re-derived. See pose/backend.ts.
 //
-// `want` is what the CALLER asks to be handed back, as a set of names -- see
-// pose/intermediates.ts for the whole argument. It replaces the single
-// `deferDecodeGrid` boolean, whose own comment was the tell that deferral was a
-// per-call-site convention: "this function has three callers and only one of
-// them can honour it."
+// NOTHING IS REQUESTED ANY MORE, and the signature is finally just the inputs.
+// There were three request mechanisms here in turn -- a `deferDecodeGrid`
+// boolean, then a `want` set of intermediate names, then `wantMembers` -- each
+// one a caller telling the pipeline in advance what it would look at. What
+// replaced all of them is the same thing: the run's buffers OUTLIVE the call
+// (they are arena slices on the returned PoseResult, live until the next
+// reconstruction), so a caller reads what it wants when it wants it and pays
+// only for that.
 //
-// The empty request is the fast path AND the default, and it is exact: no
-// handle is created, the residency is destroyed in the finally exactly as
-// before, and the decode grid is never brought down at all. That last part is a
-// real behaviour change from `deferDecodeGrid=false`, which always read the
-// 0.45MB grid back. It is not the view-conditional SKIP that was tried and
-// rejected here (see runPositionDecode) -- that had the pipeline guessing what
-// display might want, leaving a null grid behind a caller's back. This is the
-// caller SAYING so up front, which is the difference between a guess and a
-// contract: axesReconstruction and mobileCapture both ask for 'decodeGrid', so
-// nothing either of them reads has changed.
-//
-// RELEASING A PREVIOUS RUN'S HANDLE IS THE CALLER'S JOB NOW, and it has to be:
-// this function used to find the stale handle on the state object it was about
-// to overwrite and release it there. With nothing shared between two calls
-// there is no stale pointer here to find, so a caller that keeps handles
-// around (axesReconstruction, which parks one on the Camera for a frame)
-// releases the one it is replacing. That is a real transfer of responsibility
-// rather than a deletion -- the alternative is the pipeline reaching into its
-// caller's storage, which is what this whole step removes.
+// `wantMembers` was the last one, and it was defended on the grounds that the
+// region CSR had to be read while the chain still held it. That was FALSE, and
+// the display path was already disproving it: it read the same CSR later,
+// through the same call, off the same slices. What the flag really gated was
+// WHEN the rectangle objects were built -- and now that a rectangle is a flat
+// row joined to its region by index, there is no such moment left to gate. See
+// LsdRectangle.
 export async function computePoseFromCapture(
   input: PoseInput, gray: Float64Array, w: number, h: number, backend: Backend,
-  // Whether the region CSR is brought down to fill each rectangle's rawMembers
-  // -- four readbacks, and the largest byte cost left in the chain. The LAST
-  // request-shaped parameter in the library, and it survives for a reason the
-  // others did not: the members are read INSIDE the chain, where the CSR is
-  // still device-resident, so a caller cannot ask for them afterwards without
-  // the chain having kept them. Callers that draw per-rectangle members (the
-  // LSD overlays, the phone's debug pass) pass true and pay; the pose path
-  // leaves it false.
-  wantMembers = false,
 ): Promise<PoseResult> {
   let rects: LsdRectangle[] = [];
   let chain: LsdChainGPU | null = null;
@@ -233,7 +215,7 @@ export async function computePoseFromCapture(
   // declared, the library has to state its own top: without this, `pose.fit`
   // and friends would each be separate roots and no report could say what one
   // reconstruction cost without adding them up and hoping.
-  const runSpan = poseSpan('pose.run', { backend, wantMembers });
+  const runSpan = poseSpan('pose.run', { backend });
 
   // Owned here rather than inside computeCompositesAndVotes so `gray` stays on
   // the device long enough for the fused decode at the bottom to reuse it --
@@ -257,7 +239,7 @@ export async function computePoseFromCapture(
   // where it happens, inside runLsdChainGPU, and charged to `lsd.gradient`.
   const stageSpan = poseSpan('pose.votes');
   try {
-    const composited = await computeCompositesAndVotes(input, gray, w, h, vFovRad, backend, wantMembers);
+    const composited = await computeCompositesAndVotes(input, gray, w, h, vFovRad, backend);
     const { voteComposites, votes } = composited;
     rects = composited.rects;
     chain = composited.chain;

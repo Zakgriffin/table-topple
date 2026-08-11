@@ -208,8 +208,10 @@ export interface CameraBase {
   // shape as trueContamData/reconContamData above, not the shared SVG
   // overlay LSD rectangles/composite lines use, since these paint a colored
   // pixel PER MEMBER PIXEL of a region rather than a small number of
-  // vector shapes. lsdRawRegionsData: accepted rectangles' own rawMembers,
-  // colored per-blob. lsdRejectedData: rejected rectangles' rawMembers, flat red.
+  // vector shapes. lsdRawRegionsData: the grown regions' member pixels, colored
+  // per-blob. lsdRejectedData: the member pixels of the regions whose rectangle
+  // was rejected, flat red -- joined `rects[i]` to `regions[i]`, see
+  // pose/stages/lsd/types.ts.
   lsdRawRegionsData: Uint8Array; lsdRawRegionsTex: THREE.DataTexture;
   lsdRejectedData: Uint8Array; lsdRejectedTex: THREE.DataTexture;
 

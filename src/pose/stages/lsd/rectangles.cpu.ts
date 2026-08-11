@@ -233,7 +233,23 @@ export function fitRegionOnce(
   return {
     cx: rect.cx, cy: rect.cy, theta: rect.theta, length: rect.length, width: rect.width,
     accepted: logNfa < logEpsilon, nfaLog10,
-    lineScore: nfaLog10ToLineScore(nfaLog10, logEpsilon), rawMembers: region.members,
+    lineScore: nfaLog10ToLineScore(nfaLog10, logEpsilon),
+  };
+}
+
+// What a region below the 2-member floor fits to, on both backends: all zeros,
+// rejected. It exists so `rects[i]` still lines up with `regions[i]` (see
+// LsdRectangle's own comment) -- dropping the region here is what would break
+// the index join, and it would break it by shifting every later rectangle onto
+// the wrong member list rather than by producing one fewer.
+//
+// lsdFit.wgsl.ts writes exactly this slot for the same case. Zeroing all of it
+// rather than just the accepted flag is deliberate now that the output lives in
+// the arena: an unwritten slot is the PREVIOUS run's rectangle, not zeroes.
+function degenerateRect(logEpsilon: number): LsdRectangle {
+  return {
+    cx: 0, cy: 0, theta: 0, length: 0, width: 0,
+    accepted: false, nfaLog10: 0, lineScore: nfaLog10ToLineScore(0, logEpsilon),
   };
 }
 
@@ -255,10 +271,17 @@ export function fitRegionsCPU(
   w: number, h: number, settings: LsdSettings,
 ): LsdRectangle[] {
   const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
-  const results: LsdRectangle[] = [];
-  for (const region of regions) {
-    const r = fitRegionOnce(region, fx, fy, w, h, settings, logNTests, logEpsilon);
-    if (r) results.push(r);
+  // ONE RECT PER REGION, always -- the degenerate ones included. This used to
+  // drop them, which was invisible while `minRegionSize` >= 2 (the prefilter
+  // already removed everything the fitter would refuse) and silently
+  // mis-attributed members to rectangles the moment the slider went below it.
+  // The GPU fitter has always emitted a slot per region; this is the CPU side
+  // agreeing, which also makes the verify harness's `dN` zero by construction
+  // rather than by settings.
+  const results: LsdRectangle[] = new Array(regions.length);
+  for (let i = 0; i < regions.length; i++) {
+    results[i] = fitRegionOnce(regions[i], fx, fy, w, h, settings, logNTests, logEpsilon)
+      ?? degenerateRect(logEpsilon);
   }
   return results;
 }

@@ -32,9 +32,9 @@ import { spanEnd } from '../profiling/profiler.ts';
 // `input` is passed straight through as the PoseInput: a HarnessInput carries
 // `aspect` and `settings`, which is the whole of what the pipeline reads.
 export async function runPoseOn(
-  input: HarnessInput, backend: Backend, wantMembers = false,
+  input: HarnessInput, backend: Backend,
 ): Promise<{ pose: PoseResult; intermediates: Intermediates }> {
-  const pose = await computePoseFromCapture(input, input.gray, input.w, input.h, backend, wantMembers);
+  const pose = await computePoseFromCapture(input, input.gray, input.w, input.h, backend);
   // Same span the app's drain opens, for the same reason: these transfers are
   // owned by `pose.drain` and have to join somewhere.
   const drainSpan = poseSpan('pose.drain');

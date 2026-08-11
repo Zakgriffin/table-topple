@@ -87,19 +87,32 @@ export interface LsdChainGPU {
   memberCount: number;
 }
 
-// How many hook+compress rounds get encoded into ONE command submission before
-// the convergence flag is read back. The flag lives on the GPU, so checking it
-// every round would mean a GPU->CPU sync per round -- and at ~log(L) rounds that
-// latency dominates the actual work, which is only two cheap per-pixel passes.
-// Batching amortizes it: the cost of overshooting is at most
-// (ROUNDS_PER_BATCH - 1) no-op rounds, each far cheaper than one readback stall.
+// How many rounds get encoded into ONE command submission before the
+// convergence flag is read back. The flag lives on the GPU, so checking it every
+// round would mean a GPU->CPU sync per round.
 //
-// This readback is the one remaining loop-control fence in the chain, and it is
-// the largest single stall in the pipeline. Removing it needs an indirect
-// early-out (the dispatch args go to zero once converged) -- a change entirely
-// inside this loop, which is why the grow stage encodes rounds rather than
-// running them.
-const ROUNDS_PER_BATCH = 8;
+// SIZED TO THE OBSERVED ROUND COUNT, not to the hard cap, and the trade changed
+// when the early-out landed. Overshoot used to cost real work -- up to
+// (ROUNDS_PER_BATCH - 1) full-image rounds past the fixpoint -- so the batch was
+// kept small at 8 and a converging run paid two fences. Now `gate` zeroes the
+// dispatch args at the fixpoint, so an overshot round is a zero-workgroup
+// dispatch plus a one-thread gate: nearly free to RUN, but still real to ENCODE.
+// So the batch wants to be just big enough to cover convergence in one pass and
+// no bigger.
+//
+// 16 against a measured 9 rounds at 480x640 (fixtures/default, CPU reference).
+// The theoretical bound is O(log n) ~ 19 for a 307200-pixel image, since
+// pointer-jumping halves the label-chain depth every round -- so 16 is a
+// practical margin, not a guarantee. Exceeding it is not a correctness problem;
+// it costs one more batch and one more fence, which is exactly what every run
+// paid before.
+//
+// The hard cap (w + h + 64) is still the loop's real bound and is ~1184 here.
+// Encoding it outright would remove the last fence entirely and is the obvious
+// next question -- 1184 rounds is ~3550 encoded passes, so it is a question
+// about ENCODE cost, and it should be answered with a measurement rather than
+// this comment.
+const ROUNDS_PER_BATCH = 16;
 
 // Stages 1-4 on GPU: gray in, rectangles out, every intermediate left on device.
 export async function runLsdChainGPU(
@@ -138,7 +151,7 @@ export async function runLsdChainGPU(
 
   const gradSpan = poseSpan('lsd.gradient', { backend: 'gpu' });
   const growSpan = poseSpan('lsd.grow', { backend: 'gpu' });
-  let fx: Slice, fy: Slice, growLabel: Slice, changed: Slice;
+  let fx: Slice, fy: Slice, growLabel: Slice;
   {
     const enc = device.createCommandEncoder();
     const grad = encodeGradient2x2(arena, alloc, enc, { gray: graySlice, w, h });
@@ -146,7 +159,7 @@ export async function runLsdChainGPU(
     const st = encodeGrowInit(arena, alloc, enc, {
       fx, fy, w, h, toleranceDeg: settings.toleranceDeg, rhoLow: settings.rhoNoiseThreshold,
     });
-    growLabel = st.label; changed = st.changed;
+    growLabel = st.label;
 
     // Same bound the CPU path uses -- hook alone propagates one pixel per round,
     // so the longest possible chain caps it; compression makes the real count
@@ -157,18 +170,23 @@ export async function runLsdChainGPU(
     // The first batch rides along in the same encoder as init and the gradient,
     // so a converged-in-one-batch capture costs exactly one submit for stages
     // 1-3 rather than three.
-    let roundsRun = 0;
+    let roundsEncoded = 0;
     let encoder: GPUCommandEncoder | null = enc;
-    while (roundsRun < cap) {
+    while (roundsEncoded < cap) {
       const e = encoder ?? device.createCommandEncoder();
       encoder = null;
-      const batch = Math.min(ROUNDS_PER_BATCH, cap - roundsRun);
-      for (let r = 0; r < batch; r++) encodeGrowRound(arena, e, st, r === batch - 1);
+      const batch = Math.min(ROUNDS_PER_BATCH, cap - roundsEncoded);
+      for (let r = 0; r < batch; r++) encodeGrowRound(arena, e, st);
       device.queue.submit([e.finish()]);
-      roundsRun += batch;
-      const flag = await readSliceU32(arena, changed, 4, 'grow:converged', 'lsd.grow');
-      crossed('grow:converged', 'down', 4);
-      if (flag[0] === 0) break;
+      roundsEncoded += batch;
+      // The ONLY fence in the round loop, and with a batch that covers the
+      // observed round count it is paid once rather than per batch. What it
+      // reads is the dispatch args themselves: `gate` zeroes them at the
+      // fixpoint, so x === 0 IS convergence -- there is no second flag to keep
+      // in sync, and a real image cannot make ceil(w/8) legitimately zero.
+      const a = await readSliceU32(arena, st.args, 16, 'grow:converged', 'lsd.grow');
+      crossed('grow:converged', 'down', 16);
+      if (a[0] === 0) break;
     }
     // A cap-length run that never converged still submitted everything above; if
     // the loop never ran at all (cap <= 0) the gradient still has to reach the
@@ -338,17 +356,24 @@ export async function growCollectGPUToCPU(
   const st = encodeGrowInit(arena, alloc, enc, { fx: fxS, fy: fyS, w, h, toleranceDeg, rhoLow });
   const hardCap = w + h + 64;
   const cap = maxRounds > 0 ? Math.min(maxRounds, hardCap) : hardCap;
-  let roundsRun = 0, converged = false;
+  let roundsEncoded = 0, roundsRun = 0, converged = false;
   let encoder: GPUCommandEncoder | null = enc;
-  while (roundsRun < cap) {
+  while (roundsEncoded < cap) {
     const e = encoder ?? device.createCommandEncoder();
     encoder = null;
-    const batch = Math.min(ROUNDS_PER_BATCH, cap - roundsRun);
-    for (let r = 0; r < batch; r++) encodeGrowRound(arena, e, st, r === batch - 1);
+    const batch = Math.min(ROUNDS_PER_BATCH, cap - roundsEncoded);
+    for (let r = 0; r < batch; r++) encodeGrowRound(arena, e, st);
     device.queue.submit([e.finish()]);
-    roundsRun += batch;
-    const flag = await readSliceU32(arena, st.changed, 4, 'grow:converged', 'lsd.grow');
-    if (flag[0] === 0) { converged = true; break; }
+    roundsEncoded += batch;
+    const a = await readSliceU32(arena, st.args, 16, 'grow:converged', 'lsd.grow');
+    // `activeRounds` counts rounds that changed a label, so the reported count
+    // is those plus the one quiet round that proved the fixpoint -- the same
+    // convention `growRegionsCCL` returns. It used to be reported as rounds
+    // ENCODED, which the batching rounded UP to a multiple of ROUNDS_PER_BATCH;
+    // this is the true number, and now that a batch overshoots on purpose the
+    // encoded count would have been meaningless.
+    if (a[0] === 0) { converged = true; roundsRun = a[3] + 1; break; }
+    roundsRun = a[3];
   }
   if (encoder) device.queue.submit([encoder.finish()]);
 

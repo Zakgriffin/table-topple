@@ -1,7 +1,7 @@
 // WGSL source for the GPU port of pose/stages/lsd/regions.cpu.ts's stage 2+3
 // (growRegionsCCL -- directed connected-component region growing).
 //
-// Three entry points, all pure per-pixel maps over the field:
+// Four entry points. The first three are pure per-pixel maps over the field:
 //
 //   init     seeds label[i] from the eligibility test and normalizes the
 //            level-line vector once, since the hook pass re-reads it every
@@ -10,6 +10,7 @@
 //            label[j]) -- reads ONLY the frozen `label`, writes ONLY `next`.
 //   compress label[i] = next[next[i]] -- pointer jumping. Reads all of `next`,
 //            reads and writes only its OWN label[i].
+//   gate     ONE thread, and it is the whole convergence mechanism -- see below.
 //
 // Neither pass has a same-round cross-pixel write dependency, which is the
 // property that makes each one a single trivially-parallel dispatch. hook
@@ -24,6 +25,19 @@
 // happens in LABEL space (pointer jumping) rather than image space, and why
 // that makes long-range shortcutting structurally unable to jump onto a
 // different parallel ridge.
+//
+// ── CONVERGENCE IS DECIDED ON DEVICE ──
+//
+// hook and compress dispatch INDIRECTLY, off `args`, and `gate` zeroes `args`
+// on the first round that changes nothing. Every round encoded after that is a
+// dispatch of zero workgroups -- valid, ordered, and no threads. So the host no
+// longer has to know the round count to stop at: it encodes a batch, and the
+// rounds past the fixpoint cost nothing but their encoding.
+//
+// The flag the host reads is `args.x` itself, not a separate word. Zero
+// workgroups IS the converged state, so there is nothing to keep in sync -- and
+// a real image can never make args.x legitimately zero, since it is
+// ceil(w/8) >= 1 for any w >= 1.
 export const GROW_REGIONS_WGSL = /* wgsl */ `
 struct Uniforms {
   w: u32, h: u32, pad0: u32, pad1: u32,
@@ -37,6 +51,20 @@ struct Uniforms {
 @group(0) @binding(5) var<storage, read_write> label: array<i32>;
 @group(0) @binding(6) var<storage, read_write> next: array<i32>;
 @group(0) @binding(7) var<storage, read_write> changed: atomic<u32>;
+// x, y, z as consumed by dispatchWorkgroupsIndirect, plus a fourth word the
+// dispatch never reads: the count of rounds that actually changed something.
+// It is here rather than in its own buffer because the host reads it in the
+// same four words it already reads to test convergence.
+//
+// GROUP 1, AND THAT IS NOT COSMETIC. Only \`gate\` binds it. hook and compress
+// dispatch INDIRECTLY off this same range, and a buffer cannot be both a
+// writable storage binding and the indirect source of the same dispatch -- that
+// is a usage-scope conflict, which WebGPU reports asynchronously, so the symptom
+// would be the silent no-op encoder this file's host header describes rather
+// than an exception. Keeping it out of group 0 keeps it out of hook's and
+// compress's usage scope entirely.
+struct Args { x: u32, y: u32, z: u32, activeRounds: u32 }
+@group(1) @binding(0) var<storage, read_write> args: Args;
 
 // Matches NEIGHBOR_DX/NEIGHBOR_DY in the LSD stage exactly -- the full
 // 8-neighbourhood, including the perpendicular ones. At stride 1 a
@@ -117,5 +145,32 @@ fn compress(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (l >= 0) { jumped = next[l]; }
   if (jumped != label[i]) { atomicStore(&changed, 1u); }
   label[i] = jumped;
+}
+
+// Runs after compress, once per round, on a single thread. It reads the flag
+// THIS round just wrote, so a quiet round is detected on the round it happens
+// -- the round operator is deterministic in \`label\` alone, so a round that
+// changes no label is a fixpoint and every later round would recompute the
+// identical result.
+//
+// Why the flag is cleared HERE rather than by a host clearBuffer: the host used
+// to clear it on the last round of a batch, which made it mean "did the final
+// round of this batch change anything". Per-round clearing is what lets the
+// early-out fire mid-batch, and it removes the one place the host had to know
+// where a batch boundary fell.
+//
+// Note the two branches are exclusive on purpose. Once converged the flag is
+// left at 0 and never cleared again, so re-running gate on the no-op rounds
+// that follow is idempotent -- it re-zeroes an already-zero \`args\`.
+@compute @workgroup_size(1)
+fn gate() {
+  if (atomicLoad(&changed) == 0u) {
+    args.x = 0u;
+    args.y = 0u;
+    args.z = 0u;
+  } else {
+    atomicStore(&changed, 0u);
+    args.activeRounds = args.activeRounds + 1u;
+  }
 }
 `;

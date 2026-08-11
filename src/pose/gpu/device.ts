@@ -9,6 +9,7 @@
 
 
 import { type StageRecord, spanStart } from '../../sphereLab/profiling/profiler.ts';
+import { type Arena, type Slice, sliceRange } from './arena.ts';
 
 let devicePromise: Promise<GPUDevice | null> | null = null;
 
@@ -371,7 +372,81 @@ export function uploadUniform(device: GPUDevice, data: ArrayBuffer, owner?: stri
 // time, read it beside gpuTimeline.ts's table -- they measure different clocks
 // and are expected to disagree, since a readback blocks until everything queued
 // ahead of it has executed.
+// Whole-buffer readbacks, for the standalone buffers that are not arena-backed.
+// Both are `readAt` at offset 0 -- see there for the probe ordering and why one
+// implementation matters.
 export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED f32', owner?: string): Promise<Float32Array> {
+  return await readAt(device, buffer, 0, byteLength, label, owner, Float32Array);
+}
+
+export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED u32', owner?: string): Promise<Uint32Array> {
+  return await readAt(device, buffer, 0, byteLength, label, owner, Uint32Array);
+}
+
+// ── Slice-aware transfers (the arena path) ───────────────────────────────
+//
+// The four helpers above each create a buffer per call: an upload allocates one
+// with mappedAtCreation, a readback allocates a staging buffer. With the arena
+// (see arena.ts) the destination already exists, so the upload half becomes a
+// WRITE INTO an existing range and stops allocating at all.
+//
+// `queue.writeBuffer` rather than mappedAtCreation, and that is the whole point
+// of the pair below: mappedAtCreation REQUIRES a fresh buffer, so it cannot
+// target a slice of one that is already live. writeBuffer takes a destination
+// offset, which is exactly what a slice is.
+//
+// These do not replace the four above yet -- uploads whose destination is a
+// standalone buffer (the De Bruijn torus, the tally hash table, both cached
+// per device and neither arena-backed) still want the old ones.
+
+// Bytes into a slice, ledgered exactly like uploadFloat32/uploadUint32 so the
+// crossings table stays exhaustive across the migration -- a transfer that
+// stopped being counted because it changed mechanism would look like a saving.
+export function writeSlice(
+  arena: Arena, slice: Slice, data: Float32Array | Uint32Array | Int32Array,
+  label = 'UNLABELLED write', owner?: string,
+): void {
+  const t0 = performance.now();
+  const { buffer, offset, size } = sliceRange(slice, arena);
+  if (data.byteLength > size) {
+    throw new Error(`writeSlice: '${label}' is ${data.byteLength}B but its slice is ${size}B`);
+  }
+  arena.device.queue.writeBuffer(buffer, offset, data.buffer, data.byteOffset, data.byteLength);
+  xfer(
+    { what: label, kind: 'upload', dir: 'up', bytes: data.byteLength, bareFenceMs: null, queueDrainMs: null },
+    t0, performance.now(), owner,
+  );
+}
+
+// A readback out of a slice. `byteLength` defaults to the whole slice, but is
+// usually PASSED and smaller: a slice is sized at a provable bound and the
+// interesting part of it is often much shorter (see lsdFit's RECT_COPY_CAP),
+// and copying the bound instead of the content is a byte regression that no
+// instrument would flag as one.
+export async function readSliceF32(
+  arena: Arena, slice: Slice, byteLength?: number, label = 'UNLABELLED f32', owner?: string,
+): Promise<Float32Array> {
+  const { buffer, offset, size } = sliceRange(slice, arena);
+  return await readAt(arena.device, buffer, offset, byteLength ?? size, label, owner, Float32Array);
+}
+
+export async function readSliceU32(
+  arena: Arena, slice: Slice, byteLength?: number, label = 'UNLABELLED u32', owner?: string,
+): Promise<Uint32Array> {
+  const { buffer, offset, size } = sliceRange(slice, arena);
+  return await readAt(arena.device, buffer, offset, byteLength ?? size, label, owner, Uint32Array);
+}
+
+// The shared body of both readbacks and of the two whole-buffer helpers above.
+// One implementation so the probe, the ledger and the staging lifetime cannot
+// drift between the arena path and the standalone path -- which they did once
+// before, when uploadUniform carried a profiler span while the other three
+// carried ledger entries, and "every crossing during a reconstruction" was one
+// short of true.
+async function readAt<T extends Float32Array | Uint32Array>(
+  device: GPUDevice, buffer: GPUBuffer, offset: number, byteLength: number,
+  label: string, owner: string | undefined, View: { new (b: ArrayBuffer): T },
+): Promise<T> {
   // Both probes BEFORE the timed read, so the real read is measured against a
   // drained queue and its excess over bareFenceMs is byte cost alone.
   const queueDrainMs = probeEnabled ? await bareRead(device, buffer) : null;
@@ -379,26 +454,10 @@ export async function readFloat32(device: GPUDevice, buffer: GPUBuffer, byteLeng
   const t0 = performance.now();
   const staging = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
   const encoder = device.createCommandEncoder();
-  encoder.copyBufferToBuffer(buffer, 0, staging, 0, byteLength);
+  encoder.copyBufferToBuffer(buffer, offset, staging, 0, byteLength);
   device.queue.submit([encoder.finish()]);
   await staging.mapAsync(GPUMapMode.READ);
-  const result = new Float32Array(staging.getMappedRange().slice(0));
-  staging.unmap();
-  staging.destroy();
-  xfer({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, bareFenceMs, queueDrainMs }, t0, performance.now(), owner);
-  return result;
-}
-
-export async function readUint32(device: GPUDevice, buffer: GPUBuffer, byteLength: number, label = 'UNLABELLED u32', owner?: string): Promise<Uint32Array> {
-  const queueDrainMs = probeEnabled ? await bareRead(device, buffer) : null;
-  const bareFenceMs = probeEnabled ? await bareRead(device, buffer) : null;
-  const t0 = performance.now();
-  const staging = device.createBuffer({ size: byteLength, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ });
-  const encoder = device.createCommandEncoder();
-  encoder.copyBufferToBuffer(buffer, 0, staging, 0, byteLength);
-  device.queue.submit([encoder.finish()]);
-  await staging.mapAsync(GPUMapMode.READ);
-  const result = new Uint32Array(staging.getMappedRange().slice(0));
+  const result = new View(staging.getMappedRange().slice(0));
   staging.unmap();
   staging.destroy();
   xfer({ what: label, kind: 'readback', dir: 'down', bytes: byteLength, bareFenceMs, queueDrainMs }, t0, performance.now(), owner);

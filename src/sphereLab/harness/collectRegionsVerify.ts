@@ -2,7 +2,7 @@ import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientFiel
 import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 import type { GrownRegion } from '../../pose/stages/lsd/types.ts';
-import { growRegionsCCLGPUToCPU } from '../../pose/stages/lsd/growRegions.gpu.ts';
+import { growCollectGPUToCPU } from '../../pose/stages/lsd/chain.ts';
 
 // ── Dev harness: does the GPU region collector match the CPU one? ────────
 //
@@ -64,11 +64,11 @@ export async function verifyCollectRegions(input: HarnessInput): Promise<Collect
     // moving it too would swamp the comparison with grower divergence. That is
     // also why the global forceCPU could not replace this.
     const t0 = performance.now();
-    const cpu = await growRegionsCCLGPUToCPU(fx, fy, ...args, false);
+    const cpu = await growCollectGPUToCPU(fx, fy, ...args, false);
     const cpuMs = performance.now() - t0;
 
     const t1 = performance.now();
-    const gpu = await growRegionsCCLGPUToCPU(fx, fy, ...args, true);
+    const gpu = await growCollectGPUToCPU(fx, fy, ...args, true);
     const gpuMs = performance.now() - t1;
 
     if (!cpu || !gpu) return 'grower returned null (WebGPU unavailable, or a validation error -- check the console)';

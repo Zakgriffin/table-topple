@@ -31,27 +31,37 @@ import {
 // would be the boundary violation this whole restructure exists to remove.
 export const POSE_STAGES = {
   'pose.run': { label: 'pose (whole reconstruction)', within: null },
-  // NOT "gray up" any more, which is what it used to say. The upload is LAZY --
-  // createLsdChainResidency only calls provideCPU, and the 1.19MB crossing
-  // happens at the first `res.gpu('gray')`, inside `lsd.gradient`. With
-  // transfers carrying an owner that is now visible in the table rather than
-  // implied by a label, and the label was implying the wrong stage.
-  'pose.residency': { label: 'residency create', within: 'pose.run' },
 
   // ── the votes stage and the LSD chain underneath it ──
-  'pose.votes': { label: 'votes stage', within: 'pose.run', inputs: ['pose.residency'] },
-  'pose.composites': { label: 'composites (2x2 gradient field)', within: 'pose.votes', inputs: ['pose.residency'] },
-  'lsd.gradient': { label: 'gradient2x2', within: 'pose.composites', inputs: ['pose.residency'] },
-  'lsd.grow': { label: 'grow+collect regions', within: 'pose.composites', inputs: ['lsd.gradient'] },
-  'lsd.fit': { label: 'fit regions', within: 'pose.composites', inputs: ['lsd.grow'] },
-  // These two are the halves of fitAndTestRegionsGPU, and `lsd.wrap` is the
-  // re-wrap that follows it in the same function. All three sit under
-  // `lsd.fit`, which exists so the Promise.all inside it has somewhere to be:
-  // `lsd.fitDispatch` and the region-CSR readback run CONCURRENTLY there, so
-  // they overlap, which is precisely the case a stack had to lie about.
-  'lsd.fitDispatch': { label: 'lsdFit dispatch+fence', within: 'lsd.fit' },
-  'lsd.fitUnpack': { label: 'lsdFit unpack (objects)', within: 'lsd.fit', sync: true, inputs: ['lsd.fitDispatch'] },
-  'lsd.wrap': { label: 'rectangle wrap (objects)', within: 'lsd.fit', sync: true, inputs: ['lsd.fitUnpack'] },
+  //
+  // `pose.residency` used to head this list, for the gray upload.
+  // `createLsdChainResidency` only recorded a CPU array into a map, and the
+  // 1.19MB crossing actually happened later, at the first `res.gpu('gray')` --
+  // which this table's own comment had noticed and worked around by relabelling
+  // rather than by moving. The upload now happens where it is written, at the
+  // top of runLsdChainGPU, and is charged to `lsd.gradient`.
+  'pose.votes': { label: 'votes stage', within: 'pose.run' },
+  'pose.composites': { label: 'composites (2x2 gradient field)', within: 'pose.votes' },
+  'lsd.gradient': { label: 'gradient2x2 (incl. gray up)', within: 'pose.composites' },
+  'lsd.grow': { label: 'grow regions (round loop)', within: 'pose.composites', inputs: ['lsd.gradient'] },
+  // Its OWN stage now. It used to run inside `growRegionsCCLGPU` behind a
+  // `collectOnGPU` boolean, so `label` was not a stage output on either backend
+  // and this seam could not be addressed without threading that flag down to the
+  // kernel. Splitting it cost nothing: both stages encode into the same encoder,
+  // so the labeling still never crosses the bus.
+  'lsd.collect': { label: 'collect regions (CSR)', within: 'pose.composites', inputs: ['lsd.grow'] },
+  // BOTH declared, and that is not belt-and-braces. `lsd.fit`'s real input is
+  // "the regions", which the GPU path gets from `lsd.collect` and the CPU path
+  // gets from `lsd.grow` -- because `growRegionsCCL` still runs the collect
+  // inside its own call and records no separate span. Declaring only
+  // `lsd.collect` truncated the CPU critical path at `lsd.fit`: an input that
+  // never recorded is SILENT by design, so the walk terminated there and
+  // reported rectangle fitting as the whole chain with the grow nowhere on it.
+  // That is the identical failure 6b was built to catch, reintroduced by
+  // splitting the stage -- and caught again by the same test. Both edges resolve
+  // to whichever producer actually ran, since readyAt is the LATEST end among
+  // the inputs that recorded.
+  'lsd.fit': { label: 'fit regions', within: 'pose.composites', inputs: ['lsd.collect', 'lsd.grow'] },
   'votes.filter': { label: 'compositesFromLsdRectangles', within: 'pose.composites', inputs: ['lsd.fit'], sync: true },
   'votes.segments': { label: 'votes (segments)', within: 'pose.votes', inputs: ['pose.composites'], sync: true },
 

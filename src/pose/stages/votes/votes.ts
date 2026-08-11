@@ -1,12 +1,13 @@
 import * as THREE from 'three';
 import { jacobiEigenSymmetric, smallestEigenvector } from '../../../linalg.ts';
 import { cornerDir } from '../../../sphereLab/math/geometry.ts';
-import { FieldResidency } from '../../gpu/fieldResidency.ts';
 import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
 import { poseSpan } from '../../timing/stages.ts';
 import { type CompositeLine, type Vote } from '../../results.ts';
 import { type Backend } from '../../backend.ts';
-import { computeLsdRectangles, runLsdChain } from '../lsd/chain.ts';
+import {
+  type LsdChainCPU, type LsdChainGPU, computeLsdRectangles, runLsdChainCPU, runLsdChainGPU,
+} from '../lsd/chain.ts';
 import type { LsdRectangle } from '../lsd/types.ts';
 // Just the LSD tuning knobs computeGradient2x2Composites/
 // compositesFromLsdRectangles actually read off `settings` -- narrowed off
@@ -54,11 +55,20 @@ export interface LsdCompositeSettings {
 // pose/intermediates.ts). They were dropped on the floor here before, which
 // is one of the reasons overlays/lsdOverlay.ts ran a second complete LSD chain:
 // the first one's answer existed and then stopped existing.
+// Returns the CHAIN alongside the lines, when one ran on GPU. Its slices are
+// live until the next arena reset, which is what lets the caller reuse `gray`
+// for the fused decode and hand fx/fy/regions to a display drain -- both of
+// which used to need the residency to be kept alive by hand.
 export async function computeGradient2x2Composites(
   settings: LsdCompositeSettings,
-  res: FieldResidency, w: number, h: number, backend: Backend, wantMembers = false,
-): Promise<{ composites: { root: number; line: CompositeLine }[]; rects: LsdRectangle[] }> {
-  const rects = await runLsdChain(res, w, h, {
+  gray: Float64Array, w: number, h: number, backend: Backend, wantMembers = false,
+): Promise<{
+  composites: { root: number; line: CompositeLine }[];
+  rects: LsdRectangle[];
+  chain: LsdChainGPU | null;
+  cpu: LsdChainCPU | null;
+}> {
+  const lsdSettings = {
     toleranceDeg: settings.lsdToleranceDeg,
     rhoNoiseThreshold: settings.lsdRhoNoiseThreshold,
     rhoHighThreshold: settings.lsdRhoHighThreshold,
@@ -66,14 +76,20 @@ export async function computeGradient2x2Composites(
     minRegionSize: settings.lsdMinRegionSize,
     nfaEpsilon: settings.lsdNfaEpsilon,
     nfaTestExponent: settings.lsdNfaTestExponent,
-  }, backend, wantMembers);
-  // Its own span inside this function's: it walks all ~5200 rectangles and keeps
-  // ~893, and until it was split out that walk was indistinguishable from the
-  // chain that produced them. Contains no await, so its duration is host CPU.
+  };
+  // The GPU chain falls back as a WHOLE now rather than per stage -- see
+  // chain.ts's header for why that capability was deliberately dropped.
+  const chain = backend === 'gpu' ? await runLsdChainGPU(gray, w, h, lsdSettings, wantMembers) : null;
+  const cpu = chain ? null : runLsdChainCPU(gray, w, h, lsdSettings);
+  const rects = chain ? chain.rects : cpu!.rects;
+
+  // Its own span: it walks all ~5200 rectangles and keeps ~893, and until it was
+  // split out that walk was indistinguishable from the chain that produced them.
+  // Contains no await, so its duration is host CPU.
   const filterSpan = poseSpan('votes.filter');
   const out = compositesFromLsdRectangles(rects, w, h, settings);
   spanEnd(filterSpan);
-  return { composites: out, rects };
+  return { composites: out, rects, chain, cpu };
 }
 
 // One line per ACCEPTED LSD rectangle -- its own two endpoints, no merging.

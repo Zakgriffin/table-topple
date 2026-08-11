@@ -533,12 +533,24 @@ test('the critical path through a real CPU reconstruction reaches the whole chai
   // Named explicitly rather than counted: a stage silently dropping off the
   // chain is exactly the failure above, and a count would have gone from 13 to
   // 12 without saying which one left.
-  for (const id of ['pose.residency', 'pose.votes', 'pose.composites', 'lsd.gradient',
+  // `pose.residency` is gone from this list along with the residency itself: it
+  // measured a map insertion, and the gray upload it was named for happens
+  // inside `lsd.gradient`. `lsd.collect` is NOT here either -- it is declared,
+  // but on the CPU path `growRegionsCCL` runs the collect inside its own call,
+  // so nothing records it and the walk treats an input that never recorded as
+  // silent. That is the documented rule, not an omission; it becomes a real
+  // stage on both backends at Step 3.
+  for (const id of ['pose.votes', 'pose.composites', 'lsd.gradient',
     'lsd.grow', 'lsd.fit', 'votes.filter', 'votes.segments', 'pose.fit', 'pose.assembly',
     'pose.distance', 'gpp.classify', 'gpp.search', 'pose.decode']) {
     assert.ok(ids.includes(id), `${id} is not on the critical path of a CPU reconstruction`);
   }
-  assert.equal(ids[0], 'pose.residency', 'the gray upload is what everything else waits on');
+  // `pose.votes` is the head of the reconstruction now, where it used to be
+  // `pose.residency`: with the residency gone there is no sibling of the votes
+  // stage left for it to wait on, so the chain starts at the first real stage.
+  // The gradient is still the head of the chain INSIDE it -- asserted by its
+  // presence above plus `unsatisfied` being empty.
+  assert.equal(ids[0], 'pose.votes', 'the reconstruction no longer starts at its first stage');
 
   // The pipeline is fully serial on CPU, so the chain should account for very
   // nearly the whole reconstruction. A real number rather than a token one: if

@@ -7,6 +7,7 @@ import {
   createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, readUint32,
   uploadFloat32, uploadUint32, uploadUniform,
 } from '../../gpu/device.ts';
+import { type Arena, type Slice, bind } from '../../gpu/arena.ts';
 import { DECODE_CORRECTNESS_WGSL, DECODE_GRID_BUILD_WGSL } from './decodeGridBuild.wgsl.ts';
 
 interface Pipelines {
@@ -124,7 +125,11 @@ interface FusedDecodeResult {
 // itself gets dropped below.
 export async function buildAndTallyDecodeGPU(
   layout: DecodeGridLayout, gray: Float64Array, w: number, h: number,
-  sharedGray?: GPUBuffer | null,
+  // The LSD chain's device-resident gray, as an ARENA SLICE rather than a bare
+  // buffer -- so the binding goes through bind() and inherits the generation
+  // check. A slice from a previous run throws here instead of feeding the decode
+  // another capture's pixels.
+  sharedGray?: { arena: Arena; slice: Slice } | null,
 ): Promise<FusedDecodeResult | null> {
   const device = await getGPUDevice();
   if (!device) return null;
@@ -134,7 +139,9 @@ export async function buildAndTallyDecodeGPU(
   const { rows, cols } = layout;
   const cells = rows * cols;
   const ownGray = sharedGray ? null : uploadFloat32(device, new Float32Array(gray), 0, 'decode:gray', 'decode.fused');
-  const grayBuf = sharedGray ?? ownGray!;
+  const grayResource: GPUBindingResource = sharedGray
+    ? bind(sharedGray.slice, sharedGray.arena)
+    : { buffer: ownGray! };
   const packedBuf = createStorageBuffer(device, cells * 4);
   const geomBuf = createStorageBuffer(device, cells * 16);
   const uniBuf = uploadUniform(device, buildUniforms(layout, w, h), 'decode.fused');
@@ -144,7 +151,7 @@ export async function buildAndTallyDecodeGPU(
       layout: p.buildLayout,
       entries: [
         { binding: 0, resource: { buffer: uniBuf } },
-        { binding: 1, resource: { buffer: grayBuf } },
+        { binding: 1, resource: grayResource },
         { binding: 2, resource: { buffer: packedBuf } },
         { binding: 3, resource: { buffer: geomBuf } },
       ],

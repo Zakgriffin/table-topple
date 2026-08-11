@@ -294,3 +294,34 @@ export function sliceRange(slice: Slice, arena: Arena): { buffer: GPUBuffer; off
   check(slice, arena);
   return { buffer: slice.buffer, offset: slice.offset, size: slice.size };
 }
+
+// ── THE TRAP THIS STEP INTRODUCES, and the one mechanism against it ───────
+//
+// `device.createBuffer` returns ZEROED memory -- the WebGPU spec guarantees it.
+// An arena slice is LAST FRAME'S BYTES. Every buffer that was silently relying
+// on that guarantee has to say so now, and the ones that were relying on it are
+// not obvious from their declarations: they are the accumulators, where a shader
+// does `atomicAdd` into a slot rather than writing it.
+//
+// A missed one does not fail loudly. It produces a count that is this frame's
+// plus some previous frame's -- larger every reconstruction, plausible for a
+// while, and wrong in a way that looks like a detection-threshold problem three
+// stages downstream. Exactly the class of bug the flat architecture is supposed
+// to make impossible, arriving through the door it opened.
+//
+// So: any slice whose shader ACCUMULATES into it goes through here, and the
+// audit is greppable. As of the LSD chain's conversion that is three --
+// collect's `labelCounts` (histogram's atomicAdd) and `cursor` (scatter's), and
+// prefixSum's `blockOffsets` (nothing writes it in the single-block base case,
+// so addOffsets reads whatever is there). Buffers that are FULLY WRITTEN before
+// they are read -- keptFlag, keptCount, regionId, members, blockSums,
+// dispatchArgs, the scan totals -- deliberately do NOT come through here; they
+// would pay a clear for nothing.
+export function allocZeroed(
+  arena: Arena, alloc: Alloc, enc: GPUCommandEncoder, bytes: number, label: string,
+): Slice {
+  const s = alloc(bytes, label);
+  const r = sliceRange(s, arena);
+  enc.clearBuffer(r.buffer, r.offset, r.size);
+  return s;
+}

@@ -1,4 +1,5 @@
-import { createStorageBuffer, getGPUDevice, readUint32, uploadUint32, uploadUniform } from './device.ts';
+import { type Alloc, type Arena, type Slice, allocZeroed, bind, createArena } from './arena.ts';
+import { getGPUDevice, readSliceU32, writeSlice } from './device.ts';
 import { PREFIX_SUM_ADD_WGSL, PREFIX_SUM_SCAN_WGSL } from './prefixSum.wgsl.ts';
 import { gpuTimelineSlot } from './gpuTimeline.ts';
 
@@ -46,10 +47,12 @@ function getPipelines(device: GPUDevice): ScanPipelines {
   return p;
 }
 
-function uniformFor(device: GPUDevice, n: number): GPUBuffer {
+function uniformFor(arena: Arena, alloc: Alloc, n: number): Slice {
   const buf = new ArrayBuffer(16);
   new DataView(buf).setUint32(0, n, true);
-  return uploadUniform(device, buf);
+  const s = alloc(16, 'scan.n');
+  arena.device.queue.writeBuffer(s.buffer, s.offset, buf);
+  return s;
 }
 
 // Encodes an EXCLUSIVE prefix sum of `inBuf[0..n)` into `outBuf`, plus the grand
@@ -60,38 +63,41 @@ function uniformFor(device: GPUDevice, n: number): GPUBuffer {
 // scatter that follows in ONE submission, and a scan that submitted internally
 // would force a needless GPU/CPU boundary between them.
 //
-// `inBuf` and `outBuf` must be DISTINCT buffers -- addOffsets reads inBuf[n-1]
-// after outBuf has been overwritten, so aliasing them would corrupt the total.
-// `inBuf` needs read-only-storage usage; `outBuf` and `totalBuf` need storage.
+// `inSlice` and `outSlice` must be DISTINCT -- addOffsets reads in[n-1] after
+// out has been overwritten, so aliasing them would corrupt the total. With one
+// arena behind every slice that is now an ALIASING question rather than a
+// buffer-identity one, and it is the caller's to get right: two separate
+// alloc() calls cannot overlap, so passing two distinct slices is sufficient.
 //
-// Returns the temporaries it allocated. The caller must destroy them AFTER the
-// submission completes -- they are live GPU-side until then, so destroying them
-// before submit (or before an await on the result) kills the scan.
+// Returns nothing. It used to return the temporaries it allocated, for the
+// caller to destroy AFTER the submission completed -- a rule that could not be
+// enforced and had to be restated at every call site. Arena temporaries are
+// freed by the frame's reset(), which by construction happens after the submit.
 export function encodeExclusiveScan(
-  device: GPUDevice, encoder: GPUCommandEncoder,
-  inBuf: GPUBuffer, outBuf: GPUBuffer, totalBuf: GPUBuffer, n: number,
-): GPUBuffer[] {
-  if (n <= 0) return [];
+  arena: Arena, alloc: Alloc, encoder: GPUCommandEncoder,
+  inSlice: Slice, outSlice: Slice, totalSlice: Slice, n: number,
+): void {
+  if (n <= 0) return;
+  const device = arena.device;
   const p = getPipelines(device);
-  const temps: GPUBuffer[] = [];
   const numBlocks = Math.ceil(n / SCAN_BLOCK);
 
-  const blockSums = createStorageBuffer(device, numBlocks * 4);
-  // Zero-initialized per the WebGPU spec, which is what makes the single-block
-  // base case correct with no special-casing: blockOffsets stays all-zero and
-  // addOffsets adds nothing.
-  const blockOffsets = createStorageBuffer(device, numBlocks * 4);
-  const uni = uniformFor(device, n);
-  temps.push(blockSums, blockOffsets, uni);
+  const blockSums = alloc(numBlocks * 4, 'scan.blockSums');
+  // ZEROED, and it is load-bearing rather than redundant now. The single-block
+  // base case relies on nothing writing blockOffsets: addOffsets reads it and
+  // adds zero. `createBuffer` used to guarantee that for free; an arena slice is
+  // last frame's bytes. See allocZeroed's header for the whole audit.
+  const blockOffsets = allocZeroed(arena, alloc, encoder, numBlocks * 4, 'scan.blockOffsets');
+  const uni = uniformFor(arena, alloc, n);
 
   {
     const bg = device.createBindGroup({
       layout: p.scanLayout,
       entries: [
-        { binding: 0, resource: { buffer: uni } },
-        { binding: 1, resource: { buffer: inBuf } },
-        { binding: 2, resource: { buffer: outBuf } },
-        { binding: 3, resource: { buffer: blockSums } },
+        { binding: 0, resource: bind(uni, arena) },
+        { binding: 1, resource: bind(inSlice, arena) },
+        { binding: 2, resource: bind(outSlice, arena) },
+        { binding: 3, resource: bind(blockSums, arena) },
       ],
     });
     const pass = encoder.beginComputePass(gpuTimelineSlot('scan:block'));
@@ -109,19 +115,19 @@ export function encodeExclusiveScan(
   if (numBlocks > 1) {
     // A throwaway total for the inner level -- only the outermost one is the
     // caller's, and the inner sums' grand total is already blockSums' own.
-    const innerTotal = createStorageBuffer(device, 4);
-    temps.push(innerTotal, ...encodeExclusiveScan(device, encoder, blockSums, blockOffsets, innerTotal, numBlocks));
+    const innerTotal = alloc(4, 'scan.innerTotal');
+    encodeExclusiveScan(arena, alloc, encoder, blockSums, blockOffsets, innerTotal, numBlocks);
   }
 
   {
     const bg = device.createBindGroup({
       layout: p.addLayout,
       entries: [
-        { binding: 0, resource: { buffer: uni } },
-        { binding: 1, resource: { buffer: inBuf } },
-        { binding: 2, resource: { buffer: outBuf } },
-        { binding: 3, resource: { buffer: blockOffsets } },
-        { binding: 4, resource: { buffer: totalBuf } },
+        { binding: 0, resource: bind(uni, arena) },
+        { binding: 1, resource: bind(inSlice, arena) },
+        { binding: 2, resource: bind(outSlice, arena) },
+        { binding: 3, resource: bind(blockOffsets, arena) },
+        { binding: 4, resource: bind(totalSlice, arena) },
       ],
     });
     const pass = encoder.beginComputePass(gpuTimelineSlot('scan:addOffsets'));
@@ -130,7 +136,6 @@ export function encodeExclusiveScan(
     pass.dispatchWorkgroups(numBlocks);
     pass.end();
   }
-  return temps;
 }
 
 // Standalone convenience wrapper: scan a plain array, get the scan and the total
@@ -143,23 +148,30 @@ export async function exclusiveScanU32(values: Uint32Array): Promise<{ scan: Uin
   if (n === 0) return { scan: new Uint32Array(0), total: 0 };
   device.pushErrorScope('validation');
 
-  const inBuf = uploadUint32(device, values, 0, 'prefixSum:in');
-  const outBuf = createStorageBuffer(device, n * 4);
-  const totalBuf = createStorageBuffer(device, 4);
-  const encoder = device.createCommandEncoder();
-  const temps = encodeExclusiveScan(device, encoder, inBuf, outBuf, totalBuf, n);
-  device.queue.submit([encoder.finish()]);
+  // Its OWN arena, destroyed in the finally. A standalone helper that borrowed
+  // the pipeline's arena would be resetting someone else's frame.
+  const arena = createArena(device, { initialBytes: n * 4 * 4 + 4096 });
+  try {
+    const inSlice = arena.alloc(n * 4, 'prefixSum:in');
+    writeSlice(arena, inSlice, values, 'prefixSum:in');
+    const outSlice = arena.alloc(n * 4, 'prefixSum:out');
+    const totalSlice = arena.alloc(4, 'prefixSum:total');
+    const encoder = device.createCommandEncoder();
+    encodeExclusiveScan(arena, arena.alloc, encoder, inSlice, outSlice, totalSlice, n);
+    device.queue.submit([encoder.finish()]);
 
-  const [scan, total] = await Promise.all([
-    readUint32(device, outBuf, n * 4, 'prefixSum:out'),
-    readUint32(device, totalBuf, 4, 'prefixSum:total'),
-  ]);
-  for (const b of [inBuf, outBuf, totalBuf, ...temps]) b.destroy();
+    const [scan, total] = await Promise.all([
+      readSliceU32(arena, outSlice, n * 4, 'prefixSum:out'),
+      readSliceU32(arena, totalSlice, 4, 'prefixSum:total'),
+    ]);
 
-  const err = await device.popErrorScope();
-  if (err) {
-    console.error('exclusiveScanU32: WebGPU validation error --', err.message);
-    return null;
+    const err = await device.popErrorScope();
+    if (err) {
+      console.error('exclusiveScanU32: WebGPU validation error --', err.message);
+      return null;
+    }
+    return { scan: new Uint32Array(scan), total: total[0] };
+  } finally {
+    arena.destroy();
   }
-  return { scan: new Uint32Array(scan), total: total[0] };
 }

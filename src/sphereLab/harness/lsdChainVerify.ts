@@ -1,4 +1,5 @@
-import { createLsdChainResidency, runLsdChain } from '../../pose/stages/lsd/chain.ts';
+import { runLsdChainCPU, runLsdChainGPU } from '../../pose/stages/lsd/chain.ts';
+import { type TransferSummary } from '../../pose/gpu/device.ts';
 import type { LsdRectangle, LsdSettings } from '../../pose/stages/lsd/types.ts';
 import { type Backend } from '../../pose/backend.ts';
 import { type InputProvenance, provenance } from './input.ts';
@@ -203,26 +204,23 @@ export async function verifyLsdChain(input: HarnessInput, reps = 3): Promise<Lsd
   // backends", and that is now literally what the code says.
   const runOnce = async (t: ChainConfig) => {
     const backend: Backend = t === 'reference (forceCPU)' ? 'cpu' : 'gpu';
-    const res = await createLsdChainResidency(gray, w, h, backend);
-    try {
-      const t0 = performance.now();
-      const rects = await runLsdChain(res, w, h, settings, backend);
-      const ms = performance.now() - t0;
-      // ORDER MATTERS: the ledger is taken BEFORE the member readback below, so
-      // `crossings`/`bytes` still describe what the CHAIN cost rather than what
-      // verifying it cost. The production path no longer brings the region CSR
-      // down at all, so asking for it here adds a crossing that exists only for
-      // this harness -- charging it to the configuration would make every
-      // fit=GPU row look one crossing more expensive than it is, and the
-      // crossings column is one of the two things this sweep is read for.
-      // `ms` is already clear of it (measured around runLsdChain alone).
-      const summary = res.summary();
-      let members = 0;
-      for (const r of await res.regionsCPU()) members += r.members.length;
-      return { rects, ms, summary, members };
-    } finally {
-      res.destroy();
-    }
+    const t0 = performance.now();
+    // `wantMembers` is TRUE here, unlike the pose path -- this sweep reports
+    // member totals. The chain counts that readback in its own ledger, so unlike
+    // the old arrangement (where the harness took the summary BEFORE reading
+    // members, specifically to keep its own cost out of the configuration's
+    // numbers) the crossings column now includes it on the GPU row. That is the
+    // honest reading of what THIS run cost; the production configuration's
+    // crossing count is what `computePoseFromCapture` reports, not this.
+    const gpu = backend === 'gpu' ? await runLsdChainGPU(gray, w, h, settings, true) : null;
+    const cpu = gpu ? null : runLsdChainCPU(gray, w, h, settings);
+    const ms = performance.now() - t0;
+    const rects = gpu ? gpu.rects : cpu!.rects;
+    const summary: TransferSummary = gpu ? gpu.transfers : { crossings: 0, bytes: 0, entries: [] };
+    let members = 0;
+    if (gpu) for (const r of rects) members += r.rawMembers.length;
+    else for (const r of cpu!.regions) members += r.members.length;
+    return { rects, ms, summary, members };
   };
 
   const focusWaitMs = await awaitPageFocus();

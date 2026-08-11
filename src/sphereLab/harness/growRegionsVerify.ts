@@ -1,7 +1,7 @@
 import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientField.ts';
 import { growRegionsCCL } from '../../pose/stages/lsd/regions.cpu.ts';
 import type { GrownRegion } from '../../pose/stages/lsd/types.ts';
-import { growRegionsCCLGPUToCPU } from '../../pose/stages/lsd/growRegions.gpu.ts';
+import { growCollectGPUToCPU } from '../../pose/stages/lsd/chain.ts';
 import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 
@@ -132,7 +132,7 @@ export async function verifyGrowRegions(input: HarnessInput): Promise<GrowRegion
   // silently changed SHAPE with a UI checkbox -- turn forceCPU on and the same
   // function suddenly compared like against like. That is the ambient-config
   // failure in miniature: the harness could not state what it was measuring.
-  const gpu = await growRegionsCCLGPUToCPU(fx, fy, ...args, false);
+  const gpu = await growCollectGPUToCPU(fx, fy, ...args, false);
   const gpuMs = performance.now() - gpuStart;
   // Null means either no WebGPU at all or a validation error the grower's own
   // error scope caught -- in the latter case it has already logged the message.

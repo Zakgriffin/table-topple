@@ -8,6 +8,7 @@ import { poseSpan } from '../../timing/stages.ts';
 import { C, ORDER, R, debruijnLookup, torus } from '../../../sphereLab/floorPattern.ts';
 import { type DecodeCellDebug, type DecodeSampleGrid, type DecodeSamplePoint, type PositionDecodeResult, type RecoveredAxes, type VoteResult } from '../../results.ts';
 import { type Backend } from '../../backend.ts';
+import { type Arena, type Slice } from '../../gpu/arena.ts';
 import { type GridPeriodPhaseResult } from '../period/gridPeriodPhase.ts';
 
 // Everything this stage needs from the stages BEFORE it, and nothing else.
@@ -436,9 +437,9 @@ export function buildDecodeSampleGrid(input: DecodeInput, gray: Float64Array, w:
 export async function runPositionDecode(
   input: DecodeInput, gray: Float64Array, w: number, h: number, vFovRad: number,
   // The LSD chain's device-resident gray, when the chain ran on GPU and its
-  // residency is still alive. Purely an optimization -- null means decode
+  // arena has not been reset. Purely an optimization -- null means decode
   // uploads its own copy exactly as it always did.
-  sharedGray: GPUBuffer | null,
+  sharedGray: { arena: Arena; slice: Slice } | null,
   backend: Backend,
   // Whether the CALLER asked for the decode grid at all (want.has('decodeGrid')
   // upstream). It decides two things at once, and they are the same decision:

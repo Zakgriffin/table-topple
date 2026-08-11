@@ -119,6 +119,29 @@ export interface TransferSample {
   queueDrainMs: number | null;
 }
 
+// ── The per-run crossing summary ─────────────────────────────────────────
+//
+// What the LSD chain's configuration actually cost the bus on one run, in the
+// shape the UI readout ("chain: 2 crossings, 1.2 MB") already reads. It moved
+// here from fieldResidency.ts when that was deleted; the chain accumulates it
+// directly now, which is if anything more honest -- the residency could only
+// count transfers IT brokered, and the chain counts every one it makes.
+//
+// There is deliberately no record of transfers AVOIDED: the useful readout is
+// what the current configuration costs, and "avoided" is only definable against
+// some other configuration.
+export interface TransferEntry {
+  what: string;
+  direction: 'up' | 'down';
+  bytes: number;
+}
+
+export interface TransferSummary {
+  crossings: number;
+  bytes: number;
+  entries: readonly TransferEntry[];
+}
+
 let probeEnabled = false;
 
 export function setTransferProbe(on: boolean): void { probeEnabled = on; }

@@ -2,8 +2,7 @@ import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientFiel
 import { countRectanglePixels, fitRegionOnce } from '../../pose/stages/lsd/rectangles.cpu.ts';
 import { growRegionsCCL } from '../../pose/stages/lsd/regions.cpu.ts';
 import type { LsdRectangle } from '../../pose/stages/lsd/types.ts';
-import { FieldResidency } from '../../pose/gpu/fieldResidency.ts';
-import { fitAndTestRegionsGPU } from '../../pose/stages/lsd/lsdFit.gpu.ts';
+import { fitRegionsGPUFromCPU } from '../../pose/stages/lsd/chain.ts';
 import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 
@@ -88,23 +87,22 @@ export async function verifyLsdFit(input: HarnessInput): Promise<LsdFitVerifyRep
   const cpu: (LsdRectangle | null)[] = regions.map((r) => fitRegionOnce(r, fx, fy, w, h, cpuSettings, logNTests, logEpsilon));
   const cpuMs = performance.now() - cpuStart;
 
-  // Everything is handed to the residency on the CPU side, which makes this the
-  // ISOLATED cost of the stage: the timing below still includes the mag/theta
-  // upload and the CSR pack, exactly as it did before the residency existed, so
-  // these numbers stay comparable to the 3.5-vs-8ms that pinned the flag off.
-  // What the production path now saves is precisely the part this harness is
-  // deliberately still paying.
-  const res = await FieldResidency.create(w * h, true);
-  res.provideCPU('fx', fx);
-  res.provideCPU('fy', fy);
-  res.provideRegionsCPU(regions);
-
+  // Everything is handed over on the CPU side, which makes this the ISOLATED
+  // cost of the stage: the timing below still includes the fx/fy upload and the
+  // CSR pack, exactly as it did before, so these numbers stay comparable to the
+  // 3.5-vs-8ms that pinned the flag off. What the production path saves is
+  // precisely the part this harness is deliberately still paying.
   const gpuStart = performance.now();
-  const gpu = await fitAndTestRegionsGPU(
-    res, w, h, s.lsdRhoNoiseThreshold, s.lsdToleranceDeg, logNTests, logEpsilon,
-  );
+  const gpu = await fitRegionsGPUFromCPU(fx, fy, regions, w, h, {
+    toleranceDeg: s.lsdToleranceDeg,
+    rhoNoiseThreshold: s.lsdRhoNoiseThreshold,
+    rhoHighThreshold: s.lsdRhoHighThreshold,
+    cclSteps: s.lsdCclSteps,
+    minRegionSize: s.lsdMinRegionSize,
+    nfaEpsilon: s.lsdNfaEpsilon,
+    nfaTestExponent: s.lsdNfaTestExponent,
+  });
   const gpuMs = performance.now() - gpuStart;
-  res.destroy();
   if (!gpu) return 'WebGPU unavailable -- nothing to compare against';
 
   const maxAbs = { cx: 0, cy: 0, theta: 0, length: 0, width: 0, nfaLog10: 0 };

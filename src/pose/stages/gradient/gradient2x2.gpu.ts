@@ -1,5 +1,5 @@
-import { createStorageBuffer, dispatchCount, uploadUniform } from '../../gpu/device.ts';
-import { FieldResidency } from '../../gpu/fieldResidency.ts';
+import { type Alloc, type Arena, type Slice, bind } from '../../gpu/arena.ts';
+import { dispatchCount } from '../../gpu/device.ts';
 import { GRADIENT_2X2_WGSL } from './gradient2x2.wgsl.ts';
 import { gpuTimelineSlot } from '../../gpu/gpuTimeline.ts';
 
@@ -15,77 +15,71 @@ function getPipeline(device: GPUDevice): GPUComputePipeline {
 }
 
 // GPU-resident counterpart to pose/stages/gradient/gradientField.ts's
-// computeGradient2x2Field -- a pure per-pixel forward-difference map with
-// no cross-thread dependency, same shape as projectSamples.ts's stage 1.
+// computeGradient2x2Field -- a pure per-pixel forward-difference map with no
+// cross-thread dependency.
+//
 // The float32 GPU result is widened to Float64Array only if somebody actually
-// asks for the CPU side, so it's not bit-identical to the CPU path -- fine for
-// the forward difference itself (precision-insensitive, near-integer grayscale
-// inputs), but downstream hard-threshold consumers (computeBucketFillRegions'
-// flood-fill comparisons) aren't guaranteed to produce identically-shaped
-// segments, only equivalent ones -- see this session's chat.
+// reads it back, so it is not bit-identical to the CPU path -- fine for the
+// forward difference itself (precision-insensitive, near-integer grayscale
+// inputs), but downstream hard-threshold consumers are only guaranteed to
+// produce equivalent segments, not identically-shaped ones.
 //
-// Stage 1 of the LSD chain, and the last stage to stop transferring by hand.
-// It used to take a Float64Array and return a GradientField, which meant it
-// uploaded gray and read fx/fy straight back every frame -- and then
-// growRegionsCCLGPU uploaded those same two arrays again a moment later, so a
-// fully-GPU chain paid FIVE crossings to move numbers that never needed to
-// leave the device. Now gray comes out of the residency and fx/fy are published
-// into it, so with stages 3/3b/4 on GPU too the only traffic left is the gray
-// upload -- and when a downstream stage is on CPU the residency does the
-// readback itself, in one place, and records it.
+// ── ENCODE ONLY ──
 //
-// Returns false if the residency has no device or a dispatch failed validation;
-// caller falls back to the CPU version, which stays the source of truth. On
-// that path nothing has been published, so the fallback is free to publish its
-// own fx/fy into the same residency.
-export async function computeGradient2x2FieldGPU(res: FieldResidency, w: number, h: number): Promise<boolean> {
-  const device = res.device;
-  if (!device) return false;
-  // Same reasoning as growRegionsCCLGPU's scope: WebGPU reports validation
-  // failures asynchronously, so without this an invalid bind group makes every
-  // command a silent no-op and stage 1 publishes an all-zero field that looks
-  // entirely plausible three stages downstream.
-  device.pushErrorScope('validation');
-  const pipeline = getPipeline(device);
-
+// This function allocates from the caller's arena, encodes into the caller's
+// encoder, and returns. It does not submit, does not await, does not read
+// anything back, and does not know what runs after it.
+//
+// It used to take a FieldResidency: it asked that object for `gray` and
+// published fx/fy into it, which meant the gradient stage had to know it was
+// stage 1 of an LSD chain. It is not -- it is a gradient. The residency also
+// made this the only place that could decide whether gray needed uploading,
+// which is a scheduling decision that belongs to whoever owns the frame.
+//
+// No error scope either, and that is a deliberate move rather than a loss. A
+// scope here forced an `await popErrorScope()` mid-chain, which is a suspension
+// point in the middle of what should be one encode; the chain pushes ONE scope
+// around all of its stages and pops it once (see stages/lsd/chain.ts). Validation
+// failures are reported per-device, not per-pass, so one scope catches exactly
+// what the per-stage scopes caught between them.
+export function sizeOfGradient(w: number, h: number): { fx: number; fy: number } {
   const n = w * h;
-  const grayBuf = res.gpu('gray', 'lsd.gradient');
-  const fxBuf = createStorageBuffer(device, n * 4);
-  const fyBuf = createStorageBuffer(device, n * 4);
-  const dimsBuf = uploadUniform(device, new Uint32Array([w, h, 0, 0]).buffer);
+  return { fx: n * 4, fy: n * 4 };
+}
 
-  const bindGroup = device.createBindGroup({
+export function encodeGradient2x2(
+  arena: Arena, alloc: Alloc, enc: GPUCommandEncoder,
+  inp: { gray: Slice; w: number; h: number },
+): { fx: Slice; fy: Slice } {
+  const { gray, w, h } = inp;
+  const sizes = sizeOfGradient(w, h);
+  const fx = alloc(sizes.fx, 'gradient.fx');
+  const fy = alloc(sizes.fy, 'gradient.fy');
+
+  // A uniform is a slice like anything else now. It used to be its own
+  // createBuffer + mappedAtCreation per call -- ~14 of those per reconstruction,
+  // each one a buffer the caller then had to remember to destroy.
+  const dims = alloc(16, 'gradient.dims');
+  arena.device.queue.writeBuffer(
+    dims.buffer, dims.offset, new Uint32Array([w, h, 0, 0]).buffer,
+  );
+
+  const pipeline = getPipeline(arena.device);
+  const bindGroup = arena.device.createBindGroup({
     layout: pipeline.getBindGroupLayout(0),
     entries: [
-      { binding: 0, resource: { buffer: dimsBuf } },
-      { binding: 1, resource: { buffer: grayBuf } },
-      { binding: 2, resource: { buffer: fxBuf } },
-      { binding: 3, resource: { buffer: fyBuf } },
+      { binding: 0, resource: bind(dims, arena) },
+      { binding: 1, resource: bind(gray, arena) },
+      { binding: 2, resource: bind(fx, arena) },
+      { binding: 3, resource: bind(fy, arena) },
     ],
   });
 
-  const encoder = device.createCommandEncoder();
-  const pass = encoder.beginComputePass(gpuTimelineSlot('gradient2x2'));
+  const pass = enc.beginComputePass(gpuTimelineSlot('gradient2x2'));
   pass.setPipeline(pipeline);
   pass.setBindGroup(0, bindGroup);
   pass.dispatchWorkgroups(dispatchCount(w), dispatchCount(h));
   pass.end();
-  device.queue.submit([encoder.finish()]);
 
-  // Popped BEFORE publishing, for the same reason growRegionsCCLGPU pops
-  // before its provideGPU: the CPU fallback publishes into this same residency,
-  // and a half-published failure would turn a recoverable fault into a
-  // single-assignment throw. gray is NOT destroyed here on either path -- the
-  // residency owns it and this stage is only borrowing.
-  const err = await device.popErrorScope();
-  if (err) {
-    console.error('computeGradient2x2FieldGPU: WebGPU validation error, falling back to CPU --', err.message);
-    for (const b of [fxBuf, fyBuf, dimsBuf]) b.destroy();
-    return false;
-  }
-
-  dimsBuf.destroy();
-  res.provideGPU('fx', fxBuf);
-  res.provideGPU('fy', fyBuf);
-  return true;
+  return { fx, fy };
 }

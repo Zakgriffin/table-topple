@@ -1,169 +1,245 @@
-import { FieldResidency } from '../../gpu/fieldResidency.ts';
-import { computeGradient2x2FieldGPU } from '../gradient/gradient2x2.gpu.ts';
-import { fitAndTestRegionsGPU } from './lsdFit.gpu.ts';
-import { growRegionsCCLGPU } from './growRegions.gpu.ts';
+import { type Arena, type Slice, createArena } from '../../gpu/arena.ts';
+import {
+  type TransferEntry, type TransferSummary, getGPUDevice, readSliceU32, recordTransfer, writeSlice,
+} from '../../gpu/device.ts';
+import { encodeGradient2x2 } from '../gradient/gradient2x2.gpu.ts';
+import { type RegionSetGPU, encodeCollectRegions } from './collectRegions.gpu.ts';
+import { encodeGrowInit, encodeGrowRound } from './growRegions.gpu.ts';
+import { type LsdFitResult, encodeLsdFit, readLsdFitResults, readRegionMembers } from './lsdFit.gpu.ts';
 import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
 import { poseSpan } from '../../timing/stages.ts';
 import { type GradientField } from '../../results.ts';
 import { type Backend } from '../../backend.ts';
 import { computeGradient2x2Field } from '../gradient/gradientField.ts';
-import { growRegionsCCL } from './regions.cpu.ts';
+import { collectRegionsFromLabels, growRegionsCCL } from './regions.cpu.ts';
 import { fitRegionsCPU, nfaLog10ToLineScore, nfaLogTerms } from './rectangles.cpu.ts';
-import { NO_MEMBERS, type LsdRectangle, type LsdSettings } from './types.ts';
+import { NO_MEMBERS, type GrownRegion, type LsdRectangle, type LsdSettings } from './types.ts';
 
 // ── LSD (Line Segment Detector, von Gioi/Jakubowicz/Morel/Randall 2010) ───
 // ── from scratch ────────────────────────────────────────────────────────
 //
 // A genuinely traditional reimplementation, and the PRODUCTION composite-line
-// source: pose/stages/votes/votes.ts's computeGradient2x2Composites turns each accepted
-// rectangle straight into one line.
+// source: pose/stages/votes/votes.ts's computeGradient2x2Composites turns each
+// accepted rectangle straight into one line.
 //
-// Pipeline: hysteresis-gated, directed-angle CONNECTED-COMPONENT region
-// growing (stage 2+3, see growRegionsCCL below -- replaces the JFA-strided
-// competitive relabeling that replaced the original magnitude-sorted serial
-// BFS) -> magnitude-weighted PCA rectangle fit per region (stage 4) -> NFA
-// statistical validation (stage 5).
+// Pipeline: 2x2 gradient -> hysteresis-gated, directed-angle CONNECTED-COMPONENT
+// region growing -> hysteresis survival + CSR collect -> magnitude-weighted PCA
+// rectangle fit per region -> NFA statistical validation.
 //
-// This file forms segments ONLY, and NOTHING bridges them afterwards.
-// Bridging genuinely disjoint segments (across a gradient dropout, or across a
-// level-line POLARITY flip -- see below) is therefore currently UNSOLVED rather
-// than solved elsewhere; it was a no-op at the settings in use. The previous design
-// tried to do both at once via long strided jumps, which is where all of its
-// complexity and all of its failure modes lived: a jump of tens or hundreds
-// of pixels only checks ANGLE agreement, so it could silently land on a
-// completely different parallel ridge (an adjacent De Bruijn grid row) that
-// merely shares a direction, and a bad merge like that compounds. Every pixel
-// comparison here is now strictly between 8-NEIGHBORS, so that class of error
-// is not merely guarded against, it is unreachable.
+// This file forms segments ONLY, and NOTHING bridges them afterwards. Bridging
+// genuinely disjoint segments (across a gradient dropout, or across a level-line
+// POLARITY flip) is therefore currently UNSOLVED rather than solved elsewhere.
+// Every pixel comparison is strictly between 8-NEIGHBORS, so the class of error
+// the old long-strided design had -- a jump landing on a different parallel
+// ridge that merely shares a direction -- is unreachable rather than guarded.
 //
-// GPU-friendliness note: stage 4+5's FIRST NFA pass HAS a GPU port
-// (pose/stages/lsd/lsdFit.gpu.ts), and it is VERIFIED identical to this file's CPU
-// path -- zero disagreements on n, k or accept/reject across a 2931-region
-// capture, max nfaLog10 delta 7.7e-6 (see harness/lsdFitVerify.ts, which
-// is how to re-check it after any change to either side). It defaults OFF
-// anyway, for a PERFORMANCE reason: fitAndTestRegionsGPU still uploads
-// mag/theta and the region CSR from CPU on every call, so it currently ADDS a
-// round trip and measures slower (3.5ms CPU vs 8ms GPU). That inverts once
-// stage 2+3 is GPU-resident and the labeling never lands on CPU.
-// Stage 2+3 ALSO has a GPU port now (pose/stages/lsd/growRegions.gpu.ts, selected by the
-// `backend` argument, alongside the fit stage in computeLsdRectanglesAuto). Like the JFA version it replaces, it was
-// architecturally GPU-ready by construction -- each round is two
-// frozen-buffer-in/fresh-buffer-out passes with no same-round cross-pixel
-// dependency -- and it needed strictly LESS GPU machinery than that version
-// would have: the per-round segmented reduction over region sums is gone
-// entirely, leaving only the propagate step itself. It is the one stage that is
-// NOT bit-identical to its CPU counterpart and cannot be made so; see its own
-// header, and harness/growRegionsVerify.ts for how to measure the exposure
-// on a given capture.
+// ── TWO STRAIGHT-LINE CHAINS, not one broker ──
 //
-// Stage 5 had a tighten-then-shrink retry loop on NFA rejection. It is gone,
-// code and settings both -- fitRegionOnce is the only fitter. It was never
-// ported to GPU (retry 2+ needs a per-region partial sort, the hardest GPU
-// problem in this file), and keeping it CPU-side meant every GPU-rejected
-// region fell back to CPU and dragged mag/theta along with it, which was the
-// last dependency preventing stages 1-4 from becoming one GPU-resident run. The
-// CPU and GPU fitters now have identical scope by construction.
+// There used to be a FieldResidency between every pair of stages, deciding per
+// field whether a transfer was needed, because each stage dispatched to CPU or
+// GPU on its OWN toggle. Those toggles collapsed into a single `backend` a while
+// ago and nothing revisited the broker -- so 449 lines were arbitrating a
+// configuration matrix that no longer existed. There is no production
+// configuration that produces a mixed chain.
 //
-// Regions below settings.minRegionSize are dropped in
-// collectRegionsFromLabels, before either fitter sees them. At the default
-// floor of 2 that is free (a 1-member region has no axis to fit) and removes
-// ~40% of the fit stage's input on a real capture.
+// So: `runLsdChainCPU` is typed arrays start to finish, `runLsdChainGPU` is
+// slices start to finish, and neither knows the other exists. A GPU validation
+// failure falls the WHOLE chain back to CPU rather than one stage, which is the
+// deliberate loss of a capability nothing was using.
 
-// Stage 4 + stage 5 on GPU (pose/stages/lsd/lsdFit.gpu.ts). Null only if WebGPU itself
-// is unavailable.
-//
-// REJECTED candidates are taken straight from the GPU's own output rather than
-// re-fitted on CPU. That fallback existed only to run the retry loop on regions
-// the first pass rejected; with the retry loop gone and the two paths
-// verified to agree on n/k/accept, re-running a rejection on CPU would spend
-// real time reproducing the identical numbers. The shader already returns full
-// geometry for rejected regions, which is all the "show rejected candidates"
-// overlay wants. Dropping it is also what frees stages 1-4 from needing
-// the gradient field on CPU at all.
-//
-// ── THE MEMBERS READBACK IS NOW OPT-IN (2026-08-05) ──
-//
-// This used to `await res.regionsCPU()` alongside the fit, unconditionally, to
-// fill in each rectangle's `rawMembers`: four readbacks (offsets/sizes/members/
-// meanDirs) and the largest byte cost left in the chain. Now it happens only
-// when `wantMembers` is set, which the pose path never sets.
-//
-// WHO ACTUALLY READS rawMembers, since a first audit got this wrong in a way
-// worth recording. The tempting conclusion is that NOBODY does, because
-// overlays/lsdOverlay.ts recomputes its own rectangles from
-// lastNoisedPreviewGray rather than reading the camera field the pose path
-// fills. That is true and it is not the point: its recomputation calls
-// computeLsdRectanglesFromField, which lands in THIS function whenever
-// the GPU fitter is in use -- which is the shipping setting. Deleting the readback
-// outright would have blanked the rejected-region raster and thrown on
-// `rawMembers[0]` in the accepted-rectangle hue. Same function, two callers,
-// only one of which needs the data.
-//
-// So the split is by CALLER, not by field:
-//   - pose path (votes.ts's computeGradient2x2Composites -> runLsdChain): the
-//     rectangles feed compositesFromLsdRectangles, which reads only
-//     accepted/length/theta/cx/cy, and are then dropped. Nothing stores them.
-//     wantMembers stays false and the CSR never crosses.
-//   - display (computeLsdRectanglesFromField, i.e. the LSD debug overlay and the
-//     phone's sendDebugInfo pass): opts in, and pays for what it draws.
-//   - harness/lsdChainVerify.ts wants the member TOTALS but not per
-//     rectangle, so it leaves this false and asks the residency directly --
-//     after taking the transfer ledger, so its own readback is not charged to
-//     the configuration it is measuring.
-async function fitRegionsGPU(
-  res: FieldResidency, w: number, h: number, settings: LsdSettings, wantMembers: boolean,
-): Promise<LsdRectangle[] | null> {
-  const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
-  // `lsd.fit` is opened by the CALLER (computeLsdRectanglesAuto), not here --
-  // see the comment there for why. Everything in this function runs inside it,
-  // including the Promise.all below, which is what that span exists to contain:
-  // its two branches genuinely overlap, and with no span around them their
-  // children were siblings of the whole composites stage, which put concurrent
-  // work next to sequential work with nothing saying which was which. Contained
-  // there, the overlap is visible as exactly what it is -- two children whose
-  // intervals intersect, subtracted from their parent as a union rather than as
-  // a sum (see profiler.ts's TreeNode.selfMs).
-  {
-    // Concurrent when both are wanted, not sequential: fitAndTestRegionsGPU binds
-    // the region CSR synchronously before its first await, so starting it first
-    // and letting the members readback run alongside puts that transfer under the
-    // kernel instead of after it. Promise.all rather than two bare awaits so a
-    // failure in either one can't leave the other rejecting unobserved.
-    const [gpuResults, regions] = await Promise.all([
-      fitAndTestRegionsGPU(res, w, h, settings.rhoNoiseThreshold, settings.toleranceDeg, logNTests, logEpsilon),
-      wantMembers ? res.regionsCPU('lsd.fit') : Promise.resolve(null),
-    ]);
-    if (!gpuResults) return null;
-
-    // Counted off the fitter rather than off `regions`, which may not be here at
-    // all now. fitAndTestRegionsGPU allocates `new Array(regionCount)` -- the same
-    // count regionsCPU() returns -- so rectangle numbering downstream is
-    // unchanged, and `regions[i]` still lines up index for index when present.
-    // The SECOND object array of the same length in as many statements, and that
-    // is the point of measuring it separately: fitAndTestRegionsGPU has just built
-    // one LsdFitResult per region straight off the readback, and this immediately
-    // re-wraps every one of them into an LsdRectangle. ~5200 regions is ~10400
-    // short-lived objects per frame, of which compositesFromLsdRectangles keeps
-    // 893. Whether that costs anything worth fixing is what this span and
-    // `lsd.fitUnpack` answer -- separately, so the two loops can be judged apart
-    // rather than as one lump.
-    const wrapSpan = poseSpan('lsd.wrap');
-    const results: LsdRectangle[] = [];
-    for (let i = 0; i < gpuResults.length; i++) {
-      const g = gpuResults[i];
-      results.push({
-        cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
-        accepted: g.accepted, nfaLog10: g.nfaLog10,
-        lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon),
-        rawMembers: regions ? regions[i].members : NO_MEMBERS,
-      });
-    }
-    spanEnd(wrapSpan);
-    return results;
+// The arena is per DEVICE and lives across reconstructions -- that is the point
+// of it, and re-creating one per run would reinstate exactly the per-frame
+// allocation churn it exists to remove. `reset()` at the top of each run frees
+// the previous run's slices and bumps the generation, so anything still holding
+// one (a display drain that never ran, say) throws instead of silently reading
+// another run's bytes.
+const arenaCache = new WeakMap<GPUDevice, Arena>();
+export function poseArena(device: GPUDevice): Arena {
+  let a = arenaCache.get(device);
+  if (!a) {
+    a = createArena(device, { initialBytes: 1 << 24 }); // 16MB; resizes itself from the high-water mark
+    arenaCache.set(device, a);
   }
+  return a;
+}
+
+// What a GPU chain leaves behind. Every field is a live arena slice, valid until
+// the next `arena.reset()` -- which is the whole ownership story now: the caller
+// holds these, reads whichever it wants, and frees them all at once by starting
+// the next run. Nothing here needs destroying and nothing can be destroyed
+// twice.
+export interface LsdChainGPU {
+  rects: LsdRectangle[];
+  arena: Arena;
+  n: number;
+  // Every crossing this run actually made, counted where it is made. The
+  // residency used to own this and could only see the transfers it brokered.
+  transfers: TransferSummary;
+  gray: Slice;
+  fx: Slice;
+  fy: Slice;
+  label: Slice;
+  regionId: Slice;
+  regions: RegionSetGPU;
+  regionCount: number;
+  memberCount: number;
+}
+
+// How many hook+compress rounds get encoded into ONE command submission before
+// the convergence flag is read back. The flag lives on the GPU, so checking it
+// every round would mean a GPU->CPU sync per round -- and at ~log(L) rounds that
+// latency dominates the actual work, which is only two cheap per-pixel passes.
+// Batching amortizes it: the cost of overshooting is at most
+// (ROUNDS_PER_BATCH - 1) no-op rounds, each far cheaper than one readback stall.
+//
+// This readback is the one remaining loop-control fence in the chain, and it is
+// the largest single stall in the pipeline. Removing it needs an indirect
+// early-out (the dispatch args go to zero once converged) -- a change entirely
+// inside this loop, which is why the grow stage encodes rounds rather than
+// running them.
+const ROUNDS_PER_BATCH = 8;
+
+// Stages 1-4 on GPU: gray in, rectangles out, every intermediate left on device.
+export async function runLsdChainGPU(
+  gray: Float64Array, w: number, h: number, settings: LsdSettings, wantMembers: boolean,
+): Promise<LsdChainGPU | null> {
+  const device = await getGPUDevice();
+  if (!device) return null;
+  const arena = poseArena(device);
+  arena.reset();
+
+  // ONE validation scope around the whole chain, popped once at the end. It used
+  // to be one per stage, each with its own `await popErrorScope()` in the middle
+  // of what should be a single encode. Validation failures are reported
+  // per-device, not per-pass, so one scope catches exactly what four caught
+  // between them -- and reports it in one place, where the fallback lives.
+  device.pushErrorScope('validation');
+  const n = w * h;
+  const alloc = arena.alloc;
+  const entries: TransferEntry[] = [];
+  const crossed = (what: string, direction: 'up' | 'down', bytes: number) => {
+    entries.push({ what, direction, bytes });
+  };
+
+  // ── gray up, and the narrowing that goes with it ──
+  const graySlice = alloc(n * 4, 'chain.gray');
+  {
+    const t0 = performance.now();
+    const narrowed = new Float32Array(gray);
+    recordTransfer({
+      what: 'gray (f64→f32 narrow)', kind: 'convert', dir: 'up', bytes: n * 4,
+      ms: performance.now() - t0, startMs: t0, bareFenceMs: null, queueDrainMs: null,
+    }, 'lsd.gradient');
+    writeSlice(arena, graySlice, narrowed, 'gray', 'lsd.gradient');
+    crossed('gray', 'up', n * 4);
+  }
+
+  const gradSpan = poseSpan('lsd.gradient', { backend: 'gpu' });
+  const growSpan = poseSpan('lsd.grow', { backend: 'gpu' });
+  let fx: Slice, fy: Slice, growLabel: Slice, changed: Slice;
+  {
+    const enc = device.createCommandEncoder();
+    const grad = encodeGradient2x2(arena, alloc, enc, { gray: graySlice, w, h });
+    fx = grad.fx; fy = grad.fy;
+    const st = encodeGrowInit(arena, alloc, enc, {
+      fx, fy, w, h, toleranceDeg: settings.toleranceDeg, rhoLow: settings.rhoNoiseThreshold,
+    });
+    growLabel = st.label; changed = st.changed;
+
+    // Same bound the CPU path uses -- hook alone propagates one pixel per round,
+    // so the longest possible chain caps it; compression makes the real count
+    // logarithmic, so this is never reached in practice.
+    const hardCap = w + h + 64;
+    const cap = settings.cclSteps > 0 ? Math.min(settings.cclSteps, hardCap) : hardCap;
+
+    // The first batch rides along in the same encoder as init and the gradient,
+    // so a converged-in-one-batch capture costs exactly one submit for stages
+    // 1-3 rather than three.
+    let roundsRun = 0;
+    let encoder: GPUCommandEncoder | null = enc;
+    while (roundsRun < cap) {
+      const e = encoder ?? device.createCommandEncoder();
+      encoder = null;
+      const batch = Math.min(ROUNDS_PER_BATCH, cap - roundsRun);
+      for (let r = 0; r < batch; r++) encodeGrowRound(arena, e, st, r === batch - 1);
+      device.queue.submit([e.finish()]);
+      roundsRun += batch;
+      const flag = await readSliceU32(arena, changed, 4, 'grow:converged', 'lsd.grow');
+      crossed('grow:converged', 'down', 4);
+      if (flag[0] === 0) break;
+    }
+    // A cap-length run that never converged still submitted everything above; if
+    // the loop never ran at all (cap <= 0) the gradient still has to reach the
+    // device, so the encoder is flushed here.
+    if (encoder) device.queue.submit([encoder.finish()]);
+  }
+  spanEnd(gradSpan);
+
+  spanEnd(growSpan);
+
+  // ── collect + fit, one encoder, one submit, nothing between them ──
+  //
+  // Two DECLARED stages sharing one encoder, which is the whole argument for
+  // un-fusing them: the labeling still never crosses the bus, and a harness can
+  // now name `label` as a stage output.
+  const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
+  const enc2 = device.createCommandEncoder();
+  const collectSpan = poseSpan('lsd.collect', { backend: 'gpu' });
+  const { regionId, regions } = encodeCollectRegions(arena, alloc, enc2, {
+    label: growLabel, fx, fy, n, rhoHigh: settings.rhoHighThreshold, minRegionSize: settings.minRegionSize,
+  });
+  spanEnd(collectSpan);
+
+  const fitSpan = poseSpan('lsd.fit', { wantMembers, backend: 'gpu' });
+  const out = encodeLsdFit(arena, alloc, enc2, {
+    fx, fy, regions, w, h,
+    rho: settings.rhoNoiseThreshold, toleranceDeg: settings.toleranceDeg, logNTests, logEpsilon,
+  });
+  device.queue.submit([enc2.finish()]);
+
+  const { results, regionCount, memberCount } = await readLsdFitResults(arena, out, regions, 'lsd.fit');
+  crossed('regions:counts', 'down', 8);
+  crossed('lsdFit:rects', 'down', regionCount * 40);
+
+  // Checked BEFORE `results` is believed. WebGPU reports validation failures
+  // asynchronously: an invalid bind group does not throw, it makes every command
+  // that uses it a silent no-op, so the readback would be all zeros and this
+  // would return a full set of plausible-looking rectangles at the origin. That
+  // is the whole reason the error scope exists.
+  const err = await device.popErrorScope();
+  if (err) {
+    console.error('runLsdChainGPU: WebGPU validation error, falling back to CPU --', err.message);
+    spanEnd(fitSpan);
+    return null;
+  }
+
+  const members = wantMembers
+    ? await readRegionMembers(arena, regions, regionCount, memberCount, 'lsd.fit')
+    : null;
+  if (members) crossed('regions', 'down', (regionCount * 4 + memberCount) * 4);
+
+  const rects: LsdRectangle[] = new Array(results.length);
+  for (let i = 0; i < results.length; i++) {
+    const g = results[i];
+    rects[i] = {
+      cx: g.cx, cy: g.cy, theta: g.theta, length: g.length, width: g.width,
+      accepted: g.accepted, nfaLog10: g.nfaLog10,
+      lineScore: nfaLog10ToLineScore(g.nfaLog10, logEpsilon),
+      rawMembers: members ? members[i].members : NO_MEMBERS,
+    };
+  }
+  spanEnd(fitSpan);
+
+  let bytes = 0;
+  for (const e of entries) bytes += e.bytes;
+  return {
+    rects, arena, n, transfers: { crossings: entries.length, bytes, entries },
+    gray: graySlice, fx, fy, label: growLabel, regionId, regions, regionCount, memberCount,
+  };
 }
 
 // Fully-CPU path, and the source of truth every GPU stage is verified against.
+// Typed arrays throughout -- no residency, no slices, nothing to own.
 export function computeLsdRectangles(field: GradientField, settings: LsdSettings): LsdRectangle[] {
   const { w, h, fx, fy } = field;
   const { regions } = growRegionsCCL(
@@ -172,183 +248,204 @@ export function computeLsdRectangles(field: GradientField, settings: LsdSettings
   return fitRegionsCPU(regions, fx, fy, w, h, settings);
 }
 
+// What the CPU chain leaves behind, shaped so a caller can ask for the same
+// things the GPU chain hands back without branching on which ran.
+export interface LsdChainCPU {
+  rects: LsdRectangle[];
+  fx: Float64Array;
+  fy: Float64Array;
+  regionId: Int32Array;
+  regions: { members: Int32Array; meanUx: number; meanUy: number }[];
+}
 
-// Single dispatch point every caller uses -- centralizes the backend check once
-// instead of duplicating it at each call site.
-//
-// Both stages follow the one `backend` argument, and either still falls back to
-// CPU on
-// its own without disturbing the other. That independence is the point -- the
-// grower is the one stage whose GPU output is NOT bit-identical to its CPU
-// output (see pose/stages/lsd/growRegions.gpu.ts's header), so it has to stay
-// separately switchable from a stage that is.
-//
-// Takes the residency (pose/gpu/fieldResidency.ts) rather than a
-// GradientField, and does NOT own it. That is deliberate: this function used to
-// create one per call, which capped the chain at stage 3 and forced stage 1's
-// output down to CPU and straight back up again no matter what either toggle
-// said. The caller owning it is what lets the gradient join the chain -- see
-// pose/poseCompute.ts, and computeLsdRectanglesFromField below for callers
-// that genuinely do start from a CPU field.
-//
-// Stages transfer nothing themselves; they publish on the side they produced on
-// and ask for the side they want, and the residency moves data only when a
-// producer and a consumer are actually on opposite sides of the bus. That is
-// what makes these toggles cost what the configuration implies rather than what
-// each module hardcoded: with the whole chain on GPU, fx/fy are never uploaded
-// at all and the labeling never crosses either.
-//
-// `wantMembers` decides whether the GPU fitter pays for LsdRectangle.rawMembers
-// -- four readbacks of the region CSR, and the largest byte cost left in the
-// chain. It defaults to FALSE because the pose path never looks at them; the two
-// callers that render them (see computeLsdRectanglesFromField) opt in. The CPU
-// fitter ignores the flag entirely: it is holding the regions already, so its
-// members are free either way, and that is what keeps the two fitters
-// comparable under the verify sweep.
-async function computeLsdRectanglesAuto(
-  res: FieldResidency, w: number, h: number, settings: LsdSettings, backend: Backend, wantMembers = false,
-): Promise<LsdRectangle[]> {
-  const growArgs = [
-    w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
-  ] as const;
-  const growSpan = poseSpan('lsd.grow');
-  const grown = backend === 'gpu' ? await growRegionsCCLGPU(res, ...growArgs, backend === 'gpu') : null;
-  if (!grown) {
-    // Either the toggle is off or the GPU grower bailed; on both paths it
-    // published nothing, so the CPU grower owns these slots. Asking the
-    // residency for the CPU side of fx/fy is what pulls stage 1's output back
-    // down if -- and only if -- it was produced on the device.
-    const cpu = growRegionsCCL(await res.cpuF64('fx', 'lsd.grow'), await res.cpuF64('fy', 'lsd.grow'), ...growArgs);
-    res.provideCPU('regionId', cpu.regionId);
-    res.provideRegionsCPU(cpu.regions);
-  }
-  // Closed AFTER the fallback, not after the GPU call, so the span means "grow
-  // finished, whoever did it" -- otherwise a forceCPU run would report a grow of
-  // ~0 and silently move the CPU grower's cost into its parent's self time,
-  // which is the one number this instrumentation exists to read.
-  //
-  // Named grow+collect because collect lives INSIDE growRegionsCCLGPU (via its
-  // collectOnGPU parameter), so there is no seam here to split them at. The two
-  // are separable in gpuTimeline, which already reports grow:hook/grow:compress
-  // and collect:finalize/regionMeta as distinct kernels -- this span is the host
-  // time wrapped around all of them, and dividing it further would need a
-  // boundary that does not exist in the call graph.
+export function runLsdChainCPU(
+  gray: Float64Array, w: number, h: number, settings: LsdSettings,
+): LsdChainCPU {
+  const gradSpan = poseSpan('lsd.gradient', { backend: 'cpu' });
+  const field = computeGradient2x2Field(gray, w, h);
+  spanEnd(gradSpan);
+
+  // grow and collect are ONE call on this side -- `growRegionsCCL` runs the
+  // round loop and then calls `collectRegionsFromLabels` itself, so there is no
+  // seam here to open a second span at. The declared split is real (the GPU path
+  // has two encode functions) and the CPU path will follow when Step 3 gives
+  // `growRegionsCCL` the same shape; until then this span covers both and
+  // `lsd.collect` simply does not record on a CPU run, which the critical-path
+  // walk treats as a silent absent input rather than an anomaly.
+  const growSpan = poseSpan('lsd.grow', { backend: 'cpu' });
+  const { regionId, regions } = growRegionsCCL(
+    field.fx, field.fy, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold,
+    settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+  );
   spanEnd(growSpan);
 
-  // Around BOTH fitters, for the same reason `lsd.grow` above is closed after
-  // its own fallback: the span has to mean "fit finished, whoever did it".
-  // Opened here rather than inside fitRegionsGPU -- where it was until the
-  // critical-path join went looking for it -- because there it recorded only on
-  // the GPU backend, so a CPU run had no `lsd.fit` at all and `votes.filter`'s
-  // declared input simply vanished. That silently dropped the whole LSD chain
-  // off the CPU critical path: the walk terminated at votes.filter, reporting
-  // 0.25ms of rectangle filtering and none of the 41ms of grow feeding it.
-  // Recording on both backends is also what makes `lsd.fit` aggregate across
-  // its `backend` attr, which was the point of collapsing the two ids into one.
-  const fitSpan = poseSpan('lsd.fit', { wantMembers, backend });
-  try {
-    if (backend === 'gpu') {
-      const gpu = await fitRegionsGPU(res, w, h, settings, wantMembers);
-      if (gpu) return gpu;
-    }
-    return fitRegionsCPU(await res.regionsCPU('lsd.fit'), await res.cpuF64('fx', 'lsd.fit'), await res.cpuF64('fy', 'lsd.fit'), w, h, settings);
-  } finally {
-    spanEnd(fitSpan);
+  // Around the fitter, so the span means "fit finished" on both backends and
+  // `lsd.fit` aggregates across its `backend` attr -- which was the point of
+  // collapsing the two ids into one.
+  const fitSpan = poseSpan('lsd.fit', { wantMembers: true, backend: 'cpu' });
+  const rects = fitRegionsCPU(regions, field.fx, field.fy, w, h, settings);
+  spanEnd(fitSpan);
+
+  return { rects, fx: field.fx, fy: field.fy, regionId, regions };
+}
+
+// ── Stage-isolation bridges, for the verify harnesses only ───────────────
+//
+// The production chain has no seam a harness can reach into: it runs gray to
+// rectangles with everything on device, which is the point. These take CPU
+// inputs, run ONE stage on GPU, and bring the answer back -- which is what a
+// differential check actually wants, and it is now stated in the harness's own
+// terms rather than as a `collectOnGPU` boolean threaded three calls deep into a
+// kernel.
+//
+// Nothing in the pose path may call these: they exist to pay for readbacks the
+// production path spent years removing.
+
+// Grow on GPU, then collect on whichever side the caller names. `collectOnGPU`
+// isolates the collect stage: the labeling comes from the same GPU round loop
+// both ways, so the ONLY difference is which collector turned it into regions.
+export async function growCollectGPUToCPU(
+  fx: Float64Array, fy: Float64Array, w: number, h: number,
+  toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
+  collectOnGPU: boolean,
+): Promise<{ regionId: Int32Array; regions: GrownRegion[]; roundsRun: number; converged: boolean } | null> {
+  const device = await getGPUDevice();
+  if (!device) return null;
+  const arena = poseArena(device);
+  arena.reset();
+  device.pushErrorScope('validation');
+  const n = w * h;
+  const alloc = arena.alloc;
+
+  const fxS = alloc(n * 4, 'verify.fx');
+  const fyS = alloc(n * 4, 'verify.fy');
+  writeSlice(arena, fxS, new Float32Array(fx), 'verify:fx');
+  writeSlice(arena, fyS, new Float32Array(fy), 'verify:fy');
+
+  const enc = device.createCommandEncoder();
+  const st = encodeGrowInit(arena, alloc, enc, { fx: fxS, fy: fyS, w, h, toleranceDeg, rhoLow });
+  const hardCap = w + h + 64;
+  const cap = maxRounds > 0 ? Math.min(maxRounds, hardCap) : hardCap;
+  let roundsRun = 0, converged = false;
+  let encoder: GPUCommandEncoder | null = enc;
+  while (roundsRun < cap) {
+    const e = encoder ?? device.createCommandEncoder();
+    encoder = null;
+    const batch = Math.min(ROUNDS_PER_BATCH, cap - roundsRun);
+    for (let r = 0; r < batch; r++) encodeGrowRound(arena, e, st, r === batch - 1);
+    device.queue.submit([e.finish()]);
+    roundsRun += batch;
+    const flag = await readSliceU32(arena, st.changed, 4, 'grow:converged', 'lsd.grow');
+    if (flag[0] === 0) { converged = true; break; }
   }
-}
+  if (encoder) device.queue.submit([encoder.finish()]);
 
-// ── Stage 1: the 2x2 forward-difference gradient ──
-//
-// Publishes into the residency instead of returning a field, which is what
-// makes stage 1 part of the chain rather than a thing that happens before it.
-// Neither branch transfers anything: the GPU one leaves fx/fy on the device and
-// the CPU one leaves them in JS, and whether either ever crosses is decided
-// later, by whoever asks for the other side. Before this, the GPU branch
-// uploaded gray and read fx/fy straight back, and then growRegionsCCLGPU
-// uploaded those same two arrays again a moment later.
-async function runGradient2x2Stage(res: FieldResidency, w: number, h: number, backend: Backend): Promise<void> {
-  const useGPU = backend === 'gpu' && res.device !== null;
-  const s = poseSpan('lsd.gradient', { backend: useGPU ? 'gpu' : 'cpu' });
-  if (!(useGPU && await computeGradient2x2FieldGPU(res, w, h))) {
-    // gray is CPU-resident by construction (createLsdChainResidency put it
-    // there), so this is a lookup and never a readback.
-    const field = computeGradient2x2Field(await res.cpuF64('gray', 'lsd.gradient'), w, h);
-    res.provideCPU('fx', field.fx);
-    res.provideCPU('fy', field.fy);
+  let regionId: Int32Array, regions: GrownRegion[];
+  if (collectOnGPU) {
+    const enc2 = device.createCommandEncoder();
+    const collected = encodeCollectRegions(arena, alloc, enc2, {
+      label: st.label, fx: fxS, fy: fyS, n, rhoHigh, minRegionSize,
+    });
+    device.queue.submit([enc2.finish()]);
+    const counts = await readSliceU32(arena, collected.regions.counts, 8, 'regions:counts');
+    const idRaw = await readSliceU32(arena, collected.regionId, n * 4, 'regionId');
+    regionId = new Int32Array(idRaw.buffer.slice(0));
+    regions = (await readRegionMembers(arena, collected.regions, counts[0], counts[1])) as GrownRegion[];
+  } else {
+    const labRaw = await readSliceU32(arena, st.label, n * 4, 'label');
+    const cpu = collectRegionsFromLabels(
+      new Int32Array(labRaw.buffer.slice(0)), fx, fy, rhoHigh, n, minRegionSize,
+    );
+    regionId = cpu.regionId;
+    regions = cpu.regions;
   }
-  spanEnd(s);
+
+  const err = await device.popErrorScope();
+  if (err) {
+    console.error('growCollectGPUToCPU: WebGPU validation error --', err.message);
+    return null;
+  }
+  return { regionId, regions, roundsRun, converged };
 }
 
-// The chain's two entry points, always used as a pair. Split rather than fused
-// because the caller has to be able to reach into the residency AFTER the
-// rectangles come out, and because the caller owns the destroy. (The reader
-// that motivated the split -- poseCompute's per-pixel "world votes" branch,
-// which wanted fx/fy back on the CPU -- is deleted; the residency now outlives
-// the rectangles for `gray`, so the fused decode can reuse it.) Anything that runs the chain should go through these two and nothing
-// else, so that a residency-plumbing mistake is visible to the dev harness
-// (harness/lsdChainVerify.ts) rather than only to production.
-// `backend` decides whether a device is requested at all: an all-CPU chain never
-// touches navigator.gpu. Stage 1 counts toward that, because it can want a device
-// when nothing downstream does.
-export async function createLsdChainResidency(
-  gray: Float64Array, w: number, h: number, backend: Backend,
-): Promise<FieldResidency> {
-  const res = await FieldResidency.create(w * h, backend === 'gpu');
-  res.provideCPU('gray', gray);
-  return res;
+// Stage 4 in isolation: CPU-built regions in, GPU fit results out.
+export async function fitRegionsGPUFromCPU(
+  fx: Float64Array, fy: Float64Array, regions: GrownRegion[], w: number, h: number,
+  settings: LsdSettings,
+): Promise<LsdFitResult[] | null> {
+  const device = await getGPUDevice();
+  if (!device) return null;
+  const arena = poseArena(device);
+  arena.reset();
+  device.pushErrorScope('validation');
+  const n = w * h;
+  const alloc = arena.alloc;
+  const { logNTests, logEpsilon } = nfaLogTerms(w, h, settings);
+
+  const fxS = alloc(n * 4, 'verify.fx');
+  const fyS = alloc(n * 4, 'verify.fy');
+  writeSlice(arena, fxS, new Float32Array(fx), 'verify:fx');
+  writeSlice(arena, fyS, new Float32Array(fy), 'verify:fy');
+
+  // The CSR the collect stage would have built on device, built here from host
+  // arrays instead. Padded to one element each because a zero-byte binding is
+  // not legal and an empty region set is an ordinary input.
+  const regionCount = regions.length;
+  const offsets = new Uint32Array(Math.max(regionCount, 1));
+  const sizes = new Uint32Array(Math.max(regionCount, 1));
+  let total = 0;
+  for (let i = 0; i < regionCount; i++) {
+    offsets[i] = total; sizes[i] = regions[i].members.length; total += sizes[i];
+  }
+  const members = new Uint32Array(Math.max(total, 1));
+  const meanDirs = new Float32Array(Math.max(regionCount * 2, 2));
+  for (let i = 0; i < regionCount; i++) {
+    members.set(regions[i].members, offsets[i]);
+    meanDirs[i * 2] = regions[i].meanUx; meanDirs[i * 2 + 1] = regions[i].meanUy;
+  }
+
+  const put = (data: Uint32Array | Float32Array, label: string): Slice => {
+    const s = alloc(data.byteLength, label);
+    writeSlice(arena, s, data, label);
+    return s;
+  };
+  const set: RegionSetGPU = {
+    offsets: put(offsets, 'verify:offsets'),
+    sizes: put(sizes, 'verify:sizes'),
+    members: put(members, 'verify:members'),
+    meanDirs: put(meanDirs, 'verify:meanDirs'),
+    counts: put(new Uint32Array([regionCount, total]), 'verify:counts'),
+    dispatchArgs: put(new Uint32Array([Math.ceil(regionCount / 64), 1, 1]), 'verify:dispatchArgs'),
+    maxRegions: Math.max(regionCount, 1),
+  };
+
+  const enc = device.createCommandEncoder();
+  const out = encodeLsdFit(arena, alloc, enc, {
+    fx: fxS, fy: fyS, regions: set, w, h,
+    rho: settings.rhoNoiseThreshold, toleranceDeg: settings.toleranceDeg, logNTests, logEpsilon,
+  });
+  device.queue.submit([enc.finish()]);
+  const { results } = await readLsdFitResults(arena, out, set, 'lsd.fit');
+
+  const err = await device.popErrorScope();
+  if (err) {
+    console.error('fitRegionsGPUFromCPU: WebGPU validation error --', err.message);
+    return null;
+  }
+  return results;
 }
 
-// Stages 1 through 4: gray in, rectangles out, every intermediate left wherever
-// its producer put it.
-//
-// No `wantMembers` parameter, deliberately: this is the POSE path's entry point
-// (and the verify harness's), and neither renders per-rectangle membership.
-// Leaving it off the signature means a future caller that does need members has
-// to notice it is asking for four extra readbacks, rather than passing `true`
-// through a chain of defaults without seeing the bill.
-// `wantMembers` fills each rectangle's rawMembers by bringing the region CSR
-// down. It is a HAND-BACK decision, not an algorithm one -- the members exist on
-// whichever side the collect ran regardless, and nothing on the pose path reads
-// them -- so passing it cannot change a pose. The production path leaves it
-// false and pays nothing; a caller that asked for 'rects' (see
-// pose/intermediates.ts) turns it on, because a rectangle with no members
-// cannot be hued by its seed pixel or rasterized.
-export async function runLsdChain(
-  res: FieldResidency, w: number, h: number, settings: LsdSettings, backend: Backend,
-  wantMembers = false,
-): Promise<LsdRectangle[]> {
-  await runGradient2x2Stage(res, w, h, backend);
-  return await computeLsdRectanglesAuto(res, w, h, settings, backend, wantMembers);
-}
-
-// computeLsdRectanglesAuto for callers that already hold a CPU gradient field
-// and have no interest in where anything lives: it wraps the field in a
-// residency of its own for the duration of the call. The production pose path
-// does NOT come through here -- it owns a residency spanning stage 1 as well,
-// which is the whole point (see pose/poseCompute.ts) -- but the debug
-// overlay and the phone both compute their gradient on CPU and would gain
-// nothing from threading one through.
-//
-// Asks for rawMembers. ONE caller left: mobileCapture's sendDebugInfo pass.
-// overlays/lsdOverlay.ts used to be the other, and that is the whole of what
-// this function was for on the desktop -- a second complete LSD chain run
-// purely so display could see rectangles the pose path had just computed and
-// thrown away. It asks for them now (see pose/intermediates.ts), and
-// runLsdChain takes wantMembers itself, so the desktop never comes through
-// here. Still off the pose path either way.
-export async function computeLsdRectanglesFromField(
+// For callers that already hold a CPU gradient field and only want rectangles --
+// the phone's sendDebugInfo pass. Asks for members, because a rectangle with no
+// members cannot be hued by its seed pixel or rasterized.
+export function computeLsdRectanglesFromField(
   field: GradientField, settings: LsdSettings, backend: Backend,
-): Promise<LsdRectangle[]> {
-  const { w, h, fx, fy } = field;
-  // Stage 1 has already happened on CPU here, so `backend` says nothing about
-  // the gradient -- only about stages 2-4, which is why this creates its
-  // residency from the same flag but publishes fx/fy on the CPU side regardless.
-  const res = await FieldResidency.create(w * h, backend === 'gpu');
-  try {
-    res.provideCPU('fx', fx);
-    res.provideCPU('fy', fy);
-    return await computeLsdRectanglesAuto(res, w, h, settings, backend, true);
-  } finally {
-    res.destroy();
-  }
+): LsdRectangle[] {
+  // `backend` is accepted and ignored: stage 1 has already happened on CPU here,
+  // and running stages 2-4 on GPU would mean uploading fx/fy for one caller that
+  // is off the pose path entirely. It stays in the signature because the two
+  // call sites thread a backend everywhere and dropping it there reads as a
+  // decision rather than an omission.
+  void backend;
+  return computeLsdRectangles(field, settings);
 }

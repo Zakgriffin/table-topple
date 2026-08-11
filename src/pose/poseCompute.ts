@@ -1,7 +1,8 @@
 import * as THREE from 'three';
 import { GRID_STEP, MATH_QUAT } from '../sphereLab/constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../sphereLab/math/geometry.ts';
-import { FieldResidency, type TransferSummary } from './gpu/fieldResidency.ts';
+import { type TransferSummary, readSliceF32, readSliceU32 } from './gpu/device.ts';
+import { readRegionMembers } from './stages/lsd/lsdFit.gpu.ts';
 import { fitPairOfPlanesGPU } from './stages/votes/fitPlanes.gpu.ts';
 import { spanDurationMs, spanEnd } from '../sphereLab/profiling/profiler.ts';
 import { poseSpan } from './timing/stages.ts';
@@ -10,7 +11,7 @@ import { type Backend } from './backend.ts';
 import { type PendingDecodeGrid, runPositionDecode } from './stages/decode/decodeGrid.ts';
 import { computeGridPeriodPhase, type GridPeriodPhaseResult } from './stages/period/gridPeriodPhase.ts';
 import { type Intermediates, type IntermediatesRequest, NO_INTERMEDIATES, type PendingIntermediates } from './intermediates.ts';
-import { createLsdChainResidency } from './stages/lsd/chain.ts';
+import { type LsdChainCPU, type LsdChainGPU } from './stages/lsd/chain.ts';
 import type { GrownRegion, LsdRectangle } from './stages/lsd/types.ts';
 import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes, type LsdCompositeSettings } from './stages/votes/votes.ts';
 
@@ -122,31 +123,32 @@ export interface PoseResult {
 // no reader past this point -- but "no reader" turned out to be a claim worth
 // checking against the transfer ledger rather than asserting.
 async function computeCompositesAndVotes(
-  input: PoseInput, res: FieldResidency, gray: Float64Array, w: number, h: number, vFovRad: number,
+  input: PoseInput, gray: Float64Array, w: number, h: number, vFovRad: number,
   backend: Backend, wantMembers: boolean,
-): Promise<{ voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[]; rects: LsdRectangle[] }> {
-  {
-    // Composite lines (one per accepted LSD rectangle, over the 2x2 gradient
-    // field) computed exactly once here and
-    // shared by every downstream consumer that needs them -- vote casting
-    // below and row/col family classification in computeGridPeriodPhase
-    // further down (and, for a real desktop camera, the "color composite
-    // lines by row/col family" debug overlay, which reads voteComposites back
-    // off the camera afterward).
-    const compositesSpan = poseSpan('pose.composites');
-    const { composites: voteComposites, rects } = await computeGradient2x2Composites(input.settings, res, w, h, backend, wantMembers);
-    spanEnd(compositesSpan);
+): Promise<{
+  voteComposites: { root: number; line: CompositeLine }[]; votes: Vote[];
+  rects: LsdRectangle[]; chain: LsdChainGPU | null; cpu: LsdChainCPU | null;
+}> {
+  // Composite lines (one per accepted LSD rectangle, over the 2x2 gradient
+  // field) computed exactly once here and shared by every downstream consumer
+  // that needs them -- vote casting below and row/col family classification in
+  // computeGridPeriodPhase further down (and, for a real desktop camera, the
+  // "color composite lines by row/col family" debug overlay, which reads
+  // voteComposites back off the camera afterward).
+  const compositesSpan = poseSpan('pose.composites');
+  const { composites: voteComposites, rects, chain, cpu } =
+    await computeGradient2x2Composites(input.settings, gray, w, h, backend, wantMembers);
+  spanEnd(compositesSpan);
 
-    // Contains no await, so this stage's duration is host CPU and is declared
-    // `sync` in the stage table. That used to be a branch: the retired
-    // per-pixel "world votes" source awaited a gradient readback here, making
-    // its duration wall time containing a fence.
-    const votesSpan = poseSpan('votes.segments');
-    const votes = computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, input.aspect);
-    spanEnd(votesSpan);
+  // Contains no await, so this stage's duration is host CPU and is declared
+  // `sync` in the stage table. That used to be a branch: the retired per-pixel
+  // "world votes" source awaited a gradient readback here, making its duration
+  // wall time containing a fence.
+  const votesSpan = poseSpan('votes.segments');
+  const votes = computeSegmentVotes(voteComposites, w, h, MATH_QUAT, vFovRad, input.aspect);
+  spanEnd(votesSpan);
 
-    return { voteComposites, votes, rects };
-  }
+  return { voteComposites, votes, rects, chain, cpu };
 }
 
 // One reconstruction, start to finish, RETURNED. The order is what
@@ -191,10 +193,12 @@ export async function computePoseFromCapture(
   input: PoseInput, gray: Float64Array, w: number, h: number, backend: Backend,
   want: IntermediatesRequest = NO_INTERMEDIATES,
 ): Promise<PoseResult> {
-  // Both are filled inside the try and read in the finally, so the residency
-  // reaches the handle even on the error unwind rather than leaking.
+  // Filled inside the try and read in the finally, so the chain's slices reach
+  // the handle even on the error unwind.
   let pendingGrid: PendingDecodeGrid | null = null;
   let rects: LsdRectangle[] | null = null;
+  let chain: LsdChainGPU | null = null;
+  let cpuChain: LsdChainCPU | null = null;
   const vFovRad = getAnalysisVFovRad(input);
 
   // The root of this reconstruction, and every other span below is declared to
@@ -214,33 +218,25 @@ export async function computePoseFromCapture(
   // Assembled in the try and DECORATED in the finally -- see there.
   let result: PoseResult | null = null;
 
-  const residencySpan = poseSpan('pose.residency');
-  const res = await createLsdChainResidency(gray, w, h, backend);
-  spanEnd(residencySpan);
-
   // IS `votesMs` -- see the return statement. It is also what makes the
   // subtree's self times readable as a decomposition of a stage rather than as
   // free-floating durations: reconstructionTiming subtracts the children from
   // this span to get the part of the votes stage that is in no child span at
   // all.
   //
-  // OPENED AFTER THE RESIDENCY, and that is a deliberate change: it used to
-  // open above it, so `pose.votes` physically CONTAINED `pose.residency` while
-  // the stage table declares residency as an INPUT to it. The critical-path
-  // join found that on its first run -- an edge whose producer had not finished
-  // when its consumer started, which is exactly the anomaly `unsatisfied`
-  // exists to report. Two consequences, both improvements: the gray upload gets
-  // its own row at the head of the chain instead of hiding inside the votes
-  // stage's self time, and `votesMs` now means the votes stage rather than the
-  // votes stage plus an upload the DECODE stage also consumes (it reuses this
-  // residency's gray buffer, so charging the whole upload to votes was always a
-  // misattribution). Historical votesMs numbers are not comparable across this
-  // -- they are void anyway, on the config-pinning ruling.
+  // There used to be a `pose.residency` span ahead of this one, for the gray
+  // upload. It is gone with the residency: `createLsdChainResidency` only ever
+  // recorded a CPU array into a map, and the 1.19MB crossing actually happened
+  // later, at the first `res.gpu('gray')` inside the gradient stage -- which the
+  // stage table's own comment had already noticed. The upload is now written
+  // where it happens, inside runLsdChainGPU, and charged to `lsd.gradient`.
   const stageSpan = poseSpan('pose.votes');
   try {
-    const composited = await computeCompositesAndVotes(input, res, gray, w, h, vFovRad, backend, want.has('rects'));
+    const composited = await computeCompositesAndVotes(input, gray, w, h, vFovRad, backend, want.has('rects'));
     const { voteComposites, votes } = composited;
     rects = composited.rects;
+    chain = composited.chain;
+    cpuChain = composited.cpu;
     spanEnd(stageSpan);
 
     // Same fallback pattern as every other GPU sub-pipeline: fitPairOfPlanes
@@ -301,7 +297,7 @@ export async function computePoseFromCapture(
     // Hand down the chain's own gray buffer when there IS one -- the residency has
     // no device on an all-CPU chain, and `gray` is only device-resident if some
     // stage put it there. Null just means decode uploads its own, as before.
-    const sharedGray = res.device && res.hasGPU('gray') ? res.gpu('gray', 'pose.decode') : null;
+    const sharedGray = chain ? { arena: chain.arena, slice: chain.gray } : null;
     const decoded = await runPositionDecode(
       { aspect: input.aspect, settings: input.settings, recoveredAxes, gridPeriodPhase: gpp },
       gray, w, h, vFovRad, sharedGray, backend, want.has('decodeGrid'),
@@ -343,32 +339,31 @@ export async function computePoseFromCapture(
     };
     return result;
   } finally {
-    // Read BEFORE destroy, and in the finally rather than the happy path, so a
-    // configuration that threw still reports the traffic it managed to incur.
+    // In the finally rather than the happy path, so a configuration that threw
+    // still reports the traffic it managed to incur.
     //
     // Frozen HERE, at the end of the pose, even when a handle carries the
-    // residency onward: this number is what the POSE PATH cost, and that is the
-    // question the readout answers. Transfers a later drain incurs on the
-    // caller's behalf are that caller's cost, not the pipeline's, and they are
-    // visible as their own profiler spans.
-    const transfers = res.summary();
+    // chain's slices onward: this number is what the POSE PATH cost, and that is
+    // the question the readout answers. Transfers a later drain incurs on the
+    // caller's behalf are that caller's cost, and they are visible as their own
+    // profiler records.
+    const transfers = chain ? chain.transfers : { crossings: 0, bytes: 0, entries: [] };
 
-    // ONE question decides the residency's fate: is there both something to
-    // hand back and something to hand it back ON? A non-empty request whose run
-    // THREW has no result to carry a handle, so those buffers are freed here
-    // rather than handed to a drain nobody will ever be given the chance to
-    // call. Otherwise the empty request destroys as it always did.
+    // NOTHING TO DESTROY on either branch, and that is the point of the arena.
+    // This used to be the one question that decided the residency's fate --
+    // whether to destroy its buffers here or hand ownership to a drain -- and
+    // getting it wrong either leaked device memory or freed buffers a display
+    // pass was about to read. The chain's slices are freed by the NEXT run's
+    // `arena.reset()`, so the only thing still worth handling is the decode
+    // grid's own handle, which owns standalone buffers.
     if (result && want.size > 0) {
-      result.pending = makePendingIntermediates(res, want, pendingGrid, rects);
+      result.pending = makePendingIntermediates(chain, cpuChain, want, pendingGrid, rects);
     } else {
       pendingGrid?.release();
-      res.destroy();
     }
 
     // Decorating the object the `return` above already evaluated, which works
-    // because it is a reference and the caller has not seen it yet. Assembling
-    // the result after the try instead would mean either reading the ledger
-    // after destroy or summarizing twice.
+    // because it is a reference and the caller has not seen it yet.
     if (result) result.chainTransfers = transfers;
 
     // Closed LAST, in the finally, so a run that threw still contributes an
@@ -379,20 +374,24 @@ export async function computePoseFromCapture(
   }
 }
 
-// Ownership of the residency (and of the decode grid's own handle, when there
-// is one) moves in here. Both are destroyed exactly once, by whichever of
-// resolve/release runs first -- see PendingIntermediates on why both have to be
-// safe twice and in either order.
+// Only the decode grid's handle moves in here now. The chain's own slices are
+// BORROWED, not owned: they stay valid until the next `arena.reset()`, and a
+// drain that runs too late throws a StaleSliceError rather than reading another
+// run's bytes. That is the whole of what used to be an ownership-transfer
+// invariant with a test attached.
+//
+// A CPU run hands its arrays over directly -- there is nothing to read back and
+// nothing to transfer, which is what "asking costs nothing" means on that path.
 function makePendingIntermediates(
-  res: FieldResidency, want: IntermediatesRequest,
+  chain: LsdChainGPU | null, cpu: LsdChainCPU | null, want: IntermediatesRequest,
   pendingGrid: PendingDecodeGrid | null, rects: LsdRectangle[] | null,
 ): PendingIntermediates {
   let spent = false;
-  // Held so a second resolve() re-hands the SAME arrays rather than draining a
-  // residency that is already destroyed. Starts as the empty set, which is also
-  // what a resolve() after a release() gets -- see PendingIntermediates.
+  // Held so a second resolve() re-hands the SAME arrays rather than draining
+  // twice. Starts as the empty set, which is also what a resolve() after a
+  // release() gets -- see PendingIntermediates.
   let drained: Intermediates = {};
-  const destroy = () => { pendingGrid?.release(); res.destroy(); };
+  const destroy = () => { pendingGrid?.release(); };
   return {
     async resolve() {
       if (spent) return drained;
@@ -400,16 +399,33 @@ function makePendingIntermediates(
       const drainSpan = poseSpan('pose.drain');
       try {
         const out: Intermediates = {};
-        // Straight off the residency's own accessors, which already know which
-        // side each field is on and transfer only if the sides differ. A field
-        // the chain happened to leave on the CPU costs nothing to hand over.
-        if (want.has('fx')) out.fx = await res.cpuF64('fx', 'pose.drain');
-        if (want.has('fy')) out.fy = await res.cpuF64('fy', 'pose.drain');
-        if (want.has('regionId')) out.regionId = await res.cpuI32('regionId', 'pose.drain');
-        if (want.has('regions')) out.regions = await res.regionsCPU('pose.drain') as GrownRegion[];
-        // Not from the residency: stage 4's rectangles are a host-side array
-        // the chain returns and then had nowhere to put. Captured during the
-        // run and simply held until now.
+        if (cpu) {
+          // Already host arrays. No readback, no widening, no transfer.
+          if (want.has('fx')) out.fx = cpu.fx;
+          if (want.has('fy')) out.fy = cpu.fy;
+          if (want.has('regionId')) out.regionId = cpu.regionId;
+          if (want.has('regions')) out.regions = cpu.regions as GrownRegion[];
+        } else if (chain) {
+          const { arena } = chain;
+          // Widened here rather than by a residency accessor. f32 is what the
+          // device holds; Float64Array is what every CPU consumer expects.
+          if (want.has('fx')) out.fx = new Float64Array(await readSliceF32(arena, chain.fx, chain.n * 4, 'fx', 'pose.drain'));
+          if (want.has('fy')) out.fy = new Float64Array(await readSliceF32(arena, chain.fy, chain.n * 4, 'fy', 'pose.drain'));
+          if (want.has('regionId')) {
+            const raw = await readSliceU32(arena, chain.regionId, chain.n * 4, 'regionId', 'pose.drain');
+            // BIT REINTERPRETATION, not a numeric convert: that is what makes
+            // the -1 sentinel survive the trip (collectRegions' scatter writes a
+            // real -1).
+            out.regionId = new Int32Array(raw.buffer.slice(0));
+          }
+          if (want.has('regions')) {
+            out.regions = (await readRegionMembers(
+              arena, chain.regions, chain.regionCount, chain.memberCount, 'pose.drain',
+            )) as GrownRegion[];
+          }
+        }
+        // Stage 4's rectangles are a host-side array the chain already returned
+        // and then had nowhere to put. Captured during the run and held.
         if (want.has('rects') && rects) out.rects = rects;
         // Last, so a throw reading a field above still leaves the grid's memory
         // to the destroy below. Folded into the SAME object as everything else:

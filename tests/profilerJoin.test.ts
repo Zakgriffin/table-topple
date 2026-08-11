@@ -535,13 +535,17 @@ test('the critical path through a real CPU reconstruction reaches the whole chai
   // 12 without saying which one left.
   // `pose.residency` is gone from this list along with the residency itself: it
   // measured a map insertion, and the gray upload it was named for happens
-  // inside `lsd.gradient`. `lsd.collect` is NOT here either -- it is declared,
-  // but on the CPU path `growRegionsCCL` runs the collect inside its own call,
-  // so nothing records it and the walk treats an input that never recorded as
-  // silent. That is the documented rule, not an omission; it becomes a real
-  // stage on both backends at Step 3.
+  // inside `lsd.gradient`.
+  // `lsd.collect` IS here now, and its presence is the load-bearing part of
+  // Step 3's CPU grow/collect split. It used to be absent-by-design: the collect
+  // ran inside `growRegionsCCL`, nothing recorded the span, and the walk treats
+  // an input that never recorded as silent. That silence is why `lsd.fit` had to
+  // declare `lsd.grow` as a second input to keep the CPU chain from truncating.
+  // Now that the stage records on both backends, `lsd.fit` declares only
+  // `lsd.collect` -- and if the split were ever undone, this line is what would
+  // fail rather than the critical path quietly getting shorter.
   for (const id of ['pose.votes', 'pose.composites', 'lsd.gradient',
-    'lsd.grow', 'lsd.fit', 'votes.filter', 'votes.segments', 'pose.fit', 'pose.assembly',
+    'lsd.grow', 'lsd.collect', 'lsd.fit', 'votes.filter', 'votes.segments', 'pose.fit', 'pose.assembly',
     'pose.distance', 'gpp.classify', 'gpp.search', 'pose.decode']) {
     assert.ok(ids.includes(id), `${id} is not on the critical path of a CPU reconstruction`);
   }

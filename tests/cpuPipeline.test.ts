@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { computeGradient2x2Field } from '../src/pose/stages/gradient/gradientField.ts';
-import { growRegionsCCL } from '../src/pose/stages/lsd/regions.cpu.ts';
+import { collectRegionsFromLabels, growRegionsCCL } from '../src/pose/stages/lsd/regions.cpu.ts';
 import { runPoseOn } from '../src/sphereLab/harness/runPose.ts';
 import { closeTo, loadInput } from './helpers/fixtures.ts';
 
@@ -52,9 +52,11 @@ test('the 2x2 gradient field covers the image and is finite everywhere', () => {
 test('grown regions respect minRegionSize and stay inside the image', () => {
   const s = input.settings;
   const { fx, fy } = computeGradient2x2Field(input.gray, input.w, input.h);
-  const { regions, regionId } = growRegionsCCL(
-    fx, fy, input.w, input.h,
-    s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
+  const { label } = growRegionsCCL(
+    fx, fy, input.w, input.h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdCclSteps,
+  );
+  const { regions, regionId } = collectRegionsFromLabels(
+    label, fx, fy, s.lsdRhoHighThreshold, input.w * input.h, s.lsdMinRegionSize,
   );
   assert.ok(regions.length > 0, 'the fixture should produce regions at its pinned settings');
   assert.equal(regionId.length, input.w * input.h);
@@ -74,9 +76,11 @@ test('grown regions respect minRegionSize and stay inside the image', () => {
 test('grown region count and sizes are unchanged (golden, fixtures/default)', () => {
   const s = input.settings;
   const { fx, fy } = computeGradient2x2Field(input.gray, input.w, input.h);
-  const { regions } = growRegionsCCL(
-    fx, fy, input.w, input.h,
-    s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
+  const { label } = growRegionsCCL(
+    fx, fy, input.w, input.h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdCclSteps,
+  );
+  const { regions } = collectRegionsFromLabels(
+    label, fx, fy, s.lsdRhoHighThreshold, input.w * input.h, s.lsdMinRegionSize,
   );
   assert.equal(regions.length, 542);
   assert.deepEqual(regions.slice(0, 5).map((r) => r.members.length), [25, 13, 31, 25, 5]);

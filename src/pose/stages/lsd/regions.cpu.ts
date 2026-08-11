@@ -118,14 +118,16 @@ function roundHardCap(w: number, h: number): number { return w + h + 64; }
 // whole. Setting rhoHigh <= rhoLow degrades gracefully to plain single-
 // threshold behavior (every eligible pixel trivially clears the high bar).
 //
-// maxRounds is a DEBUG SCRUBBER, not a tuning parameter: 0 means run to the
-// fixpoint (the real algorithm, and the production default), while 1..N caps
-// the round count so an overlay can watch components coalesce. Unlike the
-// growSteps it replaces, changing it cannot change the converged answer --
-// only how much of the way there you are looking at.
-// Hysteresis survival + the collect/relabel pass, shared by growRegionsCCL and
-// its GPU counterpart (pose/stages/lsd/growRegions.gpu.ts) so the two can never drift
-// in how a finished labeling turns into regions.
+// The pair is SPLIT ACROSS THE TWO STAGES below, which is worth stating since
+// the block above describes them together: rhoLow gates who may participate in
+// an edge and is read by the round loop, while rhoHigh gates which finished
+// components survive and is read only by the collector.
+
+// Hysteresis survival + the collect/relabel pass: the `lsd.collect` STAGE, and
+// the CPU counterpart of encodeCollectRegions. It takes a finished labeling and
+// nothing else, which is what lets both backends call grow and collect as two
+// steps in the same order. It used to be called from inside `growRegionsCCL`,
+// where it was reachable only by growing first.
 //
 // This is the CPU route AND the fallback; pose/stages/lsd/collectRegions.gpu.ts is the
 // GPU one. An earlier version of this comment called the step "inherently
@@ -199,10 +201,27 @@ export function collectRegionsFromLabels(
   return { regionId, regions };
 }
 
+// maxRounds is a DEBUG SCRUBBER, not a tuning parameter: 0 means run to the
+// fixpoint (the real algorithm, and the production default), while 1..N caps
+// the round count so an overlay can watch components coalesce. Unlike the
+// growSteps it replaces, changing it cannot change the converged answer --
+// only how much of the way there you are looking at.
+//
+// The ROUND LOOP, and nothing else. It returns the finished labeling; turning
+// that into regions is `collectRegionsFromLabels`, which the caller calls
+// itself -- the same two-step the GPU path has always had (`encodeGrowInit` +
+// `encodeGrowRound`, then `encodeCollectRegions`). This used to end by calling
+// the collector, which made `label` the one stage output that existed on only
+// one backend, cost `lsd.collect` its CPU span, and left the two decompositions
+// disagreeing about where a stage boundary is.
+//
+// Note what left the signature with the collector: `rhoHigh` and
+// `minRegionSize` are hysteresis and prefilter parameters that no round ever
+// read. The remaining three are exactly `encodeGrowInit`'s inputs plus the cap.
 export function growRegionsCCL(
   fx: Float64Array, fy: Float64Array, w: number, h: number,
-  toleranceDeg: number, rhoLow: number, rhoHigh: number, maxRounds: number, minRegionSize: number,
-): { regionId: Int32Array; regions: GrownRegion[]; roundsRun: number; converged: boolean } {
+  toleranceDeg: number, rhoLow: number, maxRounds: number,
+): { label: Int32Array; roundsRun: number; converged: boolean } {
   const n = w * h;
   const cosTol = Math.cos(THREE.MathUtils.degToRad(toleranceDeg));
 
@@ -276,6 +295,5 @@ export function growRegionsCCL(
     if (!changed) { converged = true; break; }
   }
 
-  const { regionId, regions } = collectRegionsFromLabels(label, fx, fy, rhoHigh, n, minRegionSize);
-  return { regionId, regions, roundsRun, converged };
+  return { label, roundsRun, converged };
 }

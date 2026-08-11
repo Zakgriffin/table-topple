@@ -244,8 +244,11 @@ export async function runLsdChainGPU(
 // Typed arrays throughout -- no residency, no slices, nothing to own.
 export function computeLsdRectangles(field: GradientField, settings: LsdSettings): LsdRectangle[] {
   const { w, h, fx, fy } = field;
-  const { regions } = growRegionsCCL(
-    fx, fy, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+  const { label } = growRegionsCCL(
+    fx, fy, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.cclSteps,
+  );
+  const { regions } = collectRegionsFromLabels(
+    label, fx, fy, settings.rhoHighThreshold, w * h, settings.minRegionSize,
   );
   return fitRegionsCPU(regions, fx, fy, w, h, settings);
 }
@@ -256,6 +259,10 @@ export interface LsdChainCPU {
   rects: LsdRectangle[];
   fx: Float64Array;
   fy: Float64Array;
+  // `lsd.grow`'s output, carried for the same reason `LsdChainGPU` carries its
+  // slice: it is a stage output, and it became one on this side only when the
+  // collect moved out of `growRegionsCCL`.
+  label: Int32Array;
   regionId: Int32Array;
   regions: { members: Int32Array; meanUx: number; meanUy: number }[];
 }
@@ -267,19 +274,22 @@ export function runLsdChainCPU(
   const field = computeGradient2x2Field(gray, w, h);
   spanEnd(gradSpan);
 
-  // grow and collect are ONE call on this side -- `growRegionsCCL` runs the
-  // round loop and then calls `collectRegionsFromLabels` itself, so there is no
-  // seam here to open a second span at. The declared split is real (the GPU path
-  // has two encode functions) and the CPU path will follow when Step 3 gives
-  // `growRegionsCCL` the same shape; until then this span covers both and
-  // `lsd.collect` simply does not record on a CPU run, which the critical-path
-  // walk treats as a silent absent input rather than an anomaly.
+  // Two spans, because there are two stages -- the round loop hands over a
+  // labeling and the collector turns it into regions, exactly as
+  // `runLsdChainGPU` encodes them. Until Step 3 split `growRegionsCCL` the
+  // collect ran inside the grow call, so `lsd.collect` never recorded on a CPU
+  // run and the critical-path walk saw a silently absent input.
   const growSpan = poseSpan('lsd.grow', { backend: 'cpu' });
-  const { regionId, regions } = growRegionsCCL(
-    field.fx, field.fy, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold,
-    settings.rhoHighThreshold, settings.cclSteps, settings.minRegionSize,
+  const { label } = growRegionsCCL(
+    field.fx, field.fy, w, h, settings.toleranceDeg, settings.rhoNoiseThreshold, settings.cclSteps,
   );
   spanEnd(growSpan);
+
+  const collectSpan = poseSpan('lsd.collect', { backend: 'cpu' });
+  const { regionId, regions } = collectRegionsFromLabels(
+    label, field.fx, field.fy, settings.rhoHighThreshold, w * h, settings.minRegionSize,
+  );
+  spanEnd(collectSpan);
 
   // Around the fitter, so the span means "fit finished" on both backends and
   // `lsd.fit` aggregates across its `backend` attr -- which was the point of
@@ -288,7 +298,7 @@ export function runLsdChainCPU(
   const rects = fitRegionsCPU(regions, field.fx, field.fy, w, h, settings);
   spanEnd(fitSpan);
 
-  return { rects, fx: field.fx, fy: field.fy, regionId, regions };
+  return { rects, fx: field.fx, fy: field.fy, label, regionId, regions };
 }
 
 // ── Stage-isolation bridges, for the verify harnesses only ───────────────

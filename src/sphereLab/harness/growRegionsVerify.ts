@@ -1,5 +1,5 @@
 import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientField.ts';
-import { growRegionsCCL } from '../../pose/stages/lsd/regions.cpu.ts';
+import { collectRegionsFromLabels, growRegionsCCL } from '../../pose/stages/lsd/regions.cpu.ts';
 import type { GrownRegion } from '../../pose/stages/lsd/types.ts';
 import { growCollectGPUToCPU } from '../../pose/stages/lsd/chain.ts';
 import { type InputProvenance, provenance } from './input.ts';
@@ -111,12 +111,24 @@ export async function verifyGrowRegions(input: HarnessInput): Promise<GrowRegion
   // round loop and not the gradient stage.
   const field = computeGradient2x2Field(gray, w, h);
   const { fx, fy } = field;
-  const args = [
-    w, h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
-  ] as const;
+  // One named local per parameter, and both paths read them. The tuple this
+  // replaced was spread into both calls, which guaranteed they agreed; the CPU
+  // side is two calls now (grow takes the round-loop parameters, collect takes
+  // the hysteresis ones) and cannot share a tuple with the GPU bridge's flat
+  // list, so the locals carry the guarantee instead.
+  const tol = s.lsdToleranceDeg, rhoLow = s.lsdRhoNoiseThreshold, rhoHigh = s.lsdRhoHighThreshold;
+  const maxRounds = s.lsdCclSteps, minRegionSize = s.lsdMinRegionSize;
 
   const cpuStart = performance.now();
-  const cpu = growRegionsCCL(fx, fy, ...args);
+  // Grow then collect -- the same two stages the bridge below encodes
+  // separately. BOTH are inside the timer, because `collectOnGPU: false` means
+  // the GPU run collects on the CPU as well, so cpuMs and gpuMs still cover the
+  // same work and the difference stays "the round loop".
+  const grown = growRegionsCCL(fx, fy, w, h, tol, rhoLow, maxRounds);
+  const cpu = {
+    ...grown,
+    ...collectRegionsFromLabels(grown.label, fx, fy, rhoHigh, w * h, minRegionSize),
+  };
   const cpuMs = performance.now() - cpuStart;
 
   const gpuStart = performance.now();
@@ -132,7 +144,7 @@ export async function verifyGrowRegions(input: HarnessInput): Promise<GrowRegion
   // silently changed SHAPE with a UI checkbox -- turn forceCPU on and the same
   // function suddenly compared like against like. That is the ambient-config
   // failure in miniature: the harness could not state what it was measuring.
-  const gpu = await growCollectGPUToCPU(fx, fy, ...args, false);
+  const gpu = await growCollectGPUToCPU(fx, fy, w, h, tol, rhoLow, rhoHigh, maxRounds, minRegionSize, false);
   const gpuMs = performance.now() - gpuStart;
   // Null means either no WebGPU at all or a validation error the grower's own
   // error scope caught -- in the latter case it has already logged the message.

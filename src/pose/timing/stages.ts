@@ -50,18 +50,18 @@ export const POSE_STAGES = {
   // kernel. Splitting it cost nothing: both stages encode into the same encoder,
   // so the labeling still never crosses the bus.
   'lsd.collect': { label: 'collect regions (CSR)', within: 'pose.composites', inputs: ['lsd.grow'] },
-  // BOTH declared, and that is not belt-and-braces. `lsd.fit`'s real input is
-  // "the regions", which the GPU path gets from `lsd.collect` and the CPU path
-  // gets from `lsd.grow` -- because `growRegionsCCL` still runs the collect
-  // inside its own call and records no separate span. Declaring only
-  // `lsd.collect` truncated the CPU critical path at `lsd.fit`: an input that
-  // never recorded is SILENT by design, so the walk terminated there and
-  // reported rectangle fitting as the whole chain with the grow nowhere on it.
-  // That is the identical failure 6b was built to catch, reintroduced by
-  // splitting the stage -- and caught again by the same test. Both edges resolve
-  // to whichever producer actually ran, since readyAt is the LATEST end among
-  // the inputs that recorded.
-  'lsd.fit': { label: 'fit regions', within: 'pose.composites', inputs: ['lsd.collect', 'lsd.grow'] },
+  // ONE input, and getting back to that is why the CPU-side grow/collect split
+  // had to land first. `lsd.fit`'s real input is "the regions", which BOTH
+  // backends now get from `lsd.collect`. This read `['lsd.collect', 'lsd.grow']`
+  // for as long as `growRegionsCCL` ran the collect inside its own call and
+  // recorded no separate span: declaring only `lsd.collect` then truncated the
+  // CPU critical path at `lsd.fit`, because an input that never recorded is
+  // SILENT by design, so the walk terminated there and reported rectangle
+  // fitting as the whole chain with the grow nowhere on it. That is the
+  // identical failure 6b was built to catch, and the same test caught it. The
+  // extra edge is only safe to drop because `lsd.collect` records on a CPU run
+  // now -- check that before narrowing any other stage's inputs.
+  'lsd.fit': { label: 'fit regions', within: 'pose.composites', inputs: ['lsd.collect'] },
   'votes.filter': { label: 'compositesFromLsdRectangles', within: 'pose.composites', inputs: ['lsd.fit'], sync: true },
   'votes.segments': { label: 'votes (segments)', within: 'pose.votes', inputs: ['pose.composites'], sync: true },
 

@@ -1,6 +1,6 @@
 import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientField.ts';
 import { countRectanglePixels, fitRegionOnce } from '../../pose/stages/lsd/rectangles.cpu.ts';
-import { growRegionsCCL } from '../../pose/stages/lsd/regions.cpu.ts';
+import { collectRegionsFromLabels, growRegionsCCL } from '../../pose/stages/lsd/regions.cpu.ts';
 import type { LsdRectangle } from '../../pose/stages/lsd/types.ts';
 import { fitRegionsGPUFromCPU } from '../../pose/stages/lsd/chain.ts';
 import { type InputProvenance, provenance } from './input.ts';
@@ -64,8 +64,11 @@ export async function verifyLsdFit(input: HarnessInput): Promise<LsdFitVerifyRep
 
   const field = computeGradient2x2Field(gray, w, h);
   const { fx, fy } = field;
-  const { regions } = growRegionsCCL(
-    fx, fy, w, h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
+  const { label } = growRegionsCCL(
+    fx, fy, w, h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdCclSteps,
+  );
+  const { regions } = collectRegionsFromLabels(
+    label, fx, fy, s.lsdRhoHighThreshold, w * h, s.lsdMinRegionSize,
   );
   if (regions.length === 0) return 'grower produced no regions -- nothing to compare';
 

@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { computeGradient2x2Field } from '../src/pose/stages/gradient/gradientField.ts';
-import { growRegionsCCL } from '../src/pose/stages/lsd/regions.cpu.ts';
+import { collectRegionsFromLabels, growRegionsCCL } from '../src/pose/stages/lsd/regions.cpu.ts';
 import { computePoseFromCapture } from '../src/pose/poseCompute.ts';
 import { closeTo, loadInput } from './helpers/fixtures.ts';
 
@@ -59,9 +59,11 @@ test('the regions and rects handed back are the collect/fit output', async () =>
   const rects = pose.rects;
   const s = input.settings;
   const field = computeGradient2x2Field(input.gray, input.w, input.h);
-  const direct = growRegionsCCL(
-    field.fx, field.fy, input.w, input.h,
-    s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdRhoHighThreshold, s.lsdCclSteps, s.lsdMinRegionSize,
+  const grown = growRegionsCCL(
+    field.fx, field.fy, input.w, input.h, s.lsdToleranceDeg, s.lsdRhoNoiseThreshold, s.lsdCclSteps,
+  );
+  const direct = collectRegionsFromLabels(
+    grown.label, field.fx, field.fy, s.lsdRhoHighThreshold, input.w * input.h, s.lsdMinRegionSize,
   );
   assert.equal(regions.length, direct.regions.length);
   assert.equal(regionId.length, input.w * input.h);

@@ -86,10 +86,16 @@ export const POSE_STAGES = {
 
   // ── decode ──
   'pose.decode': { label: 'positionDecode', within: 'pose.run', inputs: ['pose.distance'] },
-  'decode.fused': { label: 'decode (fused GPU build+tally)', within: 'pose.decode' },
-  'decode.tallyDispatch': { label: 'GPU dispatch (4 orientations)', within: 'decode.fused' },
-  // The unfused fallback's two halves. Both can coexist with `decode.fused` in
-  // one run: the fused route is ATTEMPTED first and falls through when the
+  // The whole GPU decode, and it is now ONE SUBMIT and one 32-byte readback --
+  // build, tally, argmax and correctness encoded in sequence. There is no
+  // sub-span inside it any more: `decode.tallyDispatch` used to close at a
+  // submit that the tally made on its own, and with all four stages sharing an
+  // encoder there is no submit there to close at. What is left inside this span
+  // is microseconds of encoding plus the one stall, and the stall is already
+  // attributed here by the readback's owner.
+  'decode.fused': { label: 'decode (GPU, one submit)', within: 'pose.decode' },
+  // The CPU fallback's two halves. Both can coexist with `decode.fused` in
+  // one run: the GPU route is ATTEMPTED first and falls through when the
   // layout or the build comes back null.
   'decode.build': { label: 'buildDecodeSampleGrid', within: 'pose.decode', sync: true },
   'decode.tally': { label: 'tallyPositionVotes', within: 'pose.decode', inputs: ['decode.build'] },

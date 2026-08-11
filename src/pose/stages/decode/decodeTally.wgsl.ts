@@ -115,3 +115,113 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   atomicAdd(&tally[idx], 1u);
 }
 `;
+
+// ── The histogram's winner, on device ────────────────────────────────────
+//
+// This is the stage that used to run on the HOST on both backends: the GPU path
+// read the entire `hist[4*R*C]` back (331KB at a 144x144 board, the largest
+// readback in decode) purely to run an argmax over it, because the correctness
+// pass needs the winner in a binding and only the host could put it there.
+//
+// That single host dependency is what made "fused" decode THREE submits. With
+// the argmax here, build -> tally -> argmax -> correctness is one encoder, one
+// submit, and one 32-byte readback.
+//
+// ── Tie-breaking, which has to match exactly ──
+//
+// The host loop it replaces was `if (v > best) { best = v; bestIdx = i; }` over
+// ascending i -- so: strictly greater, therefore the LOWEST index among equal
+// maxima, and a winner requires at least one vote. Both halves below preserve
+// that: each thread strides upward and takes `>` only, and the tree reduction
+// prefers the smaller index on a tie. A thread that never saw a positive count
+// keeps idx = NONE, which loses every comparison against a real one.
+//
+// (The CPU reference in decodeGrid.ts breaks ties by Map INSERTION order
+// instead, which is neither index order nor meaningful. That difference predates
+// this and is only reachable on a frame where two anchors tie for first -- an
+// ambiguous decode either way. Not introduced here, and not fixed here.)
+//
+// ── One workgroup, deliberately ──
+//
+// 4*R*C is 82944 u32 at the default board and 262144 at the largest; one
+// workgroup of 256 threads reads that in 324 or 1024 strided iterations, which
+// is well under the cost of the readback it removes. A two-level reduction would
+// use the machine better and would also need a second pass, a second buffer, and
+// its own tie-break argument across blocks. Revisit if a measurement ever puts
+// this on the critical path -- it currently replaces a 331KB stall.
+export const DECODE_ARGMAX_WGSL = /* wgsl */ `
+struct ArgmaxUniforms {
+  n: u32,        // 4 * torusR * torusC
+  torusR: u32, torusC: u32,
+  gr: u32, gc: u32,   // the UNROTATED grid dims, for the correctness dispatch below
+  wgSize: u32, pad: u32,
+}
+@group(0) @binding(0) var<uniform> u: ArgmaxUniforms;
+@group(0) @binding(1) var<storage, read> tally: array<u32>;
+@group(0) @binding(2) var<storage, read> totalWindows: array<u32>;
+// The decode result block -- see DECODE_RESULT_* in decodeTally.gpu.ts for the
+// slot names. This pass writes 0..5; the correctness pass adds into 6..7.
+@group(0) @binding(3) var<storage, read_write> result: array<u32>;
+// Workgroup counts for the correctness pass, so its extent (which depends on the
+// winning ORIENTATION) never has to come back to the host either.
+@group(0) @binding(4) var<storage, read_write> dispatchArgs: array<u32>;
+
+const NONE: u32 = 0xFFFFFFFFu;
+const WG: u32 = 256u;
+
+var<workgroup> partialVotes: array<u32, 256>;
+var<workgroup> partialIdx: array<u32, 256>;
+
+@compute @workgroup_size(256)
+fn argmax(@builtin(local_invocation_id) lid: vec3<u32>) {
+  let t = lid.x;
+  var bv = 0u;
+  var bi = NONE;
+  for (var i = t; i < u.n; i = i + WG) {
+    let v = tally[i];
+    if (v > bv) { bv = v; bi = i; }
+  }
+  partialVotes[t] = bv;
+  partialIdx[t] = bi;
+  workgroupBarrier();
+
+  for (var s = WG / 2u; s > 0u; s = s >> 1u) {
+    if (t < s) {
+      let ov = partialVotes[t + s];
+      let oi = partialIdx[t + s];
+      if (ov > partialVotes[t] || (ov == partialVotes[t] && oi < partialIdx[t])) {
+        partialVotes[t] = ov;
+        partialIdx[t] = oi;
+      }
+    }
+    workgroupBarrier();
+  }
+  if (t != 0u) { return; }
+
+  let votes = partialVotes[0];
+  let idx = partialIdx[0];
+  let found = select(0u, 1u, idx != NONE);
+  let rc = u.torusR * u.torusC;
+  // Guarded by found rather than left to read out of a NONE index: an
+  // undecodable frame is an ordinary outcome here (the host falls back to the
+  // CPU decode), so it has to produce zeros rather than 0xFFFFFFFF/rc.
+  let orient = select(0u, idx / rc, found == 1u);
+  let rem = select(0u, idx % rc, found == 1u);
+  result[0] = found;
+  result[1] = orient;
+  result[2] = select(0u, rem / u.torusC, found == 1u);
+  result[3] = select(0u, rem % u.torusC, found == 1u);
+  result[4] = votes;
+  result[5] = totalWindows[0];
+
+  // rotatedDims(gr, gc, orient), then ceil to the correctness kernel's 8x8
+  // workgroup. Zero on a miss, so the pass encoded after this one runs no
+  // threads at all rather than counting against a garbage anchor.
+  let swap = (orient == 1u || orient == 3u);
+  let rr = select(u.gr, u.gc, swap);
+  let cc = select(u.gc, u.gr, swap);
+  dispatchArgs[0] = select(0u, (rr + u.wgSize - 1u) / u.wgSize, found == 1u);
+  dispatchArgs[1] = select(0u, (cc + u.wgSize - 1u) / u.wgSize, found == 1u);
+  dispatchArgs[2] = select(0u, 1u, found == 1u);
+}
+`;

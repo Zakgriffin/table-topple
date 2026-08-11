@@ -113,15 +113,27 @@ fn build(@builtin(global_invocation_id) gid: vec3<u32>) {
 //
 // Mirrors runPositionDecode's own loop exactly, including that it walks the
 // ROTATED grid and skips invalid cells.
+//
+// THE WINNER COMES FROM THE DEVICE, not from a uniform. That one binding change
+// is what collapsed decode from three submits to one: this pass needs the
+// orientation and anchor the tally picked, and while the argmax ran on the host
+// the only way to deliver them was to read the histogram back, pick, upload, and
+// submit again. Now decodeTally.wgsl.ts's argmax writes them into `result` in
+// the pass immediately before this one, and the DISPATCH EXTENT -- which also
+// depends on the orientation -- comes from the same pass as indirect args.
 export const DECODE_CORRECTNESS_WGSL = /* wgsl */ `
 struct Uniforms {
-  gr: u32, gc: u32, orient: u32, pad0: u32,
-  torusR: u32, torusC: u32, anchorRow: u32, anchorCol: u32,
+  gr: u32, gc: u32, pad0: u32, pad1: u32,
+  torusR: u32, torusC: u32, pad2: u32, pad3: u32,
 }
 @group(0) @binding(0) var<uniform> u: Uniforms;
 @group(0) @binding(1) var<storage, read> gridPacked: array<u32>;
 @group(0) @binding(2) var<storage, read> torus: array<u32>; // [torusR * torusC], 0/1
-@group(0) @binding(3) var<storage, read_write> counts: array<atomic<u32>>; // [correct, wrong]
+// The shared decode result block: slots 1..3 are the winner (written by argmax),
+// 6..7 are the correct/wrong counters this pass adds into. Bound as atomics
+// throughout because the same binding does both jobs -- the winner slots are
+// settled by the time this pass runs and are read with a plain atomicLoad.
+@group(0) @binding(3) var<storage, read_write> result: array<atomic<u32>>;
 
 // Identical to decodeTally.wgsl.ts's origIndex -- readRotated's index map.
 fn origIndex(o: u32, gr: u32, gc: u32, a: u32, b: u32) -> vec2<u32> {
@@ -133,23 +145,29 @@ fn origIndex(o: u32, gr: u32, gc: u32, a: u32, b: u32) -> vec2<u32> {
 
 @compute @workgroup_size(8, 8)
 fn correctness(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let swap = (u.orient == 1u || u.orient == 3u);
+  let orient = atomicLoad(&result[1]);
+  let anchorRow = atomicLoad(&result[2]);
+  let anchorCol = atomicLoad(&result[3]);
+  let swap = (orient == 1u || orient == 3u);
   let rr = select(u.gr, u.gc, swap);
   let cc = select(u.gc, u.gr, swap);
   let i = gid.x; let j = gid.y;
+  // Still bounds-checked even though the dispatch is now sized on device: the
+  // indirect args are a CEILING over the 8x8 workgroup, so the last row and
+  // column of workgroups still run threads past the grid.
   if (i >= rr || j >= cc) { return; }
 
-  let oi = origIndex(u.orient, u.gr, u.gc, i, j);
+  let oi = origIndex(orient, u.gr, u.gc, i, j);
   let packed = gridPacked[oi.x * u.gc + oi.y];
   if ((packed & 1u) == 0u) { return; } // invalid cell -- not counted either way
   let bit = (packed >> 1u) & 1u;
 
-  let torusRow = (u.anchorRow + i) % u.torusR;
-  let torusCol = (u.anchorCol + j) % u.torusC;
+  let torusRow = (anchorRow + i) % u.torusR;
+  let torusCol = (anchorCol + j) % u.torusC;
   if (bit == torus[torusRow * u.torusC + torusCol]) {
-    atomicAdd(&counts[0], 1u);
+    atomicAdd(&result[6], 1u);
   } else {
-    atomicAdd(&counts[1], 1u);
+    atomicAdd(&result[7], 1u);
   }
 }
 `;

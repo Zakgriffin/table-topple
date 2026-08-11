@@ -1,13 +1,17 @@
 import { ORDER, R, C, debruijnLookup } from '../../../sphereLab/floorPattern.ts';
 import { rotatedDims } from './decodeGrid.ts';
 import { type DecodeSampleGrid, type VoteResult } from '../../results.ts';
-import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
-import { poseSpan } from '../../timing/stages.ts';
-import { dispatchCount, getGPUDevice, readSliceU32, uploadUint32, uploadUniform, writeSlice } from '../../gpu/device.ts';
-import { type Arena, type Slice, allocZeroed, bind } from '../../gpu/arena.ts';
+import { dispatchCount, getGPUDevice, readSliceU32, uploadUint32, writeSlice } from '../../gpu/device.ts';
+import { type Alloc, type Arena, type Slice, allocZeroed, bind, sliceRange } from '../../gpu/arena.ts';
 import { poseArena } from '../lsd/chain.ts';
 import { gpuTimelineSlot } from '../../gpu/gpuTimeline.ts';
-import { DECODE_TALLY_WGSL } from './decodeTally.wgsl.ts';
+import { DECODE_ARGMAX_WGSL, DECODE_TALLY_WGSL } from './decodeTally.wgsl.ts';
+
+// The correctness kernel's workgroup edge (it is @workgroup_size(8, 8)), needed
+// HERE because the argmax computes that pass's workgroup counts on device. Same
+// value dispatchCount uses; passed through the uniform rather than hard-coded in
+// the shader so the two cannot drift apart silently.
+const CORRECTNESS_WG = 8;
 
 const NOT_FOUND = 0xffffffff;
 
@@ -69,15 +73,55 @@ function getHashTable(device: GPUDevice): HashTable {
   return table;
 }
 
-const pipelineCache = new WeakMap<GPUDevice, GPUComputePipeline>();
-function getPipeline(device: GPUDevice): GPUComputePipeline {
+interface Pipelines { tally: GPUComputePipeline; argmax: GPUComputePipeline }
+const pipelineCache = new WeakMap<GPUDevice, Pipelines>();
+function getPipelines(device: GPUDevice): Pipelines {
   let p = pipelineCache.get(device);
   if (!p) {
-    const module = device.createShaderModule({ code: DECODE_TALLY_WGSL, label: 'decodeTally' });
-    p = device.createComputePipeline({ layout: 'auto', compute: { module, entryPoint: 'main' }, label: 'decodeTally' });
+    const tallyModule = device.createShaderModule({ code: DECODE_TALLY_WGSL, label: 'decodeTally' });
+    const argmaxModule = device.createShaderModule({ code: DECODE_ARGMAX_WGSL, label: 'decodeArgmax' });
+    p = {
+      tally: device.createComputePipeline({
+        layout: 'auto', compute: { module: tallyModule, entryPoint: 'main' }, label: 'decodeTally',
+      }),
+      argmax: device.createComputePipeline({
+        layout: 'auto', compute: { module: argmaxModule, entryPoint: 'argmax' }, label: 'decodeArgmax',
+      }),
+    };
     pipelineCache.set(device, p);
   }
   return p;
+}
+
+// ── THE DECODE RESULT BLOCK ──────────────────────────────────────────────
+//
+// Eight u32 shared by the argmax pass (which writes 0..5) and the correctness
+// pass (which adds into 6..7), and the ONLY thing decode reads back on the pose
+// path. It is one buffer rather than three so the whole stage costs one map
+// instead of three -- the readbacks it replaced were the 331KB histogram, a
+// 4-byte totalWindows and an 8-byte counts pair, each behind its own fence.
+//
+// `found` is slot 0 because "no anchor got a single vote" is an ordinary
+// outcome, not an error: the host returns null and the caller decodes on CPU.
+export const DECODE_RESULT_SLOTS = 8;
+export const DECODE_RESULT_BYTES = DECODE_RESULT_SLOTS * 4;
+export const RESULT_FOUND = 0, RESULT_ORIENT = 1, RESULT_ANCHOR_ROW = 2, RESULT_ANCHOR_COL = 3;
+export const RESULT_VOTES = 4, RESULT_TOTAL_WINDOWS = 5, RESULT_CORRECT = 6, RESULT_WRONG = 7;
+
+// The decode result read out of the block above, once. Slots 6/7 are only
+// meaningful when a correctness pass was encoded after the argmax -- the unfused
+// entry point does not encode one, and leaves them zero.
+export function unpackDecodeResult(raw: Uint32Array): {
+  winner: VoteResult; correctCount: number; wrongCount: number;
+} | null {
+  if (raw[RESULT_FOUND] === 0) return null;
+  return {
+    winner: {
+      orientation: raw[RESULT_ORIENT], anchorRow: raw[RESULT_ANCHOR_ROW], anchorCol: raw[RESULT_ANCHOR_COL],
+      votes: raw[RESULT_VOTES], totalWindows: raw[RESULT_TOTAL_WINDOWS],
+    },
+    correctCount: raw[RESULT_CORRECT], wrongCount: raw[RESULT_WRONG],
+  };
 }
 
 function buildUniforms(gr: number, gc: number, orient: number, tableSize: number): ArrayBuffer {
@@ -131,21 +175,24 @@ export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<Vot
   return await tallyFromDeviceGrid(device, arena, gridSlice, gr, gc);
 }
 
-// The tally proper, over a grid buffer this function does NOT own. Split out so
-// pose/stages/decode/decodeGridBuild.gpu.ts can hand it a grid the GPU just BUILT, instead
-// of one packed and uploaded from CPU -- at a 270x276 grid that upload is 298KB
-// per call, and it is the single biggest reason to fuse the two stages.
-export async function tallyFromDeviceGrid(
-  device: GPUDevice, arena: Arena, gridSlice: Slice, gr: number, gc: number,
-): Promise<VoteResult | null> {
-  // Scoped HERE rather than in the two entry points, so both the
-  // pack-and-upload route and decodeGridBuild.ts's device-grid route are
-  // covered by one copy. Nesting is fine and intended: decodeGridBuild pushes
-  // its own scope around this call, and since an error is captured by the
-  // INNERMOST enclosing scope, this one takes it, returns null, and that
-  // caller's `if (!winner)` path pops its own scope and falls back.
-  device.pushErrorScope('validation');
-  const pipeline = getPipeline(device);
+// ── The tally, ENCODE-ONLY ───────────────────────────────────────────────
+//
+// Four passes over a grid buffer this function does NOT own, into a histogram it
+// allocates from the caller's arena. No submit, no await, no readback -- which
+// is what lets decodeGridBuild.gpu.ts put build, tally, argmax and correctness
+// in ONE encoder.
+//
+// Split from the grid build so the packed grid never crosses the bus: at a
+// 270x276 lattice that upload is 298KB per call, and it was the single biggest
+// reason these were fused. Under encode-only stages sharing an encoder the
+// saving is free, so the fusion is gone and the saving stayed.
+export function encodeDecodeTally(
+  arena: Arena, alloc: Alloc, enc: GPUCommandEncoder,
+  inp: { grid: Slice; gr: number; gc: number },
+): { hist: Slice; totalWindows: Slice } {
+  const { grid, gr, gc } = inp;
+  const device = arena.device;
+  const pipeline = getPipelines(device).tally;
   const { keysBuf, valuesBuf, size: tableSize } = getHashTable(device);
 
   // ZEROED EXPLICITLY. Both are atomicAdd targets, and both used to rely on
@@ -153,25 +200,28 @@ export async function tallyFromDeviceGrid(
   // last frame's bytes, so without these clears the histogram would accumulate
   // across reconstructions and every frame would decode to the previous frame's
   // winner with a growing vote count. See allocZeroed's header in arena.ts.
-  const encoder = device.createCommandEncoder();
-  const tallyBuf = allocZeroed(arena, arena.alloc, encoder, 4 * R * C * 4, 'tally.hist');
-  const totalWindowsBuf = allocZeroed(arena, arena.alloc, encoder, 4, 'tally.totalWindows');
+  const hist = allocZeroed(arena, alloc, enc, 4 * R * C * 4, 'tally.hist');
+  const totalWindows = allocZeroed(arena, alloc, enc, 4, 'tally.totalWindows');
 
-  const dispatchSpan = poseSpan('decode.tallyDispatch');
-  const uniformBufs: GPUBuffer[] = [];
   for (let o = 0; o < 4; o++) {
     const [rr, cc] = rotatedDims(gr, gc, o);
-    const uniformBuf = uploadUniform(device, buildUniforms(gr, gc, o, tableSize), 'decode.tallyDispatch');
-    uniformBufs.push(uniformBuf);
+    // The uniforms come out of the ARENA rather than a per-call createBuffer,
+    // which is what makes this stage encode-only: a buffer created here would
+    // have to outlive a submit this function does not make, so there would be
+    // nowhere to destroy it. The arena frees them at the next reset with
+    // everything else.
+    const uni = alloc(32, 'tally.uniforms');
+    const r = sliceRange(uni, arena);
+    device.queue.writeBuffer(r.buffer, r.offset, buildUniforms(gr, gc, o, tableSize));
     const bindGroup = device.createBindGroup({
       layout: pipeline.getBindGroupLayout(0),
       entries: [
-        { binding: 0, resource: { buffer: uniformBuf } },
-        { binding: 1, resource: bind(gridSlice, arena) },
+        { binding: 0, resource: bind(uni, arena) },
+        { binding: 1, resource: bind(grid, arena) },
         { binding: 2, resource: { buffer: keysBuf } },
         { binding: 3, resource: { buffer: valuesBuf } },
-        { binding: 4, resource: bind(tallyBuf, arena) },
-        { binding: 5, resource: bind(totalWindowsBuf, arena) },
+        { binding: 4, resource: bind(hist, arena) },
+        { binding: 5, resource: bind(totalWindows, arena) },
       ],
     });
     // One label for all four orientations rather than `tally:o0..o3`: they are
@@ -179,39 +229,105 @@ export async function tallyFromDeviceGrid(
     // per-label aggregation reports them as `tally:orient x4` -- which is the
     // useful reading, and four rows of one quantum each is not (see
     // gpuTimeline.ts on the resolution limit).
-    const pass = encoder.beginComputePass(gpuTimelineSlot('tally:orient'));
+    const pass = enc.beginComputePass(gpuTimelineSlot('tally:orient'));
     pass.setPipeline(pipeline);
     pass.setBindGroup(0, bindGroup);
     pass.dispatchWorkgroups(dispatchCount(rr), dispatchCount(cc));
     pass.end();
+    // Every uniform is a distinct slice, so all four stay valid until the
+    // submit. Reusing one and rewriting it between passes would be a
+    // write-after-encode race with commands that have not run yet.
   }
-  device.queue.submit([encoder.finish()]);
-  spanEnd(dispatchSpan);
+  return { hist, totalWindows };
+}
 
-  const [tallyRaw, totalWindowsRaw] = await Promise.all([
-    readSliceU32(arena, tallyBuf, 4 * R * C * 4, 'tally:hist', 'decode.fused'),
-    readSliceU32(arena, totalWindowsBuf, 4, 'tally:totalWindows', 'decode.fused'),
-  ]);
-  for (const b of uniformBufs) b.destroy();
+// ── The argmax, ENCODE-ONLY ──────────────────────────────────────────────
+//
+// The stage that used to run on the host on both backends. It writes the winner
+// into the shared result block and the correctness pass's workgroup counts into
+// `dispatchArgs`, so nothing about "which anchor won" or "how big is the rotated
+// grid" has to come back to the CPU and be sent down again.
+//
+// `gr`/`gc` are only for those dispatch args -- the argmax itself is a reduction
+// over the histogram and knows nothing about the lattice.
+export function encodeDecodeArgmax(
+  arena: Arena, alloc: Alloc, enc: GPUCommandEncoder,
+  inp: { hist: Slice; totalWindows: Slice; gr: number; gc: number },
+): { result: Slice; dispatchArgs: Slice } {
+  const { hist, totalWindows, gr, gc } = inp;
+  const device = arena.device;
+  const pipeline = getPipelines(device).argmax;
 
-  // This one would have degraded almost-safely by accident -- an all-zero tally
-  // leaves bestIdx at -1, which already returns null. Made explicit anyway,
-  // because "almost" is doing real work in that sentence: it relies on no
-  // orientation scoring a single vote, and it would report a validation bug as
-  // an ordinary undecodable frame with nothing in the console.
+  // ZEROED: slots 6/7 are the correctness pass's atomicAdd targets. The argmax
+  // itself fully writes 0..5, so only the tail actually needs it -- but the
+  // whole block is one slice and one clear, and a partial clear here would be a
+  // trap for whoever adds slot 8.
+  const result = allocZeroed(arena, alloc, enc, DECODE_RESULT_BYTES, 'decode.result');
+  // Zeroed too, though this pass fully writes it. The case it covers is this
+  // pass NOT RUNNING -- a bind group that failed validation makes every command
+  // using it a silent no-op, and the indirect dispatch that reads these args is
+  // a different command with its own valid buffer. Without the clear it would
+  // launch over the PREVIOUS reconstruction's extent.
+  const dispatchArgs = allocZeroed(arena, alloc, enc, 12, 'decode.correctnessArgs');
+
+  const uni = alloc(32, 'argmax.uniforms');
+  {
+    const b = new ArrayBuffer(32);
+    const dv = new DataView(b);
+    dv.setUint32(0, 4 * R * C, true);
+    dv.setUint32(4, R, true); dv.setUint32(8, C, true);
+    dv.setUint32(12, gr, true); dv.setUint32(16, gc, true);
+    dv.setUint32(20, CORRECTNESS_WG, true);
+    const r = sliceRange(uni, arena);
+    device.queue.writeBuffer(r.buffer, r.offset, b);
+  }
+
+  const bindGroup = device.createBindGroup({
+    layout: pipeline.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: bind(uni, arena) },
+      { binding: 1, resource: bind(hist, arena) },
+      { binding: 2, resource: bind(totalWindows, arena) },
+      { binding: 3, resource: bind(result, arena) },
+      { binding: 4, resource: bind(dispatchArgs, arena) },
+    ],
+  });
+  const pass = enc.beginComputePass(gpuTimelineSlot('decode:argmax'));
+  pass.setPipeline(pipeline);
+  pass.setBindGroup(0, bindGroup);
+  pass.dispatchWorkgroups(1); // one workgroup by design -- see DECODE_ARGMAX_WGSL
+  pass.end();
+  return { result, dispatchArgs };
+}
+
+// The unfused route's tally: encode, submit, read the 32-byte result. Used when
+// the grid came from the CPU builder, so there is nothing to share an encoder
+// with. It reads the SAME block the fused path does and simply leaves the
+// correctness slots at zero, because it encodes no correctness pass.
+//
+// What it no longer does is read the histogram. That was 4*R*C u32 -- 331KB at
+// the default board -- brought down so the host could scan it for a maximum.
+export async function tallyFromDeviceGrid(
+  device: GPUDevice, arena: Arena, gridSlice: Slice, gr: number, gc: number,
+): Promise<VoteResult | null> {
+  // Scoped HERE rather than in the entry point above, so a validation failure
+  // becomes a null and the caller's CPU fallback, in one place.
+  device.pushErrorScope('validation');
+  const enc = device.createCommandEncoder();
+  const { hist, totalWindows } = encodeDecodeTally(arena, arena.alloc, enc, { grid: gridSlice, gr, gc });
+  const { result } = encodeDecodeArgmax(arena, arena.alloc, enc, { hist, totalWindows, gr, gc });
+  device.queue.submit([enc.finish()]);
+
+  const raw = await readSliceU32(arena, result, DECODE_RESULT_BYTES, 'decode:result', 'decode.tally');
+
+  // Checked BEFORE the result is believed. An all-zero block reads as "no
+  // anchor won", which is an ordinary undecodable frame -- so without this a
+  // validation failure would be indistinguishable from one, silently, with
+  // nothing in the console.
   const err = await device.popErrorScope();
   if (err) {
     console.error('tallyFromDeviceGrid: WebGPU validation error, falling back to CPU --', err.message);
     return null;
   }
-
-  let bestIdx = -1, bestVotes = 0;
-  for (let i = 0; i < tallyRaw.length; i++) {
-    if (tallyRaw[i] > bestVotes) { bestVotes = tallyRaw[i]; bestIdx = i; }
-  }
-  if (bestIdx < 0) return null;
-  const orientation = Math.floor(bestIdx / (R * C));
-  const rem = bestIdx % (R * C);
-  const anchorRow = Math.floor(rem / C), anchorCol = rem % C;
-  return { orientation, anchorRow, anchorCol, votes: bestVotes, totalWindows: totalWindowsRaw[0] };
+  return unpackDecodeResult(raw)?.winner ?? null;
 }

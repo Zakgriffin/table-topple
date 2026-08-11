@@ -61,7 +61,7 @@ const APP_STAGES = {
   'project.bins': { label: 'projectBins', within: 'app.project' },
   'project.upload': { label: 'CPU→GPU upload phase (gray + uniforms)', within: 'project.bins' },
   'project.dispatch': { label: 'GPU dispatch (gradient + project)', within: 'project.bins', inputs: ['project.upload'] },
-  // Same shape as fit.finish: the dispatch span closes at submit and this one
+  // Same shape as fit.eigen: the dispatch span closes at submit and this one
   // opens after the readback resolves, so the fence lands on this EDGE rather
   // than inside either span.
   'project.finish': { label: 'CPU finish (unpack + min/max)', within: 'project.bins', sync: true, inputs: ['project.dispatch'] },

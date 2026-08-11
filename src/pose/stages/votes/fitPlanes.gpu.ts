@@ -1,5 +1,4 @@
-import * as THREE from 'three';
-import { jacobiEigenSymmetric, smallestEigenvector } from '../../../linalg.ts';
+import { type PlaneTriad, planesFromScatter } from './votes.ts';
 import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
 import { poseSpan } from '../../timing/stages.ts';
 import { type Vote } from '../../results.ts';
@@ -20,14 +19,15 @@ function getPipeline(device: GPUDevice): GPUComputePipeline {
 
 const WORKGROUP_SIZE_1D = 64;
 
-// GPU-resident counterpart to pose/stages/votes/votes.ts's fitPairOfPlanes -- see
-// fitPlanes.wgsl.ts's header for exactly what's offloaded (the ATA
-// reduction) vs what stays on CPU (the eigendecomposition, fixed-size
-// regardless of vote count). Returns null if WebGPU isn't available; caller
-// falls back to the CPU version, which stays the source of truth.
-export async function fitPairOfPlanesGPU(
-  votes: Vote[],
-): Promise<{ Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null> {
+// `fit.ata` on GPU, then `fit.eigen` on the host -- the SAME `planesFromScatter`
+// the CPU path calls, not a copy of it. Only the scatter accumulation is
+// offloaded, because only it grows with the vote count; the decomposition is
+// fixed-size arithmetic and stays where it is on both backends (see
+// fitPlanes.wgsl.ts's header).
+//
+// Returns null if WebGPU isn't available; caller falls back to the CPU version,
+// which stays the source of truth.
+export async function fitPairOfPlanesGPU(votes: Vote[]): Promise<PlaneTriad | null> {
   const device = await getGPUDevice();
   if (!device) return null;
   if (votes.length === 0) return null;
@@ -63,7 +63,7 @@ export async function fitPairOfPlanesGPU(
     ],
   });
 
-  const dispatchSpan = poseSpan('fit.dispatch');
+  const ataSpan = poseSpan('fit.ata', { backend: 'gpu' });
   const encoder = device.createCommandEncoder();
   const pass = encoder.beginComputePass(gpuTimelineSlot('fit:ATA'));
   pass.setPipeline(pipeline);
@@ -71,7 +71,9 @@ export async function fitPairOfPlanesGPU(
   pass.dispatchWorkgroups(numWorkgroups);
   pass.end();
   device.queue.submit([encoder.finish()]);
-  spanEnd(dispatchSpan);
+  // Closes at SUBMIT, deliberately -- the readback stall below belongs to the
+  // declared edge into `fit.eigen`, not inside this span. See timing/stages.ts.
+  spanEnd(ataSpan);
 
   const raw = await readFloat32(device, outBuf, numWorkgroups * 21 * 4, 'fit:ATApartials', 'pose.fit');
   for (const b of [voteBuf, outBuf, uniformBuf]) b.destroy();
@@ -88,40 +90,34 @@ export async function fitPairOfPlanesGPU(
     return null;
   }
 
-  const finishSpan = poseSpan('fit.finish');
-  const packed = new Float64Array(21);
-  for (let g = 0; g < numWorkgroups; g++) {
-    const base = g * 21;
-    for (let k = 0; k < 21; k++) packed[k] += raw[base + k];
-  }
-  // Unpack in the exact a<=b order fitPlanes.wgsl.ts packed them in.
-  const ATA: number[][] = Array.from({ length: 6 }, () => new Array(6).fill(0));
-  let idx = 0;
-  for (let a = 0; a < 6; a++) {
-    for (let b = a; b < 6; b++) {
-      ATA[a][b] = packed[idx]; ATA[b][a] = packed[idx];
-      idx++;
+  // The partial sum sits in `fit.eigen` rather than `fit.ata`, and that is a
+  // deliberate impurity: it is arithmetically the tail of the ATA reduction, but
+  // it happens AFTER the readback, and putting it in `fit.ata` would mean that
+  // span had to span the fence too -- burying the pipeline's stall inside a
+  // stage instead of on the edge that reports it.
+  const eigenSpan = poseSpan('fit.eigen', { backend: 'gpu' });
+  try {
+    const packed = new Float64Array(21);
+    for (let g = 0; g < numWorkgroups; g++) {
+      const base = g * 21;
+      for (let k = 0; k < 21; k++) packed[k] += raw[base + k];
     }
+    // Unpack in the exact a<=b order fitPlanes.wgsl.ts packed them in.
+    const ATA: number[][] = Array.from({ length: 6 }, () => new Array(6).fill(0));
+    let idx = 0;
+    for (let a = 0; a < 6; a++) {
+      for (let b = a; b < 6; b++) {
+        ATA[a][b] = packed[idx]; ATA[b][a] = packed[idx];
+        idx++;
+      }
+    }
+    // THE SHARED TAIL. This used to be twenty lines copied verbatim out of
+    // fitPairOfPlanes -- the same smallestEigenvector, the same jacobi, the same
+    // b1/b2 handedness -- so the two backends could disagree about the fit
+    // without either file changing. Now the GPU path differs from the CPU path
+    // in exactly one thing, which is where its ATA came from.
+    return planesFromScatter(ATA);
+  } finally {
+    spanEnd(eigenSpan);
   }
-
-  // From here down, identical to fitPairOfPlanes' own tail (votes.ts) --
-  // a fixed-size 6x6 -> 3x3 eigendecomposition, not worth porting.
-  const m = smallestEigenvector(ATA);
-  const M = [
-    [m[0], m[3] / 2, m[4] / 2],
-    [m[3] / 2, m[1], m[5] / 2],
-    [m[4] / 2, m[5] / 2, m[2]],
-  ];
-  const { values, vectors } = jacobiEigenSymmetric(M);
-  let zeroIdx = 0;
-  for (let i = 1; i < 3; i++) if (Math.abs(values[i]) < Math.abs(values[zeroIdx])) zeroIdx = i;
-  const others = [0, 1, 2].filter((i) => i !== zeroIdx);
-  const b1 = new THREE.Vector3(vectors[others[0]][0], vectors[others[0]][1], vectors[others[0]][2]);
-  const b2 = new THREE.Vector3(vectors[others[1]][0], vectors[others[1]][1], vectors[others[1]][2]);
-  const Dnormal = new THREE.Vector3(vectors[zeroIdx][0], vectors[zeroIdx][1], vectors[zeroIdx][2]).normalize();
-  const Drow = b1.clone().add(b2);
-  const Dcol = b1.clone().sub(b2);
-  spanEnd(finishSpan);
-  if (Drow.lengthSq() < 1e-9 || Dcol.lengthSq() < 1e-9) return null;
-  return { Drow: Drow.normalize(), Dcol: Dcol.normalize(), Dnormal };
 }

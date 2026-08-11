@@ -67,14 +67,21 @@ export const POSE_STAGES = {
 
   // ── the plane fit ──
   'pose.fit': { label: 'fitPairOfPlanes', within: 'pose.run', inputs: ['pose.votes'] },
-  'fit.dispatch': { label: 'GPU dispatch (ATA reduction)', within: 'pose.fit' },
-  // The edge that pays for the whole `inputs` half of this table. `fit.dispatch`
-  // closes at submit and `fit.finish` opens after the partials readback has
-  // resolved, so the fence between them is inside NEITHER span -- it sits in
-  // `pose.fit`'s self time, where nothing says what it was waiting on. As a
-  // declared edge it becomes `fit.finish`'s waitMs, attributed to the stall it
-  // actually is. Same shape at lsd.fitUnpack, decode.tally and votes.filter.
-  'fit.finish': { label: 'CPU finish (sum partials + eigen)', within: 'pose.fit', inputs: ['fit.dispatch'] },
+  // TWO STAGES, recording on BOTH backends -- they used to be `fit.dispatch` and
+  // `fit.finish`, which named where the GPU path's awaits fell rather than what
+  // was computed, and had no CPU counterpart at all. `fit.ata` is the scatter
+  // accumulation (the only vote-count-dependent part, and the only part with a
+  // kernel); `fit.eigen` is the fixed-size decomposition that runs on the host
+  // either way.
+  'fit.ata': { label: 'ATA scatter accumulation', within: 'pose.fit' },
+  // The edge that pays for the whole `inputs` half of this table. On the GPU
+  // backend `fit.ata` closes at SUBMIT and `fit.eigen` opens after the partials
+  // readback has resolved, so the fence between them is inside NEITHER span --
+  // it would sit in `pose.fit`'s self time, where nothing says what it was
+  // waiting on. As a declared edge it becomes `fit.eigen`'s waitMs, attributed
+  // to the stall it actually is. On the CPU backend the two are adjacent and the
+  // edge costs nothing. Same shape at decode.tally and votes.filter.
+  'fit.eigen': { label: 'eigen solve (6x6 -> 3x3 -> triad)', within: 'pose.fit', inputs: ['fit.ata'] },
 
   'pose.assembly': { label: 'poseAssembly', within: 'pose.run', inputs: ['pose.fit'], sync: true },
 

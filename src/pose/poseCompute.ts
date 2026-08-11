@@ -11,7 +11,10 @@ import { type ReadDecodeGrid, runPositionDecode } from './stages/decode/decodeGr
 import { computeGridPeriodPhase, type GridPeriodPhaseResult } from './stages/period/gridPeriodPhase.ts';
 import { type LsdChainCPU, type LsdChainGPU } from './stages/lsd/chain.ts';
 import type { LsdRectangle } from './stages/lsd/types.ts';
-import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes, type LsdCompositeSettings } from './stages/votes/votes.ts';
+import {
+  computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes,
+  type LsdCompositeSettings, type PlaneTriad,
+} from './stages/votes/votes.ts';
 
 // ── Shared pure pose-recovery orchestrator ────────────────────────────────
 //
@@ -256,7 +259,7 @@ export async function computePoseFromCapture(
     // interval as this one, i.e. a guaranteed-zero self time in the harness'
     // span tree. `fitMs` reads this span directly now.
     const fitSpan = poseSpan('pose.fit', { backend });
-    const quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null =
+    const quadricPair: PlaneTriad | null =
       backend === 'gpu'
         ? (await fitPairOfPlanesGPU(votes)) ?? fitPairOfPlanes(votes)
         : fitPairOfPlanes(votes);

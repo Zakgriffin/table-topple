@@ -206,7 +206,7 @@ interface SpanBreakdown {
 //   these two stages" idea rests on.
 //
 //   waitMs on an edge is a stall the self-time table files under the enclosing
-//   stage. `fit.dispatch` ends at submit, `fit.finish` begins after the readback
+//   stage. `fit.ata` ends at submit, `fit.eigen` begins after the readback
 //   resolves; the fence between them belongs to neither span and shows up in
 //   `pose.fit`'s self time with nothing naming it. Here it is an edge with a
 //   producer's name on it, which is the form the perf TODO's readback-stall

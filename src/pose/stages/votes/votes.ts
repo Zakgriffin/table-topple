@@ -178,17 +178,35 @@ export function computeSegmentVotes(
 // untouched -- it is kept because the GPU counterpart accumulates in f32 and
 // wants the summands in [0,1].
 //
-// The accumulation and the eigen-solve used to be two named helpers, split so
-// an IRLS refinement pass could reuse them with a residual-based reweight in
-// place of the magnitude sharpen below. That pass is deleted, this is the only
-// caller either half ever had, and the split's own comments described a
-// sharing that no longer existed -- so they are one function again.
-export function fitPairOfPlanes(votes: Vote[]): { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null {
+// ── TWO STAGES, and the split is what makes them ONE implementation ──
+//
+// `fit.ata` is the only vote-count-dependent part and the only part with a GPU
+// counterpart; `fit.eigen` is fixed-size regardless of vote count and correctly
+// runs on the host either way. They were one function, and the GPU path
+// therefore carried a VERBATIM COPY of the eigen tail -- twenty lines of
+// smallestEigenvector/jacobi/handedness duplicated in fitPlanes.gpu.ts, where a
+// change to one would silently not reach the other. Drawing the stage boundary
+// on the CPU/GPU correspondence deletes that copy: both backends now call
+// `planesFromScatter` on their own ATA.
+//
+// (They were previously split for a different reason -- so a since-deleted IRLS
+// refinement could reuse the halves with a residual reweight -- and were merged
+// when that went away. The boundary is back in the same place on a different
+// argument, which is worth knowing before someone merges them again.)
+export type PlaneTriad = { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 };
+
+// Weighted 6x6 scatter matrix over the votes.
+//
+// Each vote enters at its own weight over the frame's max weight. That
+// normalization is a NO-OP for the fit -- scaling every weight by a constant
+// scales ATA by that constant and leaves its eigenvectors untouched -- and is
+// kept because the GPU counterpart accumulates in f32 and wants the summands in
+// [0, 1]. fitPlanes.wgsl.ts computes the identical thing, packed as the 21
+// upper-triangle entries.
+export function accumulateVoteScatter(votes: Vote[]): number[][] {
   let maxW = 0;
   for (const { weight } of votes) if (weight > maxW) maxW = weight;
 
-  // Weighted 6x6 scatter matrix over the votes -- the only vote-count-
-  // dependent part; everything below it is fixed-size.
   const ATA: number[][] = Array.from({ length: 6 }, () => new Array(6).fill(0));
   for (const v of votes) {
     const w = maxW > 0 ? v.weight / maxW : 0;
@@ -200,7 +218,14 @@ export function fitPairOfPlanes(votes: Vote[]): { Drow: THREE.Vector3; Dcol: THR
       for (let b = 0; b < 6; b++) ATA[a][b] += wra * row[b];
     }
   }
+  return ATA;
+}
 
+// The scatter matrix's degenerate quadric, decomposed into the row/col/normal
+// triad. Fixed-size arithmetic -- 6x6 -> 3x3 -> eigenvectors -- so it does not
+// care how many votes produced the matrix, which is exactly why it has no GPU
+// counterpart and why BOTH backends call this one.
+export function planesFromScatter(ATA: number[][]): PlaneTriad | null {
   const m = smallestEigenvector(ATA);
   const M = [
     [m[0], m[3] / 2, m[4] / 2],
@@ -218,4 +243,22 @@ export function fitPairOfPlanes(votes: Vote[]): { Drow: THREE.Vector3; Dcol: THR
   const Dcol = b1.clone().sub(b2);
   if (Drow.lengthSq() < 1e-9 || Dcol.lengthSq() < 1e-9) return null;
   return { Drow: Drow.normalize(), Dcol: Dcol.normalize(), Dnormal };
+}
+
+// The CPU path, as the two stages in sequence. `fit.ata` and `fit.eigen` record
+// on BOTH backends now (see fitPlanes.gpu.ts for the GPU halves), which is what
+// makes the two rows in a profile comparable at all -- before this, the CPU run
+// had one span covering both stages and the GPU run had two spans named after
+// where its awaits happened to fall.
+export function fitPairOfPlanes(votes: Vote[]): PlaneTriad | null {
+  const ataSpan = poseSpan('fit.ata', { backend: 'cpu' });
+  const ATA = accumulateVoteScatter(votes);
+  spanEnd(ataSpan);
+
+  const eigenSpan = poseSpan('fit.eigen', { backend: 'cpu' });
+  try {
+    return planesFromScatter(ATA);
+  } finally {
+    spanEnd(eigenSpan);
+  }
 }

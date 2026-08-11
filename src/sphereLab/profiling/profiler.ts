@@ -371,8 +371,8 @@ export function joinRecords(recs: readonly StageRecord[], table: StageTable): Jo
 //             the moment its last input existed.
 //   waitMs  = start - readyAt. Time the stage COULD have been running and was
 //             not. It localizes a stall to an EDGE rather than leaving it in the
-//             enclosing stage's self time: `fit.dispatch` closes at submit and
-//             `fit.finish` opens after the readback resolves, so the fence
+//             enclosing stage's self time: `fit.ata` closes at submit and
+//             `fit.eigen` opens after the readback resolves, so the fence
 //             between them is not inside either span -- it is this number.
 //
 // ── Resolution reaches DOWN and lifts back UP ──

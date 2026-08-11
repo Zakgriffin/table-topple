@@ -220,10 +220,11 @@ for (const [name, table] of [['pose', POSE_STAGE_TABLE], ['app (ALL_STAGES)', AL
 // inside one that never encloses it. The synthetic tests cannot see that, and
 // neither can tsc: a bad `within` is a perfectly well-typed string.
 //
-// CPU backend, so it runs headless. The GPU-only stages (lsd.fitDispatch,
-// fit.dispatch, decode.fused and its child) are therefore NOT covered here and
-// are owed a device session -- stated rather than silently implied, because a
-// green run here is not a green run for the whole table.
+// CPU backend, so it runs headless. `fit.ata`/`fit.eigen` DO record here now
+// (they used to be GPU-only, named after where the awaits fell); what is still
+// uncovered is the GPU-only set -- lsd.fitDispatch and decode.fused -- which is
+// owed a device session, stated rather than silently implied, because a green
+// run here is not a green run for the whole table.
 test('a real CPU reconstruction joins into ONE tree with no orphans', async () => {
   const input = loadInput();
   const session = profilerBeginSession();

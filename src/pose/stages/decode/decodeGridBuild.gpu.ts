@@ -4,10 +4,12 @@ import { type DecodeGridLayout } from './decodeGrid.ts';
 import { type DecodeSampleGrid, type DecodeSamplePoint, type VoteResult } from '../../results.ts';
 import { tallyFromDeviceGrid } from './decodeTally.gpu.ts';
 import {
-  createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, readUint32,
+  createStorageBuffer, dispatchCount, getGPUDevice, readUint32,
   uploadFloat32, uploadUint32, uploadUniform,
 } from '../../gpu/device.ts';
 import { type Arena, type Slice, bind } from '../../gpu/arena.ts';
+import { readSliceF32, readSliceU32 } from '../../gpu/device.ts';
+import { poseArena } from '../lsd/chain.ts';
 import { DECODE_CORRECTNESS_WGSL, DECODE_GRID_BUILD_WGSL } from './decodeGridBuild.wgsl.ts';
 
 interface Pipelines {
@@ -95,10 +97,15 @@ interface FusedDecodeResult {
   // reason the grid is split across two buffers. Calling it is what turns a
   // ~24-byte readback into a ~1.5MB one, so call it only when a view is
   // actually going to draw the result.
+  //
+  // There is no `release` beside it any more, and its absence is the point.
+  // The grid lives in ARENA SLICES now, so it is freed by the next
+  // reconstruction's reset along with everything else -- which deletes the
+  // second deferral handle in the library (the first was PendingIntermediates)
+  // and, with it, the rule that readGrid-after-release must throw. A caller
+  // that reads too late gets a StaleSliceError naming the slice, from the one
+  // mechanism that guards every other buffer here.
   readGrid: () => Promise<DecodeSampleGrid>;
-  // Frees the device buffers readGrid depends on. Safe to call twice; readGrid
-  // after release throws rather than returning a silently empty grid.
-  release: () => void;
 }
 
 // Fused GPU counterpart to buildDecodeSampleGrid + tallyPositionVotes.
@@ -138,12 +145,17 @@ export async function buildAndTallyDecodeGPU(
 
   const { rows, cols } = layout;
   const cells = rows * cols;
+  // The SAME arena the LSD chain used, deliberately NOT reset here: decode runs
+  // after the chain within one reconstruction, so it appends to that frame's
+  // allocation and both are freed together at the next run.
+  const arena = poseArena(device);
+  const alloc = arena.alloc;
   const ownGray = sharedGray ? null : uploadFloat32(device, new Float32Array(gray), 0, 'decode:gray', 'decode.fused');
   const grayResource: GPUBindingResource = sharedGray
     ? bind(sharedGray.slice, sharedGray.arena)
     : { buffer: ownGray! };
-  const packedBuf = createStorageBuffer(device, cells * 4);
-  const geomBuf = createStorageBuffer(device, cells * 16);
+  const packedBuf = alloc(cells * 4, 'decode.packed');
+  const geomBuf = alloc(cells * 16, 'decode.geom');
   const uniBuf = uploadUniform(device, buildUniforms(layout, w, h), 'decode.fused');
 
   {
@@ -152,8 +164,8 @@ export async function buildAndTallyDecodeGPU(
       entries: [
         { binding: 0, resource: { buffer: uniBuf } },
         { binding: 1, resource: grayResource },
-        { binding: 2, resource: { buffer: packedBuf } },
-        { binding: 3, resource: { buffer: geomBuf } },
+        { binding: 2, resource: bind(packedBuf, arena) },
+        { binding: 3, resource: bind(geomBuf, arena) },
       ],
     });
     const encoder = device.createCommandEncoder();
@@ -169,9 +181,8 @@ export async function buildAndTallyDecodeGPU(
   // ever OUR copy -- a shared buffer is the residency's to free.
   ownGray?.destroy();
 
-  const winner = await tallyFromDeviceGrid(device, packedBuf, rows, cols);
+  const winner = await tallyFromDeviceGrid(device, arena, packedBuf, rows, cols);
   if (!winner) {
-    for (const b of [packedBuf, geomBuf, uniBuf]) b.destroy();
     await device.popErrorScope();
     return null;
   }
@@ -190,7 +201,7 @@ export async function buildAndTallyDecodeGPU(
       layout: p.correctLayout,
       entries: [
         { binding: 0, resource: { buffer: cuBuf } },
-        { binding: 1, resource: { buffer: packedBuf } },
+        { binding: 1, resource: bind(packedBuf, arena) },
         { binding: 2, resource: { buffer: getTorusBuffer(device) } },
         { binding: 3, resource: { buffer: countsBuf } },
       ],
@@ -212,22 +223,14 @@ export async function buildAndTallyDecodeGPU(
   const err = await device.popErrorScope();
   if (err) {
     console.error('buildAndTallyDecodeGPU: WebGPU validation error, falling back to CPU --', err.message);
-    for (const b of [packedBuf, geomBuf, uniBuf]) b.destroy();
     return null;
   }
 
   {
-    let released = false;
-    const release = () => {
-      if (released) return;
-      released = true;
-      for (const b of [packedBuf, geomBuf, uniBuf]) b.destroy();
-    };
     const readGrid = async (): Promise<DecodeSampleGrid> => {
-      if (released) throw new Error('buildAndTallyDecodeGPU: readGrid() called after release()');
       const [geom, packed] = await Promise.all([
-        readFloat32(device, geomBuf, cells * 16, 'decode:gridGeom', 'pose.drain'),
-        readUint32(device, packedBuf, cells * 4, 'decode:gridPacked', 'pose.drain'),
+        readSliceF32(arena, geomBuf, cells * 16, 'decode:gridGeom', 'pose.drain'),
+        readSliceU32(arena, packedBuf, cells * 4, 'decode:gridPacked', 'pose.drain'),
       ]);
       const points: DecodeSamplePoint[][] = [];
       for (let i = 0; i < rows; i++) {
@@ -243,6 +246,6 @@ export async function buildAndTallyDecodeGPU(
       }
       return { rows, cols, zeroI: layout.zeroI, zeroJ: layout.zeroJ, points };
     };
-    return { winner, correctCount: counts[0], wrongCount: counts[1], readGrid, release };
+    return { winner, correctCount: counts[0], wrongCount: counts[1], readGrid };
   }
 }

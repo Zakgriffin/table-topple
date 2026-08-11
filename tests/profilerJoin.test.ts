@@ -9,7 +9,6 @@ import { POSE_STAGE_TABLE } from '../src/pose/timing/stages.ts';
 import { ALL_STAGES } from '../src/sphereLab/profiling/stages.ts';
 import { runPoseOn } from '../src/sphereLab/harness/runPose.ts';
 import { loadInput } from './helpers/fixtures.ts';
-import { wants } from '../src/pose/intermediates.ts';
 
 // ── The join, tested on synthetic intervals ───────────────────────────────
 //
@@ -233,7 +232,7 @@ test('a real CPU reconstruction joins into ONE tree with no orphans', async () =
     // Intermediates requested so the drain records too -- `pose.drain` is
     // declared a root in the library table and this is what proves it does not
     // accidentally land inside the pose.
-    await runPoseOn(input, 'cpu', wants('fx', 'regions'));
+    await runPoseOn(input, 'cpu', true);
     records = session.takeRepRecords();
   } finally {
     session.end();
@@ -514,7 +513,7 @@ test('the critical path through a real CPU reconstruction reaches the whole chai
   const session = profilerBeginSession();
   let records;
   try {
-    await runPoseOn(input, 'cpu', wants('fx', 'regions'));
+    await runPoseOn(input, 'cpu', true);
     records = session.takeRepRecords();
   } finally {
     session.end();

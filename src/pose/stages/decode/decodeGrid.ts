@@ -50,34 +50,26 @@ export interface DecodeGridPayload {
 // counts (8 bytes); the GRID itself -- 0.45MB across decode:gridGeom and
 // decode:gridPacked -- is display. So the pose does not have to wait for it.
 //
-// This is now ONE HALF of a general mechanism rather than the whole of a
-// special case: runPositionDecode RETURNS it, and computePoseFromCapture folds
-// it into the single PendingIntermediates its caller actually holds (see
-// pose/intermediates.ts). It used to park itself on the camera, which meant
-// this stage owned a field on everyone's state object and the release-the-stale-
-// one logic lived here, where it could only ever see the decode's own buffers.
+// A PLAIN FUNCTION now, not a handle with resolve/release. It used to need both
+// halves because it OWNED device buffers: something had to free them if nobody
+// ever read, and reading after that free had to be an error rather than a silent
+// empty grid. The grid lives in arena slices now, so it is freed by the next
+// reconstruction along with every other intermediate, and there is nothing left
+// to release. Calling it late throws a StaleSliceError from the arena's own
+// guard rather than from a rule this file had to invent.
 //
-// BOTH BACKENDS HAND ONE BACK NOW when the grid was requested, and that is a
-// change: the CPU route has nothing to defer -- it built the grid on the host
-// and never crossed a bus -- so it used to write the three fields directly and
-// return null. Which meant "did I get a grid?" was answered differently
-// depending on the backend, at the caller. It hands back an
-// already-settled handle instead, so there is ONE way to collect the payload
-// and the two routes differ only in what resolving it costs.
-//
-// `resolve` is IDEMPOTENT and `release` is safe to call twice, in either order.
-export interface PendingDecodeGrid {
-  resolve(): Promise<DecodeGridPayload | null>;
-  release(): void;
-}
+// BOTH BACKENDS HAND ONE BACK, which is what keeps "did I get a grid?" from
+// depending on the backend: the CPU route has nothing to defer -- it built the
+// grid on the host and never crossed a bus -- so its function is already
+// settled and simply returns what it holds.
+export type ReadDecodeGrid = () => Promise<DecodeGridPayload>;
 
-// What the decode stage produces: the pose, plus a handle to the display grid
-// when one was asked for. Two fields rather than a bare result because they
-// have different lifetimes -- the pose is final on return, the grid may still
-// be on the device.
+// What the decode stage produces: the pose, plus a way to get the display grid.
+// Two fields rather than one because they have different lifetimes -- the pose
+// is final on return, the grid may still be on the device.
 export interface DecodeOutput {
   decode: PositionDecodeResult | null;
-  pendingGrid: PendingDecodeGrid | null;
+  readGrid: ReadDecodeGrid | null;
 }
 
 // ── Grid rotation helpers (pure) ─────────────────────────────────────────
@@ -441,24 +433,13 @@ export async function runPositionDecode(
   // uploads its own copy exactly as it always did.
   sharedGray: { arena: Arena; slice: Slice } | null,
   backend: Backend,
-  // Whether the CALLER asked for the decode grid at all (want.has('decodeGrid')
-  // upstream). It decides two things at once, and they are the same decision:
-  // whether the 0.45MB grid is brought down, and whether a handle comes back at
-  // all.
-  //
-  // False returns pendingGrid: null on BOTH backends. That parity is
-  // deliberate: the CPU route builds the grid regardless (the pose needs it) so
-  // it could "helpfully" keep it for free, and then a CPU run and a GPU run of
-  // the same request would differ in what they left behind -- exactly the
-  // behavioural split between the two routes that got an earlier version of
-  // this rejected.
-  //
-  // True on the GPU route returns a handle rather than awaiting the readback
-  // here; releasing a previous run's handle is computePoseFromCapture's job
-  // now, since it is what owns the pointer.
-  wantGrid = false,
+  // No `wantGrid` any more. It existed to decide whether the 0.45MB grid was
+  // brought down AND whether a handle came back -- one decision, because
+  // handing back a handle meant handing back OWNERSHIP of device buffers, so
+  // producing one nobody wanted meant leaking them. With the grid in arena
+  // slices there is nothing to own: a way to READ is always returned, reading is
+  // what costs, and a caller that never reads pays nothing and leaks nothing.
 ): Promise<DecodeOutput> {
-  let pendingGrid: PendingDecodeGrid | null = null;
   // ── Fused GPU path: grid built on device, tally consumes it in place ────
   //
   // The fused path: grid built AND tallied on device. It supersedes the
@@ -469,9 +450,9 @@ export async function runPositionDecode(
   // what comes back is the winner and two correctness counts, and the reference
   // cell's u/v are recomputed on the host in f64 rather than read back.
   //
-  // The grid is still read back UNCONDITIONALLY -- but as of 2026-08-05 not
-  // necessarily HERE. `defer` hands the readback to the caller as a
-  // PendingDecodeGrid instead of awaiting it on the pose path.
+  // The grid readback never happens on the pose path: this returns a function
+  // and the CALLER decides whether to call it, which is what makes the 0.45MB
+  // conditional without the pipeline guessing.
   //
   // Read the distinction carefully, because the obvious version of this was
   // tried and rejected. SKIPPING the readback when no view wants it was the
@@ -513,6 +494,7 @@ export async function runPositionDecode(
     const fused = layout ? await buildAndTallyDecodeGPU(layout, gray, w, h, sharedGray) : null;
     if (layout && fused) {
       let decode: PositionDecodeResult | null = null;
+      let readGrid: ReadDecodeGrid | null = null;
       try {
         // The pose needs NONE of the grid. The reference cell is unchanged by
         // rotation -- only its INDEX moves -- so its u/v are the original
@@ -535,35 +517,18 @@ export async function runPositionDecode(
         // RETURNED there is no shared field to be stale: a caller holds last
         // frame's grid until it swaps in this frame's, and the two never
         // interleave.
-        if (wantGrid) {
-          let done = false;
-          let payload: DecodeGridPayload | null = null;
-          pendingGrid = {
-            resolve: async () => {
-              if (done) return payload;
-              done = true;
-              try {
-                const built = await fused.readGrid();
-                const rotated = rotateGrid(built, fused.winner.orientation);
-                payload = {
-                  grid: built, rotated,
-                  correctness: buildCorrectnessArray(rotated, fused.winner.anchorRow, fused.winner.anchorCol).correctness,
-                };
-                return payload;
-              } finally { fused.release(); }
-            },
-            release: () => { done = true; fused.release(); },
+        readGrid = async () => {
+          const built = await fused.readGrid();
+          const rotated = rotateGrid(built, fused.winner.orientation);
+          return {
+            grid: built, rotated,
+            correctness: buildCorrectnessArray(rotated, fused.winner.anchorRow, fused.winner.anchorCol).correctness,
           };
-        }
+        };
       } finally {
-        // Only the un-requested path frees here; the requested one handed
-        // ownership to pendingGrid above and releases through it.
-        // fused.release() is idempotent (see buildAndTallyDecodeGPU), so the
-        // double call on that path's own error unwind is harmless.
-        if (!pendingGrid) fused.release();
         spanEnd(fusedSpan);
       }
-      return { decode, pendingGrid };
+      return { decode, readGrid };
     }
     spanEnd(fusedSpan);
     // fall through to CPU
@@ -577,9 +542,9 @@ export async function runPositionDecode(
   const buildSpan = poseSpan('decode.build');
   const grid = buildDecodeSampleGrid(input, gray, w, h, vFovRad);
   spanEnd(buildSpan);
-  // The pose below needs `grid` either way, which is exactly why wantGrid is a
-  // decision about what to HAND BACK rather than about what to compute.
-  if (!grid) return { decode: null, pendingGrid: null };
+  // The pose below needs `grid` either way -- which is why reading it was never
+  // a decision about what to COMPUTE.
+  if (!grid) return { decode: null, readGrid: null };
   // Same GPU-source-of-truth-verified-by-CPU-fallback pattern as every other
   // GPU sub-pipeline (axesReconstruction.ts's gradient2x2Field/projectBins/
   // fitPairOfPlanes) -- see tallyPositionVotesGPU's own header for why this
@@ -591,7 +556,7 @@ export async function runPositionDecode(
     ? (await tallyPositionVotesGPU(grid)) ?? tallyPositionVotes(grid)
     : tallyPositionVotes(grid);
   spanEnd(tallySpan);
-  if (!winner) return { decode: null, pendingGrid: null };
+  if (!winner) return { decode: null, readGrid: null };
 
   const rotated = rotateGrid(grid, winner.orientation);
   const { correctness, correctCount, wrongCount } = buildCorrectnessArray(rotated, winner.anchorRow, winner.anchorCol);
@@ -600,17 +565,10 @@ export async function runPositionDecode(
     input, vFovRad, winner, refPt.u, refPt.v, rotated.zeroI, rotated.zeroJ, correctCount, wrongCount,
   );
   // correctCount/wrongCount feed the pose above, so the array is built either
-  // way; only whether it is handed back depends on the request.
-  //
-  // Already settled -- nothing crossed a bus, so there is nothing to wait for.
-  // It is still a HANDLE rather than a bare payload so that a caller has one
-  // shape to collect from on both backends; see PendingDecodeGrid's header.
-  return {
-    decode,
-    pendingGrid: wantGrid
-      ? { resolve: async () => ({ grid, rotated, correctness }), release: () => {} }
-      : null,
-  };
+  // way. Already settled here -- nothing crossed a bus, so this function simply
+  // hands back what it is holding. It is still a FUNCTION rather than a bare
+  // payload so a caller has one shape to collect from on both backends.
+  return { decode, readGrid: async () => ({ grid, rotated, correctness }) };
 }
 
 // Per-cell correctness for the projected-cam overlay, plus the two counts that

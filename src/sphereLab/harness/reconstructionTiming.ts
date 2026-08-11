@@ -1,6 +1,5 @@
 import { type Backend } from '../../pose/backend.ts';
 import { computePoseFromCapture, type PoseResult } from '../../pose/poseCompute.ts';
-import { NO_INTERMEDIATES } from '../../pose/intermediates.ts';
 import { type InputProvenance, provenance } from './input.ts';
 import type { HarnessInput } from './input.ts';
 import {
@@ -454,12 +453,11 @@ function median(xs: number[]): number {
 // Asks for NOTHING, which is now literally free rather than nearly free. This
 // used to pass deferDecodeGrid=true and then release the handle in a finally --
 // deferring a readback and immediately throwing it away, because that was the
-// only way to keep it off the measured path. An empty request does not build
-// the handle, does not read the grid back, and destroys the residency in
-// computePoseFromCapture's own finally, so there is nothing left here to clean
-// up. See pose/intermediates.ts, capability (1).
+// only way to keep it off the measured path. Now a read that is not made costs
+// nothing and leaves nothing behind: this measures the pose, so it reads none
+// of the intermediates and there is nothing to clean up.
 async function poseOnce(input: HarnessInput, gray: Float64Array, w: number, h: number, backend: Backend) {
-  return computePoseFromCapture(input, gray, w, h, backend, NO_INTERMEDIATES);
+  return computePoseFromCapture(input, gray, w, h, backend);
 }
 
 // One rep's joined tree, flattened to (label, selfMs, depth) in pre-order.

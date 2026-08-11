@@ -311,10 +311,11 @@ export async function ingestRemotePose(
   // middle of showing, so intermediates still parked from that local capture
   // are stale by definition -- resolving them later would paint this frame's
   // remote pose against the previous local frame's decode. Dropped rather than
-  // resolved, which also frees the chain's device buffers. Dropping the whole
-  // mailbox slot is what makes that true for the POSE as well: a tail that ran
-  // afterwards would repaint the local pose over this one.
-  camera.pendingVisuals?.pending?.release();
+  // read. Dropping the whole mailbox slot is what makes that true for the POSE
+  // as well: a tail that ran afterwards would repaint the local pose over this
+  // one. There is no release beside it any more -- the arena frees the local
+  // run's slices at the next reconstruction, so dropping the pointer is all of
+  // it.
   camera.pendingVisuals = null;
 
   const recoveredAxes = msg.recoveredAxes ? {
@@ -377,6 +378,10 @@ export async function ingestRemotePose(
       orientation: msg.positionDecode.orientation,
     } : null,
     chainTransfers: null,
+    // Genuinely absent on this path, like votes and timing: the phone ran the
+    // chain, so there are no local rectangles. It used to be a camera field
+    // this function never wrote, which meant it showed the last LOCAL run's.
+    rects: [],
     timing: null,
     intermediates: {},
   };

@@ -3,7 +3,9 @@ import { rotatedDims } from './decodeGrid.ts';
 import { type DecodeSampleGrid, type VoteResult } from '../../results.ts';
 import { spanEnd } from '../../../sphereLab/profiling/profiler.ts';
 import { poseSpan } from '../../timing/stages.ts';
-import { createStorageBuffer, dispatchCount, getGPUDevice, readUint32, uploadUint32, uploadUniform } from '../../gpu/device.ts';
+import { dispatchCount, getGPUDevice, readSliceU32, uploadUint32, uploadUniform, writeSlice } from '../../gpu/device.ts';
+import { type Arena, type Slice, allocZeroed, bind } from '../../gpu/arena.ts';
+import { poseArena } from '../lsd/chain.ts';
 import { gpuTimelineSlot } from '../../gpu/gpuTimeline.ts';
 import { DECODE_TALLY_WGSL } from './decodeTally.wgsl.ts';
 
@@ -120,12 +122,13 @@ export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<Vot
       gridData[i * gc + j] = pt.valid ? (1 | (pt.bit << 1)) : 0;
     }
   }
-  const gridBuf = uploadUint32(device, gridData, 0, 'tally:grid', 'decode.fused');
-  try {
-    return await tallyFromDeviceGrid(device, gridBuf, gr, gc);
-  } finally {
-    gridBuf.destroy(); // owned here, unlike the fused path's caller-owned buffer
-  }
+  // Into an arena slice like everything else, so the two entry points hand
+  // `tallyFromDeviceGrid` the same kind of thing. Freed by the next
+  // reconstruction's reset rather than by a finally.
+  const arena = poseArena(device);
+  const gridSlice = arena.alloc(gridData.byteLength, 'tally.gridUpload');
+  writeSlice(arena, gridSlice, gridData, 'tally:grid', 'decode.fused');
+  return await tallyFromDeviceGrid(device, arena, gridSlice, gr, gc);
 }
 
 // The tally proper, over a grid buffer this function does NOT own. Split out so
@@ -133,7 +136,7 @@ export async function tallyPositionVotesGPU(grid: DecodeSampleGrid): Promise<Vot
 // of one packed and uploaded from CPU -- at a 270x276 grid that upload is 298KB
 // per call, and it is the single biggest reason to fuse the two stages.
 export async function tallyFromDeviceGrid(
-  device: GPUDevice, gridBuf: GPUBuffer, gr: number, gc: number,
+  device: GPUDevice, arena: Arena, gridSlice: Slice, gr: number, gc: number,
 ): Promise<VoteResult | null> {
   // Scoped HERE rather than in the two entry points, so both the
   // pack-and-upload route and decodeGridBuild.ts's device-grid route are
@@ -145,11 +148,16 @@ export async function tallyFromDeviceGrid(
   const pipeline = getPipeline(device);
   const { keysBuf, valuesBuf, size: tableSize } = getHashTable(device);
 
-  const tallyBuf = createStorageBuffer(device, 4 * R * C * 4); // zero-initialized per WebGPU spec
-  const totalWindowsBuf = createStorageBuffer(device, 4);
+  // ZEROED EXPLICITLY. Both are atomicAdd targets, and both used to rely on
+  // createBuffer returning zeroes -- the comment here said so. An arena slice is
+  // last frame's bytes, so without these clears the histogram would accumulate
+  // across reconstructions and every frame would decode to the previous frame's
+  // winner with a growing vote count. See allocZeroed's header in arena.ts.
+  const encoder = device.createCommandEncoder();
+  const tallyBuf = allocZeroed(arena, arena.alloc, encoder, 4 * R * C * 4, 'tally.hist');
+  const totalWindowsBuf = allocZeroed(arena, arena.alloc, encoder, 4, 'tally.totalWindows');
 
   const dispatchSpan = poseSpan('decode.tallyDispatch');
-  const encoder = device.createCommandEncoder();
   const uniformBufs: GPUBuffer[] = [];
   for (let o = 0; o < 4; o++) {
     const [rr, cc] = rotatedDims(gr, gc, o);
@@ -159,11 +167,11 @@ export async function tallyFromDeviceGrid(
       layout: pipeline.getBindGroupLayout(0),
       entries: [
         { binding: 0, resource: { buffer: uniformBuf } },
-        { binding: 1, resource: { buffer: gridBuf } },
+        { binding: 1, resource: bind(gridSlice, arena) },
         { binding: 2, resource: { buffer: keysBuf } },
         { binding: 3, resource: { buffer: valuesBuf } },
-        { binding: 4, resource: { buffer: tallyBuf } },
-        { binding: 5, resource: { buffer: totalWindowsBuf } },
+        { binding: 4, resource: bind(tallyBuf, arena) },
+        { binding: 5, resource: bind(totalWindowsBuf, arena) },
       ],
     });
     // One label for all four orientations rather than `tally:o0..o3`: they are
@@ -181,10 +189,10 @@ export async function tallyFromDeviceGrid(
   spanEnd(dispatchSpan);
 
   const [tallyRaw, totalWindowsRaw] = await Promise.all([
-    readUint32(device, tallyBuf, 4 * R * C * 4, 'tally:hist', 'decode.fused'),
-    readUint32(device, totalWindowsBuf, 4, 'tally:totalWindows', 'decode.fused'),
+    readSliceU32(arena, tallyBuf, 4 * R * C * 4, 'tally:hist', 'decode.fused'),
+    readSliceU32(arena, totalWindowsBuf, 4, 'tally:totalWindows', 'decode.fused'),
   ]);
-  for (const b of [tallyBuf, totalWindowsBuf, ...uniformBufs]) b.destroy(); // gridBuf is the caller's
+  for (const b of uniformBufs) b.destroy();
 
   // This one would have degraded almost-safely by accident -- an all-zero tally
   // leaves bestIdx at -1, which already returns null. Made explicit anyway,

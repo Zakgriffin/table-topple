@@ -1,10 +1,43 @@
 import * as THREE from 'three';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
-import type { Intermediates, PendingIntermediates } from '../../pose/intermediates.ts';
 import type { PoseComputeTiming, PoseResult } from '../../pose/poseCompute.ts';
 import { type ProjectedBins } from '../types.ts';
 import { type StageRecord } from '../profiling/profiler.ts';
 import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './settings.ts';
+import type { DecodeCellDebug, DecodeSampleGrid } from '../../pose/results.ts';
+import type { GrownRegion, LsdRectangle } from '../../pose/stages/lsd/types.ts';
+
+// ── What the overlays read, and it is the APP's type now ──────────────────
+//
+// This used to be `Intermediates` in pose/intermediates.ts, one half of a
+// request mechanism: a caller named the fields it wanted, the library handed
+// back a drain handle, and ownership of the chain's device buffers moved with
+// it. All of that existed for one reason -- the pipeline destroyed its buffers
+// before a caller could look -- and the arena removed it. What is left is what
+// this always was underneath: a bag of arrays the display half happens to want.
+//
+// So it lives here, with the thing that stores it. The library has no opinion
+// on which intermediates a view needs, and no longer has a type expressing that
+// it might.
+//
+// ORIENTATION, which is the trap: these are the PIPELINE's own buffers, so they
+// are TOP-DOWN -- the dominant convention everywhere except the preview
+// textures. The flip happens at the PAINT, and it is not merely a row reversal:
+// a vertical flip also negates the vertical derivative and shifts the 2x2
+// stencil by a row, so flipRows(computeField(g)) and computeField(flipRows(g))
+// are different arrays.
+export interface Intermediates {
+  fx?: Float64Array;
+  fy?: Float64Array;
+  regionId?: Int32Array;
+  regions?: GrownRegion[];
+  rects?: LsdRectangle[];
+  // All three arrive together or not at all -- the rotation and the correctness
+  // array are derived from the grid and are worthless without it.
+  decodeGrid?: DecodeSampleGrid;
+  decodeRotated?: DecodeSampleGrid;
+  decodeCorrectness?: (DecodeCellDebug | null)[][];
+}
 
 // requestVideoFrameCallback's metadata for one decoded video frame, captured
 // on the phone (mobileCapture.ts's onVideoFrame) and relayed with the frame
@@ -44,21 +77,22 @@ export interface FrameMeta {
 // TWO DIFFERENCES FROM PoseResult, both because this type answers "what is on
 // screen" rather than "what did that call return":
 //
-//   - `pending` is GONE. A published pose owns no undrained handle -- the
-//     mailbox (pendingVisuals) carries it until the tail spends it, and this
-//     type is what states that, rather than a comment asking readers not to
-//     touch a spent field.
+//   - The CHAIN HANDLES are gone (`chain`, `cpuChain`, `readGrid`). They are
+//     the live pipeline buffers, valid only until the next reconstruction; the
+//     mailbox carries them until the tail reads them, and a pose that is "on
+//     screen" must not hold a pointer that expires under it. Dropping them here
+//     is what makes that a type error rather than a StaleSliceError at paint
+//     time.
 //   - `timing` is NULLABLE, because a pose that arrived already computed from
 //     a phone (pipeline/capture.ts's ingestRemotePose) has no local run behind
 //     it to have timed. Same reason `votes` can be empty and `chainTransfers`
 //     null on that path -- a remote pose genuinely does not carry them, and
 //     the old fields showed the previous LOCAL run's instead.
-export type CameraPose = Omit<PoseResult, 'pending' | 'timing'> & {
+export type CameraPose = Omit<PoseResult, 'chain' | 'cpuChain' | 'readGrid' | 'timing'> & {
   timing: PoseComputeTiming | null;
   // What the drain pulled back FOR THIS POSE: the run's own fx/fy/regionId/
-  // regions/rects/decode grid, for the overlays that used to recompute them
-  // (see pose/intermediates.ts). Empty until the tail resolves the handle, and
-  // empty forever for a run that asked for nothing.
+  // regions/decode grid, for the overlays that used to recompute them. Empty
+  // until the tail reads them, and empty forever for a run nothing asked about.
   //
   // Inside the pose rather than beside it, and that is the point: a decode grid
   // cannot be displayed next to a different run's axes when the two travel in
@@ -67,14 +101,19 @@ export type CameraPose = Omit<PoseResult, 'pending' | 'timing'> & {
 };
 
 // The deferred-visualization mailbox's payload -- the pose the tail is to
-// paint, plus the handle it has to spend to finish painting it.
+// paint, plus the live pipeline result it has to read to finish painting it.
 //
 // The pose here is the SAME OBJECT that was published to camera.pose, not a
-// copy, so the tail can ask "is what I was handed still what is on screen?"
-// by identity before it publishes an enriched version over the top.
+// copy, so the tail can ask "is what I was handed still what is on screen?" by
+// identity before it publishes an enriched version over the top.
+//
+// `result` is the raw PoseResult, carried ONLY here and only until the tail
+// runs. It is what holds the arena slices, and the reason those do not travel
+// on CameraPose: this field has a stated expiry (the next reconstruction) and
+// the pose on screen does not.
 export interface PendingVisuals {
   pose: CameraPose;
-  pending: PendingIntermediates | null;
+  result: PoseResult;
 }
 
 export interface CameraBase {

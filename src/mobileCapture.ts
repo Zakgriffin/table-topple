@@ -19,7 +19,6 @@ import { toGrayscale } from './decode.ts';
 import { config, fetchConfigFile } from './sphereLab/config.ts';
 import { globalState } from './sphereLab/state.ts';
 import { backendFromForceCPU } from './pose/backend.ts';
-import { wants } from './pose/intermediates.ts';
 // Only the data-side rebuild is needed here now. The board's world EXTENT
 // (C/R/GRID_STEP) is read by gameOverlay.ts instead, which is the only thing
 // on this page that still draws anything at board scale.
@@ -36,7 +35,7 @@ import { computeGradient2x2Field } from './pose/stages/gradient/gradientField.ts
 import { computeLsdRectanglesFromField } from './pose/stages/lsd/chain.ts';
 import type { LsdRectangle } from './pose/stages/lsd/types.ts';
 import { computePoseFromCapture, type PoseInput, type PoseResult } from './pose/poseCompute.ts';
-import type { Intermediates } from './pose/intermediates.ts';
+import type { Intermediates } from './sphereLab/camera/model.ts';
 // Shared with the desktop rather than restated here, so the wire shape and
 // the recorded shape cannot drift apart -- this page PRODUCES the value that
 // camera/model.ts types on the receiving end.
@@ -2107,16 +2106,21 @@ async function captureComputeAndSendPose() {
     // The phone's globalState is THIS page's own module instance, kept in sync
     // by settingsSync (see below) -- converted to a Backend right here so the
     // pipeline itself never reads it. Same conversion the desktop does.
-    // Asks for the decode grid and drains it RIGHT HERE rather than deferring:
-    // buildDebugPayload below needs it and this page has no visual mailbox to
-    // resolve a handle in later. The request has to be explicit -- an
-    // unasked-for grid is not brought down at all -- which is the point: this
-    // page's need is stated at the call site instead of being a default that
-    // another caller's parameter happened to preserve.
     const pose = await computePoseFromCapture(
-      poseInput, grayTopDown, cw, ch, backendFromForceCPU(globalState.forceCPU), wants('decodeGrid'),
+      poseInput, grayTopDown, cw, ch, backendFromForceCPU(globalState.forceCPU),
     );
-    const drained = (await pose.pending?.resolve()) ?? {};
+    // Reads the decode grid RIGHT HERE rather than deferring: buildDebugPayload
+    // below needs it and this page has no visual mailbox to read it in later.
+    // The read is what costs -- 0.45MB -- and it happens because this page
+    // genuinely draws it, which is the whole of what the old `wants(...)`
+    // request was expressing.
+    const drained: Intermediates = {};
+    if (pose.readGrid) {
+      const g = await pose.readGrid();
+      drained.decodeGrid = g.grid;
+      drained.decodeRotated = g.rotated;
+      drained.decodeCorrectness = g.correctness;
+    }
     const timing = pose.timing;
     const totalMs = performance.now() - t0;
     const pd = pose.positionDecode;

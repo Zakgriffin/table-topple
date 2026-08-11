@@ -136,6 +136,5 @@ export async function verifyDecodeGridBuild(
       cpuMs, gpuMs,
     };
   } finally {
-    fused.release();
   }
 }

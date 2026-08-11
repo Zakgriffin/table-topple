@@ -13,9 +13,13 @@ import { captureDistortedGrayscale } from './capture.ts';
 import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './projectedBins.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
-import { type IntermediateName, type IntermediatesRequest, wants } from '../../pose/intermediates.ts';
+import { readSliceF32, readSliceU32 } from '../../pose/gpu/device.ts';
+import { readRegionMembers } from '../../pose/stages/lsd/lsdFit.gpu.ts';
+import type { GrownRegion } from '../../pose/stages/lsd/types.ts';
+import type { Intermediates } from '../camera/model.ts';
 import { computePoseFromCapture, type PoseResult } from '../../pose/poseCompute.ts';
 import { type StageRecord, spanEnd } from '../profiling/profiler.ts';
+import { poseSpan } from '../../pose/timing/stages.ts';
 import { appSpan } from '../profiling/stages.ts';
 
 // Shared pole-marker/gizmo/floor-overlay/readout tail -- called after EITHER
@@ -239,8 +243,8 @@ async function runVisualTailBody(camera: Camera, posted: PendingVisuals): Promis
   // and that exclusion is exactly what this makes droppable: without it, a
   // reconstruction that landed while the readback was in flight would otherwise
   // get its axes overwritten by the previous frame's, decode grid and all.
-  if (posted.pending) {
-    const got = await posted.pending.resolve();
+  {
+    const got = await readDisplayIntermediates(camera, posted.result);
     if (camera.pose === posted.pose) camera.pose = { ...posted.pose, intermediates: got };
   }
 
@@ -417,24 +421,79 @@ export function drainVisuals(camera: Camera): void {
 // real cost change -- flipping one of these re-runs the pose stages instead of
 // recomputing one field on the CPU -- and it is the trade the whole step is
 // making: one pipeline, asked, instead of a second one, duplicated.
-function displayIntermediates(camera: Camera): IntermediatesRequest {
+async function readDisplayIntermediates(camera: Camera, result: PoseResult): Promise<Intermediates> {
   const s = camera.settings;
-  const want: IntermediateName[] = ['decodeGrid'];
-  // fx/fy: the contamination rasters, the top-gradient raster, the hover
-  // arrows, and the LSD edge-connectivity preview.
-  if (s.showTrueContamination || s.showReconstructedContamination
-    || s.showTopGradient
-    || s.showGradientArrow || s.showLevelLineArrow
-    || s.showLsdRawRegions) {
-    want.push('fx', 'fy');
+  const out: Intermediates = {};
+  // `pose.drain` is opened HERE now, by the app, and that is the honest place
+  // for it: the drain was never a pipeline stage, it is the display half
+  // deciding to pay for a readback. The library still names it as the OWNER of
+  // those transfers, so the crossings join inside this span exactly as before.
+  const drainSpan = poseSpan('pose.drain');
+  try {
+
+    // fx/fy: the contamination rasters, the top-gradient raster, the hover
+    // arrows, and the LSD edge-connectivity preview.
+    const needField = s.showTrueContamination || s.showReconstructedContamination
+      || s.showTopGradient
+      || s.showGradientArrow || s.showLevelLineArrow
+      || s.showLsdRawRegions;
+    // The three LSD debug views. The raw-region view additionally needs the
+    // per-pixel labeling and the region member lists.
+    const needRects = s.showLsdSegments || s.showLsdRejected || s.showLsdRawRegions;
+    const needRegions = s.showLsdRawRegions;
+
+    // ── the reads, written out ──
+    //
+    // This used to be `displayIntermediates(camera)` returning a SET OF NAMES
+    // that went into the pipeline as `want`, and a `pending.resolve()` here that
+    // drained whatever had been named. Two halves that had to agree, several call
+    // sites away from each other, plus a handle carrying ownership of device
+    // buffers between them.
+    //
+    // Now the settings decide what to read and the reads happen here. The
+    // conditions are the same conditions; what is gone is the mechanism that used
+    // to carry them across the boundary -- and with it the question of who frees
+    // what, since the pipeline's arena frees all of it at the next run.
+    const { chain, cpuChain } = result;
+    if (cpuChain) {
+      // Already host arrays: no readback, no widening, no transfer. Handing them
+      // over is a pointer copy, which is why the CPU path pays literally nothing
+      // for display data.
+      if (needField) { out.fx = cpuChain.fx; out.fy = cpuChain.fy; }
+      if (needRegions) { out.regionId = cpuChain.regionId; out.regions = cpuChain.regions as GrownRegion[]; }
+    } else if (chain) {
+      const { arena, n } = chain;
+      if (needField) {
+        out.fx = new Float64Array(await readSliceF32(arena, chain.fx, n * 4, 'fx', 'pose.drain'));
+        out.fy = new Float64Array(await readSliceF32(arena, chain.fy, n * 4, 'fy', 'pose.drain'));
+      }
+      if (needRegions) {
+        const raw = await readSliceU32(arena, chain.regionId, n * 4, 'regionId', 'pose.drain');
+        // BIT REINTERPRETATION, not a numeric convert -- that is what makes the
+        // -1 sentinel survive the trip (collect's scatter writes a real -1).
+        out.regionId = new Int32Array(raw.buffer.slice(0));
+        out.regions = (await readRegionMembers(
+          arena, chain.regions, chain.regionCount, chain.memberCount, 'pose.drain',
+        )) as GrownRegion[];
+      }
+    }
+    // Host-side on both backends, so this is never a read.
+    if (needRects) out.rects = result.rects;
+
+    // The decode grid, 0.45MB. Projected-Cam and the world-floor decal are the
+    // only things that draw it, but it is read unconditionally for now because
+    // several readouts consume `decodeRotated` outside those views; narrowing it
+    // is a separate change with its own display consequences.
+    if (result.readGrid) {
+      const g = await result.readGrid();
+      out.decodeGrid = g.grid;
+      out.decodeRotated = g.rotated;
+      out.decodeCorrectness = g.correctness;
+    }
+    return out;
+  } finally {
+    spanEnd(drainSpan);
   }
-  // The three LSD debug views. 'rects' also turns on the region-CSR readback
-  // that fills each rectangle's rawMembers (see runLsdChain's wantMembers) --
-  // the rejected raster and the per-rectangle hue are both member-derived, so a
-  // rectangle without them cannot be drawn.
-  if (s.showLsdSegments || s.showLsdRejected) want.push('rects');
-  if (s.showLsdRawRegions) want.push('rects', 'regions', 'regionId');
-  return wants(...want);
 }
 
 // ── The one place a pose result lands on a Camera ─────────────────────────
@@ -458,11 +517,15 @@ function displayIntermediates(camera: Camera): IntermediatesRequest {
 // it. Starting empty is the point -- the previous run's decode grid can no
 // longer be read next to this run's axes, because it is not in this object.
 function applyPoseResult(camera: Camera, result: PoseResult): void {
-  const { pending, ...rest } = result;
+  const { chain, cpuChain, readGrid, ...rest } = result;
+  void chain; void cpuChain; void readGrid;
   const pose: CameraPose = { ...rest, intermediates: {} };
   camera.pose = pose;
-  // Posts to the mailbox. The pose is final; the tail is what is deferred.
-  camera.pendingVisuals = { pose, pending };
+  // Posts to the mailbox. The pose is final; the tail is what is deferred. The
+  // RESULT rides along rather than the pose, because it is what holds the arena
+  // slices -- and those expire at the next reconstruction, which is exactly why
+  // they are not on the pose that stays on screen.
+  camera.pendingVisuals = { pose, result };
 }
 
 async function recomputeStages(camera: Camera) {
@@ -477,18 +540,20 @@ async function recomputeStages(camera: Camera) {
   // confirmed not on the critical path to a pose (distance is already
   // finalized by gridPeriodPhase before that stage would run); they exist
   // only to feed Projected-Cam/World-floor-decal DISPLAY.
-  // A payload this camera never drained (a newer reconstruction superseded it
-  // before runVisualTail ran) still owns the chain's device buffers, and would
-  // hold them until device loss. Released BEFORE the run below rather than
-  // after it, so the two sets of buffers never coexist --
-  // computePoseFromCapture used to do exactly this, at exactly this moment, by
-  // reaching into the state object it was about to overwrite. It has no such
-  // pointer now, so the holder frees it.
-  camera.pendingVisuals?.pending?.release();
+  // Dropped, not released. A payload this camera never drained (a newer
+  // reconstruction superseded it before runVisualTail ran) used to own the
+  // chain's device buffers and would hold them until device loss, so it had to
+  // be released here, before the next run, so two sets never coexisted. The
+  // arena frees the previous run's slices itself at the top of the next one, so
+  // all that is left is to stop pointing at them.
   camera.pendingVisuals = null;
 
   const result = await computePoseFromCapture(
-    camera, gray, w, h, backendFromForceCPU(globalState.forceCPU), displayIntermediates(camera),
+    camera, gray, w, h, backendFromForceCPU(globalState.forceCPU),
+    // The one thing still asked for UP FRONT: the region CSR readback that
+    // fills each rectangle's rawMembers has to happen while the chain still
+    // holds the CSR, so it cannot be a later read like the others.
+    camera.settings.showLsdSegments || camera.settings.showLsdRejected || camera.settings.showLsdRawRegions,
   );
   // Publishes the pose AND posts the tail's payload -- the pose is final here,
   // and everything past this point is display. Deferred, that display work

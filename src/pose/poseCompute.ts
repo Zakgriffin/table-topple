@@ -1,18 +1,16 @@
 import * as THREE from 'three';
 import { GRID_STEP, MATH_QUAT } from '../sphereLab/constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../sphereLab/math/geometry.ts';
-import { type TransferSummary, readSliceF32, readSliceU32 } from './gpu/device.ts';
-import { readRegionMembers } from './stages/lsd/lsdFit.gpu.ts';
+import { type TransferSummary } from './gpu/device.ts';
 import { fitPairOfPlanesGPU } from './stages/votes/fitPlanes.gpu.ts';
 import { spanDurationMs, spanEnd } from '../sphereLab/profiling/profiler.ts';
 import { poseSpan } from './timing/stages.ts';
 import { type CompositeLine, type PositionDecodeResult, type RecoveredAxes, type Vote } from './results.ts';
 import { type Backend } from './backend.ts';
-import { type PendingDecodeGrid, runPositionDecode } from './stages/decode/decodeGrid.ts';
+import { type ReadDecodeGrid, runPositionDecode } from './stages/decode/decodeGrid.ts';
 import { computeGridPeriodPhase, type GridPeriodPhaseResult } from './stages/period/gridPeriodPhase.ts';
-import { type Intermediates, type IntermediatesRequest, NO_INTERMEDIATES, type PendingIntermediates } from './intermediates.ts';
 import { type LsdChainCPU, type LsdChainGPU } from './stages/lsd/chain.ts';
-import type { GrownRegion, LsdRectangle } from './stages/lsd/types.ts';
+import type { LsdRectangle } from './stages/lsd/types.ts';
 import { computeGradient2x2Composites, computeSegmentVotes, fitPairOfPlanes, type LsdCompositeSettings } from './stages/votes/votes.ts';
 
 // ── Shared pure pose-recovery orchestrator ────────────────────────────────
@@ -97,16 +95,38 @@ export interface PoseResult {
   // CPU, and on which optional readbacks a consumer happened to ask for.
   chainTransfers: TransferSummary | null;
   timing: PoseComputeTiming;
-  // Set exactly when the caller asked for intermediates (see
-  // pose/intermediates.ts), and null otherwise -- which is what makes "asking
-  // for nothing costs nothing" literally true: there is no handle and nothing
-  // to drain. Whoever holds it owns resolving or releasing it; left unresolved
-  // it holds the chain's device buffers until device loss.
+
+  // ── The intermediates, as the things themselves ──
   //
-  // The drained payload is the resolve() call's RETURN VALUE, not a field
-  // here. A result object that filled itself in later would be exactly the
-  // mutable shared state this type replaced, one level down.
-  pending: PendingIntermediates | null;
+  // There is no request type and no drain handle any more. `want`, a set of
+  // names, existed to answer two questions -- what to hand back, and who owns
+  // the memory -- and the second one was the only one that needed a mechanism:
+  // the residency destroyed its buffers in this function's `finally`, so
+  // anything a caller wanted had ceased to exist before it could ask. With the
+  // arena, the chain's buffers outlive the call and are freed by the NEXT
+  // reconstruction, so "asking" is just reading.
+  //
+  // Both properties the request type was built to guarantee still hold, but
+  // structurally: asking for nothing costs nothing because a read you do not
+  // make is a read you do not pay for, and asking cannot change the pose
+  // because a read is a read.
+  //
+  // `chain` is non-null exactly when the GPU chain ran; `cpuChain` exactly when
+  // the CPU one did. Their fields are the SAME intermediates on the two sides
+  // of the bus -- slices vs typed arrays -- and reading a slice costs a
+  // readback where reading an array costs nothing.
+  //
+  // LIFETIME, and it is the one real obligation left: everything here is valid
+  // until the next `computePoseFromCapture` on the same device. Reading later
+  // throws a StaleSliceError naming the slice, rather than silently handing
+  // back another run's bytes.
+  chain: LsdChainGPU | null;
+  cpuChain: LsdChainCPU | null;
+  // Stage 4's rectangles -- already host-side on both backends, so they are the
+  // one intermediate that is a plain field.
+  rects: LsdRectangle[];
+  // 0.45MB of display data. Null only when the decode produced no grid at all.
+  readGrid: ReadDecodeGrid | null;
 }
 
 // Stages 1-4 plus vote casting, over a FieldResidency the CALLER now owns.
@@ -191,12 +211,17 @@ async function computeCompositesAndVotes(
 // caller's storage, which is what this whole step removes.
 export async function computePoseFromCapture(
   input: PoseInput, gray: Float64Array, w: number, h: number, backend: Backend,
-  want: IntermediatesRequest = NO_INTERMEDIATES,
+  // Whether the region CSR is brought down to fill each rectangle's rawMembers
+  // -- four readbacks, and the largest byte cost left in the chain. The LAST
+  // request-shaped parameter in the library, and it survives for a reason the
+  // others did not: the members are read INSIDE the chain, where the CSR is
+  // still device-resident, so a caller cannot ask for them afterwards without
+  // the chain having kept them. Callers that draw per-rectangle members (the
+  // LSD overlays, the phone's debug pass) pass true and pay; the pose path
+  // leaves it false.
+  wantMembers = false,
 ): Promise<PoseResult> {
-  // Filled inside the try and read in the finally, so the chain's slices reach
-  // the handle even on the error unwind.
-  let pendingGrid: PendingDecodeGrid | null = null;
-  let rects: LsdRectangle[] | null = null;
+  let rects: LsdRectangle[] = [];
   let chain: LsdChainGPU | null = null;
   let cpuChain: LsdChainCPU | null = null;
   const vFovRad = getAnalysisVFovRad(input);
@@ -208,7 +233,7 @@ export async function computePoseFromCapture(
   // declared, the library has to state its own top: without this, `pose.fit`
   // and friends would each be separate roots and no report could say what one
   // reconstruction cost without adding them up and hoping.
-  const runSpan = poseSpan('pose.run', { backend, want: want.size });
+  const runSpan = poseSpan('pose.run', { backend, wantMembers });
 
   // Owned here rather than inside computeCompositesAndVotes so `gray` stays on
   // the device long enough for the fused decode at the bottom to reuse it --
@@ -232,7 +257,7 @@ export async function computePoseFromCapture(
   // where it happens, inside runLsdChainGPU, and charged to `lsd.gradient`.
   const stageSpan = poseSpan('pose.votes');
   try {
-    const composited = await computeCompositesAndVotes(input, gray, w, h, vFovRad, backend, want.has('rects'));
+    const composited = await computeCompositesAndVotes(input, gray, w, h, vFovRad, backend, wantMembers);
     const { voteComposites, votes } = composited;
     rects = composited.rects;
     chain = composited.chain;
@@ -300,9 +325,8 @@ export async function computePoseFromCapture(
     const sharedGray = chain ? { arena: chain.arena, slice: chain.gray } : null;
     const decoded = await runPositionDecode(
       { aspect: input.aspect, settings: input.settings, recoveredAxes, gridPeriodPhase: gpp },
-      gray, w, h, vFovRad, sharedGray, backend, want.has('decodeGrid'),
+      gray, w, h, vFovRad, sharedGray, backend,
     );
-    pendingGrid = decoded.pendingGrid;
     spanEnd(decodeSpan);
 
     // Read off the span objects held above, not off a parallel set of
@@ -324,11 +348,12 @@ export async function computePoseFromCapture(
       gridPeriodPhase: gpp,
       recoveredAxes,
       positionDecode: decoded.decode,
-      // Both are filled by the finally below, which runs before this object
-      // reaches the caller. Placeholders rather than optional fields so the
-      // type stays honest about what a caller receives.
+      chain, cpuChain, rects,
+      readGrid: decoded.readGrid,
+      // Filled by the finally below, which runs before this object reaches the
+      // caller. A placeholder rather than an optional field so the type stays
+      // honest about what a caller receives.
       chainTransfers: null,
-      pending: null,
       timing: {
         votesMs: spanDurationMs(stageSpan),
         fitMs: spanDurationMs(fitSpan),
@@ -349,18 +374,12 @@ export async function computePoseFromCapture(
     // profiler records.
     const transfers = chain ? chain.transfers : { crossings: 0, bytes: 0, entries: [] };
 
-    // NOTHING TO DESTROY on either branch, and that is the point of the arena.
-    // This used to be the one question that decided the residency's fate --
-    // whether to destroy its buffers here or hand ownership to a drain -- and
-    // getting it wrong either leaked device memory or freed buffers a display
-    // pass was about to read. The chain's slices are freed by the NEXT run's
-    // `arena.reset()`, so the only thing still worth handling is the decode
-    // grid's own handle, which owns standalone buffers.
-    if (result && want.size > 0) {
-      result.pending = makePendingIntermediates(chain, cpuChain, want, pendingGrid, rects);
-    } else {
-      pendingGrid?.release();
-    }
+    // NOTHING TO DESTROY, AND NO BRANCH, which is the point of the arena. This
+    // used to be the question that decided the residency's fate -- destroy its
+    // buffers here, or hand ownership to a drain -- and getting it wrong either
+    // leaked device memory or freed buffers a display pass was about to read.
+    // Everything the chain and the decode allocated is freed by the NEXT run's
+    // `arena.reset()`.
 
     // Decorating the object the `return` above already evaluated, which works
     // because it is a reference and the caller has not seen it yet.
@@ -372,82 +391,4 @@ export async function computePoseFromCapture(
     // the one report most worth reading is the one from the failure.
     spanEnd(runSpan);
   }
-}
-
-// Only the decode grid's handle moves in here now. The chain's own slices are
-// BORROWED, not owned: they stay valid until the next `arena.reset()`, and a
-// drain that runs too late throws a StaleSliceError rather than reading another
-// run's bytes. That is the whole of what used to be an ownership-transfer
-// invariant with a test attached.
-//
-// A CPU run hands its arrays over directly -- there is nothing to read back and
-// nothing to transfer, which is what "asking costs nothing" means on that path.
-function makePendingIntermediates(
-  chain: LsdChainGPU | null, cpu: LsdChainCPU | null, want: IntermediatesRequest,
-  pendingGrid: PendingDecodeGrid | null, rects: LsdRectangle[] | null,
-): PendingIntermediates {
-  let spent = false;
-  // Held so a second resolve() re-hands the SAME arrays rather than draining
-  // twice. Starts as the empty set, which is also what a resolve() after a
-  // release() gets -- see PendingIntermediates.
-  let drained: Intermediates = {};
-  const destroy = () => { pendingGrid?.release(); };
-  return {
-    async resolve() {
-      if (spent) return drained;
-      spent = true;
-      const drainSpan = poseSpan('pose.drain');
-      try {
-        const out: Intermediates = {};
-        if (cpu) {
-          // Already host arrays. No readback, no widening, no transfer.
-          if (want.has('fx')) out.fx = cpu.fx;
-          if (want.has('fy')) out.fy = cpu.fy;
-          if (want.has('regionId')) out.regionId = cpu.regionId;
-          if (want.has('regions')) out.regions = cpu.regions as GrownRegion[];
-        } else if (chain) {
-          const { arena } = chain;
-          // Widened here rather than by a residency accessor. f32 is what the
-          // device holds; Float64Array is what every CPU consumer expects.
-          if (want.has('fx')) out.fx = new Float64Array(await readSliceF32(arena, chain.fx, chain.n * 4, 'fx', 'pose.drain'));
-          if (want.has('fy')) out.fy = new Float64Array(await readSliceF32(arena, chain.fy, chain.n * 4, 'fy', 'pose.drain'));
-          if (want.has('regionId')) {
-            const raw = await readSliceU32(arena, chain.regionId, chain.n * 4, 'regionId', 'pose.drain');
-            // BIT REINTERPRETATION, not a numeric convert: that is what makes
-            // the -1 sentinel survive the trip (collectRegions' scatter writes a
-            // real -1).
-            out.regionId = new Int32Array(raw.buffer.slice(0));
-          }
-          if (want.has('regions')) {
-            out.regions = (await readRegionMembers(
-              arena, chain.regions, chain.regionCount, chain.memberCount, 'pose.drain',
-            )) as GrownRegion[];
-          }
-        }
-        // Stage 4's rectangles are a host-side array the chain already returned
-        // and then had nowhere to put. Captured during the run and held.
-        if (want.has('rects') && rects) out.rects = rects;
-        // Last, so a throw reading a field above still leaves the grid's memory
-        // to the destroy below. Folded into the SAME object as everything else:
-        // the decode grid used to be the one requestable thing that landed on
-        // the caller's state instead of here (see IntermediateName).
-        const grid = await pendingGrid?.resolve();
-        if (grid) {
-          out.decodeGrid = grid.grid;
-          out.decodeRotated = grid.rotated;
-          out.decodeCorrectness = grid.correctness;
-        }
-        drained = out;
-        return drained;
-      } finally {
-        spanEnd(drainSpan);
-        destroy();
-      }
-    },
-    release() {
-      if (spent) return;
-      spent = true;
-      destroy();
-    },
-  };
 }

@@ -8,6 +8,7 @@
         "allowImportingTsExtensions": true,
         "noEmit": true,
         "noUnusedLocals": true,
-        "verbatimModuleSyntax": true
+        "verbatimModuleSyntax": true,
+        "skipLibCheck": true
     }
 }

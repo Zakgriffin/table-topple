@@ -7,12 +7,14 @@
         "dev:bridge": "node scripts/dev-bridge/server.js",
         "generate:torus": "node scripts/generate-debruijn-torus.ts",
         "print:board": "node scripts/print-debruijn-board.ts",
-        "test": "node --test \"tests/**/*.test.ts\"",
+        "test": "node --test --test-force-exit \"tests/**/*.test.ts\"",
         "check:types": "tsc --noEmit",
         "check:config": "node scripts/check-config.mjs",
         "check:fixtures": "node scripts/check-fixtures.mjs",
         "fixture:save": "node scripts/dev-bridge/save-fixture.mjs",
-        "fixture:restore": "node scripts/dev-bridge/restore-fixture.mjs"
+        "fixture:restore": "node scripts/dev-bridge/restore-fixture.mjs",
+        "sweep": "node scripts/sweep.ts",
+        "hull": "node scripts/hull-measure.ts"
     },
     "devDependencies": {
         "@types/node": "^26.0.1",
@@ -22,11 +24,15 @@
         "pngjs": "^7.0.0",
         "typescript": "^6.0.3",
         "vite": "^8.0.14",
+        "webgpu": "^0.4.0",
         "ws": "^8.21.0"
     },
     "dependencies": {
         "@sinclair/typebox": "^0.34.52",
         "jsqr": "^1.4.0",
         "three": "^0.185.0"
+    },
+    "allowScripts": {
+        "webgpu@0.4.0": true
     }
 }

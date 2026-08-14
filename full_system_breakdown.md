@@ -13,12 +13,16 @@ it that size", and "what was decided and why".
 in and a camera pose comes out: one upload, one submit, one 128-byte readback, no
 host in the middle. `npm test` is 144 green; `npx tsc --noEmit` is clean.
 
-Branch `consolidate-and-purge`; **every file of this work product is UNTRACKED —
-`src/pose2/`, all `tests/pose2*`/`tests/helpers/gpu.ts` files, `scripts/sweep.ts`,
-`scripts/hull-measure.ts`, and THIS DOCUMENT.** Only `package.json`,
-`package-lock.json` and `tsconfig.json` are modified-tracked. So `git diff` and
-`git stash` are blind to all of it and `git checkout .` would not restore one line
-— copy files before experimenting on them.
+Branch `consolidate-and-purge`. **COMMITTED 2026-08-14, in five commits** —
+the headless-WebGPU toolchain, this document, the pipeline, the oracles, and the
+tests, in that order so each stands on the previous. The tree is clean and
+`git diff`, `git stash` and `git checkout .` all work normally now.
+
+That is a change of régime, not a footnote: everything below written in the
+past tense about "untracked" refers to how the work was DONE, and the mutation
+loop's copy-out-of-the-repo dance is no longer the only way to restore a file.
+`git checkout -- src/pose2/pose.wgsl.ts` now does it. The copy recipe is kept
+because it is still the safer habit when the working tree holds other changes.
 
 | built | stage entries |
 |---|---|
@@ -105,7 +109,9 @@ segfaults at process teardown without it. A runner that omits it — `npx tsx
 than a missing flag.
 
 **The mutation loop, since every stage here ends with one.** `src/pose2/` is
-untracked, so git cannot restore it:
+committed as of 2026-08-14, so `git checkout --` restores a mutated file; the
+copy-out-of-the-repo form below is what the runs recorded here actually used,
+and it stays the safer habit when the tree holds unrelated changes:
 
 ```
 cp src/pose2/pose.wgsl.ts $SCRATCH/          # 1. copy OUT of the repo
@@ -2751,8 +2757,9 @@ line** — which the twin has no access to and ground truth does. That belongs i
 the sweep, against `truthFor`, and it is the one place a rectangle that is
 self-consistently wrong would show up.
 
-One process note: `src/pose2/` is still untracked, so `git diff` is blind to it.
-The mutation runs were restored from a file copy and verified with `diff`.
+One process note: every mutation run recorded above was done while `src/pose2/`
+was UNTRACKED, so restoration was from a file copy verified with `diff` rather
+than from git. The work was committed 2026-08-14; see START HERE.
 
 **Phase 3 -- replace.** Swap the app onto this pipeline, then delete
 `src/pose/`. NOT STARTED. Two things to know before it is:

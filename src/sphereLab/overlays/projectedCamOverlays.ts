@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { type Camera } from '../camera/model.ts';
 import { isPhysical } from '../camera/store.ts';
-import { positionReadout, sampleLatticeCanvas } from '../ui/dom.ts';
+import { positionReadout } from '../ui/dom.ts';
 
 // ── Projected-Cam sample lattice ─────────────────────────────────────────
 
@@ -33,26 +33,18 @@ export function updatePositionReadoutText(camera: Camera) {
   positionReadout.textContent = decodeLines;
 }
 
-function hideSampleLattice() {
-  sampleLatticeCanvas.style.display = 'none';
-}
-
-// Unreferenced by the real app (replaced by gridPeriodPhaseOverlays.ts's
-// sample lattice, see this session's chat) -- left defined for reference/
-// dev-bridge use. NOTE: camera.settings.showSampleLattice was reassigned to
-// gate the NEW lattice when the old dedicated toggle was removed, so if
-// this is ever called manually again, it'll piggyback on that toggle's
-// current value rather than anything meant for this function specifically.
-// ── THE LATTICE IS DARK, pending pose2 plumbing ──
+// ── THE SECOND drawSampleLattice IS GONE, and it was the dead one ────────
 //
-// It drew every decode sample point on the Projected-Cam rect, filled by its
-// sampled bit and ringed green/red by whether that bit matched the printed
-// board. Both inputs -- `decodeRotated` and `decodeCorrectness` -- were pipeline
-// intermediates, and they are gone from Intermediates entirely: pose2 keeps the
-// decode grid on the device and reads back 128 bytes of pose.
+// Two functions drew a "sample lattice": this one, and the one inside
+// gridPeriodPhaseOverlays.ts's drawGridPeriodPhaseProjected. The second
+// superseded the first -- main.ts calls only that -- and this one survived as a
+// stub kept "for reference/dev-bridge use", reachable by bare name and doing
+// nothing but hiding its own canvas.
 //
-// The canvas, its sizing and its toggle are untouched, so this comes back by
-// filling it rather than by rebuilding the panel.
-export function drawSampleLattice(_camera: Camera, _x: number, _y: number, _w: number, _h: number) {
-  hideSampleLattice();
-}
+// Deleted rather than reimplemented alongside the real one. Two overlays with
+// one name, one of them hollow, is what a reader has to disambiguate before they
+// can start, and the reference value it was kept for is now served by an
+// implementation that actually runs. Its `#sampleLattice` canvas, that canvas's
+// CSS and both of its ui/dom.ts handles went with it -- a private surface with
+// no writer left is the shape the dead-code guard cannot see, since
+// `noUnusedLocals` says nothing about an unreferenced export.

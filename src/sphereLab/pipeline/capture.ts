@@ -383,6 +383,10 @@ export async function ingestRemotePose(
       camPos: new THREE.Vector3().fromArray(msg.positionDecode.camPos),
       recoveredCamQuat: new THREE.Quaternion().fromArray(msg.positionDecode.recoveredCamQuat),
       orientation: msg.positionDecode.orientation,
+      // -1, for the same reason lineCount is: the wire carries the RATIO, and
+      // the two counts it came from are not on it. Zero would say "the grid was
+      // compared and nothing matched", which is a different and false claim.
+      correct: -1, wrong: -1,
     } : null,
     chainTransfers: null,
     timing: null,

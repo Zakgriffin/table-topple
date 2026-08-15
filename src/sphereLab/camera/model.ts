@@ -64,6 +64,43 @@ export interface Intermediates {
   regionCount?: number;
   /** Which pixels each region is made of. Absent unless a raster asked. */
   regions?: RegionCsr;
+  /** Where decode sampled the floor, and what it read. Absent unless the sample
+   *  lattice asked. */
+  lattice?: DecodeLattice;
+}
+
+// ── The decode sample lattice, as the Projected-Cam overlay draws it ──────
+//
+// The lattice `decode.build` sampled: one point per cell, in FLOOR (u, v)
+// coordinates, which is the same space pipeline/projectedBins.ts projects the
+// image into -- so a dot goes on the Projected-Cam rect with no further
+// geometry. It is separable by construction (`u` depends only on the column,
+// `v` only on the row), which is why this is two short arrays and not one of
+// length rows*cols.
+//
+// `packed` is the DEVICE's own per-cell verdict, copied verbatim rather than
+// recomputed: bit 0 is "resolvable" and carries decode.build's three guards --
+// the grazing cutoff, behind-the-camera, and on-screen -- and bit 1 is the
+// sampled bit. Re-deriving that host-side would put a second copy of the
+// projection in an overlay, which is the mistake this whole display path exists
+// to avoid; asking for the buffer costs 83 KiB.
+export interface DecodeLattice {
+  rows: number; cols: number;
+  /** Floor u of column j, and floor v of row i. */
+  uAt: Float64Array; vAt: Float64Array;
+  /** Per cell `i * cols + j`: bit 0 resolvable, bit 1 the sampled bit. */
+  packed: Uint32Array;
+  /**
+   * Per cell: 1 agrees with the printed board, 0 disagrees, -1 not comparable
+   * (unresolvable, or outside the winning orientation's extent).
+   *
+   * NULL when the frame did not decode, and ALSO when the host re-derivation
+   * disagreed with the counters the device reported -- see
+   * pipeline/decodeLattice.ts. A lattice with no rings is the honest rendering
+   * of "we cannot say"; rings drawn from a re-derivation that failed its own
+   * check would be worse than none.
+   */
+  correct: Int8Array | null;
 }
 
 // The region CSR, exactly as `src/pose2` holds it: three buffers that are one
@@ -197,6 +234,12 @@ export interface PositionDecodeResult {
   recoveredCamQuat: THREE.Quaternion;
   // Which of the 4 cardinal rotations the decode matched at -- display-only.
   orientation: number;
+  // The two counters `consistency` is the ratio of, carried separately because
+  // a ratio cannot be checked against anything. They are the ORACLE for the
+  // sample lattice's per-cell correctness, which is re-derived on this side --
+  // see pipeline/decodeLattice.ts. -1 on a remote pose, which reports a ratio
+  // and not its parts.
+  correct: number; wrong: number;
 }
 
 // The deferred-visualization mailbox's payload -- the pose the tail is to

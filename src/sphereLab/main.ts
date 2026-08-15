@@ -115,7 +115,6 @@ import { refreshModeVisualizations } from './pipeline/modeRefresh.ts';
 import { updateContaminationOverlays } from './overlays/contaminationOverlays.ts';
 import { updateGizmo, updateSphereOverlays } from './overlays/sphereOverlays.ts';
 import { updateRecoveredCamGizmo } from './overlays/recoveredOverlays.ts';
-import { drawSampleLattice } from './overlays/projectedCamOverlays.ts';
 import { drawGridPeriodPhaseProjected } from './overlays/gridPeriodPhaseOverlays.ts';
 import { pushPoseSync, pushSettingsSync, sendToDevBridge } from './devBridge/client.ts'; // also opens the dev-bridge websocket as a side effect
 
@@ -194,7 +193,7 @@ Object.assign(
     getAnalysisVFovRad, markCaptureDirty, resizeCaptureBuffers,
     renderCamRT, updateDistortedPreview, PREVIEW_UPDATE_INTERVAL_MS, buildProjectedTexture, runAxesReconstruction,
     updateContaminationOverlays, updateGizmo, updateSphereOverlays, updateRecoveredCamGizmo,
-    drawSampleLattice, computeThroughRect, drawGridPeriodPhaseProjected },
+    computeThroughRect, drawGridPeriodPhaseProjected },
 );
 
 type Mode = 'world' | 'through' | 'inside' | 'projected';

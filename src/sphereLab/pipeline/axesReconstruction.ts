@@ -19,6 +19,7 @@ import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
 import { backendFromForceCPU } from '../backend.ts';
 import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
 import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './projectedBins.ts';
+import { buildDecodeLattice } from './decodeLattice.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
 import { type StageRecord, spanEnd } from '../profiling/profiler.ts';
@@ -493,7 +494,7 @@ const MAX_LINES = 16384;
 // riding along with the rectangles.
 const INSPECT = [
   'triad', 'layout', 'fx', 'fy', 'votes', 'lines', 'lineScan', 'counts', 'rects',
-  'members', 'regionOffsets', 'regionSizes',
+  'members', 'regionOffsets', 'regionSizes', 'packed', 'result',
 ] as const;
 
 // ── WHAT THIS FRAME ACTUALLY ASKS FOR ────────────────────────────────────
@@ -550,6 +551,11 @@ function inspectFor(camera: Camera): readonly string[] {
   if (s.showLsdRawRegions || s.showLsdRejected) {
     want.push('members', 'regionOffsets', 'regionSizes', 'counts');
   }
+  // The decode sample lattice. `layout` is already in `want` -- it is the pose --
+  // and it carries the cell POSITIONS, so this asks only for what the device
+  // decided about each cell. 83 KiB at the board's dimensions, and it is what
+  // stops the overlay from reprojecting the lattice itself.
+  if (s.showSampleLattice) want.push('packed', 'result');
   return want;
 }
 
@@ -707,6 +713,9 @@ function toCameraPose(frame: Pose2Frame): CameraPose {
         recoveredCamQuat: new THREE.Quaternion(
           pose.quaternion.x, pose.quaternion.y, pose.quaternion.z, pose.quaternion.w),
         orientation: pose.orientation,
+        // The parts, not just the ratio: buildDecodeLattice scores its own
+        // re-derivation against these two before it draws a single ring.
+        correct: pose.correct, wrong: pose.wrong,
       }
       : null,
     chainTransfers: null,
@@ -738,6 +747,13 @@ function toCameraPose(frame: Pose2Frame): CameraPose {
         : {}),
       // All three or none -- see RegionCsr. They are requested together and this
       // is the one place that could hand back a half of one.
+      // The sample lattice, reassembled from the block that describes it and the
+      // device's own per-cell verdict. Returns null on a frame with no lattice,
+      // which the spread then drops -- so the overlay's "absent means blank"
+      // rule needs no second condition.
+      ...(inspected['packed'] && inspected['result']
+        ? { lattice: buildDecodeLattice(layout, inspected['packed'], inspected['result'], pose) ?? undefined }
+        : {}),
       ...(inspected['members'] && inspected['regionOffsets'] && inspected['regionSizes']
         ? {
           regions: {

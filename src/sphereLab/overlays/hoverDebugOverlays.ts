@@ -334,13 +334,19 @@ toggleTrueCardinalOrientationBtn.addEventListener('click', () => {
 });
 // Lives in the Projected-view overlay group rather than the left panel: it only
 // draws in Projected Cam, and that group is the one mode.ts already shows and
-// hides with the mode. Same display-only story as the toggle above -- animate()
-// reads the setting fresh each frame, so there is nothing to recompute.
+// hides with the mode.
+//
+// NOT display-only any more, unlike the toggle above. It gates `packed` in
+// inspectFor, so a run that happened while this was off has no per-cell verdict
+// to draw and animate() reading the flag fresh would just find nothing -- which
+// is why this recomputes like every other readback-gating toggle rather than
+// only repainting.
 toggleSampleLatticeBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showSampleLattice = !cam.settings.showSampleLattice;
   toggleSampleLatticeBtn.classList.toggle('active', cam.settings.showSampleLattice);
   persistConfig();
+  recomputeFromLastCapture(cam);
 });
 
 

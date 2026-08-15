@@ -276,8 +276,6 @@ export function createPhysicalCamera(color: THREE.Color, connectionId: string): 
     connectionId, captureMode: 'single', computeMode: 'desktop', neverSyncedSettings: true, lastRemoteDebug: null, lastReportedReady: true,
     pendingCapture: null, pendingPoseResult: null, captureIngestBusy: false,
     idleSpan: null,
-    lastPullMs: null, lastEncodeMs: null, lastTransitMs: null,
-    pullMsHistory: [], encodeMsHistory: [], transitMsHistory: [], payloadBytesHistory: [],
     lastFrameStats: null,
     imuSamples: [], lastImuMeta: null, lastCaptureTiming: null,
   };

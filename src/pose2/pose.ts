@@ -72,11 +72,100 @@ export interface Ctx {
    * `bufs` is captured at construction.
    */
   bindGroups?: Map<string, GPUBindGroup[]>;
+  /**
+   * GPU pass timing, when the device can do it. Absent means untimed, which is
+   * the only behaviour on a device without `timestamp-query` -- and asking for a
+   * timestamp there is a validation error, not a no-op, so this is a real gate
+   * rather than a preference.
+   */
+  timing?: PassTimer;
 }
 
-/** A ctx over a fresh encoder against an existing buffer set. */
-export function makeCtx(device: GPUDevice, plan: PoolPlan, bufs: Buffers, dims: Dims): Ctx {
-  return { device, plan, bufs, enc: device.createCommandEncoder(), dims, bindGroups: new Map() };
+/**
+ * One frame's timestamp accounting, filled in as passes are encoded.
+ *
+ * ── THE LIBRARY TAKES NO POSITION ON WHAT THESE MEAN ──
+ *
+ * `src/pose2` gets no profiler, no spans and no timing module (the design's §5).
+ * It owns `pass()`, which is the single `beginComputePass` in the pipeline, so
+ * it is the only thing that can say WHICH pass inside the submit took the time.
+ * Everything else -- upload, encode, the fence, the map -- is a host-clock
+ * quantity the caller can bracket from outside, and does. So this forwards raw
+ * nanoseconds and stops.
+ */
+export interface PassTimer {
+  /** Two queries per pass: one at the beginning, one at the end. */
+  readonly querySet: GPUQuerySet;
+  /** Capacity in PASSES. The query set holds twice this many queries. */
+  readonly capacity: number;
+  /**
+   * The stage id of each encoded pass, in encode order -- so `ids.length` is
+   * the pass count and `ids[i]` names query pair `2i`/`2i+1`.
+   *
+   * Ids REPEAT, and that is not a defect to fix here: grow's hook/compress/gate
+   * run once per convergence round, so a frame holds up to 32 passes under each
+   * of those three ids. Which occurrence is which is the `index`, and what to do
+   * about the repetition (aggregate, or not) is the consumer's decision.
+   */
+  readonly ids: string[];
+}
+
+/** One encoded pass's measured device time. */
+export interface PassTiming {
+  /** The pipeline stage id. Not unique within a frame -- see PassTimer.ids. */
+  readonly stage: string;
+  /** Elapsed device time in nanoseconds, on the GPU's own counter. */
+  readonly ns: number;
+  /**
+   * Nanoseconds from the frame's FIRST timestamp to this pass's beginning.
+   *
+   * Relative, not absolute, and deliberately: the raw counter runs to ~1.4e15,
+   * which is inside a double's exact-integer range but not by much, and nothing
+   * outside this frame can use the absolute value anyway -- the GPU counter has
+   * no defined relationship to any host clock. A consumer places the block by
+   * anchoring `startNs = 0` to the host timestamp of the submit and laying the
+   * rest out from there, which is exactly what these offsets are for.
+   */
+  readonly startNs: number;
+  /** Position in the submit, 0-based, so a consumer need not re-derive encode order. */
+  readonly index: number;
+}
+
+/**
+ * One frame's device timing, or absent entirely.
+ *
+ * One block rather than three optional fields, so "this frame was timed" is a
+ * single check and a consumer cannot end up holding passes without the host
+ * stamps needed to place them.
+ */
+export interface GpuFrameTiming {
+  readonly passes: readonly PassTiming[];
+  /**
+   * `performance.now()` immediately before and after the submit/fence.
+   *
+   * These are STAMPS, not a span -- the same role `mobileCapture`'s sentAt /
+   * pulledAt play for the phone link. They exist because they are the one
+   * host-clock pair a caller CANNOT take for itself: the submit and the map
+   * both happen inside `runPose2`, so an outside bracket measures upload and
+   * encode too and would anchor the GPU block earlier than it could have run.
+   *
+   * The library still takes no position on what they mean -- it does not build
+   * a span, subtract them, or name the difference.
+   */
+  readonly submittedAt: number;
+  readonly resolvedAt: number;
+}
+
+/**
+ * A ctx over a fresh encoder against an existing buffer set.
+ *
+ * `timing` is optional and omitted by every caller that is not a whole frame:
+ * the stage tests encode one stage at a time and have nothing to time.
+ */
+export function makeCtx(
+  device: GPUDevice, plan: PoolPlan, bufs: Buffers, dims: Dims, timing?: PassTimer,
+): Ctx {
+  return { device, plan, bufs, enc: device.createCommandEncoder(), dims, bindGroups: new Map(), timing };
 }
 
 interface Program {
@@ -297,6 +386,37 @@ type Dispatch =
  *  3. Takes bind groups as an array of arrays, because a stage with an indirect
  *     args buffer keeps it in its own group -- see GROW_WGSL.
  */
+/**
+ * The compute-pass descriptor for one pass, with timestamp writes when this
+ * frame is being timed.
+ *
+ * Claims the next pass slot as a side effect, so it must be called exactly once
+ * per pass and at the point the pass is actually begun -- the index it hands out
+ * IS the encode order the caller reads back.
+ */
+function timingFor(ctx: Ctx, stageId: string): GPUComputePassDescriptor {
+  const t = ctx.timing;
+  if (!t) return { label: stageId };
+  const index = t.ids.length;
+  if (index >= t.capacity) {
+    // A throw, not a silent stop. Running past the query set would otherwise
+    // report a frame whose last passes are missing while looking complete, and
+    // a timing report that quietly omits its tail is worse than no report.
+    throw new Error(
+      `pass: this frame encoded more than ${t.capacity} passes, which is the timestamp ` +
+      `query set's capacity (MAX_TIMED_PASSES in run.ts). Raise it to match the pipeline.`);
+  }
+  t.ids.push(stageId);
+  return {
+    label: stageId,
+    timestampWrites: {
+      querySet: t.querySet,
+      beginningOfPassWriteIndex: index * 2,
+      endOfPassWriteIndex: index * 2 + 1,
+    },
+  };
+}
+
 export function pass(
   ctx: Ctx, stageId: string, program: Program,
   bindGroups: readonly (readonly string[])[], dispatch: Dispatch,
@@ -319,7 +439,15 @@ export function pass(
     ctx.bindGroups?.set(stageId, groups);
   }
 
-  const cp = enc.beginComputePass({ label: stageId });
+  // Timestamps ride on the pass descriptor, so they cost no extra encoding and
+  // nothing on the main thread -- unlike performance.measure, which is real work
+  // inside the window being measured. The pair is written by the DEVICE at the
+  // pass boundaries.
+  //
+  // Recorded here rather than at each of the fourteen encode functions for the
+  // reason `assertBinds` lives here: this is the one chokepoint every pass goes
+  // through, so a new stage is timed by construction and cannot be forgotten.
+  const cp = enc.beginComputePass(timingFor(ctx, stageId));
   cp.setPipeline(program.pipeline);
   groups.forEach((g, i) => cp.setBindGroup(i, g));
   if (dispatch.kind === 'indirect') {

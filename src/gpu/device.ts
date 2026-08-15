@@ -35,6 +35,68 @@ export function isWebGPUSupported(): boolean {
   return typeof navigator !== 'undefined' && 'gpu' in navigator;
 }
 
+// ── The one device-creation decision that cannot be revisited per frame ──
+//
+// `timestamp-query` must be asked for HERE, at requestDevice, or the device
+// simply cannot write a timestamp for the rest of its life. Everything else
+// about GPU timing is a per-submit choice; this is not one, which is why it is
+// settled at the earliest possible point and by a single function.
+//
+// REQUESTED WHEN OFFERED, NEVER REQUIRED. A feature named in `requiredFeatures`
+// that the adapter does not expose makes requestDevice REJECT -- so requiring it
+// unconditionally would turn "this machine cannot be profiled" into "this
+// machine cannot run the pipeline", trading the whole app for an instrument.
+// The check-then-request below is what keeps the absence merely uninstrumented.
+//
+// Three callers, and they must agree: the app (getGPUDevice), the sweep, and the
+// test helper. They agree by calling this rather than by three copies of the
+// same two lines -- the sweep and the tests are exactly where GPU timing gets
+// read, so a site that quietly skipped the feature would present as "timing is
+// unavailable on this machine" rather than as the omission it is.
+export async function requestDeviceWithOptionalTimestamps(adapter: GPUAdapter): Promise<GPUDevice> {
+  const wanted: GPUFeatureName[] = adapter.features.has('timestamp-query')
+    ? ['timestamp-query']
+    : [];
+  return await adapter.requestDevice({ requiredFeatures: wanted });
+}
+
+// ── Dawn's timestamps are QUANTIZED unless you say otherwise ─────────────
+//
+// **The single most important fact about GPU timing in this project, and it
+// cost a long misdiagnosis to find.** Dawn ships a `timestamp_quantization`
+// toggle, ON by default, which is a side-channel mitigation: it rounds every
+// timestamp to a coarse grid. Measured here, that grid is **65536 ns**, against
+// passes that take single-digit microseconds -- so a pass's begin and end land
+// in the SAME tick and its duration reads exactly **zero**. A typical frame came
+// back with 114 of 136 passes at zero and five distinct values in total.
+//
+// It does not fail loudly. It returns plausible-looking numbers that are almost
+// all zero, which reads as "the GPU is idle" or "the counter degraded" rather
+// than as a setting.
+//
+// Passed at INSTANCE creation, not device creation, so it belongs to whoever
+// calls `create()` -- both node entry points (the test helper and the sweep)
+// share this constant so they cannot drift apart. It is node-only: the browser
+// has no `create()`, and see below for what the app needs instead.
+//
+// ── THE BROWSER NEEDS THE SAME THING, BY A DIFFERENT ROUTE ──
+//
+// Chrome applies the same mitigation. An app-side timing capture must run Chrome
+// with `--disable-dawn-features=timestamp_quantization` (or
+// `--enable-webgpu-developer-features`), or every number it reports will be on
+// the 65536 ns grid. **This is UNVERIFIED in Chrome as of 2026-08-15** -- it is
+// the reason to check before trusting an app-side GPU breakdown.
+export const DAWN_NODE_FLAGS = ['disable-dawn-features=timestamp_quantization'];
+
+// Whether a device can time a pass. Read this, not the adapter: a device only
+// has the features it was CREATED with, so an adapter that offers the feature
+// says nothing about a device that did not ask for it. Anything encoding
+// timestamp writes must gate on this, since doing so on a device without the
+// feature is a validation error rather than a no-op.
+export function canTimestamp(device: GPUDevice): boolean {
+  return device.features.has('timestamp-query');
+}
+
 export async function getGPUDevice(): Promise<GPUDevice | null> {
   if (!devicePromise) {
     devicePromise = (async () => {
@@ -42,7 +104,7 @@ export async function getGPUDevice(): Promise<GPUDevice | null> {
       try {
         const adapter = await navigator.gpu!.requestAdapter();
         if (!adapter) return null;
-        const device = await adapter.requestDevice();
+        const device = await requestDeviceWithOptionalTimestamps(adapter);
         device.lost.then((info) => {
           console.error('[gpu] WebGPU device lost:', info.message);
           devicePromise = null; // let a later call re-request a fresh device

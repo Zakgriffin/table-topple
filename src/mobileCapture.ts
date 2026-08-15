@@ -1514,7 +1514,10 @@ const POSE_RING_CAPACITY = 600;
 interface PoseRecord {
   tDrawn: number;              // nowMs() at the moment the frame was pulled off the video element
   frameMeta: FrameMeta | null;
-  computeMs: number;
+  // `computeMs` is GONE (profiling_rewrite.md §7): a ring of durations
+  // alongside the profiler was a second way to measure one, and this one was
+  // measuring an empty statement anyway -- see the TODO at its write site. When
+  // this page runs a pipeline again, its duration is a SPAN, not a field here.
   ok: boolean;                 // did positionDecode produce anything
   // Whether the desktop had pushed a settingsSync by the time THIS pose was
   // computed. Per-record rather than per-session because a sync can land
@@ -2064,16 +2067,26 @@ async function captureComputeAndSendPose() {
     // The twelve-null-field state literal that used to be built here is gone:
     // the pipeline reads exactly these two fields and returns everything else.
     const poseInput = { aspect: cw / ch, settings: cameraSettings };
-    const t0 = performance.now();
-    // Was computePoseFromCapture over grayTopDown. See LocalPose's header: the
-    // capture still happens and is still measured, and the result is an
-    // undecoded pose, which every consumer below already handles.
+    // ── TODO(phone-on-pose2): THE SPAN GOES HERE ─────────────────────────
+    //
+    // `profiling_rewrite.md` Phase 7 says this becomes a profiler span. It does
+    // not, yet, and deliberately: there is NOTHING HERE TO TIME. The pose
+    // computation went with `src/pose`, so what stood between the two
+    // `performance.now()` calls that used to be here was `void grayTopDown;`
+    // and an object literal -- the stopwatch reported ~0ms every frame, and a
+    // span would have reported the same 0ms as a row on a flamechart, which is
+    // a more confident way of saying something false.
+    //
+    // So the stopwatch is deleted rather than converted, and `computeMs` is
+    // gone from PoseRecord with it. **When this page is wired onto `src/pose2`,
+    // open a span around `runPose2` here** -- and note that pose2 also hands
+    // back `frame.gpu`, so the phone gets the same per-pass GPU breakdown the
+    // desktop has, through `profiling/clocks.ts`'s `ingestGpuFrame`.
     void grayTopDown;
     const pose: LocalPose = { recoveredAxes: null, positionDecode: null };
-    const totalMs = performance.now() - t0;
     const pd = pose.positionDecode;
     recordPose({
-      tDrawn, frameMeta: frameMetaAtDraw, computeMs: totalMs,
+      tDrawn, frameMeta: frameMetaAtDraw,
       ok: !!pd,
       synced: settingsSyncedAt !== null, boardSize: knownBoardSize,
       camPos: pd ? pd.camPos.toArray() : null,
@@ -2176,12 +2189,15 @@ async function captureComputeAndSendPose() {
     // toggle is seeing the phone's TRUE compute speed, and timing is
     // deliberately excluded from the wire payload for now, see this
     // session's on-device-pose-recovery plan).
-    // The per-stage breakdown came off the deleted pipeline's own timing struct.
-    // The wall-clock half is this page's own measurement and still means what it
-    // always did -- it is just measuring a capture with no pose behind it.
-    const fps = totalMs > 0 ? 1000 / totalMs : 0;
-    poseReadoutEl.textContent = `pose ${totalMs.toFixed(0)}ms (${fps.toFixed(1)}fps)`
-      + (pd ? '' : '  [no fix]');
+    // NO MILLISECONDS HERE, and that is the honest reading rather than a
+    // regression. This used to print `pose <totalMs>ms (<fps>fps)` off the
+    // stopwatch deleted above -- which, once the pose computation went with
+    // `src/pose`, was timing an empty statement and reporting ~0ms at an
+    // implausible frame rate. A readout that says nothing beats one that says
+    // the phone reconstructs instantly.
+    //
+    // The number comes back with the pipeline: see the TODO at the capture site.
+    poseReadoutEl.textContent = pd ? 'pose recovered' : 'no pose pipeline on device yet  [no fix]';
   } finally {
     devicePoseComputing = false;
   }

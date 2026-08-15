@@ -1,17 +1,35 @@
 // ── Flat interval recorder + a declared-structure join ───────────────────
 //
-// Records ALWAYS. That is a deliberate change from the old design, where
-// everything here sat behind an `enabled` flag, and it is what lets
-// pose/poseCompute.ts report its per-stage timings straight off its own
-// record objects instead of keeping a parallel set of performance.now() marks
-// in step with them by hand.
+// Records ALWAYS. That is deliberate: everything here used to sit behind an
+// `enabled` flag, which meant any caller that wanted a duration it could rely
+// on kept a parallel set of performance.now() marks in step with the profiler
+// by hand. One store, always on, is what removes the second set -- and
+// removing second sets is this module's whole job.
 //
-// The cost of always recording is one object and two performance.now() calls
-// per span, ~14 per reconstruction against a ~15ms budget. The expensive half
-// was never the spans -- it was the User Timing mirror and (until it was
-// deleted) a set of per-module GPU timestamp queries that cost a mapAsync each.
-// Only the mirror is optional now, and `profilerSetDevToolsMirror` is the flag
-// that gates it.
+// The cost of always recording is one object and two clock reads per span,
+// ~14 per reconstruction against a ~15ms budget. The expensive half was never
+// the spans -- it was the User Timing mirror and (until it was deleted) a set
+// of per-module GPU timestamp queries that cost a mapAsync each. Only the
+// mirror is optional now, and `profilerSetDevToolsMirror` is the flag that
+// gates it.
+//
+// ── ONE RECORD TYPE, AND THE CLOCK IS A FIELD ON IT ──
+//
+// A duration measured on the GPU, or on the phone across the network, is the
+// same kind of fact as one measured here -- so it is the same record with a
+// different `clock`, not a different system.
+//
+// What differs between clocks is NOT the units. By the time a Span is in this
+// store its start/end are host-clock milliseconds no matter where they came
+// from, because a foreign timestamp is translated ONCE, at the boundary where
+// it enters. What differs is how much a reader may trust its ABSOLUTE
+// POSITION: a GPU counter and performance.now() have no defined relationship,
+// so a GPU span's length is exact and its placement is anchored to a lower
+// bound. `clock` is what carries that caveat, and it is the only thing a
+// consumer needs in order to know which of the two it is holding.
+//
+// Everything downstream of the store -- the join, the renderer, the DevTools
+// mirror, a dev-bridge script -- sees one timeline and needs no special case.
 //
 // ── RECORDING AND STRUCTURE ARE SEPARATE, and that is the whole design ──
 //
@@ -41,24 +59,34 @@
 //
 // THE `within` HALF IS NOT OPTIONAL, and it is worth saying why, because
 // "derive containment from interval nesting alone" looks equivalent and is not:
-// a display drain's interval can physically enclose a pose's `pose.votes`, and
+// a display drain's interval can physically enclose a pose's span, and
 // nesting-by-measurement would happily adopt it -- reparenting again, in a new
-// costume. Declared parent AND measured containment cannot do that, because
-// `pose.votes` does not name the drain as its parent.
+// costume. Declared parent AND measured containment cannot do that, because the
+// pose does not name the drain as its parent.
 //
 // What survives from the old design: an individual record's OWN duration.
 // `end - start` was always correct no matter where the span landed, which is
-// why poseCompute reads its stage timings from the records it holds by
-// reference. That is unchanged -- it just no longer needs the caveat.
+// why a caller holding a record can read its duration off the object directly.
 
 export interface SpanAttrs { readonly [k: string]: string | number | boolean }
 
+// Where a span's numbers CAME FROM, which is the only thing that varies once
+// they are in the store. See the header: this is provenance, not units.
+//
+//   host -- performance.now() on this machine. Zero offset by definition.
+//   gpu  -- a timestamp-query counter, translated at ingest. Length measured,
+//           position anchored to the submit that carried it.
+//   peer -- another device's clock (the phone's), on the shared epoch that
+//           clock.ts establishes. Length measured, position good to NTP skew.
+export type Clock = 'host' | 'gpu' | 'peer';
+
 // One measured interval. No parent pointer and no children: this is data, and
 // structure is imposed on it later by joinRecords.
-export interface StageRecord {
+export interface Span {
   readonly id: string;
-  readonly start: number;
+  readonly start: number; // ms, ALWAYS host-clock -- translated before it lands here
   end: number; // 0 while still open
+  readonly clock: Clock;
   // The parts of a span that VARY per occurrence, kept off the id so they
   // cannot fragment it. `fitPairOfPlanes (CPU)` and `(GPU)` used to be two
   // different labels that no report could aggregate, and every readback minted
@@ -68,14 +96,17 @@ export interface StageRecord {
   // The declared parent for THIS OCCURRENCE, overriding the table's `within`.
   // `undefined` means "use the table"; an explicit `null` means "a root".
   //
-  // This exists for exactly one shape, and it is not a loophole in "structure
-  // is declared": a TRANSFER helper is a single call site serving a dozen
-  // stages, so its owner is a fact about the call, not about the stage. There
-  // is nothing to write in a static table -- `xfer.readback` genuinely has no
-  // one parent. What the caller passes is still a DECLARATION, made at the only
-  // place that knows the answer, and the join treats it identically: declared
-  // parent plus measured containment. Inference is what stays banned, and it is
-  // unavailable anyway now that there is no stack.
+  // This exists for spans whose owner is a fact about the CALL rather than
+  // about the stage, and it is not a loophole in "structure is declared": what
+  // the caller passes is still a DECLARATION, made at the only place that knows
+  // the answer, and the join treats it identically -- declared parent plus
+  // measured containment. Inference is what stays banned, and it is unavailable
+  // anyway now that there is no stack.
+  //
+  // The shape it is FOR: a GPU span belongs to the host span that submitted the
+  // work, which is knowable at the injection point and nowhere else -- there is
+  // no one parent to write in a static table. It currently has no callers,
+  // because the GPU half is not built yet.
   //
   // Do NOT reach for this to avoid declaring a stage properly. A stage called
   // from two places with two different parents is two stages.
@@ -86,10 +117,10 @@ export interface StageRecord {
 export interface StageNode {
   readonly label: string;
   // The stage this one runs inside, or null for a root. A consumer's table may
-  // OVERRIDE this for a stage it composes -- the library declares `pose.run` a
-  // root because within the library it is one, and the app re-declares it as
-  // running inside `app.reconstruct`. Composition is the consumer's knowledge,
-  // not the library's.
+  // OVERRIDE this for a stage it composes -- a library declares its entry point
+  // a root because within the library it is one, and the app re-declares it as
+  // running inside the app's own stage. Composition is the consumer's
+  // knowledge, not the library's.
   readonly within: string | null;
   // True when the stage provably encloses no `await`.
   //
@@ -107,15 +138,11 @@ export interface StageNode {
   // With a closed id union the id IS the stage, one id is one call site, and a
   // stage whose two branches genuinely differ in this should be two ids.
   readonly sync?: boolean;
-  // Data-dependency edges: the stages whose output this one consumes. Distinct
-  // from `within`, which is containment. Consumed by the critical-path
-  // analysis; unset means "no declared inputs", not "no inputs".
-  readonly inputs?: readonly string[];
 }
 
 export type StageTable = Readonly<Record<string, StageNode>>;
 
-let records: StageRecord[] = [];
+let records: Span[] = [];
 
 // ── Bounding the list, now that recording never stops ──
 //
@@ -140,13 +167,12 @@ const MAX_RECORDS = 4096;
 // The records above are only visible through this module's own formatting.
 // Mirroring each as a performance.measure ALSO puts it in Chrome DevTools'
 // "Timings" track, which is worth more than it costs for one specific reason:
-// the pose pipeline is an async function that suspends at roughly a dozen GPU
-// readbacks, so in the main-thread flame chart it appears as a dozen unrelated
-// task slices with the render loop interleaved between them, and reading it as
-// one operation is essentially impossible. A measure spans the whole thing
-// INCLUDING its suspensions, so the pipeline reads as one labeled bar in
-// Timings while the interleaved work stays visible underneath in the main
-// track.
+// a capture is an async operation that suspends at its GPU readback, so in the
+// main-thread flame chart it appears as unrelated task slices with the render
+// loop interleaved between them, and reading it as one operation is essentially
+// impossible. A measure spans the whole thing INCLUDING its suspensions, so it
+// reads as one labeled bar in Timings while the interleaved work stays visible
+// underneath in the main track.
 //
 // It is off by default because performance.measure is a real per-record cost
 // and the User Timing buffer is finite -- neither is worth paying when nobody
@@ -154,7 +180,6 @@ const MAX_RECORDS = 4096;
 let mirrorOn = false;
 
 export function profilerSetDevToolsMirror(v: boolean): void { mirrorOn = v; }
-export function profilerDevToolsMirror(): boolean { return mirrorOn; }
 
 export function profilerReset(): void {
   records = [];
@@ -166,29 +191,38 @@ export function profilerReset(): void {
   try { performance.clearMeasures(); } catch { /* diagnostics must not throw */ }
 }
 
-// Never returns null. Callers hold the returned record and read its duration
-// directly (see spanDurationMs) -- that is the contract poseCompute's stage
-// timings rest on, and it is why this cannot go back behind a flag without
-// giving those callers a second source of numbers again.
+// Never returns null. Callers hold the returned record and read `end - start`
+// off it directly -- that contract is why this cannot go back behind a flag
+// without giving those callers a second source of numbers again.
+//
+// Everything opened here is `clock: 'host'` by construction, because
+// performance.now() is what it reads. A span on another clock is not opened; it
+// is INGESTED whole, already translated, by whoever owns the boundary.
 export function spanStart(
   id: string, attrs: SpanAttrs | null = null, within?: string | null,
-): StageRecord {
+): Span {
   if (records.length >= MAX_RECORDS) trimClosed();
-  const rec: StageRecord = within === undefined
-    ? { id, start: performance.now(), end: 0, attrs }
-    : { id, start: performance.now(), end: 0, attrs, within };
+  const start = performance.now();
+  const rec: Span = within === undefined
+    ? { id, start, end: 0, clock: 'host', attrs }
+    : { id, start, end: 0, clock: 'host', attrs, within };
   records.push(rec);
   return rec;
 }
 
 // The parent this record declares: its own override when it has one, the
-// table's otherwise. One function so the join and the critical path cannot
-// disagree about which of the two wins.
-function declaredParent(rec: StageRecord, table: StageTable): string | null {
+// table's otherwise. One function so nothing can disagree about which wins.
+function declaredParent(rec: Span, table: StageTable): string | null {
   return rec.within !== undefined ? rec.within : table[rec.id].within;
 }
 
-export function spanEnd(rec: StageRecord | null): void {
+// A record's duration, tolerating one still open so a caller on an early-return
+// path gets 0 rather than a negative number derived from `end === 0`.
+function durationOf(rec: Span): number {
+  return rec.end > 0 ? rec.end - rec.start : 0;
+}
+
+export function spanEnd(rec: Span | null): void {
   if (!rec) return;
   rec.end = performance.now();
   if (!mirrorOn) return;
@@ -204,11 +238,40 @@ export function spanEnd(rec: StageRecord | null): void {
   }
 }
 
-// The duration of a record the caller holds. Tolerates null and an unclosed
-// record so a caller on an early-return path gets 0 rather than a negative
-// number derived from `end === 0`.
-export function spanDurationMs(rec: StageRecord | null): number {
-  return rec && rec.end > 0 ? rec.end - rec.start : 0;
+/**
+ * Append an already-finished span measured on ANOTHER CLOCK.
+ *
+ * `spanStart`/`spanEnd` cannot serve this: they read `performance.now()`, which
+ * is the one thing a foreign span's endpoints are not. So a caller that owns a
+ * clock boundary translates the endpoints to host-clock milliseconds itself and
+ * hands over the finished record.
+ *
+ * **Translating is the caller's job and doing it BEFORE this call is the whole
+ * contract.** Everything downstream of the store -- the join, the renderer, the
+ * DevTools mirror -- assumes one timeline, and this function is what makes that
+ * assumption safe by refusing to be the place where a second one could enter.
+ */
+export function spanIngest(span: Span): Span {
+  if (records.length >= MAX_RECORDS) trimClosed();
+  records.push(span);
+  if (mirrorOn && span.end > 0) {
+    try {
+      // ── The caveat rides on the NAME, because a bar has nowhere else to put
+      // it ──
+      //
+      // A mirrored GPU or peer span appears in DevTools' Timings track as an
+      // ordinary bar, indistinguishable from a host-measured one. Its LENGTH is
+      // measured and its POSITION is anchored (§3), and a reader who does not
+      // know that will read a lower bound as a fact.
+      //
+      // So: a leading `~` and nothing else. The id already says what the span
+      // is -- a GPU pass is `gpu:<stage>` -- so prefixing the clock name again
+      // produced `~gpu:gpu:<stage>`, which §6 does not ask for and which reads
+      // like a bug in the instrument rather than a caveat about it.
+      performance.measure(mark(span.clock) + span.id, { start: span.start, end: span.end });
+    } catch { /* diagnostics must not throw */ }
+  }
+  return span;
 }
 
 // The raw records. Serves both readers -- this module's own formatting and the
@@ -217,7 +280,7 @@ export function spanDurationMs(rec: StageRecord | null): number {
 // (`getRoots` and `getFlamechartJSON`) returning the same tree; flat records are
 // already JSON-shaped, so one suffices, and a consumer can run its own join
 // against whatever table it cares about.
-export function getRecords(): readonly StageRecord[] { return records; }
+export function getRecords(): readonly Span[] { return records; }
 
 function trimClosed(): void {
   const keep = records.filter((r) => r.end === 0);
@@ -231,7 +294,7 @@ function trimClosed(): void {
 // ── THE JOIN: declared structure, measured intervals ─────────────────────
 
 export interface TreeNode {
-  readonly rec: StageRecord;
+  readonly rec: Span;
   readonly node: StageNode;
   readonly children: TreeNode[];
   readonly durationMs: number;
@@ -253,25 +316,25 @@ export interface JoinResult {
   // occurrence of it covers. This is a real anomaly -- a stage ran outside the
   // stage that declares it -- and it is reported rather than resolved by
   // guessing, which is the behaviour the old stack could not offer.
-  orphans: StageRecord[];
+  orphans: Span[];
   // Records whose id is absent from the table entirely: another subsystem
   // recording into the same store. NOT corruption any more -- they simply do
   // not join, so nothing of theirs lands inside a stage that is being
   // decomposed. Worth reporting as context, not as a reason to void a report.
-  unknown: StageRecord[];
+  unknown: Span[];
 }
 
 // Containment treats an OPEN parent as extending to +Infinity (it has not
 // finished yet, so anything started inside it is inside it) and an open CHILD
 // as a point at its start (it began inside, and where it ends is not yet
 // known).
-function containsRec(parent: StageRecord, child: StageRecord): boolean {
+function containsRec(parent: Span, child: Span): boolean {
   const parentEnd = parent.end > 0 ? parent.end : Infinity;
   const childEnd = child.end > 0 ? child.end : child.start;
   return parent.start <= child.start && childEnd <= parentEnd;
 }
 
-function overlaps(a: StageRecord, b: StageRecord): boolean {
+function overlaps(a: Span, b: Span): boolean {
   const aEnd = a.end > 0 ? a.end : Infinity;
   const bEnd = b.end > 0 ? b.end : b.start;
   return a.start < bEnd && b.start < aEnd;
@@ -293,21 +356,55 @@ function unionMs(kids: readonly TreeNode[]): number {
   return total;
 }
 
-export function joinRecords(recs: readonly StageRecord[], table: StageTable): JoinResult {
-  const unknown: StageRecord[] = [];
-  const orphans: StageRecord[] = [];
-  const known: StageRecord[] = [];
-  const byId = new Map<string, StageRecord[]>();
+// ── THE TABLE-LESS PATH, and why it is not a hole in "structure is declared" ──
+//
+// A stage table names the ids one subsystem knows about ahead of time. GPU pass
+// ids do not fit that: `src/pose2` owns them, there are ~40, they repeat, and
+// mirroring its stage list in the app's table is precisely the drift this
+// project keeps finding as a defect. The library is the authority on what its
+// passes are called, and the app must not restate it.
+//
+// So an id absent from the table still joins IF it declares its parent for that
+// occurrence. The declaration is per-call rather than per-stage, which is right
+// here for the reason `Span.within` exists at all: a GPU span belongs to the
+// host span that SUBMITTED it, which is a fact about the call.
+//
+// This was measured before it was written. The first version filtered on
+// `table[r.id]` in this loop and pushed to `unknown` before ever reading
+// `within`, so a GPU span could not join whatever it declared -- and its time
+// stayed inside the submitter's SELF time, which is exactly the decomposition
+// error the design forbids.
+//
+// What must NOT change: an id with no table entry AND no override is still a
+// foreign subsystem's record and still stays out of the tree entirely.
+function nodeFor(rec: Span, table: StageTable): StageNode | null {
+  const declared = table[rec.id];
+  if (declared) return declared;
+  if (rec.within === undefined) return null;
+  // The id is the label. There is nothing better and nothing to invent: a
+  // synthesized label that dressed it up would be this file guessing at another
+  // subsystem's naming.
+  return { label: rec.id, within: rec.within };
+}
+
+export function joinRecords(recs: readonly Span[], table: StageTable): JoinResult {
+  const unknown: Span[] = [];
+  const orphans: Span[] = [];
+  const known: Span[] = [];
+  const byId = new Map<string, Span[]>();
+  const declaredNode = new Map<Span, StageNode>();
   for (const r of recs) {
-    if (!table[r.id]) { unknown.push(r); continue; }
+    const node = nodeFor(r, table);
+    if (!node) { unknown.push(r); continue; }
+    declaredNode.set(r, node);
     known.push(r);
     const list = byId.get(r.id);
     if (list) list.push(r); else byId.set(r.id, [r]);
   }
 
-  const nodes = new Map<StageRecord, TreeNode>();
+  const nodes = new Map<Span, TreeNode>();
   for (const r of known) {
-    nodes.set(r, { rec: r, node: table[r.id], children: [], durationMs: spanDurationMs(r), selfMs: 0 });
+    nodes.set(r, { rec: r, node: declaredNode.get(r)!, children: [], durationMs: durationOf(r), selfMs: 0 });
   }
 
   const roots: TreeNode[] = [];
@@ -321,7 +418,7 @@ export function joinRecords(recs: readonly StageRecord[], table: StageTable): Jo
     // The INNERMOST containing occurrence, i.e. the latest-starting one, so a
     // stage that legitimately runs twice inside two occurrences of its parent
     // lands in the right one.
-    let best: StageRecord | null = null;
+    let best: Span | null = null;
     let straddled = false;
     for (const c of candidates) {
       if (c === r) continue;
@@ -335,8 +432,7 @@ export function joinRecords(recs: readonly StageRecord[], table: StageTable): Jo
     // A declared parent that ran but never overlapped this record at all is
     // not an anomaly: the stage was simply called from somewhere else this
     // time. `project.bins` runs inside the display tail's `app.project` and
-    // ALSO straight off a mode switch with no tail above it; the harness runs
-    // `pose.run` with no `app.reconstruct` above it at all. Both are roots.
+    // ALSO straight off a mode switch with no tail above it. Both are roots.
     //
     // A parent that OVERLAPS without containing is the real defect -- a stage
     // straddling its own parent's boundary means the declaration is wrong or
@@ -356,210 +452,6 @@ export function joinRecords(recs: readonly StageRecord[], table: StageTable): Jo
   return { roots, orphans, unknown };
 }
 
-// ── THE CRITICAL PATH: the DEPENDENT chain that sets the floor ───────────
-//
-// `within` decomposes cost; `inputs` is what this walks, and they are different
-// graphs. A tree of self times answers "where did the time go" and structurally
-// CANNOT answer "which dependent chain sets the floor on a reconstruction" --
-// the perf-actionable question, because a stage off the critical path can be
-// made free without the total moving at all.
-//
-// Two numbers per node, and the second is the one with no equivalent in the
-// tree view:
-//
-//   readyAt = the latest END among the stages this one declares as inputs, i.e.
-//             the moment its last input existed.
-//   waitMs  = start - readyAt. Time the stage COULD have been running and was
-//             not. It localizes a stall to an EDGE rather than leaving it in the
-//             enclosing stage's self time: `fit.ata` closes at submit and
-//             `fit.eigen` opens after the readback resolves, so the fence
-//             between them is not inside either span -- it is this number.
-//
-// ── Resolution reaches DOWN and lifts back UP ──
-//
-// An input is routinely produced deeper than it is consumed: `pose.distance`
-// declares `pose.composites`, which runs two levels down inside `pose.votes`.
-// So the producer is found wherever it actually ran, and then LIFTED to the
-// sibling containing it -- the edge at this level reads votes -> distance,
-// while readyAt still means "when the data existed" rather than "when its
-// container finished". Both halves are needed: without the lift there is no
-// chain at this level, and without the deep search the edge simply vanishes.
-export interface PathNode {
-  readonly node: TreeNode;
-  // Null when no declared input of this stage recorded in this scope -- the
-  // head of a chain, not an error. `lsd.gradient` declares `pose.residency`,
-  // which runs a level above it and so is legitimately absent from its own.
-  readonly readyAt: number | null;
-  readonly waitMs: number;
-  // The stage id whose end SET readyAt -- the binding input. The chain follows
-  // this edge backwards, so it is also the answer to "what was this waiting on".
-  readonly boundBy: string | null;
-  // The critical path through this node's own children. Empty for a leaf.
-  readonly inner: PathNode[];
-}
-
-export interface CriticalPath {
-  // Head first, in execution order.
-  readonly chain: PathNode[];
-  // Wall time from the head's start to the tail's end. Compare against the
-  // parent's duration: at ~100% the level is a serial chain with no slack to
-  // exploit, and the only way to make it faster is to make a stage faster.
-  readonly spanMs: number;
-  // Sum of the chain's own durations at the TOP level. spanMs - onPathMs is
-  // the time inside the window that no chain member was executing in.
-  readonly onPathMs: number;
-  // Edges where the input stage DID record here but no occurrence of it
-  // finished before the consumer started. Either the declaration is wrong or
-  // the two genuinely overlap, and both are worth knowing; an input that did
-  // not record at all is silent, since that is the normal cross-level and
-  // wrong-backend case.
-  readonly unsatisfied: string[];
-}
-
-function recEnd(r: StageRecord): number { return r.end > 0 ? r.end : r.start; }
-
-function levelPath(parent: TreeNode, unsatisfied: string[]): PathNode[] {
-  const sibs = parent.children;
-  if (sibs.length === 0) return [];
-
-  // Every descendant by id, plus which SIBLING contains it. See the lift above.
-  const byId = new Map<string, TreeNode[]>();
-  const owner = new Map<TreeNode, TreeNode>();
-  const index = (n: TreeNode, sib: TreeNode): void => {
-    owner.set(n, sib);
-    const l = byId.get(n.rec.id);
-    if (l) l.push(n); else byId.set(n.rec.id, [n]);
-    for (const c of n.children) index(c, sib);
-  };
-  for (const s of sibs) index(s, s);
-
-  interface Edge { readyAt: number | null; producer: TreeNode | null; prev: TreeNode | null }
-  const edges = new Map<TreeNode, Edge>();
-  for (const s of sibs) {
-    let readyAt: number | null = null;
-    let producer: TreeNode | null = null;
-    for (const inputId of s.node.inputs ?? []) {
-      // Occurrences inside S itself are excluded: a stage cannot be its own
-      // predecessor at this level, and a nested one is part of its cost rather
-      // than a thing it waited for.
-      const cands = (byId.get(inputId) ?? []).filter((c) => owner.get(c) !== s);
-      if (cands.length === 0) continue;
-      let best: TreeNode | null = null;
-      for (const c of cands) {
-        // The LATEST occurrence that finished before this stage began. Latest
-        // rather than first because a stage run repeatedly (CCL rounds, a
-        // second overflow readback) is consumed at its most recent value.
-        if (c.rec.end <= 0 || c.rec.end > s.rec.start) continue;
-        if (!best || c.rec.end > best.rec.end) best = c;
-      }
-      if (!best) { unsatisfied.push(`${s.rec.id} <- ${inputId}`); continue; }
-      if (readyAt === null || best.rec.end > readyAt) { readyAt = best.rec.end; producer = best; }
-    }
-    edges.set(s, { readyAt, producer, prev: producer ? owner.get(producer)! : null });
-  }
-
-  // The walk starts at the LAST-FINISHING sibling, which is what "sets the
-  // floor" means: nothing at this level can complete before it does.
-  let terminal = sibs[0];
-  for (const s of sibs) if (recEnd(s.rec) > recEnd(terminal.rec)) terminal = s;
-
-  const rev: PathNode[] = [];
-  // Ends strictly decrease along the walk (a producer finished before its
-  // consumer started), so this cannot cycle. The guard is here anyway because
-  // a coarsened clock can make two timestamps equal, and an instrument that
-  // hangs is worse than one that reports a short chain.
-  const seen = new Set<TreeNode>();
-  let cur: TreeNode | null = terminal;
-  while (cur && !seen.has(cur)) {
-    seen.add(cur);
-    // Annotated because the inference is circular otherwise: `cur` is
-    // reassigned from `e.prev`, so tsc will not derive `e` from a lookup keyed
-    // on `cur` (TS7022).
-    const e: Edge = edges.get(cur)!;
-    rev.push({
-      node: cur,
-      readyAt: e.readyAt,
-      waitMs: e.readyAt === null ? 0 : cur.rec.start - e.readyAt,
-      boundBy: e.producer ? e.producer.rec.id : null,
-      inner: levelPath(cur, unsatisfied),
-    });
-    cur = e.prev;
-  }
-  rev.reverse();
-  return rev;
-}
-
-export function criticalPath(parent: TreeNode): CriticalPath {
-  const unsatisfied: string[] = [];
-  const chain = levelPath(parent, unsatisfied);
-  const spanMs = chain.length
-    ? recEnd(chain[chain.length - 1].node.rec) - chain[0].node.rec.start
-    : 0;
-  const onPathMs = chain.reduce((a, p) => a + p.node.durationMs, 0);
-  return { chain, spanMs, onPathMs, unsatisfied: [...new Set(unsatisfied)] };
-}
-
-// ── A TIMING SESSION: one record set per rep, and the caller's own preserved ──
-//
-// A harness that measures N reps needs a fresh record set per rep and must
-// leave the page exactly as it found it. It used to do that by hand, with four
-// exported primitives and a try/finally of its own -- which meant the harness
-// had to know that the store is a module-level variable and that the DevTools
-// mirror is a separate flag with its own save/restore. That is the module's
-// internals, spelled out in a caller.
-//
-// This is that whole protocol as one object. `records` and `mirrorOn` are
-// private to this file.
-//
-// profilerReset() is the wrong tool for per-rep clearing and always was: it
-// calls performance.clearMeasures(), so a caller resetting per iteration
-// deletes earlier captures out of a DevTools recording in progress, and would
-// also destroy a record set the user had already taken and not yet printed.
-// Nothing here clears anything -- the caller's records are swapped aside and
-// put back, so both the User Timing track and whatever they had recorded
-// survive.
-export interface ProfilerSession {
-  // Whether the DevTools mirror was on when the session began. Worth reporting
-  // in a result: a caller's PREVIOUS numbers were taken with a
-  // performance.measure per record and are not comparable to the ones from
-  // inside a session, which forces it off.
-  readonly mirrorWasOn: boolean;
-  // This rep's records, and a fresh set started. Call it after each rep.
-  takeRepRecords(): StageRecord[];
-  // Restore the caller's records and their mirror setting. Idempotent, so it is
-  // safe in a finally that may also be reached after an early return.
-  end(): void;
-}
-
-export function profilerBeginSession(): ProfilerSession {
-  const mirrorWasOn = mirrorOn;
-  // Swapped aside, not cleared: whoever ran a profiled capture before calling
-  // this still has their records to print afterwards.
-  const callerRecords = takeRecords();
-  // A performance.measure per record across ~25 reps is main-thread work inside
-  // the window being timed, and nobody is watching a DevTools track during a
-  // harness run. Recording itself is not optional and is NOT turned off -- it
-  // is where the stage timings come from.
-  mirrorOn = false;
-  let ended = false;
-  return {
-    mirrorWasOn,
-    takeRepRecords: () => takeRecords(),
-    end() {
-      if (ended) return;
-      ended = true;
-      mirrorOn = mirrorWasOn;
-      records = callerRecords;
-    },
-  };
-}
-
-function takeRecords(): StageRecord[] {
-  const taken = records;
-  records = [];
-  return taken;
-}
-
 // ── Rendering ────────────────────────────────────────────────────────────
 //
 // Nested indented text, duration + self time + percent-of-parent per line.
@@ -568,6 +460,19 @@ function takeRecords(): StageRecord[] {
 // when its interval is contained in its parent's, and self times cannot go
 // negative because children are subtracted as a union. What CAN still be
 // reported is a record that did not join, and those get their own sections.
+// A row's clock marker. `~` means the LENGTH is measured and the POSITION is
+// anchored -- see the design's §3. A reader has to be told, and the alternative
+// (a legend, or nothing) is how a lower bound gets read as a measurement.
+function mark(clock: Clock): string {
+  return clock === 'host' ? '' : '~';
+}
+
+function median(xs: readonly number[]): number {
+  const s = [...xs].sort((a, b) => a - b);
+  const mid = s.length >> 1;
+  return s.length % 2 ? s[mid]! : (s[mid - 1]! + s[mid]!) / 2;
+}
+
 export function formatSpanTree(join: JoinResult, table: StageTable): string {
   const lines: string[] = [];
   const walk = (n: TreeNode, depth: number, parentMs: number) => {
@@ -575,24 +480,43 @@ export function formatSpanTree(join: JoinResult, table: StageTable): string {
     const attrs = n.rec.attrs
       ? ' ' + Object.entries(n.rec.attrs).map(([k, v]) => `${k}=${v}`).join(' ')
       : '';
-    lines.push(`${'  '.repeat(depth)}${n.node.label}${attrs} -- ${n.durationMs.toFixed(2)}ms`
+    lines.push(`${'  '.repeat(depth)}${mark(n.rec.clock)}${n.node.label}${attrs}`
+      + ` -- ${n.durationMs.toFixed(2)}ms`
       + ` (${pct}%, self ${n.selfMs.toFixed(2)}ms)${n.node.sync ? ' SYNC' : ''}`);
-    for (const c of n.children) walk(c, depth + 1, n.durationMs);
+    walkChildren(n.children, depth + 1, n.durationMs);
   };
-  for (const r of join.roots) {
-    walk(r, 0, r.durationMs);
-    // The dependency view of the same root, appended rather than given its own
-    // console entry point: it is one more reading of one instrument, and a
-    // reader who has the decomposition in front of them is exactly the reader
-    // who wants to know which of those rows are actually in series.
-    //
-    // Suppressed below two nodes because a one-node "chain" says nothing that
-    // the row above it did not already say.
-    const cp = criticalPath(r);
-    if (cp.chain.length >= 2) {
-      lines.push(...formatCriticalPath(cp, r.durationMs).split('\n'));
+
+  // ── Repeats aggregate HERE, not in the store ──
+  //
+  // grow's hook/compress/gate run once per convergence round -- up to 32 each,
+  // so a frame carries ~136 GPU rows. Per-occurrence rows are unreadable, and
+  // the answer is a rendering decision rather than a recording one: the raw
+  // records stay in the store for anything that wants them.
+  //
+  // Only LEAVES are aggregated. A repeated stage that has children of its own
+  // would have its subtree hidden by the collapse, and a shorter report is not
+  // worth losing a level of decomposition.
+  const walkChildren = (kids: readonly TreeNode[], depth: number, parentMs: number) => {
+    const groups = new Map<string, TreeNode[]>();
+    for (const k of kids) {
+      const g = groups.get(k.rec.id);
+      if (g) g.push(k); else groups.set(k.rec.id, [k]);
     }
-  }
+    // First occurrence order, so the report still reads in execution order.
+    for (const g of groups.values()) {
+      if (g.length === 1 || g.some((k) => k.children.length > 0)) {
+        for (const k of g) walk(k, depth, parentMs);
+        continue;
+      }
+      const total = g.reduce((a, k) => a + k.durationMs, 0);
+      const pct = parentMs > 0 ? ((total / parentMs) * 100).toFixed(1) : '100.0';
+      lines.push(`${'  '.repeat(depth)}${mark(g[0]!.rec.clock)}${g[0]!.node.label}`
+        + ` -- n=${g.length} total=${total.toFixed(2)}ms (${pct}%)`
+        + ` median=${median(g.map((k) => k.durationMs)).toFixed(3)}ms`);
+    }
+  };
+
+  for (const r of join.roots) walk(r, 0, r.durationMs);
   if (join.orphans.length) {
     lines.push(`!! ${join.orphans.length} record(s) ran OUTSIDE the stage that declares them:`);
     for (const o of join.orphans.slice(0, 8)) {
@@ -604,33 +528,6 @@ export function formatSpanTree(join: JoinResult, table: StageTable): string {
     const ids = [...new Set(join.unknown.map((u) => u.id))];
     lines.push(`note: ${join.unknown.length} record(s) from outside this table (${ids.join(', ')}).`);
     lines.push(`      They did not join, so nothing of theirs is inside the rows above.`);
-  }
-  return lines.join('\n');
-}
-
-// The chain, indented by level. `wait` is the column to read: it is the only
-// number here that the self-time tree cannot produce, and it sits on the EDGE
-// between two stages rather than inside either of them.
-export function formatCriticalPath(cp: CriticalPath, totalMs: number): string {
-  const lines: string[] = [];
-  const pct = totalMs > 0 ? ((cp.spanMs / totalMs) * 100).toFixed(0) : '?';
-  lines.push(`  critical path: ${cp.spanMs.toFixed(2)}ms of ${totalMs.toFixed(2)}ms (${pct}%),`
-    + ` ${cp.chain.length} stage(s) in series`);
-  const walk = (ps: readonly PathNode[], depth: number): void => {
-    for (const p of ps) {
-      const wait = p.readyAt === null
-        ? ''
-        : `  wait ${p.waitMs.toFixed(2)}ms on ${p.boundBy}`;
-      lines.push(`  ${'  '.repeat(depth + 1)}${p.node.node.label}`
-        + ` -- ${p.node.durationMs.toFixed(2)}ms${wait}`);
-      walk(p.inner, depth + 1);
-    }
-  };
-  walk(cp.chain, 0);
-  if (cp.unsatisfied.length) {
-    lines.push(`  !! ${cp.unsatisfied.length} dependency edge(s) whose input had not FINISHED when the`);
-    lines.push(`     consumer started: ${cp.unsatisfied.join(', ')}. Either the \`inputs\` declaration`);
-    lines.push(`     is wrong or those two genuinely overlap.`);
   }
   return lines.join('\n');
 }

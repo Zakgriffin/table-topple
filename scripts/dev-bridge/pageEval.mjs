@@ -1,7 +1,7 @@
 // One websocket round-trip to the live page, as a function.
 //
 // cli.js, save-fixture.mjs, restore-fixture.mjs, profile-comparison.mjs and
-// profile-video-gap.mjs each grew their own copy of "connect, announce
+// several one-off profiling scripts each grew their own copy of "connect, announce
 // controller, send an eval, match the id, close" -- five copies of about
 // twenty lines. This is that, once. The fixture scripts use it; the others
 // still carry their own copies and can be moved over when they are next

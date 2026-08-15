@@ -1,9 +1,11 @@
+import { canTimestamp } from '../gpu/device.ts';
 import { type BoardData, buildBoard, uploadBoard } from './board.ts';
 import { type Buffers, type PoolPlan, bufferBytes, createBuffers, planPool } from './buffers.ts';
 import type { Dims } from './pipeline.ts';
 import {
   type CollectSettings, type GppSettings, type GrowSettings, type LayoutSettings,
-  type LineSettings, type LsdFitSettings, type Pose2Result, type VoteSettings,
+  type GpuFrameTiming, type LineSettings, type LsdFitSettings, type PassTimer,
+  type PassTiming, type Pose2Result, type VoteSettings,
   decodePose, encodeCollect, encodeDecodeBuild, encodeDecodeLayout, encodeDecodeTally,
   encodeFinish, encodeFit, encodeGpp, encodeGradient, encodeGrow, encodeLines,
   encodeLsdFit, encodeVotes, makeCtx,
@@ -38,6 +40,38 @@ import {
 
 /** The pose block, and the one part of the staging buffer that is never optional. */
 const POSE_BYTES = 128;
+
+// ── GPU pass timing ───────────────────────────────────────────────────────
+//
+// Two queries per pass, resolved into a buffer, copied into THE SAME staging
+// buffer inside THE SAME encoder, before THE SAME submit. That is the whole
+// design, and it is the argument that made inspection cheap reused verbatim:
+// timestamps cost bytes, never a round trip. So timing is on whenever the
+// device can do it -- there is no per-frame toggle because there is nothing a
+// toggle would save.
+//
+// ── WHY A CAPACITY CONSTANT AND NOT A DERIVED COUNT ──
+//
+// The query set is allocated once per context, so its size is needed before any
+// pass is encoded -- and the encoded pass count is NOT `plan.stages.length`.
+// grow's hook/compress/gate are re-encoded once per convergence round, all 32 of
+// them every frame (rounds past the fixpoint dispatch zero workgroups but are
+// still real to ENCODE), so the true count is several times the number of
+// declared stages.
+//
+// The alternative to a constant is a function that mirrors the encode structure
+// to predict its own pass count, which is precisely the hand-mirrored second
+// declaration this project keeps finding as a defect. So instead: one generous
+// capacity, a THROW in `pass()` if a frame exceeds it, and a test that pins the
+// actual count -- adding passes moves a number in a test rather than silently
+// truncating a report.
+//
+// 512 passes is 8 KiB of query set and 8 KiB of staging tail, against a real
+// count in the low hundreds.
+export const MAX_TIMED_PASSES = 512;
+
+/** 2 queries x 8 bytes (u64 nanoseconds) per pass. */
+const TIMESTAMP_BYTES_PER_PASS = 16;
 
 // Every mapped region starts 8-aligned, so a host-side view of any width can be
 // taken over it directly. Buffer sizes are all multiples of 4 already; this is
@@ -77,6 +111,18 @@ export interface Pose2Context {
    * rather than a slot holding some other stage's bytes.
    */
   inspectable: Map<string, number>;
+  /**
+   * The timestamp machinery, or null on a device without `timestamp-query`.
+   *
+   * Null is a normal state, not a degraded one: the pipeline runs identically
+   * and `Pose2Frame.gpu` is simply absent. Nothing downstream may require it.
+   */
+  timing: {
+    querySet: GPUQuerySet;
+    /** resolveQuerySet's destination. Cannot be the staging buffer: that one is
+     *  MAP_READ, and QUERY_RESOLVE cannot be combined with it. */
+    resolve: GPUBuffer;
+  } | null;
 }
 
 /** One frame's output: the pose, and whatever was asked to ride back with it. */
@@ -91,6 +137,18 @@ export interface Pose2Frame {
    * displayed, which is the coupling §22 keeps out.
    */
   inspected: Record<string, ArrayBuffer>;
+  /**
+   * Per-pass device time, in encode order. **Absent** when the device lacks
+   * `timestamp-query` -- not empty, absent, so a consumer cannot mistake "this
+   * machine cannot be timed" for "every pass took zero".
+   *
+   * Raw nanoseconds and a stage id, and deliberately nothing else. Turning these
+   * into a timeline needs the host clock they must be anchored against, which
+   * this library does not have and does not ask for (§5): a GPU counter and
+   * performance.now() have no defined relationship, so translating them is the
+   * caller's job, done once at its own boundary.
+   */
+  gpu?: GpuFrameTiming;
 }
 
 export interface Pose2Options {
@@ -137,10 +195,32 @@ export function createPose2Context(
   // nothing maps only the first 128 bytes. Worst-case sizing is what buys "no
   // frame allocates"; the cost is host-visible bytes in the one app whose
   // purpose is looking at them.
-  const stagingBytes = [...inspectable.values()].reduce((a, b) => a + align8(b), POSE_BYTES);
+  const inspectBytes = [...inspectable.values()].reduce((a, b) => a + align8(b), POSE_BYTES);
+
+  // Read the DEVICE, not the adapter: a device only has the features it was
+  // created with, so an adapter that offers timestamps says nothing about a
+  // device that never asked.
+  const timed = canTimestamp(device);
+  // The timestamp tail is sized for CAPACITY rather than for the frame's actual
+  // pass count, for the same reason the inspect region is sized for the whole
+  // catalogue: this buffer is allocated once and a frame must never resize it.
+  const stagingBytes = inspectBytes
+    + (timed ? MAX_TIMED_PASSES * TIMESTAMP_BYTES_PER_PASS : 0);
 
   return {
     device, dims, plan, bufs, board, inspectable,
+    timing: timed
+      ? {
+        querySet: device.createQuerySet({
+          type: 'timestamp', count: MAX_TIMED_PASSES * 2, label: 'pose2 pass timing',
+        }),
+        resolve: device.createBuffer({
+          size: MAX_TIMED_PASSES * TIMESTAMP_BYTES_PER_PASS,
+          usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
+          label: 'pose2 timestamp resolve',
+        }),
+      }
+      : null,
     // One staging buffer, kept, because it is mapped and unmapped every frame
     // and creating it per call is an allocation on the one path that is supposed
     // to have none.
@@ -152,6 +232,8 @@ export function createPose2Context(
 
 export function destroyPose2Context(ctx: Pose2Context): void {
   ctx.staging.destroy();
+  ctx.timing?.querySet.destroy();
+  ctx.timing?.resolve.destroy();
   for (const b of new Set(Object.values(ctx.bufs))) b.destroy();
 }
 
@@ -192,7 +274,13 @@ export async function runPose2(
   // THE ONE UPLOAD.
   device.queue.writeBuffer(bufs.gray!, 0, gray);
 
-  const c = makeCtx(device, plan, bufs, dims);
+  // `ids` accumulates one entry per pass as they are encoded, so its length
+  // after encoding IS the pass count -- the library never predicts it.
+  const timer: PassTimer | undefined = ctx.timing
+    ? { querySet: ctx.timing.querySet, capacity: MAX_TIMED_PASSES, ids: [] }
+    : undefined;
+
+  const c = makeCtx(device, plan, bufs, dims, timer);
   encodeGradient(c);
   encodeGrow(c, s.grow);
   encodeCollect(c, s.collect);
@@ -210,17 +298,72 @@ export async function runPose2(
   // the bus, still one submit and still one fence.
   c.enc.copyBufferToBuffer(bufs.pose!, 0, ctx.staging, 0, POSE_BYTES);
   for (const r of regions) c.enc.copyBufferToBuffer(bufs[r.name]!, 0, ctx.staging, r.offset, r.bytes);
+
+  // The timestamps join the same encoder, after the last pass and before the
+  // same submit: resolve the queries this frame actually wrote, then copy them
+  // into the staging tail. Still one submit, one fence, one map.
+  //
+  // Resolved through a separate buffer because QUERY_RESOLVE and MAP_READ cannot
+  // be combined in one usage -- the extra hop is device-local and costs no round
+  // trip, which is the only cost that would matter here.
+  const tsOffset = align8(used);
+  const tsBytes = timer ? timer.ids.length * TIMESTAMP_BYTES_PER_PASS : 0;
+  if (timer && tsBytes > 0) {
+    c.enc.resolveQuerySet(timer.querySet, 0, timer.ids.length * 2, ctx.timing!.resolve, 0);
+    c.enc.copyBufferToBuffer(ctx.timing!.resolve, 0, ctx.staging, tsOffset, tsBytes);
+  }
+  // Stamped as tightly around the crossing as possible: everything before this
+  // line is upload and encode, which a caller can bracket for itself.
+  const submittedAt = performance.now();
   device.queue.submit([c.enc.finish()]);
 
   // Only the prefix actually written -- `used` is POSE_BYTES when nothing was
   // asked for, which is byte for byte the frame this function ran before
   // inspection existed.
-  await ctx.staging.mapAsync(GPUMapMode.READ, 0, used);
+  const mapBytes = tsBytes > 0 ? tsOffset + tsBytes : used;
+  await ctx.staging.mapAsync(GPUMapMode.READ, 0, mapBytes);
+  // The map cannot resolve before the submitted work completes, so this bounds
+  // the GPU block from above exactly as submittedAt bounds it from below.
+  const resolvedAt = performance.now();
   // Copied OUT of the mapped range: it stops being valid at unmap.
-  const mapped = ctx.staging.getMappedRange(0, used);
+  const mapped = ctx.staging.getMappedRange(0, mapBytes);
   const block = mapped.slice(0, POSE_BYTES);
   const inspected: Record<string, ArrayBuffer> = {};
   for (const r of regions) inspected[r.name] = mapped.slice(r.offset, r.offset + r.bytes);
+  const gpu: GpuFrameTiming | undefined = timer && tsBytes > 0
+    ? {
+      passes: readTimings(mapped.slice(tsOffset, tsOffset + tsBytes), timer.ids),
+      submittedAt,
+      resolvedAt,
+    }
+    : undefined;
   ctx.staging.unmap();
-  return { pose: decodePose(block), inspected };
+  return gpu ? { pose: decodePose(block), inspected, gpu } : { pose: decodePose(block), inspected };
+}
+
+/**
+ * The resolved query pairs, as one duration per pass.
+ *
+ * The values are u64 nanoseconds on the GPU's own counter, so they are read as
+ * BigInt and SUBTRACTED before narrowing -- the raw counter can be large enough
+ * to lose nanosecond resolution as a double, while a difference never is.
+ *
+ * Zeros are passed through rather than filtered. A pass that legitimately took
+ * no measurable time and a pass whose query was never written are both worth
+ * seeing, and the caller can tell them apart by whether the count matches.
+ */
+function readTimings(bytes: ArrayBuffer, ids: readonly string[]): PassTiming[] {
+  const raw = new BigUint64Array(bytes);
+  // The frame's first timestamp, which every offset below is relative to. It is
+  // the FIRST PASS'S begin rather than the minimum over all of them: passes
+  // execute in encode order, so pass 0 begins first, and taking a minimum would
+  // quietly paper over an out-of-order read instead of exposing it as a
+  // negative offset.
+  const origin = raw[0] ?? 0n;
+  return ids.map((stage, index) => ({
+    stage,
+    ns: Number(raw[index * 2 + 1]! - raw[index * 2]!),
+    startNs: Number(raw[index * 2]! - origin),
+    index,
+  }));
 }

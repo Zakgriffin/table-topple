@@ -249,7 +249,14 @@ be decided up front is `requiredFeatures: ['timestamp-query']` at device
 creation, which belongs to `src/gpu/device.ts` and cannot be changed per frame.
 Request it when the adapter offers it; the pipeline must still run without it.
 
-### Measured: the resolution is 41.7 ns
+### Measured: the resolution is 41.7 ns — ON THE FIRST FEW FRAMES ONLY
+
+> **QUALIFIED 2026-08-15 by Phase 3.** The 41.667 ns tick is real, but it is
+> only observable with Dawn's `timestamp_quantization` toggle DISABLED —
+> otherwise every timestamp is rounded to a 65536 ns grid and most per-pass
+> durations read zero. This probe ran on a quantizing instance and its "no
+> coarsening at any scale" is therefore a statement about the probe, not the
+> hardware. See Phase 3 in §8, and `DAWN_NODE_FLAGS` in `src/gpu/device.ts`.
 
 Probed 2026-08-15 against the same Dawn build the tests and sweep use.
 
@@ -293,6 +300,18 @@ the right relative spacing.
 The caveat travels with the label rather than being lost: mirrored GPU measures
 are named `~gpu:<stage>`. The tilde is the reminder that the bar's **length is
 measured and its position is anchored**.
+
+**BUILT AND TESTED 2026-08-15 — and it was wrong until it was tested.** This was
+the only part of the design with no test, and the first one written caught a
+defect: GPU span ids already carry a `gpu:` prefix, so naming the measure
+`~<clock>:<id>` emitted **`~gpu:gpu:<stage>`**. The rule is now simply `~` +
+the span's id, using the same `mark()` the text renderer uses — so the marker
+cannot diverge between the two views. Peer spans mirror as `~link.pull`.
+
+Three tests cover it: nothing reaches User Timing with the mirror off, the names
+carry exactly one marker (host rows unmarked), and `profilerReset` clears the
+buffer it filled. Verified by mutation — restoring the old naming fails the
+middle one.
 
 **Why mirror them at all, given the caveat:** the alternative is a second viewer
 for the GPU half, and the whole point of translating at the boundary is that
@@ -357,42 +376,226 @@ into one store and read it back the same way.
 
 Each phase leaves the tree green and the app working.
 
-**Phase 1 — demolition.** Everything in §7 that is a deletion, plus the
-`Span.clock` field defaulting to `'host'`. No behaviour change; ~636 → ~300
-lines. Verifiable by `tsc`, the suite, and `formatFlamechart()` still printing.
+**Phase 1 — demolition. DONE 2026-08-15.** Everything in §7 that is a deletion,
+plus the `Span.clock` field defaulting to `'host'`. No behaviour change; 636 →
+418 lines (the estimate was ~300; the difference is comment, not code).
+`StageRecord` was renamed to `Span` to match §2, 5 call sites. Verified by `tsc`,
+the suite (101/101, unchanged from baseline — no test ever covered the deleted
+machinery), and `formatFlamechart()` still printing.
 
-**Phase 2 — the device feature.** `src/gpu/device.ts` requests
-`timestamp-query` when the adapter offers it. Nothing consumes it yet. The
-pipeline must still run when it is absent, and that path needs a deliberate test
-rather than an assumption.
+**Two things Phase 1 deliberately did NOT delete, though §7 lists them.** §7 is a
+taxonomy — it says what each timestamp *is* — and §8 is the schedule. Where they
+disagree, §8 wins. The four `Camera` history arrays are Phase **6**, because
+deleting them before `profile-video-gap.mjs` re-points at the record store breaks
+that script with nothing to replace it, which is a behaviour change; and the
+sweep's and the phone's stopwatches are Phase **7** for the same reason.
 
-**Phase 3 — the library forwards.** A query set sized from `plan.stages`,
-`timestampWrites` in `pass()`, `resolveQuerySet` + copy into the existing staging
-buffer, `Pose2Frame.gpu` populated. **The gate: one submit, one fence, one map,
-byte-identical pose.** A stage test asserts the pose block is unchanged with
-timing on and off, and that the reported pass count matches the encoded pass
-count.
+**Phase 2 — the device feature. DONE 2026-08-15.** `src/gpu/device.ts` requests
+`timestamp-query` when the adapter offers it. Nothing consumes it yet.
 
-**Phase 4 — translation and ingest.** `app.pose` records `tSubmit`/`tResolved`,
-translates the GPU spans, and appends them with `clock: 'gpu'` and a per-call
-`within` pointing at the host span that submitted them. `pose.gpu.unattributed`
-is computed here. **This is the only place in the project that knows there is
-more than one clock.**
+**It went to all THREE device-creation sites, not just the one this section
+names** — the app, `scripts/sweep.ts`, and `tests/helpers/gpu.ts` — through one
+exported `requestDeviceWithOptionalTimestamps(adapter)`. The sweep and the tests
+are precisely where GPU timing gets read (Phase 7 and Phase 3 respectively), so a
+site left on a bare `requestDevice()` would present as "timing is unavailable on
+this machine" rather than as the omission it is. `canTimestamp(device)` is the
+companion: read the DEVICE, never the adapter, since a device only has the
+features it was created with.
 
-**Phase 5 — the renderer.** Aggregation by id, the `~` marker on anchored rows,
-and the `~gpu:` prefix on mirrored measures.
+**Requested when offered, never required.** A `requiredFeatures` entry the
+adapter lacks makes `requestDevice` *reject*, so requiring it unconditionally
+would trade the whole app for an instrument.
 
-**Phase 6 — the link spans.** Phone-link latencies become `peer` spans;
-`profile-video-gap.mjs` re-points at the record store; the four history arrays
-AND `lastPullMs`/`lastEncodeMs`/`lastTransitMs` are deleted, since the newest
-record is the latest sample.
+**The absent path is tested, not assumed** (`tests/pose2Timing.test.ts`, 3
+tests). Since this adapter *does* offer the feature, the absence is manufactured:
+a second device asking for no optional features at all. It is the only honest
+way — the absence is a property of a device, fixed at creation, and no flag on
+the shared device can imitate it. The middle test asserts the two devices
+genuinely DIFFER, so the absent-path test cannot pass by silently running on a
+capable device. Verified by mutation: making the helper skip the request fails
+both feature tests and correctly leaves the untimed-pipeline test green.
 
-**Phase 7 — the other two stopwatches, which is what closes the door.** The
-sweep records a span instead of its own `performance.now()` pair, which is the
-phase with the real payoff: 180 poses of GPU pass breakdown, medians and p90, out
-of an instrument that already exists. And the phone's `t0`/`totalMs` becomes a
-span, after which `PoseRecord` keeps only its non-timing fields and stops being a
-second profiler.
+The file also carries Phase 3's gate ahead of time — the pose from a timed and an
+untimed device must be `deepStrictEqual`. It is **trivially green today**, and
+that is stated in the test, so it starts failing the moment Phase 3's
+`timestampWrites` perturbs anything.
+
+**Phase 3 — the library forwards. DONE 2026-08-15.** `timestampWrites` in
+`pass()`, `resolveQuerySet` + copy into the existing staging buffer,
+`Pose2Frame.gpu` populated. **The gate holds and is measured, not asserted: one
+submit, one fence, one map, and a pose `deepStrictEqual` between a timed and an
+untimed device.** The counts come from `tests/helpers/countingDevice.ts`, which
+counts the WebGPU calls themselves — asking the library how many passes it
+encoded would have been one variable checked against itself.
+
+**"A query set sized from `plan.stages`" was WRONG, and it is worth saying why.**
+The encoded pass count is not the declared stage count: grow's
+hook/compress/gate are re-encoded once per convergence round, all 32 every frame.
+**Measured: 136 encoded passes at 96x128, against 14 declared stages.** The query
+set is therefore sized by a capacity constant (`MAX_TIMED_PASSES = 512`) with a
+throw in `pass()` on overflow and a test pinning the real count — rather than by
+a function that predicts its own pass count, which would be the hand-mirrored
+second declaration this project keeps finding as a defect.
+
+### Dawn QUANTIZES timestamps by default, and it must be switched off
+
+**The most important thing Phase 3 produced, and the one setting the whole
+instrument depends on.**
+
+Dawn ships a `timestamp_quantization` toggle, **ON by default**, a side-channel
+mitigation that rounds every timestamp to a coarse grid. Measured here that grid
+is **65536 ns**, against passes taking single-digit microseconds — so a pass's
+begin and end land in the same tick and its duration reads exactly **zero**. A
+typical frame: 114 of 136 passes at zero, five distinct values in the whole
+frame.
+
+The fix is one flag at INSTANCE creation, now `DAWN_NODE_FLAGS` in
+`src/gpu/device.ts`, shared by the test helper and the sweep so they cannot
+drift:
+
+```
+create(['disable-dawn-features=timestamp_quantization'])
+```
+
+With it, the same late frame reports **91 distinct durations and zero zeros**.
+
+**It does not fail loudly.** It returns plausible numbers that happen to be
+mostly zero, which reads as "the GPU is idle", or — as it did here for an
+embarrassingly long stretch — as "the counter degrades after a couple of
+frames". The misdiagnosis was reached honestly: the degradation really did track
+frame count in the first experiments, and reuse and `destroy` were both ruled out
+before the real cause turned up. **A quantized counter and a degrading one are
+indistinguishable from the durations alone; only the raw u64s and the toggle
+name tell them apart.** That is the transferable lesson, and it belongs with
+§7's other "the instrument's own output can be structurally wrong while looking
+plausible" entries.
+
+**§5's "no coarsening at any scale" was measured on a quantizing instance and is
+therefore not a statement about the hardware.** The 41.667 ns tick it reports is
+real and now reproducible on every frame.
+
+**THE OPEN QUESTION, and it is the one that matters for Phases 4-7: Chrome
+applies the same mitigation.** An app-side capture needs Chrome launched with
+`--disable-dawn-features=timestamp_quantization` (or
+`--enable-webgpu-developer-features`), and **that is UNVERIFIED as of
+2026-08-15**. Without it, every GPU number the app reports will be on the 65536
+ns grid and will look like a pipeline that costs nothing. Verify before trusting
+an app-side breakdown.
+
+The tests keep the distinction visible rather than assuming it: they assert
+structure (pass count, order, ids, non-negativity), which is sound whatever the
+grid, and the reporting test prints a `COARSE COUNTER` marker whenever a frame
+carries fewer than ten distinct durations.
+
+**Phase 4 — translation and ingest. DONE 2026-08-15.** `src/sphereLab/profiling/
+gpuSpans.ts` is **the only place in the project that knows there is more than one
+clock**, and it is its own file to keep that true. GPU spans are appended with
+`clock: 'gpu'` and a per-call `within` of `app.pose`; `pose.gpu.unattributed`
+closes the window.
+
+Two things the plan did not anticipate:
+
+- **`tSubmit`/`tResolved` cannot be taken by `app.pose`.** The submit and the map
+  both happen *inside* `runPose2`, so an outside bracket also contains upload and
+  encode and would anchor the GPU block earlier than it could possibly have run.
+  The library now reports `submittedAt`/`resolvedAt` alongside the passes. This
+  does not breach §5: they are **stamps**, exactly like `mobileCapture`'s
+  `sentAt`/`pulledAt`, and the library still builds no span and names no
+  difference.
+- **A pass needs its POSITION, not just its duration.** `PassTiming.startNs` is
+  nanoseconds from the frame's first timestamp — relative, because the raw
+  counter runs to ~1.4e15 and nothing outside the frame can use an absolute GPU
+  time anyway.
+
+`joinRecords` gained the table-less path §9 demanded (see that section). The
+unattributed row is **clamped at the window's end**, since the anchor is a lower
+bound and an over-long GPU block must report zero leftover rather than a
+backwards span.
+
+**Phase 5 — the renderer. DONE 2026-08-15.** Leaf repeats aggregate by id within
+a parent (`n=32 total=0.43ms median=0.013ms`), the `~` marker goes on any row
+whose clock is not `host`, and `spanIngest` mirrors non-host spans as
+`~<clock>:<id>`. Only LEAVES aggregate — collapsing a repeated stage that has
+children would hide a level of decomposition, which is not worth a shorter
+report. A 101-pass frame renders as eight rows:
+
+```
+axesReconstruction -- 8.34ms (100.0%, self 0.24ms)
+  capture+preprocess -- 2.08ms (25.0%, self 2.08ms)
+  pose2 (submit + readback) -- 6.02ms (72.1%, self 2.04ms)
+    ~gpu:gradient index=0 -- 0.01ms (0.1%, self 0.01ms)
+    ~gpu:grow.hook -- n=32 total=0.43ms (7.1%) median=0.013ms
+    ~gpu:fit.eigen index=99 -- 1.22ms (20.3%, self 1.22ms)
+    pose.gpu.unattributed -- 1.04ms (17.3%, self 1.04ms)
+```
+
+**Phase 6 — the link spans. DONE 2026-08-15.** Phone-link latencies are `peer`
+spans; the four history arrays and `lastPullMs`/`lastEncodeMs`/`lastTransitMs`
+are deleted. **`profile-video-gap.mjs` was DELETED rather than re-pointed** — the
+user's call. It was the only reader of those arrays, was referenced nowhere else
+in the repo, and needed the dev bridge plus a focused tab plus a freshly loaded
+phone to answer a question nobody is currently asking. If it comes back it is a
+short script over the record store, and against better data than the arrays were.
+
+**Only TWO spans came out of the three latencies, and this is the interesting
+part.** `link.pull` (sentAt→pulledAt) and `link.encode` (pulledAt→encodedAt) have
+both endpoints on the PHONE's clock, so the cross-device skew cancels and the
+durations are true whatever it is.
+
+**`link.transit` does not exist.** It would be `receivedAt` (DESKTOP clock) minus
+`encodedAt` (PHONE clock), which capture.ts had already measured at **about
+-38 ms** on this pair of machines — a negative network time. It is not a duration;
+it is a measurement of the skew. A span cannot hold it: `end < start` breaks
+containment and lets a union of children exceed its parent, the exact defect
+class the flat store was built to eliminate, and unlike the GPU anchor there is
+no lower bound to retreat to because the SIGN is wrong. Recovering real transit
+means solving for the offset first. Until something does, an omitted row beats a
+confidently negative one. The raw stamps all survive on `lastCaptureTiming`,
+where the IMU work reads them.
+
+`gpuSpans.ts` became **`clocks.ts`** when the peer boundary landed in it, so
+"the only place in the project that knows there is more than one clock" stays
+literally true of one file. The byte count that `payloadBytesHistory` carried is
+now an attribute on `ingest.run`.
+
+**Phase 7 — the other two stopwatches. DONE 2026-08-15.**
+
+**The sweep** records a `sweep.pose` span instead of its own `performance.now()`
+pair, ingests `frame.gpu` under it, and prints a per-stage GPU breakdown after
+the accuracy summary — median, p90 and share, sorted. This is the payoff and it
+works: a first reading at 240x320 puts **3.66 ms on device against 11.2 ms wall
+on a warm pose** (43.7 ms cold, which is shader compilation).
+
+One thing the plan did not foresee: **the store's 4096-record cap.** 180 poses x
+~140 passes is ~25k records, so letting them accumulate would trim the early
+poses straight out of the medians. Each pose is folded into the summary and the
+store is reset — the store is the transport, the accumulator is the report, the
+same relationship the renderer has to it.
+
+**The phone's stopwatch was DELETED, not converted, and the reason is worth
+keeping.** §7 says `t0`/`totalMs` becomes a span. It cannot: the pose computation
+went with `src/pose`, so what sat between those two clock reads was
+`void grayTopDown;` and an object literal. The stopwatch reported ~0 ms every
+frame, and a span would have put that same 0 ms on a flamechart as a row — a more
+confident way of saying something false. The on-page readout printed
+`pose <totalMs>ms (<fps>fps)` off it and now says `no pose pipeline on device
+yet` instead.
+
+`PoseRecord.computeMs` is gone with it, so the ring keeps only non-timing fields
+and has stopped being a second profiler, exactly as §7 wanted — just by
+subtraction rather than by conversion. **A `TODO(phone-on-pose2)` marks the
+capture site**: when that page runs `src/pose2`, the span opens around
+`runPose2`, and `frame.gpu` gives the phone the same per-pass breakdown the
+desktop has through `clocks.ts`.
+
+### The acceptance grep passes
+
+`grep -rn 'performance.now' src/ scripts/` now returns only: the recorder
+(`profiler.ts`), the scheduler (`main.ts`), the game's simulation clock, `nowMs()`
+itself, and three STAMPS — `devBridge/client.ts`'s `receivedAt` and
+`run.ts`'s `submittedAt`/`resolvedAt`. Every one is a clock read rather than a
+measurement. **There is no second way to measure a duration left in the
+project.**
 
 **After phase 7, `grep -rn 'performance.now' src/ scripts/` returns only the
 recorder, the scheduler in `main.ts`, the game's simulation clock and the offline
@@ -403,17 +606,32 @@ grep is the acceptance test for "no old systems left".
 
 ## 9. Open questions
 
-- **Does the per-call `within` override scale to 40 GPU ids?** The rule is "a GPU
-  span belongs to the host span that submitted it", declared at the injection
-  point — which is the existing per-occurrence override, used exactly as
-  intended. But it means 40 ids that are in no table. They should join under
-  their submitter and render fine; if `formatSpanTree` reports them as
-  `unknown` instead, the join needs a table-less path rather than 40 hand-mirrored
-  declarations. **Hand-mirroring the library's stage list in the app is the one
-  outcome to refuse** — that drift is a defect this project has found repeatedly.
-- **What is the actual CPU/GPU split of a 13.5 ms reconstruction?** Nobody has
-  measured it. The old pipeline's "66% blocked in readback stalls" was seven
-  fences and does not transfer. This is the first number the rewrite should
-  produce, and it is the reason to build it.
+- ~~**Does the per-call `within` override scale to 40 GPU ids?**~~ **ANSWERED
+  2026-08-15, and the answer is the bad one: they report as `unknown` and do not
+  join.** Measured in Phase 1 by opening a span with an id absent from the table
+  and an explicit `within` pointing at a live parent. The cause is structural, not
+  a tuning problem: `joinRecords` filters on `table[r.id]` in its first loop and
+  pushes to `unknown` before it ever calls `declaredParent`, so **an id with no
+  table entry can never join no matter what parent it declares.**
+
+  The consequence is the one §3 says must not happen: the GPU span's time is not
+  subtracted from anything, so it stays in the submitter's **self time**, and the
+  decomposition silently stops adding up.
+
+  **FIXED in Phase 4.** `nodeFor()` in `joinRecords` gives an unknown id with an
+  explicit `within` a synthesized node whose label is the id; an id with no table
+  entry *and* no override still lands in `unknown` and stays out of the tree.
+  Both halves are regression-tested in `tests/profilerJoin.test.ts`, and the
+  library's stage list is nowhere mirrored in the app.
+- **What is the actual CPU/GPU split of a 13.5 ms reconstruction?** **First
+  reading, 2026-08-15: about a third on device.** The sweep at 240x320 reports
+  3.66 ms of GPU against 11.2 ms wall on a warm pose. **Indicative only** — two
+  poses at reduced resolution, and the 13.5 ms figure is a 480x640 number, so the
+  proper measurement is a full sweep at that resolution. The instrument to do it
+  now exists and prints the breakdown by default. The old pipeline's "66% blocked
+  in readback stalls" was seven fences and still does not transfer.
+- **NEW: where does the host-side two thirds actually go?** `app.pose`'s self
+  time is upload + encode + fence + map, and `pose.gpu.unattributed` separates
+  the last two. Nobody has read those rows yet.
 - **Does the phone need any of this?** `mobileCapture.ts` has its own device and
   will have its own context. It is out of scope until it has a pipeline at all.

@@ -5,6 +5,7 @@ import { toGrayscale } from '../../decode.ts';
 import { renderer, scene } from '../scene/renderer.ts';
 import { spanEnd } from '../profiling/profiler.ts';
 import { appSpan } from '../profiling/stages.ts';
+import { ingestLinkSpans } from '../profiling/clocks.ts';
 import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
@@ -158,11 +159,10 @@ export function captureDistortedGrayscale(camera: SimulatedCamera): { gray: Floa
 // needed here, since top-down is this whole pipeline's one dominant
 // convention now (see captureDistortedGrayscale's own comment). `pending` is
 // whatever main.ts's mailbox pump just popped -- see PhysicalCamera's own
-// comments on idleSpan/lastPullMs/lastEncodeMs/lastTransitMs for what the
-// timing fields here are for (tracking down video mode's round-trip idle
-// gap, and specifically telling "pull the video frame" apart from "JPEG
-// encode" apart from "actual network transit" instead of lumping them all
-// together).
+// comment on idleSpan, and profiling/clocks.ts for the `peer` spans the
+// phone-side stamps become -- which tell "pull the video frame" apart from
+// "JPEG encode" instead of lumping them together, and which deliberately do
+// NOT include a transit span.
 //
 // pending.blob arrives as a genuine binary WebSocket frame now (devBridge/
 // client.ts), not a base64 data: URL -- decoded via a blob: object URL
@@ -178,9 +178,12 @@ export async function ingestRealCapture(
   },
 ): Promise<void> {
   if (camera.idleSpan) { spanEnd(camera.idleSpan); camera.idleSpan = null; }
-  camera.lastPullMs = pending.pulledAt - pending.sentAt;
-  camera.lastEncodeMs = pending.encodedAt - pending.pulledAt;
-  camera.lastTransitMs = pending.receivedAt - pending.encodedAt;
+  // The phone-side half of this frame's journey, as `peer` spans in the one
+  // record store. It used to be three subtractions into three `lastXMs` fields
+  // plus four rolling arrays -- a second way to measure a duration, with one
+  // reader, which is now gone. Only two spans come out of three subtractions:
+  // clocks.ts explains why "transit" was never a duration.
+  ingestLinkSpans(pending);
   // pendingCapture is a MAILBOX -- main.ts pops it and it is gone. Everything
   // above survives only as a derived duration, which is exactly what the IMU
   // work cannot use: a filter needs the ABSOLUTE time this frame was
@@ -189,11 +192,11 @@ export async function ingestRealCapture(
   // retained here rather than recomputed later, because later they no longer
   // exist.
   //
-  // ON THE CLOCK, AND WHY THESE MUST NOT BE MIXED WITH lastTransitMs:
-  // that field is `receivedAt (DESKTOP clock) - encodedAt (PHONE clock)`, and
-  // it measures ~-38ms on this pair of machines -- a NEGATIVE transit time,
-  // i.e. it is reporting cross-device clock SKEW, not network time. 38ms is a
-  // third of the whole prediction horizon this project is trying to cover.
+  // ON THE CLOCK: `receivedAt (DESKTOP clock) - encodedAt (PHONE clock)`
+  // measures ~-38ms on this pair of machines -- a NEGATIVE transit time, i.e.
+  // cross-device clock SKEW rather than network time. 38ms is a third of the
+  // whole prediction horizon this project is trying to cover. That is why no
+  // `link.transit` span exists; see profiling/clocks.ts.
   // Everything stored below is phone-clock-only and therefore mutually
   // consistent with imuSamples; nothing here may be compared against a
   // desktop timestamp without solving for that offset first.
@@ -202,15 +205,7 @@ export async function ingestRealCapture(
     drawnAt: pending.drawnAt ?? null, frameMeta: pending.frameMeta ?? null,
     receivedAtDesktop: pending.receivedAt,
   };
-  camera.pullMsHistory.push(camera.lastPullMs);
-  camera.encodeMsHistory.push(camera.lastEncodeMs);
-  camera.transitMsHistory.push(camera.lastTransitMs);
-  camera.payloadBytesHistory.push(pending.bytes);
-  if (camera.pullMsHistory.length > 50) camera.pullMsHistory.shift();
-  if (camera.encodeMsHistory.length > 50) camera.encodeMsHistory.shift();
-  if (camera.transitMsHistory.length > 50) camera.transitMsHistory.shift();
-  if (camera.payloadBytesHistory.length > 50) camera.payloadBytesHistory.shift();
-  const rootSpan = appSpan('ingest.run');
+  const rootSpan = appSpan('ingest.run', { bytes: pending.bytes });
 
   const decodeSpan = appSpan('ingest.decode');
   const img = new Image();

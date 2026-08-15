@@ -1,4 +1,5 @@
 import { create, globals } from 'webgpu';
+import { DAWN_NODE_FLAGS, requestDeviceWithOptionalTimestamps } from '../../src/gpu/device.ts';
 
 // ── A real GPUDevice under `node --test` ──────────────────────────────────
 //
@@ -48,7 +49,7 @@ Object.assign(globalThis, globals);
 // more than one pipeline run per process". It is not; it is this line.
 //
 // Module scope is the retention. Do not inline it.
-const gpuInstance = create([]);
+const gpuInstance = create(DAWN_NODE_FLAGS);
 
 let cached: GPUDevice | null = null;
 let unavailable: string | null = null;
@@ -65,12 +66,34 @@ export async function getTestDevice(): Promise<GPUDevice | null> {
   try {
     const adapter = await gpuInstance.requestAdapter();
     if (!adapter) { unavailable = 'no adapter'; return null; }
-    cached = await adapter.requestDevice();
+    // The same helper the app and the sweep call, so the device a test runs
+    // against has the same feature set as the device a user runs against.
+    cached = await requestDeviceWithOptionalTimestamps(adapter);
     return cached;
   } catch (e) {
     unavailable = String(e);
     return null;
   }
+}
+
+/**
+ * A second device with NO optional features, for testing the path where
+ * `timestamp-query` is absent.
+ *
+ * A deliberate exception to this file's one-device rule, and the only way to
+ * test that path honestly: the absence being tested is a property of a DEVICE,
+ * fixed at creation, so it cannot be simulated on the shared device by any flag.
+ * The alternative -- assuming the untimed path works because the timed one does
+ * -- is exactly the assumption the plan's Phase 2 says to replace with a test.
+ *
+ * Not cached and not destroyed: it is created by the one test that needs it, and
+ * the process exits shortly after. Destroying it would risk the shared
+ * instance's teardown, which this file's header explains is not to be poked at.
+ */
+export async function getBareTestDevice(): Promise<GPUDevice | null> {
+  const adapter = await gpuInstance.requestAdapter();
+  if (!adapter) return null;
+  return await adapter.requestDevice({ requiredFeatures: [] });
 }
 
 /**

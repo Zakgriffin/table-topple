@@ -22,7 +22,8 @@ import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleRe
 import { buildDecodeLattice } from './decodeLattice.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
-import { type StageRecord, spanEnd } from '../profiling/profiler.ts';
+import { type Span, spanEnd } from '../profiling/profiler.ts';
+import { ingestGpuFrame } from '../profiling/clocks.ts';
 import { appSpan } from '../profiling/stages.ts';
 
 // Shared pole-marker/gizmo/floor-overlay/readout tail -- called after EITHER
@@ -298,7 +299,6 @@ async function runVisualTailBody(camera: Camera, posted: PendingVisuals): Promis
   updateGradientCirclesDebug(camera);
 
   const projectSpan = appSpan('app.project');
-  const projectStart = performance.now();
   // Captured outside the `if` (stays null when there's no recovered axes to
   // project) so it can be handed to refreshModeVisualizations below instead
   // of that call recomputing the exact same (possibly GPU) result a second
@@ -308,7 +308,6 @@ async function runVisualTailBody(camera: Camera, posted: PendingVisuals): Promis
     projResult = await computeProjectedBinsAuto(camera, backendFromForceCPU(globalState.forceCPU));
     if (showProjected) paintProjectedTexture(camera, projResult);
   }
-  const projectMs = performance.now() - projectStart;
   spanEnd(projectSpan);
 
   const overlaySpan = appSpan('app.overlays');
@@ -322,9 +321,13 @@ async function runVisualTailBody(camera: Camera, posted: PendingVisuals): Promis
   // being painted, and the drain runs long after that run returned.
   // The per-stage breakdown (votes/fit/pose/distance/decode) came off the
   // deleted pipeline's PoseComputeTiming. pose2 does not report host-side stage
-  // spans -- it is one submit -- so only the projection's own time is left, and
-  // it is the app's own measurement.
-  const timingLine = `project ${projectMs.toFixed(0)}ms`;
+  // spans -- it is one submit -- so only the projection's own time is left.
+  //
+  // Read off the span rather than a performance.now() pair of its own, which is
+  // what this was: `app.project` brackets exactly the same region, so the pair
+  // was a second stopwatch measuring an interval already measured, and the two
+  // could only ever agree or be a bug.
+  const timingLine = `project ${(projectSpan.end - projectSpan.start).toFixed(0)}ms`;
   applyPoseVisualizations(camera, isActive, timingLine);
   spanEnd(overlaySpan);
 
@@ -846,6 +849,12 @@ async function recomputeStages(camera: Camera) {
   } finally {
     spanEnd(poseSpan);
   }
+  // Translated and filed here, after the host span is closed, because the GPU
+  // spans declare it as their parent and the join attaches a child to the
+  // occurrence whose interval CONTAINS it -- which `app.pose` only does once it
+  // has an end. Absent on a device without `timestamp-query`, which is a normal
+  // state and not a degraded one.
+  if (frame.gpu) ingestGpuFrame(frame.gpu, 'app.pose');
   applyPoseResult(camera, toCameraPose(frame));
 }
 
@@ -861,7 +870,7 @@ export function runAxesReconstruction(camera: Camera) {
     axesReadout.textContent = 'computing...';
   }
   requestAnimationFrame(async () => {
-    let rootSpan: StageRecord | null = null;
+    let rootSpan: Span | null = null;
     try {
       rootSpan = appSpan('app.reconstruct', { kind: 'capture' });
       if (isPhysical(camera) && !camera.lastRealCaptureGray) {
@@ -925,7 +934,7 @@ export function recomputeFromLastCapture(camera: Camera) {
     axesReadout.textContent = 'computing...';
   }
   requestAnimationFrame(async () => {
-    let rootSpan: StageRecord | null = null;
+    let rootSpan: Span | null = null;
     try {
       rootSpan = appSpan('app.reconstruct', { kind: 'recompute' });
       await recomputeStages(camera);

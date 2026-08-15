@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
 import { type ProjectedBins } from '../types.ts';
-import { type StageRecord } from '../profiling/profiler.ts';
+import { type Span } from '../profiling/profiler.ts';
 import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './settings.ts';
 
 // ── The decode sample lattice, as the Projected-Cam overlay draws it ──────
@@ -451,7 +451,7 @@ export interface PhysicalCamera extends CameraBase {
   // ingestRealCapture can split "pull the video frame onto a canvas" from
   // "JPEG encode" from "actual network transit" on pop, instead of lumping
   // them into one number and guessing which one dominated a given slow
-  // sample -- see lastPullMs/lastEncodeMs/lastTransitMs.
+  // sample -- see the `link.pull`/`link.encode` peer spans in profiling/clocks.ts.
   // bytes is blob.size -- the real JPEG byte count now that the image
   // travels as a genuine binary WebSocket frame (devBridge/client.ts)
   // rather than base64 text inside JSON, so this is exact rather than the
@@ -502,35 +502,18 @@ export interface PhysicalCamera extends CameraBase {
   // own. Never null in practice now that spans record unconditionally; the
   // type stays nullable because nothing has opened one yet before the first
   // reconstruction completes.
-  idleSpan: StageRecord | null;
-  // Approximate phone-side "pull the current video frame onto a canvas"
-  // duration (canvas resize + drawImage, NOT the JPEG encode itself) for
-  // the most recently ingested frame -- pendingCapture.pulledAt -
-  // pendingCapture.sentAt.
-  lastPullMs: number | null;
-  // Approximate phone-side JPEG encode duration (toDataURL only, now that
-  // pullMs is split out separately) for the most recently ingested frame --
-  // pendingCapture.encodedAt - pendingCapture.pulledAt. Cross-device
-  // wall-clock diff (see pendingCapture's own comment on why that's
-  // "approximate" rather than nanosecond-precise).
-  lastEncodeMs: number | null;
-  // Approximate actual network transit duration (ws.send on the phone to
-  // this message handler on the desktop, including the relay hop) for the
-  // most recently ingested frame -- pendingCapture.receivedAt -
-  // pendingCapture.encodedAt.
-  lastTransitMs: number | null;
-  // Rolling histories (capped, oldest dropped) of lastPullMs/lastEncodeMs/
-  // lastTransitMs -- a single sample is noisy, this is what lets a
-  // diagnostic script report a real distribution and tell pull-bound/
-  // encode-bound/transit-bound samples apart instead of guessing.
-  pullMsHistory: number[];
-  encodeMsHistory: number[];
-  transitMsHistory: number[];
-  // pendingCapture.bytes for the same samples, same index alignment as
-  // transitMsHistory -- lets a diagnostic script compute actual throughput
-  // (bytes / transit ms) instead of guessing whether a given duration is
-  // bandwidth-bound from timing alone.
-  payloadBytesHistory: number[];
+  idleSpan: Span | null;
+  // ── The four latency histories and the three lastXMs fields are GONE ──
+  //
+  // They were a hand-rolled ring buffer per quantity, written every frame and
+  // read by exactly one diagnostic script -- a second way to measure a duration
+  // alongside the profiler, which is what the profiling rewrite exists to end.
+  // The phone-side durations are `peer` spans in the one record store now (see
+  // profiling/clocks.ts), the newest record IS the latest sample, and the byte
+  // count rides on `ingest.run` as a span attribute.
+  //
+  // The raw phone-clock STAMPS survive on `lastCaptureTiming` below, because the
+  // IMU work needs absolute capture times rather than durations.
   // Self-reported by mobile-capture.html every ~2s (its flush interval).
   // Two distinct diagnostic purposes bundled in one message:
   //   - nominalFrameRate/avgIntervalMs/maxIntervalMs/sampleCount (from

@@ -59,8 +59,31 @@ export interface Intermediates {
    * this side, which is what CameraPose exists to avoid.
    */
   rects?: Float32Array;
-  /** How many entries of `rects` are real. Off `counts`, not off the array. */
+  /** How many entries of `rects` and `regions` are real. Off `counts`, not off
+   *  either array. */
   regionCount?: number;
+  /** Which pixels each region is made of. Absent unless a raster asked. */
+  regions?: RegionCsr;
+}
+
+// The region CSR, exactly as `src/pose2` holds it: three buffers that are one
+// fact. Grouped rather than spread across three optional fields because two of
+// them are meaningless alone -- an offset into an absent `members` is not a
+// partial answer, it is a crash waiting for a caller who forgot to check the
+// third field. `fx`/`fy` stay separate above because each IS a field on its own.
+//
+// TOP-DOWN pixel indices (`y * w + x`), ascending within a region --
+// collect.finalize sorts each slice, since the atomic cursor that fills it hands
+// out slots in arrival order. Regions are a disjoint partition of the pixels
+// that survived the edge floor, so `members` is bounded by `w * h` exactly and
+// most of it is unused on a typical frame.
+export interface RegionCsr {
+  /** Pixel index per member, region slices laid end to end. */
+  members: Uint32Array;
+  /** Where region r's slice starts in `members`. */
+  offsets: Uint32Array;
+  /** How long it is. */
+  sizes: Uint32Array;
 }
 
 // requestVideoFrameCallback's metadata for one decoded video frame, captured

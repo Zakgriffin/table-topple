@@ -9,7 +9,7 @@ import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, thr
 import { computeThroughRect } from '../ui/layout.ts';
 import { persistConfig } from '../config.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
-import { hashSeedIndexToHueDeg, repaintLsdRawRegionsHighlight } from './lsdOverlay.ts';
+import { regionRgb, repaintLsdRawRegionsHighlight } from './lsdOverlay.ts';
 import { drawOneArrow, svgEl } from './svgUtil.ts';
 
 // Clears the gradient/level-line arrow groups only -- NOT lsdRectanglesGroup/
@@ -64,8 +64,10 @@ export function clearArrowOverlays() {
 // correct as written -- and it was correct-looking either way round, which is
 // why the stale comment survived. See overlays/pipelineField.ts.
 //
-// COLOUR: a unique per-line hue hashed from the index of the REGION the segment
-// was fitted to (overlays/lsdOverlay.ts's hashSeedIndexToHueDeg). The
+// COLOUR: overlays/lsdOverlay.ts's regionRgb, hashed from the index of the
+// REGION the segment was fitted to -- the same call the fitted outline and the
+// region's own member pixels make, which is what makes the three views one
+// picture rather than three. The
 // showCompositeLineFamilies mode -- blue=row, red=column, shaded by each line's
 // rank within its family -- needs the period search's rectified values, which
 // are `rowSamples`/`colSamples` and are not requested yet, so the toggle
@@ -98,7 +100,7 @@ function drawCompositeLines(camera: Camera) {
       // rectified periodic coordinate. That came off the deleted period search
       // (rowLines/colLines), so every line now takes the per-root hash colour --
       // which is the branch that already ran whenever the toggle was off.
-      const [hr, hg, hb] = hsvToRgb(hashSeedIndexToHueDeg(root), 0.85, 1);
+      const [hr, hg, hb] = regionRgb(root);
       strokeColor = `rgb(${hr},${hg},${hb})`;
     }
     // Grouped (not two independently-alpha'd strokes) so the halo+color

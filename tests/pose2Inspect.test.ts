@@ -31,7 +31,13 @@ const POSE = { height: 10, overRow: 40.1, overCol: 40.6, tiltDeg: 20, yawDeg: 15
 // (composite lines, the vote circles) and both are measurably clobbered under
 // `alias` without the declaration -- see pose2Buffers.test.ts. `fx` and `layout`
 // come along as the two other shapes, a full-image array and a 128-byte struct.
-const INSPECT = ['fx', 'lines', 'votes', 'layout'] as const;
+// The region CSR joins them: three buffers that are one fact, and the only
+// display request that is megabytes rather than kilobytes. `fy` comes along
+// because the CSR's strongest available property is a CROSS-BUFFER one -- every
+// member pixel is above grow's edge floor, which needs both components.
+const INSPECT = [
+  'fx', 'fy', 'lines', 'votes', 'layout', 'members', 'regionOffsets', 'regionSizes', 'counts',
+] as const;
 
 const SETTINGS = {
   grow: { rhoLow: 0.132, toleranceDeg: 9.5 },
@@ -72,11 +78,31 @@ test('inspected bytes are identical with pooling on and off', async () => {
     assert.ok(off.pose.lineCount > 40, `only ${off.pose.lineCount} lines`);
 
     assert.deepEqual(on.pose, off.pose, 'pooling changed the pose itself');
+
+    // ── ONE BUFFER IS COMPARED ONLY OVER ITS DEFINED PREFIX ──────────────
+    //
+    // `members` is sized for the whole image, because regions are a disjoint
+    // partition and the worst case is every pixel; a real frame fills the first
+    // `counts.y` of it and NOTHING WRITES THE TAIL. So the tail is whatever the
+    // slot last held -- under `alias: false` the previous frame's, under
+    // `alias: true` its partner's (`next`/`labelCounts`) -- and demanding the two
+    // agree there is demanding that two different pieces of garbage match.
+    //
+    // MEASURED, not assumed, because "compare less until it passes" is how a real
+    // aliasing bug would be hidden: at this fixture 314 regions hold 2,137
+    // members, `regionOffsets`/`regionSizes` are identical over their FULL
+    // length, and all 794 differing `members` elements sit at index 2,144 or
+    // above. Not one is inside the data.
+    const memberCount = new Uint32Array(off.inspected['counts']!)[1]!;
+    assert.ok(memberCount > 500, `only ${memberCount} members -- the prefix below is nearly empty`);
+    const defined: Record<string, number> = { members: memberCount * 4 };
     for (const name of INSPECT) {
+      const end = defined[name];
       const a = new Uint8Array(off.inspected[name]!);
       const b = new Uint8Array(on.inspected[name]!);
       assert.equal(a.length, b.length, `${name}: different sizes`);
-      const at = a.findIndex((v, i) => v !== b[i]);
+      if (end !== undefined) assert.ok(end < a.length, `${name}: nothing is being skipped`);
+      const at = a.subarray(0, end).findIndex((v, i) => v !== b[i]);
       assert.equal(at, -1, `${name}: first differing byte at ${at}`);
     }
   });
@@ -120,6 +146,69 @@ test('inspected bytes are the BUFFER\'s, not some other stage\'s', async () => {
     assert.equal(layout.length, 32);
     assert.ok(Math.abs(layout[12]! - got.pose.height) < 1e-3,
       `layout.distance ${layout[12]} disagrees with pose.height ${got.pose.height}`);
+  });
+});
+
+// ── The CSR, which is what the two per-pixel rasters draw ────────────────
+//
+// The rasters walk `members[offsets[r] .. +sizes[r]]` and paint a pixel each, so
+// what they need from the readback is not "the bytes match" but "these three
+// buffers are a consistent slicing of pixel indices". Every assertion below is a
+// property the CSR has and an arbitrary other buffer's bytes do not, which is
+// what makes this a check on the staging layout and not just on collect.
+//
+// The last one is the strongest and is CROSS-BUFFER: a member pixel is by
+// construction above grow's edge floor (GROW_SEED_WGSL labels only
+// `fx^2+fy^2 > rhoLowSq`), so `members` and `fx`/`fy` have to be the same
+// frame's, correctly offset, for it to hold.
+test('the region CSR slices members into disjoint, in-frame, above-floor runs', async () => {
+  await withDevice(async (device) => {
+    const gray = renderPose(POSE, FRAME_DIMS, 4);
+    const got = await frameWith(device, gray, { alias: true, inspect: INSPECT });
+
+    const counts = new Uint32Array(got.inspected['counts']!);
+    const members = new Uint32Array(got.inspected['members']!);
+    const offsets = new Uint32Array(got.inspected['regionOffsets']!);
+    const sizes = new Uint32Array(got.inspected['regionSizes']!);
+    const [regionCount, memberCount] = [counts[0]!, counts[1]!];
+
+    // Not vacuous: a frame with no regions passes every loop below trivially.
+    assert.ok(regionCount > 40, `only ${regionCount} regions -- nothing below is meaningful`);
+    // `counts.x` is the UNCLAMPED label count, deliberately (finish compares it
+    // against maxRegions to report regionOverflow). This fixture must not
+    // overflow, or the per-region arrays are truncated and the slicing below
+    // would be a statement about a different set of regions than counts names.
+    assert.ok(regionCount <= FRAME.maxRegions, `${regionCount} regions overflowed maxRegions`);
+    assert.equal(members.length, FRAME.w * FRAME.h);
+    assert.equal(offsets.length, FRAME.maxRegions);
+
+    const n = FRAME.w * FRAME.h;
+    const fx = new Float32Array(got.inspected['fx']!);
+    const fy = new Float32Array(got.inspected['fy']!);
+    const rhoLow = SETTINGS.grow.rhoLow;
+    // -1 = not a member of anything, which is most of the image.
+    const owner = new Int32Array(n).fill(-1);
+    let total = 0;
+    for (let r = 0; r < regionCount; r++) {
+      const off = offsets[r]!, size = sizes[r]!;
+      // Contiguous and in scan order: `offsets` is the exclusive prefix sum of
+      // the kept sizes, so a region starts exactly where the previous one ended.
+      assert.equal(off, total, `region ${r} starts at ${off}, not ${total}`);
+      assert.ok(size >= SETTINGS.collect.minRegionSize, `region ${r} has ${size} members`);
+      total += size;
+      assert.ok(off + size <= members.length, `region ${r} runs past members`);
+      for (let m = off; m < off + size; m++) {
+        const p = members[m]!;
+        assert.ok(p < n, `region ${r} member ${p} is not a pixel of a ${FRAME.w}x${FRAME.h} frame`);
+        // DISJOINT: regions are a partition, which is exactly what lets the app
+        // invert this into a hover-to-region map with a single pass.
+        assert.equal(owner[p], -1, `pixel ${p} is in both region ${owner[p]} and ${r}`);
+        owner[p] = r;
+        assert.ok(fx[p]! * fx[p]! + fy[p]! * fy[p]! > rhoLow * rhoLow,
+          `region ${r} member ${p} is below the edge floor and could never have been labeled`);
+      }
+    }
+    assert.equal(total, memberCount, 'the region sizes do not sum to counts.y');
   });
 });
 

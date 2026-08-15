@@ -486,7 +486,15 @@ const MAX_LINES = 16384;
 // Cheap by construction: this camera plans with `alias` off (the default), where
 // every buffer already holds its own slot for the whole frame, so declaring one
 // costs staging bytes and nothing else. See src/pose2/buffers.ts's PlanOptions.
-const INSPECT = ['triad', 'layout', 'fx', 'fy', 'votes', 'lines', 'lineScan', 'counts', 'rects'] as const;
+//
+// `members` is the one genuinely large name here (1.17 MiB at 480x640, one u32
+// per pixel) and it is still only staging bytes while `alias` is off -- but it
+// is the reason the two rasters gate on their own toggles below rather than
+// riding along with the rectangles.
+const INSPECT = [
+  'triad', 'layout', 'fx', 'fy', 'votes', 'lines', 'lineScan', 'counts', 'rects',
+  'members', 'regionOffsets', 'regionSizes',
+] as const;
 
 // ── WHAT THIS FRAME ACTUALLY ASKS FOR ────────────────────────────────────
 //
@@ -534,6 +542,14 @@ function inspectFor(camera: Camera): readonly string[] {
   // it was the only one on. `counts` may already be in the list -- runPose2
   // dedupes.
   if (s.showLsdSegments || s.showLsdRejected) want.push('rects', 'counts');
+  // The two per-pixel rasters. They paint a pixel per MEMBER PIXEL, which is why
+  // they need the CSR and the rectangle outlines do not -- and why they are the
+  // only display request that costs more than kilobytes. The rejected raster
+  // additionally needs `rects` to know which regions to paint, and gets it from
+  // the line above, which is gated on the same toggle.
+  if (s.showLsdRawRegions || s.showLsdRejected) {
+    want.push('members', 'regionOffsets', 'regionSizes', 'counts');
+  }
   return want;
 }
 
@@ -712,7 +728,25 @@ function toCameraPose(frame: Pose2Frame): CameraPose {
       ...(inspected['fx'] ? { fx: new Float32Array(inspected['fx']) } : {}),
       ...(inspected['fy'] ? { fy: new Float32Array(inspected['fy']) } : {}),
       ...(inspected['rects'] ? { rects: new Float32Array(inspected['rects']) } : {}),
-      ...(inspected['counts'] ? { regionCount: new Uint32Array(inspected['counts'])[0] } : {}),
+      // CLAMPED, and `counts.x` is not: collect.regionMeta writes the raw label
+      // count so `finish` can compare it against maxRegions and report §15's
+      // regionOverflow. Every array indexed by region is sized for maxRegions, so
+      // an overflowing frame that published the raw count would walk a display
+      // loop off the end of `rects`. The overflow is still reported, on the pose.
+      ...(inspected['counts']
+        ? { regionCount: Math.min(new Uint32Array(inspected['counts'])[0]!, MAX_REGIONS) }
+        : {}),
+      // All three or none -- see RegionCsr. They are requested together and this
+      // is the one place that could hand back a half of one.
+      ...(inspected['members'] && inspected['regionOffsets'] && inspected['regionSizes']
+        ? {
+          regions: {
+            members: new Uint32Array(inspected['members']),
+            offsets: new Uint32Array(inspected['regionOffsets']),
+            sizes: new Uint32Array(inspected['regionSizes']),
+          },
+        }
+        : {}),
     },
   };
 }

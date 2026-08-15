@@ -379,8 +379,12 @@ export async function ingestRemotePose(
       : {}),
     // The phone's composite lines are the one display array that DOES cross the
     // wire, inside the optional debug blob.
+    // `index` is the array position, which is the best available answer: the
+    // wire carries a list, not the pipeline's own line slots. It is only ever
+    // used to look up `rectified`/`lineFamily`, and a remote pose has neither,
+    // so nothing can join against a wrong one.
     ...(pipelineDebug?.voteComposites
-      ? { composites: pipelineDebug.voteComposites.map((c) => ({ region: c.root, line: c.line })) }
+      ? { composites: pipelineDebug.voteComposites.map((c, i) => ({ region: c.root, index: i, line: c.line })) }
       : {}),
   };
   camera.pose = pose;

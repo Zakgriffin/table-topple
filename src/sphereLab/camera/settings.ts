@@ -166,6 +166,13 @@ export const CameraSettingsCommonSchema = Type.Object({
   gridPeriodPhaseGapLowerBound: Type.Number(),
   showCompositeLineFamilies: Type.Boolean(),
   showSampleLattice: Type.Boolean(),
+  // The detected segments drawn in RECTIFIED space on the Projected-Cam rect --
+  // each line as the straight segment it becomes once the recovered axes flatten
+  // the floor, coloured by which family (row or column) it was classified into.
+  // A toggle where the old app drew these unconditionally: they cost a readback
+  // of the per-line rectified coordinates now, so a view nobody is looking at
+  // should not be paying for it every capture.
+  showRectifiedLines: Type.Boolean(),
   // Purely a display-time rotation of the Projected-Cam view (WebGL texture
   // + debug overlay) by camera.pose.positionDecode.orientation * 90 degrees,
   // so "up" matches the pattern's true cardinal orientation instead of

@@ -91,7 +91,11 @@
   #overlayPanel button.active#toggleLsdRejected { background: rgba(230,60,60,0.6); color: #fff; border-color: #e63c3c; }
   #overlayPanel button.active#toggleLsdRawRegions { background: rgba(60,200,230,0.6); color: #fff; border-color: #3cc8e6; }
   #overlayPanel button.active#toggleLsdComposite { background: rgba(230,180,60,0.6); color: #fff; border-color: #e6b43c; }
-  #overlayPanel button.active#toggleCompositeLineFamilies { background: rgba(100,140,230,0.6); color: #fff; border-color: #648ce6; }
+  /* One colour for the two views of the SAME classification: the composite
+     lines coloured by family in Through-Cam, and those same lines drawn
+     rectified in Projected-Cam. */
+  #overlayPanel button.active#toggleCompositeLineFamilies,
+  #overlayPanel button.active#toggleRectifiedLines { background: rgba(100,140,230,0.6); color: #fff; border-color: #648ce6; }
   /* Active colors deliberately match each histogram's own bars in the plot
      (gray gaps, white values) so the button says which series it controls. */
   #overlayPanel button.active#toggleGapHistogram { background: rgba(200,200,200,0.45); color: #fff; border-color: #c8c8c8; }
@@ -221,7 +225,7 @@
 <canvas id="throughCamCanvas"></canvas>
 <div id="pipFrame"></div>
 <div id="pipLabel">through camera</div>
-<svg id="projectedSvgOverlay"><g id="sampleLatticeGroup"></g></svg>
+<svg id="projectedSvgOverlay"><g id="rectifiedLinesGroup"></g><g id="sampleLatticeGroup"></g></svg>
 <svg id="lsdSvgOverlay"><g id="lsdRectanglesGroup"></g><g id="lsdCompositeGroup"></g><g id="gradientArrowGroup"></g><g id="levelLineArrowGroup"></g><g id="growthCandidateGroup"></g></svg>
 <button id="overlayPanelToggle" title="show/hide overlay panel">&rsaquo;</button>
 <div id="overlayPanel">
@@ -270,6 +274,7 @@
     <h2>Projected view</h2>
     <button id="toggleTrueCardinalOrientation">use true cardinal orientation</button>
     <button id="toggleSampleLattice">sample lattice</button>
+    <button id="toggleRectifiedLines">rectified lines (row/column families)</button>
   </div>
 </div>
 <div id="insideHint">drag to look around &middot; scroll to zoom &middot; you are standing at the camera's optical center</div>

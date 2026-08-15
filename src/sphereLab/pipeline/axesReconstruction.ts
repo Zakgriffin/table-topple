@@ -497,7 +497,7 @@ const MAX_LINES = 16384;
 // riding along with the rectangles.
 const INSPECT = [
   'triad', 'layout', 'fx', 'fy', 'votes', 'lines', 'lineScan', 'rects',
-  'members', 'regionOffsets', 'regionSizes', 'packed', 'result',
+  'members', 'regionOffsets', 'regionSizes', 'packed', 'result', 'samples', 'family',
 ] as const;
 
 // ── WHAT THIS FRAME ACTUALLY ASKS FOR ────────────────────────────────────
@@ -558,6 +558,17 @@ function inspectFor(camera: Camera): readonly string[] {
   // decided about each cell. 83 KiB at the board's dimensions, and it is what
   // stops the overlay from reprojecting the lattice itself.
   if (s.showSampleLattice) want.push('packed', 'result');
+  // The rectified lines, and the family colouring of the composite lines -- TWO
+  // VIEWS OF ONE CLASSIFICATION, which is why one pair of buffers serves both.
+  // `samples`/`family` are per LINE (uncompacted), so they join to `composites`
+  // by index; `rowSamples`/`colSamples` hold the same numbers compacted per
+  // family, which would have cost a second join to get back to a line.
+  if (s.showRectifiedLines || (s.showLsdComposite && s.showCompositeLineFamilies)) {
+    want.push('samples', 'family');
+    // The Through-Cam view needs the segments themselves to colour; the
+    // Projected-Cam one does not, but asking twice is free -- runPose2 dedupes.
+    if (s.showLsdComposite) want.push('lines', 'lineScan');
+  }
   return want;
 }
 
@@ -666,11 +677,11 @@ function unpackVotes(bytes: ArrayBuffer, lineCount: number): { n: THREE.Vector3;
 // already had.
 function unpackComposites(
   lines: ArrayBuffer, lineScan: ArrayBuffer, regionCount: number, lineCount: number,
-): { region: number; line: CompositeLine }[] {
+): { region: number; index: number; line: CompositeLine }[] {
   const seg = new Float32Array(lines);
   const scan = new Uint32Array(lineScan);
   const emitted = Math.min(lineCount, seg.length / 4);
-  const out: { region: number; line: CompositeLine }[] = [];
+  const out: { region: number; index: number; line: CompositeLine }[] = [];
   for (let r = 0; r < regionCount; r++) {
     // vec2 per entry, and only .x carries the flag -- see BUFFERS.lineFlag.
     const at = scan[r * 2]!;
@@ -679,9 +690,25 @@ function unpackComposites(
     const next = r + 1 < regionCount ? scan[(r + 1) * 2]! : emitted;
     if (next <= at || at >= emitted) continue;
     out.push({
-      region: r,
+      // `at` IS the line's own slot, and carrying it is what lets the family
+      // colouring join this segment to its rectified coordinates without a
+      // second scan of the same flags.
+      region: r, index: at,
       line: { x1: seg[at * 4]!, y1: seg[at * 4 + 1]!, x2: seg[at * 4 + 2]!, y2: seg[at * 4 + 3]! },
     });
+  }
+  return out;
+}
+
+// (isRow, isCol) per line, collapsed to one signed byte. Both zero is a real
+// third state -- gpp.classify writes it for a degenerate line and for the dead
+// tail past `lineCount` -- and it is NOT the same fact as "column family", which
+// is the encoding trap GPP_CLASSIFY_WGSL's own header records one level down.
+function unpackFamilies(bytes: ArrayBuffer): Int8Array {
+  const f = new Uint32Array(bytes);
+  const out = new Int8Array(f.length / 2);
+  for (let i = 0; i < out.length; i++) {
+    out[i] = f[i * 2] === 1 ? 1 : (f[i * 2 + 1] === 1 ? 0 : -1);
   }
   return out;
 }
@@ -751,6 +778,8 @@ function toCameraPose(frame: Pose2Frame): CameraPose {
       ? { composites: unpackComposites(inspected['lines'], inspected['lineScan'], regionCount, pose.lineCount) }
       : {}),
     ...(inspected['rects'] ? { rects: new Float32Array(inspected['rects']) } : {}),
+    ...(inspected['samples'] ? { rectified: new Float32Array(inspected['samples']) } : {}),
+    ...(inspected['family'] ? { lineFamily: unpackFamilies(inspected['family']) } : {}),
     // All three or none -- see RegionCsr. They are requested together and this is
     // the one place that could hand back a half of one.
     ...(inspected['members'] && inspected['regionOffsets'] && inspected['regionSizes']

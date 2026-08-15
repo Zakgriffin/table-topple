@@ -5,7 +5,7 @@ import { flipDy, pipelineField } from './pipelineField.ts';
 import { recomputeFromLastCapture } from '../pipeline/axesReconstruction.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';
-import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleRectifiedLinesBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import { persistConfig } from '../config.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
@@ -50,14 +50,60 @@ export function clearArrowOverlays() {
 // correct as written -- and it was correct-looking either way round, which is
 // why the stale comment survived. See overlays/pipelineField.ts.
 //
-// COLOUR: overlays/lsdOverlay.ts's regionRgb, hashed from the index of the
-// REGION the segment was fitted to -- the same call the fitted outline and the
-// region's own member pixels make, which is what makes the three views one
-// picture rather than three. The
-// showCompositeLineFamilies mode -- blue=row, red=column, shaded by each line's
-// rank within its family -- needs the period search's rectified values, which
-// are `rowSamples`/`colSamples` and are not requested yet, so the toggle
-// currently recolours nothing.
+// Each classified line's position in its own family, ordered by the rectified
+// coordinate -- which is the order the period search assigns integer indices in,
+// so this is literally the sequence the fit will register them as.
+//
+// SORTED HERE, not upstream. `rectified` arrives in line order because that is
+// the order `samples` is written in, and the two families interleave; the
+// pipeline's own compaction (`rowSamples`/`colSamples`) does not sort either,
+// since gpp only ever needs the spread and the resultant. So the ranking is a
+// display question and this is where it belongs.
+//
+// Returns null when the buffers were not requested, which is the usual "absent
+// means draw something else" rather than a failure.
+function familyRanks(camera: Camera): Map<number, { isRow: boolean; t: number }> | null {
+  const rectified = camera.pose?.rectified, family = camera.pose?.lineFamily;
+  const lineCount = camera.pose?.lineCount;
+  if (!rectified || !family || lineCount === undefined) return null;
+
+  const n = Math.min(lineCount, family.length, rectified.length / 4);
+  const byFamily: [{ i: number; value: number }[], { i: number; value: number }[]] = [[], []];
+  for (let i = 0; i < n; i++) {
+    const fam = family[i]!;
+    if (fam < 0) continue; // neither family -- see CameraPose.lineFamily
+    byFamily[fam]!.push({ i, value: rectified[i * 4]! });
+  }
+  const out = new Map<number, { isRow: boolean; t: number }>();
+  for (const fam of [0, 1] as const) {
+    const list = byFamily[fam]!;
+    list.sort((p, q) => p.value - q.value);
+    // A single-member family has no gradient to shade along, so it takes the
+    // full colour rather than a 0/0.
+    const last = Math.max(list.length - 1, 1);
+    list.forEach((e, k) => out.set(e.i, { isRow: fam === 1, t: k / last }));
+  }
+  return out;
+}
+
+// TWO COLOURINGS, and they answer different questions.
+//
+// By default each segment takes overlays/lsdOverlay.ts's regionRgb, hashed from
+// the index of the REGION it was fitted to -- the same call the fitted outline
+// and the region's own member pixels make, which is what makes those views one
+// picture rather than three. That answers "which blob produced this".
+//
+// `showCompositeLineFamilies` answers a different one -- "what will the period
+// search make of this" -- so it recolours by CLASSIFICATION: blue for the row
+// family, red for the column family, each shaded by the line's RANK within its
+// family. The rank is the order the search registers lines in, so a segment
+// whose shade breaks the gradient along the floor is one the search has ordered
+// wrongly, which is what makes a period wrong. Grey for a line gpp classified
+// into neither family (degenerate, or no gnomonic image).
+//
+// It is the same classification the Projected-Cam rectified lines draw, off the
+// same two buffers -- see gridPeriodPhaseOverlays.ts. This view keeps the lines
+// where they are in the IMAGE; that one straightens them.
 function drawCompositeLines(camera: Camera) {
   while (lsdCompositeGroup.firstChild) lsdCompositeGroup.removeChild(lsdCompositeGroup.firstChild);
   const settings = camera.settings;
@@ -73,19 +119,20 @@ function drawCompositeLines(camera: Camera) {
     };
   };
 
-  // The row/column FAMILY colouring ranked each detected line by its rectified
-  // periodic coordinate, which came off the deleted period search's rowLines/
-  // colLines. Nothing produces those now, so both ranks stay null and the lines
-  // draw in their un-ranked colour -- which is exactly what already happened
-  // whenever the toggle was off or the search had not run.
-  for (const { region, line } of composites) {
+  const ranks = settings.showCompositeLineFamilies ? familyRanks(camera) : null;
+  for (const { region, index, line } of composites) {
     const a = toScreen(line.x1, line.y1), b = toScreen(line.x2, line.y2);
     let strokeColor: string;
-    {
-      // The blue/red FAMILY colouring used to go here, ranking each line by its
-      // rectified periodic coordinate. That came off the deleted period search
-      // (rowLines/colLines), so every line now takes its region hash colour --
-      // which is the branch that already ran whenever the toggle was off.
+    const ranked = ranks?.get(index);
+    if (ranked) {
+      // Shade from near-black at rank 0 to full colour at the last -- the
+      // sequence, not just the membership. Value, not hue: the hue is the family
+      // and must stay readable as one of two things.
+      const [hr, hg, hb] = hsvToRgb(ranked.isRow ? 210 : 0, 0.85, 0.35 + 0.65 * ranked.t);
+      strokeColor = `rgb(${hr},${hg},${hb})`;
+    } else if (ranks) {
+      strokeColor = 'rgb(130,130,130)'; // classified into neither family
+    } else {
       const [hr, hg, hb] = regionRgb(region);
       strokeColor = `rgb(${hr},${hg},${hb})`;
     }
@@ -284,12 +331,16 @@ toggleLsdCompositeBtn.addEventListener('click', () => {
   persistConfig();
   drawCompositeLines(cam);
 });
+// It DOES recolour the same lines rather than recomputing them -- but the colour
+// now comes from a readback (`samples`/`family`, see inspectFor), so a run taken
+// while this was off has nothing to recolour FROM. Hence the recompute, same as
+// every other toggle that gates a buffer.
 toggleCompositeLineFamiliesBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showCompositeLineFamilies = !cam.settings.showCompositeLineFamilies;
   toggleCompositeLineFamiliesBtn.classList.toggle('active', cam.settings.showCompositeLineFamilies);
   persistConfig();
-  drawCompositeLines(cam); // recolors the SAME lines, doesn't recompute them
+  recomputeFromLastCapture(cam);
 });
 // The two arrow toggles also gained a recompute, for the same reason as the
 // raster overlays above: the arrows read the pose run's fx/fy, which the run
@@ -331,6 +382,14 @@ toggleSampleLatticeBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showSampleLattice = !cam.settings.showSampleLattice;
   toggleSampleLatticeBtn.classList.toggle('active', cam.settings.showSampleLattice);
+  persistConfig();
+  recomputeFromLastCapture(cam);
+});
+// Same story one overlay across: it gates `samples`/`family`.
+toggleRectifiedLinesBtn.addEventListener('click', () => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.showRectifiedLines = !cam.settings.showRectifiedLines;
+  toggleRectifiedLinesBtn.classList.toggle('active', cam.settings.showRectifiedLines);
   persistConfig();
   recomputeFromLastCapture(cam);
 });

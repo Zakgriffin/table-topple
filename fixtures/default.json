@@ -55,6 +55,7 @@
         "gridPeriodPhaseGapLowerBound": 0.005,
         "showCompositeLineFamilies": false,
         "showSampleLattice": true,
+        "showRectifiedLines": true,
         "useTrueCardinalOrientation": false,
         "fieldView": "noised",
         "axesAutoCapture": false,

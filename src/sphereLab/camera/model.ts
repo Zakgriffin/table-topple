@@ -155,9 +155,26 @@ export interface CameraPose {
   /** One vote normal per detected line, in MATH_QUAT's fixed math frame.
    *  Zero-weight votes are dropped rather than passed on. */
   votes?: { n: THREE.Vector3; weight: number }[];
-  /** The detected segments, each tagged with the REGION INDEX it was fitted to
-   *  -- the same key every other view of that region colours by. */
-  composites?: { region: number; line: CompositeLine }[];
+  /**
+   * The detected segments. `region` is the index of the region each was fitted
+   * to -- the key every other view of that region colours by. `index` is the
+   * segment's own slot in the pipeline's line arrays, which is what joins it to
+   * `rectified`/`lineFamily` below.
+   */
+  composites?: { region: number; index: number; line: CompositeLine }[];
+  /**
+   * Per LINE, 4 f32: value, weight, crossMin, crossMax -- the segment's
+   * coordinates once the recovered axes flatten the floor. `value` is the
+   * coordinate the line holds CONSTANT (xCol for a row line, xRow for a column
+   * line) and cross[Min,Max] span the one it RUNS ALONG. Gnomonic units:
+   * multiply by `recoveredAxes.distance` for floor coordinates.
+   *
+   * Flat and unbounded by its own length, like `rects` -- see `lineCount`.
+   */
+  rectified?: Float32Array;
+  /** Per LINE: 1 row family, 0 column family, -1 not classified (a degenerate
+   *  line, or one whose endpoints had no gnomonic image). */
+  lineFamily?: Int8Array;
   /**
    * One fitted rectangle per REGION, flat: 10 f32 each --
    * cx, cy, theta, length, width, nfaLog10, accepted, pad, n, k. Bounded by

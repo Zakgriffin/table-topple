@@ -27,6 +27,7 @@ export const toggleProductCurveBtn = document.getElementById('toggleProductCurve
 // was moved and resized on every animation frame.
 export const projectedSvgOverlay = document.getElementById('projectedSvgOverlay') as unknown as SVGSVGElement;
 export const sampleLatticeGroup = document.getElementById('sampleLatticeGroup') as unknown as SVGGElement;
+export const rectifiedLinesGroup = document.getElementById('rectifiedLinesGroup') as unknown as SVGGElement;
 export const overlayPanel = document.getElementById('overlayPanel') as HTMLDivElement;
 export const overlayPanelToggle = document.getElementById('overlayPanelToggle') as HTMLButtonElement;
 export const contamToggles = document.getElementById('contamToggles') as HTMLDivElement;
@@ -52,6 +53,7 @@ export const arrowToggles = document.getElementById('arrowToggles') as HTMLDivEl
 export const projectedToggles = document.getElementById('projectedToggles') as HTMLDivElement;
 export const toggleTrueCardinalOrientationBtn = document.getElementById('toggleTrueCardinalOrientation') as HTMLButtonElement;
 export const toggleSampleLatticeBtn = document.getElementById('toggleSampleLattice') as HTMLButtonElement;
+export const toggleRectifiedLinesBtn = document.getElementById('toggleRectifiedLines') as HTMLButtonElement;
 export const simDistortionSection = document.getElementById('simDistortionSection') as HTMLDivElement;
 
 export const modeBtns: Record<Mode, HTMLButtonElement> = {

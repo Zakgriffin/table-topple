@@ -20,7 +20,7 @@ import { profilerReset, profilerSetDevToolsMirror } from '../profiling/profiler.
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { type FieldView } from '../types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, loadConfigBtn, saveConfigBtn, configStatus, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, loadConfigBtn, saveConfigBtn, configStatus, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleRectifiedLinesBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Tells config.ts which camera's settings persistConfig should capture before
@@ -222,6 +222,7 @@ export function refreshCameraPanel() {
   toggleReconContamBtn.classList.toggle('active', cam.settings.showReconstructedContamination);
   toggleTrueCardinalOrientationBtn.classList.toggle('active', cam.settings.useTrueCardinalOrientation);
   toggleSampleLatticeBtn.classList.toggle('active', cam.settings.showSampleLattice);
+  toggleRectifiedLinesBtn.classList.toggle('active', cam.settings.showRectifiedLines);
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
   toggleLevelLineArrowBtn.classList.toggle('active', cam.settings.showLevelLineArrow);
   toggleTopGradientBtn.classList.toggle('active', cam.settings.showTopGradient);

@@ -4,71 +4,6 @@ import { type ProjectedBins } from '../types.ts';
 import { type StageRecord } from '../profiling/profiler.ts';
 import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './settings.ts';
 
-// ── What the overlays read, and it is the APP's type now ──────────────────
-//
-// This used to be `Intermediates` in pose/intermediates.ts, one half of a
-// request mechanism: a caller named the fields it wanted, the library handed
-// back a drain handle, and ownership of the chain's device buffers moved with
-// it. All of that existed for one reason -- the pipeline destroyed its buffers
-// before a caller could look -- and the arena removed it. What is left is what
-// this always was underneath: a bag of arrays the display half happens to want.
-//
-// So it lives here, with the thing that stores it. The library has no opinion
-// on which intermediates a view needs, and no longer has a type expressing that
-// it might.
-//
-// ORIENTATION, which is the trap: these are the PIPELINE's own buffers, so they
-// are TOP-DOWN -- the dominant convention everywhere except the preview
-// textures. The flip happens at the PAINT, and it is not merely a row reversal:
-// a vertical flip also negates the vertical derivative and shifts the 2x2
-// stencil by a row, so flipRows(computeField(g)) and computeField(flipRows(g))
-// are different arrays.
-//
-// ── EVERY FIELD IS OPTIONAL, AND THAT IS THE MECHANISM ──
-//
-// `src/pose2` keeps its intermediates on the device and reads back 128 bytes of
-// pose. What lands here is whatever a given capture ASKED for -- see
-// pipeline/axesReconstruction.ts's INSPECT (what may be read) and inspectFor
-// (what this frame requested), and full_system_breakdown.md §18's "Reading a
-// buffer back" for the mechanism. A reader must treat absent as the normal case:
-// a field nobody asked for is not here, and that is the mechanism working.
-//
-// FILLED WITH THE POSE, not after it. There is no drain: pose2 has one fence, so
-// these ride in the same staging buffer as the pose and the published pose is
-// already complete.
-//
-// `regionId` IS NOT COMING BACK, and its absence is not a gap. pose2 computes no
-// per-pixel region id at all, and the region CSR carries the same information;
-// the one thing it bought -- hover to region -- is an inverse-map pass on this
-// side. `regions`, `rects`, `decodeGrid`, `decodeRotated` and `decodeCorrectness`
-// were also here once, typed by the deleted pipeline; each comes back, if it
-// does, as a buffer name and an unpacker, not as that pipeline's vocabulary.
-export interface Intermediates {
-  /** f32 from the device, not the f64 the app's own gradient functions produce.
-   *  See types.ts's FloatField for why nothing converts. */
-  fx?: Float32Array;
-  fy?: Float32Array;
-  /**
-   * One fitted rectangle per REGION, flat: 10 f32 each --
-   * cx, cy, theta, length, width, nfaLog10, accepted, pad, n, k. Indexed by
-   * region, so `regionCount` (below) bounds it, not the array's length.
-   *
-   * FLAT, and deliberately not unpacked into objects here: `src/pose2` hands back
-   * bytes and the one consumer walks them once per capture. A parallel array of
-   * ten-field objects would be the old pipeline's LsdRectangle type rebuilt on
-   * this side, which is what CameraPose exists to avoid.
-   */
-  rects?: Float32Array;
-  /** How many entries of `rects` and `regions` are real. Off `counts`, not off
-   *  either array. */
-  regionCount?: number;
-  /** Which pixels each region is made of. Absent unless a raster asked. */
-  regions?: RegionCsr;
-  /** Where decode sampled the floor, and what it read. Absent unless the sample
-   *  lattice asked. */
-  lattice?: DecodeLattice;
-}
-
 // ── The decode sample lattice, as the Projected-Cam overlay draws it ──────
 //
 // The lattice `decode.build` sampled: one point per cell, in FLOOR (u, v)
@@ -148,72 +83,96 @@ export interface FrameMeta {
 
 // ── The pose, as the app DISPLAYS it ─────────────────────────────────────
 //
-// ONE object, where there used to be thirteen `last*` fields on the camera.
-// The library hands back a PoseResult built fresh per run (pose/
-// poseCompute.ts); the app then DESTRUCTURED it into thirteen separate
-// mutations -- eight at the seam, five more when the deferred readback landed
-// -- which put the result straight back into the shape it was made a return
-// value to escape. An atomically swappable object and an exploded copy of it
-// spread across a camera are not the same thing: the copy can be observed
-// halfway through being replaced, and pipeline/axesReconstruction.ts's visual
-// tail reads camera fields on both sides of its awaits.
+// ONE object, where there used to be thirteen `last*` fields on the camera. An
+// atomically swappable object and an exploded copy of it spread across a camera
+// are not the same thing: the copy can be observed halfway through being
+// replaced, and pipeline/axesReconstruction.ts's visual tail reads camera fields
+// on both sides of its awaits.
 //
-// TWO DIFFERENCES FROM PoseResult, both because this type answers "what is on
-// screen" rather than "what did that call return":
+// ── FLAT, AND EVERY FIELD OPTIONAL. THAT IS THE WHOLE RULE ──
 //
-//   - The CHAIN HANDLES are gone (`chain`, `cpuChain`, `readGrid`). They are
-//     the live pipeline buffers, valid only until the next reconstruction; the
-//     mailbox carries them until the tail reads them, and a pose that is "on
-//     screen" must not hold a pointer that expires under it. Dropping them here
-//     is what makes that a type error rather than a StaleSliceError at paint
-//     time.
-//   - `timing` is NULLABLE, because a pose that arrived already computed from
-//     a phone (pipeline/capture.ts's ingestRemotePose) has no local run behind
-//     it to have timed. Same reason `votes` can be empty and `chainTransfers`
-//     null on that path -- a remote pose genuinely does not carry them, and
-//     the old fields showed the previous LOCAL run's instead.
+// This is what the app KNOWS about the pose on screen, and each field is present
+// exactly when it is known. Two different things make a field absent, and the
+// type deliberately does not distinguish them, because no reader should care:
 //
-// ── IT IS THE APP'S OWN TYPE NOW, NOT A PROJECTION OF PoseResult ──
+//   - the RUN did not produce it (a degenerate fit has no triad; an undecodable
+//     frame has no anchor; a pose relayed from a phone has neither a detector
+//     report nor a status);
+//   - nobody ASKED for it. `src/pose2` keeps its intermediates on the device and
+//     reads back 128 bytes; anything larger arrives only when a display toggle
+//     put it in that frame's request. See INSPECT (what may ever be read) and
+//     `inspectFor` (what this frame asked for) in pipeline/axesReconstruction.ts.
 //
-// This was `Omit<PoseResult, 'chain' | 'cpuChain' | 'readGrid' | 'timing'>`.
-// PoseResult is deleted with `src/pose`, and it was NOT re-homed: it described
-// that pipeline's return shape -- a chain, a timing DAG, a backend-dependent
-// transfer ledger -- and `src/pose2` returns a plain struct instead. Deriving
-// the app's display type from it would have kept the old shape alive under a
-// new path, which is the one thing the rewrite was for.
+// It was NOT flat before, and the split it had was historical rather than
+// meaningful: `votes` and `voteComposites` sat at the top level while `fx`/`fy`
+// sat inside a nested `intermediates` bag, though all four are opt-in on exactly
+// the same terms. Three more fields (`gridPeriodPhase`, `chainTransfers`,
+// `timing`) were typed `null` -- placeholders for shapes the deleted pipeline
+// had, written on every path and read by nothing.
 //
-// So the fields are spelled out, and the ones nothing can fill are typed
-// `null` rather than left as optimistic shapes:
-//   - `gridPeriodPhase` was the period search's full result, rowLines/colLines/
-//     debug included, and drove the debug plot;
-//   - `chainTransfers` was the bus-crossing ledger, which pose2 does not have a
-//     concept of (one crossing per frame, by construction).
+// ── ABSENCE IS NOT A FAILURE REPORT. `status` IS ──
+//
+// The readout used to infer WHY a frame produced nothing from which field came
+// back null, which is why `quadricPair` existed at all: the same three vectors
+// as `recoveredAxes`, gated one stage earlier, so that "degenerate fit" could be
+// told from "no lattice". The pipeline reports that directly -- §15's bits, in
+// `status` -- so the inference is gone and so is the duplicate triad.
+//
+// ORIENTATION, the trap that outlives every refactor: `fx`/`fy`, `rects`,
+// `regions` and `lattice` are the PIPELINE's own buffers, so they are TOP-DOWN,
+// the dominant convention everywhere except the preview textures. The flip
+// happens at the PAINT, and it is not merely a row reversal -- a vertical flip
+// also negates the vertical derivative and shifts the 2x2 stencil by a row, so
+// flipRows(computeField(g)) and computeField(flipRows(g)) are different arrays.
 export interface CameraPose {
-  voteComposites: { root: number; line: CompositeLine }[];
-  // The vote NORMALS, one per detected line, and only when a display toggle asked
-  // for them -- they are hundreds of thousands of vec4s on a real capture, so the
-  // pipeline is not asked to send them for nobody. EMPTY IS NOT "NO LINES": read
-  // `lineCount` for that, which always arrives.
-  votes: { n: THREE.Vector3; weight: number }[];
-  // How many lines the detector actually found, off the pose block itself rather
-  // than off `votes.length`. Its own field precisely BECAUSE `votes` is optional:
-  // a readout keyed to the array would report zero whenever the circles overlay
-  // happened to be switched off, which reads as a detection failure.
-  // -1 where nothing counted -- a remote pose carries no line count.
-  lineCount: number;
-  quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
-  gridPeriodPhase: null;
-  recoveredAxes: RecoveredAxes | null;
-  positionDecode: PositionDecodeResult | null;
-  chainTransfers: null;
-  timing: null;
-  // What the drain pulled back FOR THIS POSE, and see Intermediates: empty, and
-  // empty for every run, until pose2 grows an opt-in readback.
-  //
-  // Inside the pose rather than beside it, and that is still the point: a decode
-  // grid cannot be displayed next to a different run's axes when the two travel
-  // in one pointer.
-  intermediates: Intermediates;
+  /** `POSE2_STATUS` bits, verbatim (see src/pose2/pose.ts). Absent when no local
+   *  run produced them, i.e. a pose relayed from a phone. This is the ONLY
+   *  honest source for why a frame came back empty -- `ordinary` outcomes, `cap`
+   *  outcomes and `budget` outcomes all look identical from a null field. */
+  status?: number;
+  /** How many lines the detector found, off the pose block rather than off
+   *  `votes.length` -- that array is opt-in, and a readout keyed to its length
+   *  reported "0 lines" on a good frame whenever the circles overlay was off. */
+  lineCount?: number;
+  /** How many line-support regions collect kept. Also off the pose block, so it
+   *  needs no readback of its own; CLAMPED to maxRegions, unlike the block's own
+   *  value, which is raw so `finish` can report `regionOverflow`. */
+  regionCount?: number;
+
+  /** The recovered axis frame and its scale. Absent when the fit was degenerate
+   *  or the lattice never resolved -- `status` says which. */
+  recoveredAxes?: RecoveredAxes;
+  /** Where the camera is, in board coordinates and in the world. Absent when no
+   *  anchor won. */
+  positionDecode?: PositionDecodeResult;
+
+  // ── Opt-in display buffers, present only when this frame requested them ──
+
+  /** The gradient field. f32 from the device, not the f64 the app's own gradient
+   *  functions produce -- see types.ts's FloatField for why nothing converts. */
+  fx?: Float32Array;
+  fy?: Float32Array;
+  /** One vote normal per detected line, in MATH_QUAT's fixed math frame.
+   *  Zero-weight votes are dropped rather than passed on. */
+  votes?: { n: THREE.Vector3; weight: number }[];
+  /** The detected segments, each tagged with the REGION INDEX it was fitted to
+   *  -- the same key every other view of that region colours by. */
+  composites?: { region: number; line: CompositeLine }[];
+  /**
+   * One fitted rectangle per REGION, flat: 10 f32 each --
+   * cx, cy, theta, length, width, nfaLog10, accepted, pad, n, k. Bounded by
+   * `regionCount`, not by the array's length.
+   *
+   * FLAT, and deliberately not unpacked into objects: `src/pose2` hands back
+   * bytes and the one consumer walks them once per capture. A parallel array of
+   * ten-field objects would be the deleted pipeline's LsdRectangle rebuilt on
+   * this side, which is what this type exists to avoid.
+   */
+  rects?: Float32Array;
+  /** Which pixels each region is made of. Only the two per-pixel rasters need it. */
+  regions?: RegionCsr;
+  /** Where decode sampled the floor, and what it read. */
+  lattice?: DecodeLattice;
 }
 
 // ── The display half of the deleted pipeline's vocabulary ────────────────
@@ -224,8 +183,14 @@ export interface CameraPose {
 // which is why these three came across and the rest did not.
 export interface RecoveredAxes { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3; distance: number }
 export interface CompositeLine { x1: number; y1: number; x2: number; y2: number }
+// `votes` and `totalWindows` were here and are gone: the winning anchor's vote
+// count and the number of windows that voted at all were carried on both paths
+// and displayed by neither. So were `correct`/`wrong`, added one commit earlier
+// on the belief that the sample lattice's self-check read them here -- it reads
+// them off the Pose2Result directly, at unpack time, and never needed a copy on
+// the display type.
 export interface PositionDecodeResult {
-  row: number; col: number; consistency: number; votes: number; totalWindows: number;
+  row: number; col: number; consistency: number;
   camPos: THREE.Vector3;
   // The camera's TRUE world orientation, solved entirely from the pattern.
   // Anything placed into the actual 3D scene needs this to convert
@@ -234,12 +199,6 @@ export interface PositionDecodeResult {
   recoveredCamQuat: THREE.Quaternion;
   // Which of the 4 cardinal rotations the decode matched at -- display-only.
   orientation: number;
-  // The two counters `consistency` is the ratio of, carried separately because
-  // a ratio cannot be checked against anything. They are the ORACLE for the
-  // sample lattice's per-cell correctness, which is re-derived on this side --
-  // see pipeline/decodeLattice.ts. -1 on a remote pose, which reports a ratio
-  // and not its parts.
-  correct: number; wrong: number;
 }
 
 // The deferred-visualization mailbox's payload -- the pose the tail is to

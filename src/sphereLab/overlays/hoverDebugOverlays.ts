@@ -28,30 +28,16 @@ export function clearArrowOverlays() {
 
 
 
-// Draws the pose's own voteComposites -- the composite lines actually fed to
-// fitPairOfPlanes and classified by pose/stages/period/gridPeriodPhase.ts (pipeline/
-// votes.ts's computeGradient2x2Composites). Drawing this exact same array
-// (rather than an independently-recomputed copy) guarantees a line's root
-// here means the same thing as it does in gpp's own row/col maps.
+// Draws the pose's own `composites` -- the detected segments the pipeline
+// actually voted from, as SVG lines in lsdCompositeGroup. Drawing that exact
+// array rather than an independently-recomputed copy is the point: a second
+// detector in an overlay is the failure this whole display path is built to
+// avoid, and a past version of this file had precisely that mismatch.
 //
-// Family coloring (pose/stages/period/gridPeriodPhase.ts): blue = row family, red =
-// column family, black -> full-color by each line's own RANK within its
-// family (sorted by its rectified `value` -- the same order the
-// period/phase fit itself assigns integer indices in), so this literally
-// shows the sequence the fit will register each line as. Gray for any line
-// gridPeriodPhase itself skipped (e.g. a degenerate gnomonic projection).
-// Draws the pose's own voteComposites -- the composite lines actually fed to
-// fitPairOfPlanes and classified by pose/stages/period/gridPeriodPhase.ts (pipeline/
-// votes.ts's computeGradient2x2Composites) -- as SVG lines in
-// lsdCompositeGroup. Populated once per REAL capture (not live-recomputed
-// per LSD slider tweak, unlike the rectangle/rejected/raw-region views in
-// overlays/lsdOverlay.ts): their pixel coords come from the
-// row-flipped `gray` axesReconstruction.ts feeds the vote/grid-period-phase
-// pipeline (its own flipRowsF64, kept separate from
-// camera.lastNoisedPreviewGray), and recomputing that same row-flip
-// live from the raw preview would risk exactly the kind of "two different
-// computations of the same thing" mismatch a past version of this file
-// already had and fixed -- see this file's git history.
+// (A second copy of this paragraph sat here, describing the same function twice
+// and citing files deleted with `src/pose`. Both copies also claimed the
+// endpoints came from a ROW-FLIPPED gray, which the arithmetic below has never
+// matched -- see the next block.)
 //
 // ── THE COORDINATES ARE TOP-DOWN, whatever the paragraph above once said ──
 //
@@ -75,7 +61,7 @@ export function clearArrowOverlays() {
 function drawCompositeLines(camera: Camera) {
   while (lsdCompositeGroup.firstChild) lsdCompositeGroup.removeChild(lsdCompositeGroup.firstChild);
   const settings = camera.settings;
-  const composites = camera.pose?.voteComposites;
+  const composites = camera.pose?.composites;
   if (!settings.showLsdComposite || !composites) return;
   const rect = computeThroughRect(camera);
   const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
@@ -92,15 +78,15 @@ function drawCompositeLines(camera: Camera) {
   // colLines. Nothing produces those now, so both ranks stay null and the lines
   // draw in their un-ranked colour -- which is exactly what already happened
   // whenever the toggle was off or the search had not run.
-  for (const { root, line } of composites) {
+  for (const { region, line } of composites) {
     const a = toScreen(line.x1, line.y1), b = toScreen(line.x2, line.y2);
     let strokeColor: string;
     {
       // The blue/red FAMILY colouring used to go here, ranking each line by its
       // rectified periodic coordinate. That came off the deleted period search
-      // (rowLines/colLines), so every line now takes the per-root hash colour --
+      // (rowLines/colLines), so every line now takes its region hash colour --
       // which is the branch that already ran whenever the toggle was off.
-      const [hr, hg, hb] = regionRgb(root);
+      const [hr, hg, hb] = regionRgb(region);
       strokeColor = `rgb(${hr},${hg},${hb})`;
     }
     // Grouped (not two independently-alpha'd strokes) so the halo+color

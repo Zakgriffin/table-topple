@@ -89,7 +89,7 @@ export function hideGridPeriodPhaseProjected() {
 // the rect moves (a resize), or the rotation/toggle flips.
 //
 // Compared by IDENTITY on the two objects, which is exact rather than a
-// heuristic: `intermediates.lattice` and `lastProjectedBins` are both rebuilt
+// heuristic: `pose.lattice` and `lastProjectedBins` are both rebuilt
 // per capture, so a new one is a new object and an unchanged one is the same
 // pointer.
 let drawn: {
@@ -100,7 +100,7 @@ let drawn: {
 // ── THE SAMPLE LATTICE IS BACK; THE RECTIFIED LINES ARE NOT ──────────────
 //
 // One dot per decode sample, filled by the bit it read and ringed by whether
-// that bit matched the printed board -- off `intermediates.lattice`, see
+// that bit matched the printed board -- off `pose.lattice`, see
 // pipeline/decodeLattice.ts.
 //
 // SVG, LIKE THE THROUGH-CAM OVERLAYS, and no longer a canvas. Same shape as
@@ -124,7 +124,7 @@ let drawn: {
 export function drawGridPeriodPhaseProjected(
   camera: Camera, x: number, y: number, w: number, h: number, rotationSteps = 0,
 ) {
-  const lattice = camera.settings.showSampleLattice ? camera.pose?.intermediates.lattice : undefined;
+  const lattice = camera.settings.showSampleLattice ? camera.pose?.lattice : undefined;
   const bins = camera.lastProjectedBins;
   if (!lattice || !bins) { hideGridPeriodPhaseProjected(); return; }
   if (drawn && drawn.lattice === lattice && drawn.bins === bins

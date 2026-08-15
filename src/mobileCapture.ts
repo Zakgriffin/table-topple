@@ -1528,7 +1528,12 @@ interface PoseRecord {
   distance: number | null;
   dnormal: number[] | null;
   consistency: number | null;
-  votes: number | null; totalWindows: number | null;
+  // `votes` and `totalWindows` -- the winning anchor's vote count and how many
+  // windows voted at all -- were here and are gone with the display type that
+  // carried them (sphereLab/camera/model.ts's PositionDecodeResult). Nothing
+  // read them on either side. They are pose-BLOCK quantities in src/pose2, so
+  // when this page is wired onto that pipeline they come back off the block
+  // directly rather than through a display struct.
 }
 let poseRing: PoseRecord[] = [];
 function recordPose(r: PoseRecord) {
@@ -2076,7 +2081,6 @@ async function captureComputeAndSendPose() {
       distance: pose.recoveredAxes ? pose.recoveredAxes.distance : null,
       dnormal: pose.recoveredAxes ? pose.recoveredAxes.Dnormal.toArray() : null,
       consistency: pd ? pd.consistency : null,
-      votes: pd ? pd.votes : null, totalWindows: pd ? pd.totalWindows : null,
     });
     // ── The one place IMU correction actually changes behaviour ──────────
     //
@@ -2137,8 +2141,7 @@ async function captureComputeAndSendPose() {
         } : null,
         positionDecode: pd ? {
           row: pd.row, col: pd.col,
-          consistency: pd.consistency, votes: pd.votes,
-          totalWindows: pd.totalWindows,
+          consistency: pd.consistency,
           camPos: pd.camPos.toArray(),
           recoveredCamQuat: pd.recoveredCamQuat.toArray(),
           orientation: pd.orientation,

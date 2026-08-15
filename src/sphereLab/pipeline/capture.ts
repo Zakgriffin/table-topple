@@ -268,8 +268,12 @@ export async function ingestRealCapture(
 export interface RemotePoseMessage {
   w: number; h: number;
   recoveredAxes: { Drow: number[]; Dcol: number[]; Dnormal: number[]; distance: number } | null;
+  // `votes`/`totalWindows` came off this shape with the display type that
+  // carried them -- nothing on either side read them. A phone built before this
+  // change still sends them; extra keys in the JSON are simply not described
+  // here, the same treatment `debug.pipeline.gridPeriodPhase` already gets.
   positionDecode: {
-    row: number; col: number; consistency: number; votes: number; totalWindows: number;
+    row: number; col: number; consistency: number;
     camPos: number[]; recoveredCamQuat: number[]; orientation: number;
   } | null;
   debug?: {
@@ -349,48 +353,35 @@ export async function ingestRemotePose(
   // published in one assignment, exactly like a local run's (see
   // axesReconstruction.ts's applyPoseResult).
   //
-  // Three fields are genuinely absent on this path rather than defaulted:
-  // `votes` (the phone sends its recovered axes, not the vote vectors they
-  // were fit from), `chainTransfers` and `timing` (there was no local run to
-  // have measured). They used to be separate camera fields this function never
-  // wrote, so each showed the last LOCAL reconstruction's value instead --
-  // stale data that no reader could tell from fresh.
+  // A REMOTE POSE IS MOSTLY ABSENCES, and the flat CameraPose now says so by
+  // omission rather than by sentinel. What the phone sends is what it
+  // RECOVERED -- an axis frame and a decoded position. It sends no detector
+  // report (so no `lineCount`, no `regionCount`, no vote normals), no §15
+  // `status` (there was no local run to have one), and none of the opt-in
+  // display buffers, which are device memory on a machine that is not this one.
+  //
+  // Every one of those used to be a written field: `-1` for the counts, `[]` for
+  // the arrays, `null` for the rest. They existed because the type demanded a
+  // value, and each one had to argue in a comment for why its particular
+  // placeholder did not read as an answer. Leaving the key out says it once.
   const pose: CameraPose = {
-    voteComposites: pipelineDebug?.voteComposites ?? [],
-    votes: [],
-    // -1, not 0: the phone sends a pose, not a detector report, so "how many
-    // lines" has no answer on this path. Zero would be an answer, and a wrong one.
-    lineCount: -1,
-    // quadricPair (Drow/Dcol/Dnormal BEFORE gridPeriodPhase gating, see
-    // pose/poseCompute.ts's PoseResult) is never transmitted over the wire --
-    // whenever recoveredAxes is non-null, gridPeriodPhase already succeeded on
-    // the phone, so its Drow/Dcol/Dnormal are EXACTLY quadricPair's own (see
-    // poseCompute.ts's assembly of both fields from the same
-    // rowDirRecovered/colDirRecovered/quadricPair.Dnormal) -- reconstructing it
-    // here needs no extra wire data.
-    quadricPair: recoveredAxes ? {
-      Drow: recoveredAxes.Drow.clone(),
-      Dcol: recoveredAxes.Dcol.clone(),
-      Dnormal: recoveredAxes.Dnormal.clone(),
-    } : null,
-    // The phone still sends a gridPeriodPhase blob; CameraPose has no type for
-    // it any more and no consumer, so it is dropped here rather than carried.
-    gridPeriodPhase: null,
-    recoveredAxes,
-    positionDecode: msg.positionDecode ? {
-      row: msg.positionDecode.row, col: msg.positionDecode.col, consistency: msg.positionDecode.consistency,
-      votes: msg.positionDecode.votes, totalWindows: msg.positionDecode.totalWindows,
-      camPos: new THREE.Vector3().fromArray(msg.positionDecode.camPos),
-      recoveredCamQuat: new THREE.Quaternion().fromArray(msg.positionDecode.recoveredCamQuat),
-      orientation: msg.positionDecode.orientation,
-      // -1, for the same reason lineCount is: the wire carries the RATIO, and
-      // the two counts it came from are not on it. Zero would say "the grid was
-      // compared and nothing matched", which is a different and false claim.
-      correct: -1, wrong: -1,
-    } : null,
-    chainTransfers: null,
-    timing: null,
-    intermediates: {},
+    ...(recoveredAxes ? { recoveredAxes } : {}),
+    ...(msg.positionDecode
+      ? {
+        positionDecode: {
+          row: msg.positionDecode.row, col: msg.positionDecode.col,
+          consistency: msg.positionDecode.consistency,
+          camPos: new THREE.Vector3().fromArray(msg.positionDecode.camPos),
+          recoveredCamQuat: new THREE.Quaternion().fromArray(msg.positionDecode.recoveredCamQuat),
+          orientation: msg.positionDecode.orientation,
+        },
+      }
+      : {}),
+    // The phone's composite lines are the one display array that DOES cross the
+    // wire, inside the optional debug blob.
+    ...(pipelineDebug?.voteComposites
+      ? { composites: pipelineDebug.voteComposites.map((c) => ({ region: c.root, line: c.line })) }
+      : {}),
   };
   camera.pose = pose;
 

@@ -471,10 +471,9 @@ function refreshLsd() {
   updateLsdOverlay(cam); // handles its own full redraw (SVG rectangles + raster raw-regions/rejected) internally
 }
 // refreshLsd() updates the live-preview LSD debug overlay only (reads
-// camera.lastNoisedPreviewGray) -- a separate, already-correct concern from
-// the PRODUCTION composite lines these same settings feed (stage 3, see
-// pose/stages/votes/votes.ts's computeGradient2x2Composites), so recomputeFromLastCapture
-// is also needed here or the pose's voteComposites/gridPeriodPhase go stale.
+// camera.lastNoisedPreviewGray) -- a separate concern from the PRODUCTION
+// segments these same settings feed, so recomputeFromLastCapture is also needed
+// here or the pose's own `composites` and `rects` go stale.
 bindSlider('lsdToleranceDeg', config.camera.common.lsdToleranceDeg, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdToleranceDeg = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => `${v.toFixed(1)}°`);
 bindSlider('lsdRhoNoiseThreshold', config.camera.common.lsdRhoNoiseThreshold, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
 bindSlider('lsdRhoHighThreshold', config.camera.common.lsdRhoHighThreshold, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoHighThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));

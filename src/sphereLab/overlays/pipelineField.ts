@@ -46,8 +46,8 @@ import type { GradientField } from '../types.ts';
 // stage straight back, and would do it on the path where it is hardest to
 // notice: the one where the request was misconfigured.
 export function pipelineField(camera: Camera): GradientField | null {
-  const fx = camera.pose?.intermediates.fx;
-  const fy = camera.pose?.intermediates.fy;
+  const fx = camera.pose?.fx;
+  const fy = camera.pose?.fy;
   if (!fx || !fy) return null;
   // r: 1 matches computeGradient2x2Field's own output -- the 2x2 stencil reads
   // one pixel forward, so the last row and column are never written.

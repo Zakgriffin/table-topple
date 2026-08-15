@@ -143,13 +143,17 @@ export function updateSphereOverlays(camera: Camera, vFovRad: number) {
   camera.circlesGroup.visible = settings.showCircles;
   camera.sphereShell.visible = settings.showSphere;
 
-  // quadricPair only reflects orientation-fit success; the poles' actual
-  // position is only ever written on a successful position decode (see
-  // runPositionDecode's caller) -- gating on the fit alone leaves them
-  // visible at a stale/default (0,0,0) whenever decode fails independently,
-  // same failure updateRecoveredCamGizmo/applyRecoveredFloorOverlay already
-  // guard against via positionDecode.
-  const recoveredPolesVisible = settings.showRecoveredPoles && !!camera.pose?.quadricPair && !!camera.pose.positionDecode;
+  // BOTH, and the AND is the load-bearing half: the poles' actual position is
+  // only ever written on a successful position decode, so gating on the axes
+  // alone would leave them visible at a stale/default (0,0,0) whenever decode
+  // failed -- the same failure updateRecoveredCamGizmo and
+  // applyRecoveredFloorOverlay already guard against via positionDecode.
+  //
+  // This read `quadricPair` before: the same three vectors gated one stage
+  // earlier. Nothing changes, because `positionDecode` cannot exist without the
+  // lattice `recoveredAxes` waits for -- the pair was only ever as available as
+  // the later of the two.
+  const recoveredPolesVisible = settings.showRecoveredPoles && !!camera.pose?.recoveredAxes && !!camera.pose.positionDecode;
   camera.recoveredRowPoleA.visible = recoveredPolesVisible;
   camera.recoveredRowPoleB.visible = recoveredPolesVisible;
   camera.recoveredColPoleA.visible = recoveredPolesVisible;

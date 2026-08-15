@@ -31,7 +31,7 @@ function hashSeedIndexToHueDeg(seedIndex: number): number {
 // ── THREE VIEWS ARE BACK; ONE IS STILL DARK ──────────────────────────────
 //
 // BACK: the fitted-rectangle outlines and the accept/reject readout off
-// `intermediates.rects`, and both per-pixel rasters off `intermediates.regions`
+// `pose.rects`, and both per-pixel rasters off `pose.regions`
 // -- the region CSR (see pipeline/axesReconstruction.ts's inspectFor, which
 // requests each only when its own toggle is on).
 //
@@ -108,8 +108,7 @@ function regionOfPixel(csr: RegionCsr, regionCount: number, n: number, pixel: nu
 // one, because scene/throughCam2D.ts paints these buffers every frame in
 // Through-Cam regardless of whether anything refreshed them.
 function rasterInputs(camera: Camera): { csr: RegionCsr; regionCount: number } | null {
-  const inter = camera.pose?.intermediates;
-  const csr = inter?.regions, regionCount = inter?.regionCount;
+  const csr = camera.pose?.regions, regionCount = camera.pose?.regionCount;
   if (!csr || regionCount === undefined) return null;
   return { csr, regionCount };
 }
@@ -161,7 +160,7 @@ function repaintLsdRejectedRaster(camera: Camera) {
   const w = camera.rtSize.w, h = camera.rtSize.h;
   out.fill(0);
   const inputs = rasterInputs(camera);
-  const rects = camera.pose?.intermediates.rects;
+  const rects = camera.pose?.rects;
   if (inputs && rects) {
     const { csr, regionCount } = inputs;
     for (let r = 0; r < regionCount; r++) {
@@ -191,20 +190,20 @@ export function updateLsdOverlay(camera: Camera) {
   repaintLsdRawRegionsHighlight(camera);
   repaintLsdRejectedRaster(camera);
 
-  const rects = camera.pose?.intermediates.rects;
-  const regionCount = camera.pose?.intermediates.regionCount;
-  const wanted = camera.settings.showLsdSegments || camera.settings.showLsdRejected;
-  if (!rects || regionCount === undefined) {
-    // The raw-regions raster needs no rectangles, so it can be the only thing on
-    // -- and then this readout is the only place the region count is printed.
-    const csr = camera.pose?.intermediates.regions;
-    if (csr && regionCount !== undefined) {
-      lsdReadout.textContent = `${regionCount} regions (no rectangles requested)`;
-    } else {
-      lsdReadout.textContent = wanted || camera.settings.showLsdRawRegions
-        ? 'no LSD data -- capture, or the last run was not asked for it'
-        : 'segment overlays off';
-    }
+  // `regionCount` rides the pose block, so it is here on every local run whether
+  // or not anything was requested -- which is why "how many regions" and "how
+  // many rectangles were accepted" are now two independent questions rather than
+  // one nested check on a `counts` readback that no longer happens.
+  const rects = camera.pose?.rects;
+  const regionCount = camera.pose?.regionCount;
+  if (regionCount === undefined) {
+    lsdReadout.textContent = 'no local detector run';
+    return;
+  }
+  if (!rects) {
+    lsdReadout.textContent = camera.settings.showLsdSegments || camera.settings.showLsdRejected
+      ? `${regionCount} regions -- the last run was not asked for rectangles`
+      : `${regionCount} regions (segment overlays off)`;
     return;
   }
 

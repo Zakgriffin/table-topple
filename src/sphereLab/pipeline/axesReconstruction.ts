@@ -34,15 +34,56 @@ import { appSpan } from '../profiling/stages.ts';
 // the readout's last line (recomputeStages passes its per-stage timing
 // breakdown; a device-compute pose has no local timing to report, so
 // ingestRemotePose passes nothing).
+// ── WHY THIS FRAME PRODUCED NOTHING, from the pipeline rather than by guess ──
+//
+// The readout used to say "degenerate fit" whenever the triad field was null,
+// which was the only failure it could name -- everything downstream of the fit
+// arrived as an equally null `recoveredAxes` or `positionDecode` and read as the
+// same thing. §15's bits distinguish them at the source, and they distinguish
+// three CATEGORIES the display was flattening together: an ORDINARY outcome (no
+// board in this frame), a CAP (raise a constant), and a BUDGET (the round count
+// was too small). Collapsing those into "failed" is exactly what §15 warns
+// against, one level up.
+//
+// Ordered upstream-first and returns the FIRST hit, because the later bits are
+// consequences: a degenerate fit guarantees no lattice, which guarantees no
+// anchor, and reporting all three would bury the cause under its own effects.
+// `gridOverflow` is deliberately absent -- it is diagnostic and the frame decoded
+// correctly anyway.
+function failureLine(pose: CameraPose | null | undefined): string | null {
+  if (!pose) return 'no capture yet';
+  // A remote pose carries no status, and its own absence of axes is not a
+  // failure to report -- the phone sends what it recovered, not what it did not.
+  if (pose.status === undefined) return null;
+  const s = pose.status;
+  const S = POSE2_STATUS;
+  if (s & S.noRegions) return 'no regions above the edge floor -- nothing to fit';
+  if (s & S.noVotes) return 'no line segments survived the NFA test';
+  if (s & S.fitDegenerate) return 'degenerate fit -- the votes span no plane pair';
+  if (s & S.gppNoSamples) return 'no lines could be rectified onto the recovered axes';
+  if (s & S.gppNoCandidates) return 'no grid period fit the rectified lines';
+  if (s & S.layoutInvalid) return 'no lattice -- the period or the hull came out empty';
+  if (s & S.decodeNoAnchor) return 'no board anchor matched -- the pattern was not recognised';
+  // Capacity and budget, reported even on a frame that otherwise worked: these
+  // mean "raise a constant" and "raise the round count", not "no board".
+  if (s & S.regionOverflow) return `more than ${MAX_REGIONS} regions -- raise MAX_REGIONS`;
+  if (s & S.lineOverflow) return `more than ${MAX_LINES} lines -- raise MAX_LINES`;
+  if (s & S.growNotConverged) return 'region growing hit its round budget before converging';
+  return null;
+}
+
 export function applyPoseVisualizations(camera: Camera, isActive: boolean, extraReadoutLine?: string) {
   let orientationErrorLine: string | null = null;
   const pose = camera.pose;
-  // Pole markers read the pose's quadricPair (its own field specifically so
-  // this survives even when gridPeriodPhase fails and recoveredAxes ends up
-  // null -- see pose/poseCompute.ts's PoseResult) instead of locally
-  // recomputing rowDirRecovered/colDirRecovered.
-  const rowDirRecovered = pose?.quadricPair?.Drow ?? null;
-  const colDirRecovered = pose?.quadricPair?.Dcol ?? null;
+  // Straight off `recoveredAxes` now. There was a second field, `quadricPair`,
+  // holding the SAME THREE VECTORS gated one stage earlier -- so that the readout
+  // could tell "the fit was degenerate" from "the lattice never resolved" by
+  // which of the two came back null. `status` reports that outright (see
+  // failureLine), so the duplicate triad is gone; and both of its drawing
+  // consumers ANDed it with `positionDecode` anyway, which cannot be present
+  // unless the lattice resolved.
+  const rowDirRecovered = pose?.recoveredAxes?.Drow ?? null;
+  const colDirRecovered = pose?.recoveredAxes?.Dcol ?? null;
   if (pose?.positionDecode && rowDirRecovered && colDirRecovered) {
     const { recoveredCamQuat } = pose.positionDecode;
     const rowDirWorld = rowDirRecovered.clone().applyQuaternion(recoveredCamQuat);
@@ -94,23 +135,19 @@ export function applyPoseVisualizations(camera: Camera, isActive: boolean, extra
 
   if (isActive) {
     const haveGroundTruth = isSimulated(camera);
-    // Zero for a device-compute pose, and honestly so: the phone sends its
-    // recovered axes, not the vote vectors they were fit from. This used to
-    // read a camera field the remote path never wrote, so it showed whatever
-    // the last LOCAL reconstruction on this camera had counted.
-    // The DETECTOR's count, not the vote array's length -- the array only arrives
-    // when a toggle asked for it (see inspectFor), and keying this line to it
-    // reported "0 votes" on a perfectly good frame whenever the circles overlay
-    // was off. -1 means nothing counted, which is the remote path.
-    const lineCount = pose?.lineCount ?? -1;
-    const lines = [lineCount < 0 ? 'no local line count (remote pose)' : `${lineCount} lines voted`];
-    if (rowDirRecovered && colDirRecovered) {
-      if (orientationErrorLine) lines.push(orientationErrorLine);
-    } else {
-      lines.push(`degenerate fit`);
-    }
-    // The PERIOD half of this line is gone with `gridPeriodPhase`; the distance
-    // is still on recoveredAxes and is still worth printing on its own.
+    // The DETECTOR's count, not the vote array's length -- that array only
+    // arrives when a toggle asked for it (see inspectFor), and keying this line
+    // to it reported "0 votes" on a perfectly good frame whenever the circles
+    // overlay was off. ABSENT, not -1: a pose relayed from a phone is a pose,
+    // not a detector report, and "we were not told" is exactly what an absent
+    // field means. Says "no local detector run" rather than naming the remote
+    // path, because a frame that never got to run one reads the same here.
+    const lines = [pose?.lineCount === undefined
+      ? 'no local detector run'
+      : `${pose.lineCount} lines voted`];
+    const failed = failureLine(pose);
+    if (failed) lines.push(failed);
+    else if (orientationErrorLine) lines.push(orientationErrorLine);
     if (pose?.recoveredAxes) {
       const trueDist = isSimulated(camera) ? camera.camPos.y : NaN;
       const dist = pose.recoveredAxes.distance;
@@ -390,49 +427,19 @@ export function drainVisuals(camera: Camera): void {
 // camera.axesCapturing is already true -- callers (runAxesReconstruction,
 // recomputeFromLastCapture) own the guard/busy-UI/RAF wrapper and the
 // capture step itself.
-// What the DISPLAY half needs handed back from this run, declared here because
-// this is the only caller that has a drain to resolve it in and the only one
-// that knows which overlays are on.
-//
-// 'decodeGrid' is unconditional: the decodeGrid/decodeRotated/decodeCorrectness
-// intermediates feed the Projected-Cam view and the pose readout, and the drain
-// always runs, so there is nothing to gate on.
-//
-// fx/fy are asked for only when something draws them. THIS FUNCTION IS THE
-// OTHER HALF OF A CONTRACT: overlays/pipelineField.ts returns null when they
-// were not requested and its consumers then draw nothing, so a toggle listed
-// in one place and not the other fails as a blank overlay rather than as a
-// silent recomputation. The list mirrors preview.ts's overlaysNeedGray, which
-// exists for the same class of mistake one stage earlier -- if you add a
-// toggle whose overlay reads pipelineField(), it belongs in BOTH.
-//
-// Every toggle here also has to invalidate: turning an overlay on cannot paint
-// from a run that was never asked to produce its input, so the handlers call
-// recomputeFromLastCapture rather than the overlay's own updater. That is a
-// real cost change -- flipping one of these re-runs the pose stages instead of
-// recomputing one field on the CPU -- and it is the trade the whole step is
-// making: one pipeline, asked, instead of a second one, duplicated.
-
 // ── The one place a pose result lands on a Camera ─────────────────────────
 //
-// This is the seam, and it is now one assignment. The pipeline returns a
-// PoseResult; the app publishes it as camera.pose, the pose that is on screen
-// -- a statement about the app's own bookkeeping the library should have no
-// opinion on. What crosses here is the DIFFERENCE between those two ideas (see
-// camera/model.ts's CameraPose): the undrained handle stays behind in the
-// mailbox, `intermediates` starts empty, and `timing` widens to nullable
-// because the remote path has none.
+// This is the seam, and it is one assignment. `runPose2` returns a block and
+// some bytes; `toCameraPose` turns those into the flat display type; this
+// publishes it as camera.pose, the pose that is on screen -- a statement about
+// the app's own bookkeeping the library should have no opinion on.
 //
 // It used to unpack the result into thirteen separate mutations, which was the
 // staleness hazard's actual home: an atomically swappable object and an
 // exploded copy of it spread across a camera are not the same thing. There is
 // no halfway state to observe now because there is nothing to be halfway
-// through.
-//
-// The intermediates are NOT filled here: they may still be on the device, and
-// they arrive with the drain, which republishes this same object with them in
-// it. Starting empty is the point -- the previous run's decode grid can no
-// longer be read next to this run's axes, because it is not in this object.
+// through -- and nothing arrives LATER either, since pose2's one fence means the
+// display buffers are already in the object being published.
 function applyPoseResult(camera: Camera, pose: CameraPose): void {
   camera.pose = pose;
   // Posts to the mailbox. The pose is final; the tail is what is deferred. The
@@ -442,16 +449,12 @@ function applyPoseResult(camera: Camera, pose: CameraPose): void {
   camera.pendingVisuals = { pose };
 }
 
-// An empty pose, which is what a local reconstruction can produce until the app
-// is swapped onto src/pose2. Spelled out rather than left implicit so that
-// wiring pose2 in is a matter of filling these fields from a Pose2Result.
-function emptyPose(): CameraPose {
-  return {
-    voteComposites: [], votes: [], lineCount: 0, quadricPair: null, gridPeriodPhase: null,
-    recoveredAxes: null, positionDecode: null, chainTransfers: null, timing: null,
-    intermediates: {},
-  };
-}
+// A pose that knows NOTHING -- which is now literally `{}`, and that is the flat
+// type paying for itself. It is published when the reconstruction could not run
+// at all (no device, or `runPose2` threw), as opposed to running and finding no
+// board: that case returns a real pose whose `status` says which §15 outcome it
+// was. Both callers write their own readout text, so there is nothing to carry.
+const NO_POSE: CameraPose = {};
 
 // ── THE POSE2 CONTEXT: one per camera, per capture size ──────────────────
 //
@@ -481,8 +484,8 @@ const MAX_LINES = 16384;
 //
 // `triad` and `layout` are here because the POSE ITSELF needs them, not merely
 // an overlay: the 128-byte pose block carries a position and a quaternion, and
-// the app's `recoveredAxes`/`quadricPair` are the axis triad those are expressed
-// against, which does not fit in the block's seven spare slots.
+// the app's `recoveredAxes` is the axis triad those are expressed against, which
+// does not fit in the block's seven spare slots.
 //
 // Cheap by construction: this camera plans with `alias` off (the default), where
 // every buffer already holds its own slot for the whole frame, so declaring one
@@ -493,7 +496,7 @@ const MAX_LINES = 16384;
 // is the reason the two rasters gate on their own toggles below rather than
 // riding along with the rectangles.
 const INSPECT = [
-  'triad', 'layout', 'fx', 'fy', 'votes', 'lines', 'lineScan', 'counts', 'rects',
+  'triad', 'layout', 'fx', 'fy', 'votes', 'lines', 'lineScan', 'rects',
   'members', 'regionOffsets', 'regionSizes', 'packed', 'result',
 ] as const;
 
@@ -522,9 +525,9 @@ const INSPECT = [
 // and it is the trade: one pipeline, asked, instead of a second one, duplicated.
 function inspectFor(camera: Camera): readonly string[] {
   const s = camera.settings;
-  // Not optional: `recoveredAxes` and `quadricPair` are the axis triad the pose
-  // block's position and quaternion are expressed against, and it does not fit
-  // in that block. These two are the pose, not an overlay.
+  // Not optional: `recoveredAxes` is the axis triad the pose block's position and
+  // quaternion are expressed against, and it does not fit in that block. These
+  // two are the pose, not an overlay.
   const want = ['triad', 'layout'];
   const fields = s.showTopGradient || s.showTrueContamination || s.showReconstructedContamination
     || s.showGradientArrow || s.showLevelLineArrow;
@@ -535,21 +538,20 @@ function inspectFor(camera: Camera): readonly string[] {
   // is hundreds of thousands of votes, which is why showTopCircles defaults off.
   if (s.showTopCircles || s.showAxisVectors) want.push('votes');
   // The segments themselves, plus what is needed to say WHICH REGION produced
-  // each one -- see unpackComposites. All three are kilobytes.
-  if (s.showLsdComposite) want.push('lines', 'lineScan', 'counts');
+  // each one -- see unpackComposites. Both are kilobytes.
+  if (s.showLsdComposite) want.push('lines', 'lineScan');
   // The fitted rectangles, for the segment outlines and the accept/reject
   // readout. EITHER toggle: the rejected view is the same buffer filtered the
   // other way, so gating on showLsdSegments alone would leave it dark whenever
-  // it was the only one on. `counts` may already be in the list -- runPose2
-  // dedupes.
-  if (s.showLsdSegments || s.showLsdRejected) want.push('rects', 'counts');
+  // it was the only one on.
+  if (s.showLsdSegments || s.showLsdRejected) want.push('rects');
   // The two per-pixel rasters. They paint a pixel per MEMBER PIXEL, which is why
   // they need the CSR and the rectangle outlines do not -- and why they are the
   // only display request that costs more than kilobytes. The rejected raster
   // additionally needs `rects` to know which regions to paint, and gets it from
   // the line above, which is gated on the same toggle.
   if (s.showLsdRawRegions || s.showLsdRejected) {
-    want.push('members', 'regionOffsets', 'regionSizes', 'counts');
+    want.push('members', 'regionOffsets', 'regionSizes');
   }
   // The decode sample lattice. `layout` is already in `want` -- it is the pose --
   // and it carries the cell POSITIONS, so this asks only for what the device
@@ -594,20 +596,22 @@ function pose2SettingsFor(camera: Camera): Pose2Settings {
   };
 }
 
-// ── The pipeline's answer, as the app DISPLAYS it ────────────────────────
+// ── TWO SUCCESS GATES, WHERE THERE WERE THREE ────────────────────────────
 //
-// THREE INDEPENDENT SUCCESS GATES, and keeping them independent is the point --
-// the old app displayed pole markers off a successful orientation fit even when
-// the position decode failed underneath it, and that is genuinely useful (it
-// says "the axes are right, the position is not").
+//   recoveredAxes    a triad, and a lattice to scale it   !fitDegenerate && layout.valid
+//   positionDecode   ...and an anchor in the board        pose.ok
 //
-//   quadricPair      the fit produced a triad          !fitDegenerate
-//   recoveredAxes    ...and a lattice to scale it      layout.valid
-//   positionDecode   ...and an anchor in the board     pose.ok
+// The third was `quadricPair`: the same triad gated on `!fitDegenerate` alone,
+// so that a frame whose fit succeeded but whose lattice did not could still show
+// pole markers and say "the axes are right, the position is not". Nothing ever
+// used it that way -- both of its consumers ANDed it with `positionDecode`,
+// which cannot exist without the lattice -- and the ONE thing it did buy, a
+// readout able to distinguish a degenerate fit from a failed lattice, is now
+// `status` saying so directly. See failureLine.
 //
-// Each implies the one above it in practice, and none of them is derived from
-// another here: a collapsed "did it work" flag is what §15 warns about, one
-// level up.
+// They are still not derived from one another: a collapsed "did it work" flag is
+// what §15 warns about, one level up.
+
 // One vote per detected line: (nx, ny, nz, weight), a vec4 per slot, in
 // MATH_QUAT's fixed math frame -- which is the frame updateGradientCirclesDebug
 // rotates OUT of, and the frame the stage tests score these against.
@@ -617,8 +621,7 @@ function pose2SettingsFor(camera: Camera): Pose2Settings {
 // (the buffer is written for every line, so the slot exists either way). Keeping
 // them would put a zero into the min/max the circle colouring normalizes
 // against, which is a display bug with no upstream cause.
-function unpackVotes(bytes: ArrayBuffer | undefined, lineCount: number): { n: THREE.Vector3; weight: number }[] {
-  if (!bytes) return [];
+function unpackVotes(bytes: ArrayBuffer, lineCount: number): { n: THREE.Vector3; weight: number }[] {
   const v = new Float32Array(bytes);
   // Clamped: `lineCount` is what the detector FOUND, and lines.emit truncates to
   // maxLines when it overflows (§15's lineOverflow). The buffer holds the kept
@@ -656,16 +659,18 @@ function unpackVotes(bytes: ArrayBuffer | undefined, lineCount: number): { n: TH
 // lineScan[r].x. Reading it this way rather than re-testing `rects`'s accepted
 // flag and length matters: the predicate lives in LINES_FLAG_WGSL, and a second
 // copy here would drift silently the first time a threshold moves.
+//
+// `regionCount` comes from the POSE BLOCK, not from a `counts` readback. `finish`
+// writes `pose[17] = counts.x`, so the number was always crossing the bus with
+// the pose and inspecting `counts` for it was a second copy of a value we
+// already had.
 function unpackComposites(
-  lines: ArrayBuffer | undefined, lineScan: ArrayBuffer | undefined,
-  counts: ArrayBuffer | undefined, lineCount: number,
-): { root: number; line: CompositeLine }[] {
-  if (!lines || !lineScan || !counts) return [];
+  lines: ArrayBuffer, lineScan: ArrayBuffer, regionCount: number, lineCount: number,
+): { region: number; line: CompositeLine }[] {
   const seg = new Float32Array(lines);
   const scan = new Uint32Array(lineScan);
-  const regionCount = new Uint32Array(counts)[0] ?? 0;
   const emitted = Math.min(lineCount, seg.length / 4);
-  const out: { root: number; line: CompositeLine }[] = [];
+  const out: { region: number; line: CompositeLine }[] = [];
   for (let r = 0; r < regionCount; r++) {
     // vec2 per entry, and only .x carries the flag -- see BUFFERS.lineFlag.
     const at = scan[r * 2]!;
@@ -674,13 +679,31 @@ function unpackComposites(
     const next = r + 1 < regionCount ? scan[(r + 1) * 2]! : emitted;
     if (next <= at || at >= emitted) continue;
     out.push({
-      root: r,
+      region: r,
       line: { x1: seg[at * 4]!, y1: seg[at * 4 + 1]!, x2: seg[at * 4 + 2]!, y2: seg[at * 4 + 3]! },
     });
   }
   return out;
 }
 
+// ── THE ONE PLACE THE TWO REAL SHAPES BECOME THE DISPLAY'S ONE ───────────
+//
+// `runPose2` returns exactly two things: a 128-byte block and raw bytes per
+// requested buffer. This turns them into the flat `CameraPose` the overlays read
+// -- see camera/model.ts, whose rule is that every field is present exactly when
+// it is known, whether that is because the RUN produced it or because a toggle
+// ASKED for it.
+//
+// Spread-conditionally throughout, so an absent field is genuinely ABSENT rather
+// than an empty array or a null standing in for one. That distinction is
+// load-bearing on the display side: `votes: []` cannot be told from "no lines
+// detected", and every reader that wanted the second meaning was reaching for
+// `lineCount` anyway.
+//
+// TOP-DOWN, which is the trap overlays/pipelineField.ts exists to hold: `fx`/
+// `fy`, `rects`, `regions` and `lattice` are the pipeline's own buffers and every
+// display surface is bottom-up. The flip belongs at the PAINT, and it is not a
+// row reversal -- it also negates the vertical derivative.
 function toCameraPose(frame: Pose2Frame): CameraPose {
   const { pose, inspected } = frame;
   // Three vec3<f32> at stride 16 -- see BUFFERS.triad. The stride is why this is
@@ -688,82 +711,64 @@ function toCameraPose(frame: Pose2Frame): CameraPose {
   const t = new Float32Array(inspected['triad']!);
   const axis = (i: number) => new THREE.Vector3(t[i * 4]!, t[i * 4 + 1]!, t[i * 4 + 2]!);
   const layout = decodeLayout(inspected['layout']!);
-
   const fitOk = (pose.status & POSE2_STATUS.fitDegenerate) === 0;
-  const Drow = axis(0), Dcol = axis(1), Dnormal = axis(2);
+
+  // CLAMPED, and the block's own value is not: collect.regionMeta writes the raw
+  // label count so `finish` can compare it against maxRegions and report §15's
+  // regionOverflow. Every array indexed by region is sized for maxRegions, so
+  // publishing the raw count would walk a display loop off the end of `rects`.
+  // The overflow is still reported, in `status`.
+  const regionCount = Math.min(pose.regionCount, MAX_REGIONS);
 
   return {
-    voteComposites: unpackComposites(
-      inspected['lines'], inspected['lineScan'], inspected['counts'], pose.lineCount),
-    votes: unpackVotes(inspected['votes'], pose.lineCount),
+    status: pose.status,
     lineCount: pose.lineCount,
-    quadricPair: fitOk ? { Drow, Dcol, Dnormal } : null,
-    gridPeriodPhase: null,
+    regionCount,
+
     // `distance` IS the camera's height above the floor -- the same quantity the
     // pose block reports as `height`, read here off the block that also carries
     // the axes it belongs with, so the two cannot be paired across a frame.
-    recoveredAxes: fitOk && layout.valid === 1
-      ? { Drow, Dcol, Dnormal, distance: layout.distance }
-      : null,
-    positionDecode: pose.ok
+    ...(fitOk && layout.valid === 1
+      ? { recoveredAxes: { Drow: axis(0), Dcol: axis(1), Dnormal: axis(2), distance: layout.distance } }
+      : {}),
+    ...(pose.ok
       ? {
-        row: pose.boardRow, col: pose.boardCol,
-        consistency: pose.consistency, votes: pose.votes, totalWindows: pose.totalWindows,
-        camPos: new THREE.Vector3(pose.position.x, pose.position.y, pose.position.z),
-        recoveredCamQuat: new THREE.Quaternion(
-          pose.quaternion.x, pose.quaternion.y, pose.quaternion.z, pose.quaternion.w),
-        orientation: pose.orientation,
-        // The parts, not just the ratio: buildDecodeLattice scores its own
-        // re-derivation against these two before it draws a single ring.
-        correct: pose.correct, wrong: pose.wrong,
+        positionDecode: {
+          row: pose.boardRow, col: pose.boardCol, consistency: pose.consistency,
+          camPos: new THREE.Vector3(pose.position.x, pose.position.y, pose.position.z),
+          recoveredCamQuat: new THREE.Quaternion(
+            pose.quaternion.x, pose.quaternion.y, pose.quaternion.z, pose.quaternion.w),
+          orientation: pose.orientation,
+        },
       }
-      : null,
-    chainTransfers: null,
-    timing: null,
-    // FILLED HERE, not by the drain, and that is the structural change pose2
-    // brings. The old pipeline finalized the pose early and host-side, so the
-    // display's own reads were a SECOND round trip worth deferring. pose2 has one
-    // fence: the pose is not known until the map resolves either, and the
-    // intermediates ride in the same staging buffer behind it. There is nothing
-    // left to defer, so the pose that gets published is already complete.
-    //
-    // TOP-DOWN, which is the trap overlays/pipelineField.ts exists to hold: these
-    // are the pipeline's own buffers and every display surface is bottom-up. The
-    // flip belongs at the PAINT, and it is not a row reversal -- it also negates
-    // the vertical derivative.
-    // Present only when this frame asked -- see inspectFor. `pipelineField()`
-    // turning up null is the mechanism working, not a failure.
-    intermediates: {
-      ...(inspected['fx'] ? { fx: new Float32Array(inspected['fx']) } : {}),
-      ...(inspected['fy'] ? { fy: new Float32Array(inspected['fy']) } : {}),
-      ...(inspected['rects'] ? { rects: new Float32Array(inspected['rects']) } : {}),
-      // CLAMPED, and `counts.x` is not: collect.regionMeta writes the raw label
-      // count so `finish` can compare it against maxRegions and report §15's
-      // regionOverflow. Every array indexed by region is sized for maxRegions, so
-      // an overflowing frame that published the raw count would walk a display
-      // loop off the end of `rects`. The overflow is still reported, on the pose.
-      ...(inspected['counts']
-        ? { regionCount: Math.min(new Uint32Array(inspected['counts'])[0]!, MAX_REGIONS) }
-        : {}),
-      // All three or none -- see RegionCsr. They are requested together and this
-      // is the one place that could hand back a half of one.
-      // The sample lattice, reassembled from the block that describes it and the
-      // device's own per-cell verdict. Returns null on a frame with no lattice,
-      // which the spread then drops -- so the overlay's "absent means blank"
-      // rule needs no second condition.
-      ...(inspected['packed'] && inspected['result']
-        ? { lattice: buildDecodeLattice(layout, inspected['packed'], inspected['result'], pose) ?? undefined }
-        : {}),
-      ...(inspected['members'] && inspected['regionOffsets'] && inspected['regionSizes']
-        ? {
-          regions: {
-            members: new Uint32Array(inspected['members']),
-            offsets: new Uint32Array(inspected['regionOffsets']),
-            sizes: new Uint32Array(inspected['regionSizes']),
-          },
-        }
-        : {}),
-    },
+      : {}),
+
+    // ── Opt-in from here down: present iff inspectFor asked ──
+    ...(inspected['fx'] ? { fx: new Float32Array(inspected['fx']) } : {}),
+    ...(inspected['fy'] ? { fy: new Float32Array(inspected['fy']) } : {}),
+    ...(inspected['votes'] ? { votes: unpackVotes(inspected['votes'], pose.lineCount) } : {}),
+    ...(inspected['lines'] && inspected['lineScan']
+      ? { composites: unpackComposites(inspected['lines'], inspected['lineScan'], regionCount, pose.lineCount) }
+      : {}),
+    ...(inspected['rects'] ? { rects: new Float32Array(inspected['rects']) } : {}),
+    // All three or none -- see RegionCsr. They are requested together and this is
+    // the one place that could hand back a half of one.
+    ...(inspected['members'] && inspected['regionOffsets'] && inspected['regionSizes']
+      ? {
+        regions: {
+          members: new Uint32Array(inspected['members']),
+          offsets: new Uint32Array(inspected['regionOffsets']),
+          sizes: new Uint32Array(inspected['regionSizes']),
+        },
+      }
+      : {}),
+    // Reassembled from the block that describes the lattice and the device's own
+    // per-cell verdict. Returns null on a frame with no lattice, and `undefined`
+    // drops the key -- so the overlay's "absent means blank" rule needs no second
+    // condition.
+    ...(inspected['packed'] && inspected['result']
+      ? { lattice: buildDecodeLattice(layout, inspected['packed'], inspected['result'], pose) ?? undefined }
+      : {}),
   };
 }
 
@@ -788,7 +793,7 @@ async function recomputeStages(camera: Camera) {
   const ctx = await poseContextFor(camera, cap.w, cap.h);
   if (!ctx) {
     if (camera === activeCamera()) axesReadout.textContent = 'no WebGPU device -- pose recovery is unavailable';
-    applyPoseResult(camera, emptyPose());
+    applyPoseResult(camera, NO_POSE);
     return;
   }
 
@@ -807,7 +812,7 @@ async function recomputeStages(camera: Camera) {
     // readout of its own rather than being flattened into "no board found".
     console.error('[pose2] reconstruction failed:', e);
     if (camera === activeCamera()) axesReadout.textContent = `pose2 failed: ${e instanceof Error ? e.message : String(e)}`;
-    applyPoseResult(camera, emptyPose());
+    applyPoseResult(camera, NO_POSE);
     return;
   } finally {
     spanEnd(poseSpan);

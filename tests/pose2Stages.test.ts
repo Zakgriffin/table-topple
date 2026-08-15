@@ -12,7 +12,35 @@ import { rayDirInto, renderPose, truthFor, vFovRadOf } from '../src/pose2/sim.ts
 import { GRID_STEP, MATH_QUAT } from '../src/sphereLab/constants.ts';
 import { C, ORDER, R, debruijnLookup, torus } from '../src/sphereLab/floorPattern.ts';
 import { boardDims, buildBoard, hashU32, uploadBoard } from '../src/pose2/board.ts';
-import { rotatedZeroIndex } from '../src/pose/stages/decode/decodeGrid.ts';
+
+// Where a lattice's zero-reference cell ENDS UP after rotating the whole grid by
+// `o` quarter-turns. Used once, by the decode anchor test.
+//
+// This came from src/pose/stages/decode/decodeGrid.ts, which no longer exists.
+// It was RE-DERIVED rather than copied across, for the same reason cpu.ts is:
+// while src/pose was here, importing it made this an independent second source,
+// and after the deletion a copy would have been an unowned duplicate of nothing.
+//
+// The derivation is one rule applied o times. A single quarter-turn takes (i, j)
+// of a rows x cols grid to (j, rows-1-i) of a cols x rows grid -- so the four
+// cases the original spelled out are just this loop unrolled, and there is no
+// table of index expressions to get wrong.
+//
+// Checked exhaustively against the original before it was deleted: 24,336 cases
+// over rows, cols in 1..12 and all four o, zero mismatches. That check was also
+// shown to be DECISIVE -- a version using `rows` where the derivation calls for
+// `cols` differs in 5,434 of them. Note such an error is invisible on a SQUARE
+// lattice, so a fixture with rows === cols would not have settled anything.
+function rotatedZeroIndex(
+  rows: number, cols: number, zeroI: number, zeroJ: number, o: number,
+): [number, number] {
+  let r = rows, c = cols, ri = zeroI, rj = zeroJ;
+  for (let k = 0; k < (o & 3); k++) {
+    [ri, rj] = [rj, r - 1 - ri];
+    [r, c] = [c, r];
+  }
+  return [ri, rj];
+}
 
 // ── Stage tests against SYNTHETIC GROUND TRUTH ────────────────────────────
 //

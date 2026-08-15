@@ -21,8 +21,15 @@ translating at the boundary, once, so that everything downstream sees one
 timeline.
 
 **What is being deleted:** roughly half of `profiling/profiler.ts`, all four
-per-camera latency history arrays, and one duplicated stopwatch. See
-[Demolition](#demolition).
+per-camera latency history arrays, and every other stopwatch in the project —
+the sweep's, the phone's, and the duplicated one in the display tail. §7 audits
+every timestamp in the repo and gives each a verdict; the acceptance test for
+"no old systems left" is a grep, stated at the end of §8.
+
+**"One timing system" means one PROFILER, not one use of the clock.** A span
+names an operation and answers *how long did that take*. Reading the clock to
+schedule a repaint, to stamp a sensor event, or to poll a deadline is a different
+question and stays exactly as it is. Drawing that line is §7's whole job.
 
 **What is being added:** GPU pass timing, which this project has never had for
 `src/pose2`, at a measured resolution of 41.7 ns.
@@ -295,36 +302,56 @@ it says so, which is what the tilde is for.
 
 ---
 
-## 7. Demolition
+## 7. Every timestamp in the project, with a verdict
 
-Delete outright:
+**"One timing system" means one PROFILER, not one use of the clock.** There is a
+real line here and it has to be drawn explicitly, or the rewrite either leaves
+old systems standing or eats things that were never profiling.
 
-- `profilerBeginSession`, `ProfilerSession` — zero callers.
-- `criticalPath`, `formatCriticalPath`, `PathNode`, `CriticalPath`, and every
-  `inputs:` declaration in `stages.ts`. See §4.
-- `spanDurationMs`, `profilerDevToolsMirror` — dead exports.
-- `Camera.pullMsHistory` / `encodeMsHistory` / `transitMsHistory` /
-  `payloadBytesHistory`, their caps, their `shift()` calls, and their manual
-  reset in `profile-video-gap.mjs`. **They become spans** (`link.pull`,
-  `link.encode`, `link.transit`, with `bytes` as an attr), after which the record
-  store *is* the history and the script reads records like every other consumer.
-- `projectMs` in `axesReconstruction.ts` — the readout line reads the
-  `app.project` span it already has.
+A **span** names an operation with a beginning and an end, and the question it
+answers is *how long did that take*. Everything else that reads a clock is
+answering a different question — *what time is it*, *has enough time passed*,
+*when did this sensor event happen* — and converting those to spans would be a
+category error, not a unification.
 
-Keep, unchanged:
+Every `performance.now()` / `nowMs()` / `Date.now()` in the project, audited
+2026-08-15:
 
-- `clock.ts`. It is the reason `peer` spans are expressible at all.
-- `Camera.lastFrameStats`. Counters, not durations; a different instrument.
-- `Camera.lastPullMs` / `lastEncodeMs` / `lastTransitMs` — the *latest* sample,
-  read by the live UI. Cheap, and not a history.
+### Becomes a span (the whole of the profiler's scope)
 
-Deliberately out of scope for the first pass:
+| site | today | after |
+|---|---|---|
+| `profiling/profiler.ts` + 16 call sites | the system | **the system**, halved |
+| `axesReconstruction.ts` `projectMs` | its own stopwatch | deleted — `app.project` already measures it |
+| `scripts/sweep.ts` per-pose `ms` | its own stopwatch | a span. **This is the payoff**: the sweep is where timing analysis actually happens (180 poses, medians, p90), so it gets the GPU pass breakdown for free |
+| `mobileCapture.ts` `t0`/`totalMs` | its own stopwatch | a span on the phone |
+| `capture.ts` `lastPullMs`/`lastEncodeMs`/`lastTransitMs` | three subtractions + three rolling arrays | `peer` spans; the latest sample is the newest record |
+| `PoseRecord.computeMs` | a field on the IMU ring | gone; the ring keeps its non-timing fields and stops being a second profiler |
 
-- The phone's `PoseRecord` ring. It belongs to a paused track
-  (motion-blur/IMU), it is dumped rather than joined, and folding it in now
-  would change a recording format nobody is currently reading.
+### Stays a raw clock read, and must not change
 
----
+| site | why it is not profiling |
+|---|---|
+| `clock.ts` `nowMs()` | **the clock every span is built on.** Not a system; the foundation of the one system |
+| `main.ts` rAF interval check | a SCHEDULER — "has `PREVIEW_UPDATE_INTERVAL_MS` elapsed" |
+| `mobileCapture.ts` `sentAt`/`pulledAt`/`drawnAt`/`encodedAt` | the STAMPS the `peer` spans are built from, and they cross the wire. They stop being a parallel accounting system; they do not stop existing |
+| IMU sample `t`, `observedAt`, `predictAt`, `settingsSyncedAt` | EVENT timestamps for sensor fusion. The filter integrates against them; they are not durations |
+| `Camera.lastFrameStats` | COUNTERS (`loopTicks`, `backpressureBlockedTicks`) plus a rate summarized on the phone. A mean over a population that never crosses as individuals is not a span; if the individuals are ever wanted, they become spans then |
+| `scripts/search-order5-torus*.ts` | a progress ETA on an offline search, unrelated to the pipeline |
+| `profile-video-gap.mjs` `Date.now()` deadlines | polling loops. Scheduling |
+| `src/game/ai.ts` | game simulation time, a separate track, and main must never edit `src/game` |
+
+### Neither — deleted outright
+
+`profilerBeginSession` / `ProfilerSession` (zero callers), `criticalPath` /
+`formatCriticalPath` / `PathNode` / `CriticalPath` and every `inputs:`
+declaration (§4), `spanDurationMs`, `profilerDevToolsMirror`, and the four
+`Camera` history arrays with their caps, their `shift()` calls and their manual
+reset in `profile-video-gap.mjs`.
+
+**After this there is no second way to measure a duration anywhere in the
+project.** The sweep, the app, the phone and the dev-bridge scripts all record
+into one store and read it back the same way.
 
 ## 8. Phases
 
@@ -356,8 +383,21 @@ more than one clock.**
 and the `~gpu:` prefix on mirrored measures.
 
 **Phase 6 — the link spans.** Phone-link latencies become `peer` spans;
-`profile-video-gap.mjs` re-points at the record store; the four arrays are
-deleted.
+`profile-video-gap.mjs` re-points at the record store; the four history arrays
+AND `lastPullMs`/`lastEncodeMs`/`lastTransitMs` are deleted, since the newest
+record is the latest sample.
+
+**Phase 7 — the other two stopwatches, which is what closes the door.** The
+sweep records a span instead of its own `performance.now()` pair, which is the
+phase with the real payoff: 180 poses of GPU pass breakdown, medians and p90, out
+of an instrument that already exists. And the phone's `t0`/`totalMs` becomes a
+span, after which `PoseRecord` keeps only its non-timing fields and stops being a
+second profiler.
+
+**After phase 7, `grep -rn 'performance.now' src/ scripts/` returns only the
+recorder, the scheduler in `main.ts`, the game's simulation clock and the offline
+search's ETA — every one of them a clock read rather than a measurement.** That
+grep is the acceptance test for "no old systems left".
 
 ---
 

@@ -5,7 +5,7 @@ import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
 import { spanEnd } from '../profiling/profiler.ts';
 import { appSpan } from '../profiling/stages.ts';
 import { type ProjectedSamplesDense } from '../types.ts';
-import { createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, readUint32, uploadFloat32, uploadUniform } from '../../pose/gpu/device.ts';
+import { createStorageBuffer, dispatchCount, getGPUDevice, readFloat32, readUint32, uploadFloat32, uploadUniform } from '../../gpu/device.ts';
 import { GRADIENT_WGSL, PROJECT_SAMPLES_WGSL } from './projectSamples.wgsl.ts';
 
 // Stage 2 (bucket accumulation) deliberately stays on CPU for now -- it's a
@@ -83,12 +83,12 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   const uploadSpan = appSpan('project.upload');
   let grayBuf: GPUBuffer | null = null;
   if (gray) {
-    grayBuf = uploadFloat32(device, new Float32Array(gray), 0, 'project:gray', 'project.upload');
+    grayBuf = uploadFloat32(device, new Float32Array(gray));
   }
-  const gradDimsBuf = uploadUniform(device, new Uint32Array([w, h, 1, 0]).buffer, 'project.upload');
+  const gradDimsBuf = uploadUniform(device, new Uint32Array([w, h, 1, 0]).buffer);
   const projUniformBuf = uploadUniform(device, buildProjectUniforms(
     w, h, minGrazingCos, distance, vFovRad, camera.aspect, MATH_QUAT, Drow, Dcol, normal,
-  ), 'project.upload');
+  ));
   spanEnd(uploadSpan);
 
   const dispatchSpan = appSpan('project.dispatch');
@@ -135,8 +135,8 @@ export async function projectSamplesGPU(camera: Camera): Promise<ProjectedSample
   spanEnd(dispatchSpan);
 
   const [sampleRaw, validRaw] = await Promise.all([
-    readFloat32(device, sampleOutBuf, n * 16, 'project:samples', 'project.bins'),
-    readUint32(device, validOutBuf, n * 4, 'project:valid', 'project.bins'),
+    readFloat32(device, sampleOutBuf, n * 16),
+    readUint32(device, validOutBuf, n * 4),
   ]);
 
   const buffersToDestroy = [fxBuf, fyBuf, gradDimsBuf, projUniformBuf, sampleOutBuf, validOutBuf];

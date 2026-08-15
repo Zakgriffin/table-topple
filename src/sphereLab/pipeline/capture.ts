@@ -8,10 +8,9 @@ import { appSpan } from '../profiling/stages.ts';
 import { globalState } from '../state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';
-import { backendFromForceCPU } from '../../pose/backend.ts';
-import { type CompositeLine } from '../../pose/results.ts';
+import { backendFromForceCPU } from '../backend.ts';
+import { type CompositeLine } from '../camera/model.ts';
 import { buildProjectedTexture, computeProjectedBinsAuto, paintProjectedTexture } from './projectedBins.ts';
-import { type GridPeriodPhaseResult } from '../../pose/stages/period/gridPeriodPhase.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
 import { updateDistortedPreview } from './preview.ts';
 
@@ -287,7 +286,10 @@ export interface RemotePoseMessage {
     // own gridPeriodPhase/voteComposites below, the same fields a
     // desktop-compute capture already populates.
     pipeline?: {
-      gridPeriodPhase: GridPeriodPhaseResult | null;
+      // Was GridPeriodPhaseResult. The phone still SENDS this field; nothing
+      // on this side has a type for it any more, and nothing reads it, so it
+      // is accepted and dropped rather than deleted from the wire format.
+      gridPeriodPhase: unknown;
       voteComposites: { root: number; line: CompositeLine }[] | null;
       lsdRectangles: {
         cx: number; cy: number; theta: number; length: number; width: number;
@@ -368,7 +370,9 @@ export async function ingestRemotePose(
       Dcol: recoveredAxes.Dcol.clone(),
       Dnormal: recoveredAxes.Dnormal.clone(),
     } : null,
-    gridPeriodPhase: pipelineDebug?.gridPeriodPhase ?? null,
+    // The phone still sends a gridPeriodPhase blob; CameraPose has no type for
+    // it any more and no consumer, so it is dropped here rather than carried.
+    gridPeriodPhase: null,
     recoveredAxes,
     positionDecode: msg.positionDecode ? {
       row: msg.positionDecode.row, col: msg.positionDecode.col, consistency: msg.positionDecode.consistency,
@@ -378,10 +382,6 @@ export async function ingestRemotePose(
       orientation: msg.positionDecode.orientation,
     } : null,
     chainTransfers: null,
-    // Genuinely absent on this path, like votes and timing: the phone ran the
-    // chain, so there are no local rectangles. It used to be a camera field
-    // this function never wrote, which meant it showed the last LOCAL run's.
-    rects: [],
     timing: null,
     intermediates: {},
   };

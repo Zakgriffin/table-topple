@@ -1,5 +1,5 @@
 import { markCaptureDirty, renderCamRT } from '../pipeline/capture.ts';
-import { backendFromForceCPU } from '../../pose/backend.ts';
+import { backendFromForceCPU } from '../backend.ts';
 import { buildProjectedTexture } from '../pipeline/projectedBins.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../state.ts';

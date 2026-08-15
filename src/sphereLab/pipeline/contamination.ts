@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { angleBetweenDegV, cornerDir } from '../math/geometry.ts';
-import { type GradientField } from '../../pose/results.ts';
+import { type GradientField } from '../types.ts';
 
 // ── Contamination overlay math (pure) ────────────────────────────────────
 //

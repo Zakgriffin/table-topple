@@ -43,24 +43,32 @@
 //
 // ── Directory layout ───────────────────────────────────────────────────────
 //
-// THE POSE LIBRARY LIVES OUTSIDE THIS APP, at src/pose/. Sphere Lab is a
-// CONSUMER of it, not its owner -- src/mobileCapture.ts (the phone) is the
-// other one, and the headless tests are a third. Its entry point is
-// pose/poseCompute.ts, it is organized by pipeline STAGE (stages/gradient,
-// stages/lsd, stages/votes, stages/period, stages/decode, plus gpu/ for the
-// device plumbing), and it imports nothing from sphereLab/ except the shared
-// leaves below. That constraint is checked, not hoped for: see
-// tests/libraryBoundary.test.ts.
+// THE POSE LIBRARY THIS APP CONSUMED IS DELETED. src/pose is gone, replaced by
+// src/pose2 -- a flat, all-GPU rewrite whose entry point is src/pose2/run.ts
+// (createPose2Context once, runPose2 per frame, returning a plain struct).
+//
+// THIS APP IS NOT WIRED TO IT YET, and that is a deliberate intermediate state:
+// the pipeline was cut out before the app was re-plumbed, so nothing here would
+// get fitted to the old pipeline's shape on the way. Concretely, every display
+// path that read a pose intermediate now reads nothing -- see camera/model.ts's
+// Intermediates, overlays/lsdOverlay.ts, overlays/gridPeriodPhaseOverlays.ts and
+// pipeline/axesReconstruction.ts, each of which says what it used to draw and
+// what pose2 would have to hand back for it to draw again.
+//
+// `tests/libraryBoundary.test.ts` checked that the library imported nothing from
+// sphereLab except the shared leaves below. It is deleted with the library whose
+// boundary it policed; pose2 has a stricter version of the same property, since
+// it reaches outside itself in exactly one place (board.ts).
 //
 // types.ts/state.ts/constants.ts   shared types + tiny bits of module state
 // math/geometry.ts                 pure sphere/ray-casting math
 // profiling/profiler.ts            the one host clock: flat interval records
 //                                   plus the join that gives them structure
-// profiling/stages.ts              this app's stage table, and where it says
-//                                   how it COMPOSES the library's (not shared)
-//    ^ the four above are the SHARED LEAVES: both this app and src/pose/
-//      depend on them, and the board game depends on constants.ts too, which
-//      is why they did not move into the library.
+// profiling/stages.ts              this app's stage table (the library half is
+//                                   gone -- see that file's header)
+//    ^ the four above were the SHARED LEAVES both this app and src/pose depended
+//      on. With the library deleted they are simply this app's, though the board
+//      game still depends on constants.ts.
 // camera/                          the Camera data model: settings, types,
 //                                   the live store, factories, add/remove/kick
 // scene/                           THREE.js scene setup shared by every
@@ -139,16 +147,25 @@ import { pushPoseSync, pushSettingsSync, sendToDevBridge } from './devBridge/cli
 // glob ITSELF into a circular import, and a .d.ts has no runtime module to
 // import at all.
 //
-// ../pose/** IS LOAD-BEARING TOO, and it is the one line of this move that no
-// typechecker could have caught. These patterns are resolved by vite at build
-// time from strings, so when the pose library moved out of sphereLab/, every
-// one of its exports would have silently stopped appearing on globalThis --
-// and the dev bridge reaches them BY BARE NAME (runLsdChain, growRegionsCCL,
-// computeLsdRectangles, and every harness entry point that calls them). The
-// failure mode is a ReferenceError in a console eval, at the far end of a
-// websocket, in a session where the page has to be re-warmed to try again.
+// ../pose/** USED TO BE HERE and was load-bearing in exactly the way no
+// typechecker could catch: these patterns are resolved by vite at build time
+// from STRINGS, so a module that stops matching silently stops appearing on
+// globalThis, and the dev bridge reaches those exports BY BARE NAME. The failure
+// mode is a ReferenceError in a console eval at the far end of a websocket.
+//
+// src/pose is deleted, so the pattern is dropped rather than repointed -- and
+// the same silent-failure warning now applies to what went WITH it. Every bare
+// name the bridge could reach into the pose library (runLsdChain,
+// growRegionsCCL, computeLsdRectangles, verifyLsdChain and the rest of the
+// harness entry points) is gone, and a bridge eval naming one gets that
+// ReferenceError. That is the correct outcome -- there is no implementation to
+// call -- but it will present as a broken bridge rather than as a deleted
+// pipeline, which is worth knowing before debugging it.
+//
+// ../gpu/** is NOT globbed: it is two files of device plumbing with no console
+// entry points, reached only through ordinary imports.
 const DEV_MODULES = import.meta.glob(
-  ['./**/*.ts', '../pose/**/*.ts', '!./main.ts', '!./**/*.d.ts', '!../pose/**/*.d.ts'],
+  ['./**/*.ts', '!./main.ts', '!./**/*.d.ts'],
   { eager: true },
 ) as Record<string, Record<string, unknown>>;
 // Collisions are REPORTED rather than silently resolved. Two modules exporting

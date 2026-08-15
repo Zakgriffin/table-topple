@@ -1,4 +1,4 @@
-import { type GradientField } from '../../pose/results.ts';
+import { type GradientField } from '../types.ts';
 import { hsvToRgb } from './distortion.ts';
 
 // ── Painting a value field, for whichever one is on screen ────────────────

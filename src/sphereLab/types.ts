@@ -1,9 +1,17 @@
 // ── The app's shared types ────────────────────────────────────────────────
 //
-// The pose pipeline's own vocabulary is NOT here -- it is in
-// src/pose/results.ts. This file used to hold both, which is the only reason
-// the library still loaded a module out of the app it is supposed to be
-// independent of; see that file's header and tests/libraryBoundary.test.ts.
+// This file's header used to say the pose pipeline's vocabulary was NOT here,
+// it was in src/pose/results.ts, and that keeping the two apart was what let the
+// library stay out of the app's import closure. src/pose is DELETED, so there is
+// no library on the other side of that boundary any more and the split has
+// nothing left to protect.
+//
+// What came back here is only what the app computes and draws for ITSELF. The
+// deleted pipeline's result vocabulary -- Vote, RecoveredAxes,
+// PositionDecodeResult, DecodeSampleGrid, LsdRectangle, GrownRegion -- did NOT
+// come with it. Those described a pose pipeline that no longer exists, and
+// src/pose2 hands back a plain struct instead, so re-homing them would have kept
+// the old shape alive under a new path.
 
 // Both of these are DERIVED from the config schemas rather than declared
 // here, and re-exported so the dozen existing importers keep their import
@@ -32,3 +40,14 @@ export interface ProjectedSamplesDense {
   u: Float32Array; v: Float32Array; cx: Float32Array; cy: Float32Array; valid: Uint8Array;
   minU: number; maxU: number; minV: number; maxV: number;
 }
+
+// ── The gradient field ────────────────────────────────────────────────────
+//
+// An image gradient is not pose vocabulary -- it is a property of a picture --
+// and the app paints it for its own display modes (pipeline/fieldPaint.ts,
+// contamination.ts, gradientHighlight.ts, overlays/pipelineField.ts). So it
+// lives here now rather than dying with the pipeline that also happened to
+// consume it.
+//
+// fx/fy are the components at radius r, in a w x h grid.
+export interface GradientField { fx: Float64Array; fy: Float64Array; w: number; h: number; r: number }

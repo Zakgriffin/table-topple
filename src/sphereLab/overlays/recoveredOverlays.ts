@@ -2,7 +2,6 @@ import * as THREE from 'three';
 import { type Camera } from '../camera/model.ts';
 import { MATH_QUAT } from '../constants.ts';
 import { cornerDir, getAnalysisVFovRad } from '../math/geometry.ts';
-import { projectImageCornersToPlane } from '../../pose/stages/decode/decodeGrid.ts';
 import { globalState } from '../state.ts';
 
 // The World-view recovered-floor quad's OUTLINE ONLY -- a 4-point closed
@@ -20,45 +19,20 @@ import { globalState } from '../state.ts';
 // (u,v) points individually (a general quad, not assumed to reduce to a
 // center + orientation the way an axis-aligned PlaneGeometry could) instead
 // of collapsing to a single center/size/orientation.
+// ── THE OUTLINE IS DARK, pending pose2 plumbing ──
+//
+// Its four corners came from `projectImageCornersToPlane`, which died with
+// src/pose's decode stage: image corners cast through the pose onto the floor
+// plane. That is a pure projection and it is genuinely re-derivable from what is
+// already on this camera (pose, FOV, aspect) -- but re-deriving it is part of
+// swapping the app onto pose2, not part of deleting the old pipeline, and doing
+// it here would be guessing at the new seam before it exists.
+//
+// The overlay object itself stays on the camera, so the mode/visibility wiring
+// in main.ts's animate loop is untouched and this comes back by filling the
+// geometry rather than by rebuilding the scene.
 export function updateRecoveredFloorOutline(camera: Camera) {
-  const axes = camera.pose?.recoveredAxes;
-  const decode = camera.pose?.positionDecode;
-  if (!axes || !decode) {
-    camera.recoveredFloorOutline.visible = false;
-    return;
-  }
-  // Explicit inputs rather than a whole Camera -- see decodeGrid.ts's
-  // DecodeInput. gridPeriodPhase is unused by this particular projection, but
-  // it is part of what the stage declares it reads.
-  const corners = projectImageCornersToPlane({
-    aspect: camera.aspect, settings: camera.settings,
-    recoveredAxes: axes, gridPeriodPhase: camera.pose?.gridPeriodPhase ?? null,
-  });
-  if (!corners) {
-    camera.recoveredFloorOutline.visible = false;
-    return;
-  }
-  const { Drow: DrowMath, Dcol: DcolMath, Dnormal, distance } = axes;
-  const normalMath = Dnormal.clone();
-  const vFovRad = getAnalysisVFovRad(camera);
-  if (cornerDir(0, 0, MATH_QUAT, vFovRad, camera.aspect).dot(normalMath) > 0) normalMath.negate();
-  const { recoveredCamQuat, camPos } = decode;
-  const Drow = DrowMath.clone().applyQuaternion(recoveredCamQuat);
-  const Dcol = DcolMath.clone().applyQuaternion(recoveredCamQuat);
-  const normal = normalMath.clone().applyQuaternion(recoveredCamQuat);
-
-  const pos = camera.recoveredFloorOutline.geometry.attributes.position as THREE.BufferAttribute;
-  const p = new THREE.Vector3();
-  corners.forEach((c, i) => {
-    p.copy(camPos).addScaledVector(Drow, c.u).addScaledVector(Dcol, c.v).addScaledVector(normal, -distance);
-    pos.setXYZ(i, p.x, p.y, p.z);
-  });
-  pos.needsUpdate = true;
-  // Actual on-screen visibility (mode/showRecoveredFloor-gated) is set every
-  // frame in main.ts's animate loop, same as recoveredFloorOverlay's own --
-  // this just guarantees it's never left visible with stale geometry from a
-  // camera that no longer has pose data at all.
-  camera.recoveredFloorOutline.visible = true;
+  camera.recoveredFloorOutline.visible = false;
 }
 
 // Rebuilds the recovered-floor overlay's geometry/position/orientation --

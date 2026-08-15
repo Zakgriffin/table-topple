@@ -3,7 +3,7 @@ import { isPhysical } from '../camera/store.ts';
 import { toGrayscale } from '../../decode.ts';
 import { renderer } from '../scene/renderer.ts';
 import { addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, flipRowsF64, separableBoxBlur } from './distortion.ts';
-import { computeGradient2x2Field } from '../../pose/stages/gradient/gradientField.ts';
+import { computeGradient2x2Field } from './gradientField.ts';
 import { fillGrayscalePreview, paintVectorFieldAsColor } from './fieldPaint.ts';
 
 // Shared tail for both capture sources: given a final analysis-resolution

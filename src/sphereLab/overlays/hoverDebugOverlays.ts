@@ -76,23 +76,19 @@ function drawCompositeLines(camera: Camera) {
     };
   };
 
-  let rowRank: Map<number, number> | null = null, colRank: Map<number, number> | null = null;
-  const gpp = camera.pose?.gridPeriodPhase;
-  if (settings.showCompositeLineFamilies && gpp) {
-    const sortedRow = [...gpp.rowLines].sort((a, b) => a.value - b.value);
-    rowRank = new Map(sortedRow.map((s, i) => [s.root, sortedRow.length > 1 ? i / (sortedRow.length - 1) : 1]));
-    const sortedCol = [...gpp.colLines].sort((a, b) => a.value - b.value);
-    colRank = new Map(sortedCol.map((s, i) => [s.root, sortedCol.length > 1 ? i / (sortedCol.length - 1) : 1]));
-  }
-
+  // The row/column FAMILY colouring ranked each detected line by its rectified
+  // periodic coordinate, which came off the deleted period search's rowLines/
+  // colLines. Nothing produces those now, so both ranks stay null and the lines
+  // draw in their un-ranked colour -- which is exactly what already happened
+  // whenever the toggle was off or the search had not run.
   for (const { root, line } of composites) {
     const a = toScreen(line.x1, line.y1), b = toScreen(line.x2, line.y2);
     let strokeColor: string;
-    if (rowRank || colRank) {
-      if (rowRank && rowRank.has(root)) strokeColor = `rgb(0,0,${Math.round(rowRank.get(root)! * 255)})`;
-      else if (colRank && colRank.has(root)) strokeColor = `rgb(${Math.round(colRank.get(root)! * 255)},0,0)`;
-      else strokeColor = 'rgb(150,150,150)';
-    } else {
+    {
+      // The blue/red FAMILY colouring used to go here, ranking each line by its
+      // rectified periodic coordinate. That came off the deleted period search
+      // (rowLines/colLines), so every line now takes the per-root hash colour --
+      // which is the branch that already ran whenever the toggle was off.
       const [hr, hg, hb] = hsvToRgb(hashSeedIndexToHueDeg(root), 0.85, 1);
       strokeColor = `rgb(${hr},${hg},${hb})`;
     }

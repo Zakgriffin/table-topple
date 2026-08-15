@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { type Camera } from '../camera/model.ts';
 import { isPhysical } from '../camera/store.ts';
-import { positionReadout, sampleLatticeCanvas, sampleLatticeCtx } from '../ui/dom.ts';
+import { positionReadout, sampleLatticeCanvas } from '../ui/dom.ts';
 
 // ── Projected-Cam sample lattice ─────────────────────────────────────────
 
@@ -43,41 +43,16 @@ function hideSampleLattice() {
 // gate the NEW lattice when the old dedicated toggle was removed, so if
 // this is ever called manually again, it'll piggyback on that toggle's
 // current value rather than anything meant for this function specifically.
-export function drawSampleLattice(camera: Camera, x: number, y: number, w: number, h: number) {
-  if (!camera.settings.showSampleLattice) { hideSampleLattice(); return; }
-  const grid = camera.pose?.intermediates.decodeRotated;
-  const correctness = camera.pose?.intermediates.decodeCorrectness;
-  if (!grid || !camera.lastProjectedBins) { hideSampleLattice(); return; }
-  const { maxU, binWidthU, minV, binWidthV, w: bw, h: bh } = camera.lastProjectedBins;
-
-  sampleLatticeCanvas.style.display = 'block';
-  sampleLatticeCanvas.style.left = x + 'px';
-  sampleLatticeCanvas.style.top = y + 'px';
-  sampleLatticeCanvas.width = Math.round(w);
-  sampleLatticeCanvas.height = Math.round(h);
-  sampleLatticeCanvas.style.width = w + 'px';
-  sampleLatticeCanvas.style.height = h + 'px';
-  const ctx = sampleLatticeCtx;
-  ctx.clearRect(0, 0, sampleLatticeCanvas.width, sampleLatticeCanvas.height);
-
-  const radius = 3;
-  for (let i = 0; i < grid.rows; i++) {
-    for (let j = 0; j < grid.cols; j++) {
-      const pt = grid.points[i][j];
-      if (!pt.valid) continue;
-      const bu = (maxU - pt.u) / binWidthU;
-      const bv = (pt.v - minV) / binWidthV;
-      if (bu < 0 || bu >= bw || bv < 0 || bv >= bh) continue;
-      const cx = (bu / bw) * sampleLatticeCanvas.width;
-      const cy = (1 - bv / bh) * sampleLatticeCanvas.height;
-      const debug = correctness ? correctness[i][j] : null;
-      ctx.beginPath();
-      ctx.arc(cx, cy, radius, 0, Math.PI * 2);
-      ctx.fillStyle = debug ? (debug.bit ? '#000' : '#fff') : '#888';
-      ctx.fill();
-      ctx.strokeStyle = debug ? (debug.correct ? '#0f0' : '#f00') : 'rgba(0,0,0,0.6)';
-      ctx.lineWidth = debug ? 2 : 1;
-      ctx.stroke();
-    }
-  }
+// ── THE LATTICE IS DARK, pending pose2 plumbing ──
+//
+// It drew every decode sample point on the Projected-Cam rect, filled by its
+// sampled bit and ringed green/red by whether that bit matched the printed
+// board. Both inputs -- `decodeRotated` and `decodeCorrectness` -- were pipeline
+// intermediates, and they are gone from Intermediates entirely: pose2 keeps the
+// decode grid on the device and reads back 128 bytes of pose.
+//
+// The canvas, its sizing and its toggle are untouched, so this comes back by
+// filling it rather than by rebuilding the panel.
+export function drawSampleLattice(_camera: Camera, _x: number, _y: number, _w: number, _h: number) {
+  hideSampleLattice();
 }

@@ -1,30 +1,28 @@
-import { POSE_STAGES } from '../../pose/timing/stages.ts';
 import {
   type JoinResult, type SpanAttrs, type StageNode, type StageRecord, type StageTable,
   formatSpanTree, getRecords, joinRecords, spanStart,
 } from './profiler.ts';
 
-// ── Sphere Lab's own stages, and how it COMPOSES the library's ───────────
+// ── Sphere Lab's own stages ──────────────────────────────────────────────
 //
-// Two things live here, and the second is the interesting one.
+// The app's own instrumented stages: the capture path, the deferred display
+// tail, and the projection that only exists to feed display.
 //
-// First, the app's own instrumented stages: the capture path, the deferred
-// display tail, and the projection that only exists to feed display.
+// ── THE LIBRARY HALF OF THIS FILE IS GONE ──
 //
-// Second, the two OVERRIDES at the bottom. pose/timing/stages.ts declares
-// `pose.run` and `pose.drain` as roots, because within the library they are --
-// `computePoseFromCapture` is the top of its own world and the drain happens
-// after it returns. In THIS app they are not roots: a pose runs inside
-// `app.reconstruct` and a drain inside `app.tail`. That knowledge belongs to
-// the consumer, so the consumer states it, and the library never has to name an
-// app stage. It is the same seam `applyPoseResult` is for the pose result
-// itself -- the library hands back facts, the app says where they go.
+// This used to spread in `POSE_STAGES` from `src/pose/timing/stages.ts` and then
+// apply two COMPOSITION OVERRIDES: the library declared `pose.run` and
+// `pose.drain` as roots because within the library they were, and the app
+// restated them as living inside `app.reconstruct` and `app.tail`. That seam was
+// the interesting part -- the library hands back facts, the consumer says where
+// they go.
 //
-// A different consumer composes differently and says so in its own table; the
-// phone (mobileCapture.ts) runs `pose.run` with nothing above it, and the
-// headless harness runs it with nothing above it either. Both get a root,
-// because the join treats "declared parent produced no records" as a root
-// rather than an anomaly. See joinRecords.
+// src/pose is deleted, so both the table and the overrides went with it.
+// `src/pose2` does not declare profiler stages at all: it is one submit and one
+// readback, timed as a whole on the host and by GPU timestamps on the device, so
+// there is no host-side span tree left for the app to compose with. If per-stage
+// pose timing comes back, it comes back through that mechanism, and this file is
+// not where it lands.
 // ── `inputs` here are what make the CHAIN reach the pose ──
 //
 // The critical path is walked per level and recurses into the stages it
@@ -69,24 +67,11 @@ const APP_STAGES = {
 
 export type AppStageId = keyof typeof APP_STAGES;
 
-// Every stage this app can record, library included, with the composition
-// overrides applied. Spread order matters: the overrides must come last.
-//
-// The overrides add an `inputs` edge as well as a `within`, for the same
-// reason: the library cannot know that a pose consumes an app capture, and the
-// app cannot state it anywhere else. On a `recompute` there is no `app.capture`
-// record at all and the edge simply does not resolve, which the walk treats as
-// "this stage is a head" rather than as an anomaly -- see joinRecords and
-// CriticalPath.unsatisfied.
-export const ALL_STAGES: StageTable = {
-  ...POSE_STAGES,
-  ...APP_STAGES,
-  'pose.run': { ...POSE_STAGES['pose.run'], within: 'app.reconstruct', inputs: ['app.capture'] },
-  'pose.drain': { ...POSE_STAGES['pose.drain'], within: 'app.tail' },
-};
+// Every stage this app can record. Just the app's own now -- see the header for
+// what used to be spread in here, and why it is not.
+export const ALL_STAGES: StageTable = { ...APP_STAGES };
 
-// The app's typed span opener, mirroring pose/timing/stages.ts's poseSpan and
-// there for the same reason: a mistyped id joins nowhere and reports as
+// The app's typed span opener: a mistyped id joins nowhere and reports as
 // `unknown` rather than failing.
 export function appSpan(id: AppStageId, attrs: SpanAttrs | null = null): StageRecord {
   return spanStart(id, attrs);

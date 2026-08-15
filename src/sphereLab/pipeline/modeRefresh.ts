@@ -6,7 +6,7 @@ import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts'
 import { lastHoverClientX, lastHoverClientY, updateHoverOverlays } from '../overlays/hoverDebugOverlays.ts';
 import { updateLsdOverlay } from '../overlays/lsdOverlay.ts';
 import { globalState } from '../state.ts';
-import { backendFromForceCPU } from '../../pose/backend.ts';
+import { backendFromForceCPU } from '../backend.ts';
 import { buildProjectedTexture, type ProjectedSampleResult } from './projectedBins.ts';
 import { updateDistortedPreview } from './preview.ts';
 

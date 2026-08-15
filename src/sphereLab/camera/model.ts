@@ -1,11 +1,8 @@
 import * as THREE from 'three';
 import type { RemotePoseMessage } from '../pipeline/capture.ts';
-import type { PoseComputeTiming, PoseResult } from '../../pose/poseCompute.ts';
 import { type ProjectedBins } from '../types.ts';
 import { type StageRecord } from '../profiling/profiler.ts';
 import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './settings.ts';
-import type { DecodeCellDebug, DecodeSampleGrid } from '../../pose/results.ts';
-import type { GrownRegion, LsdRectangle } from '../../pose/stages/lsd/types.ts';
 
 // ── What the overlays read, and it is the APP's type now ──────────────────
 //
@@ -26,17 +23,23 @@ import type { GrownRegion, LsdRectangle } from '../../pose/stages/lsd/types.ts';
 // a vertical flip also negates the vertical derivative and shifts the 2x2
 // stencil by a row, so flipRows(computeField(g)) and computeField(flipRows(g))
 // are different arrays.
+//
+// ── AND IT IS EMPTY NOW ──
+//
+// It used to carry `regions`, `rects`, `decodeGrid`, `decodeRotated` and
+// `decodeCorrectness` as well. Those were typed by the deleted pipeline
+// (GrownRegion, LsdRectangle, DecodeSampleGrid, DecodeCellDebug) and, more to
+// the point, nothing produces them: `src/pose2` keeps every one of those on the
+// device and reads back 128 bytes of pose. There is no opt-in intermediate
+// readback yet -- see full_system_breakdown.md §22.
+//
+// The three plain-array fields stay because they are shapes, not pipeline
+// vocabulary, and the paint path is written against them. They are never filled
+// today; a reader must treat absent as the normal case, which it always had to.
 export interface Intermediates {
   fx?: Float64Array;
   fy?: Float64Array;
   regionId?: Int32Array;
-  regions?: GrownRegion[];
-  rects?: LsdRectangle[];
-  // All three arrive together or not at all -- the rotation and the correctness
-  // array are derived from the grid and are worthless without it.
-  decodeGrid?: DecodeSampleGrid;
-  decodeRotated?: DecodeSampleGrid;
-  decodeCorrectness?: (DecodeCellDebug | null)[][];
 }
 
 // requestVideoFrameCallback's metadata for one decoded video frame, captured
@@ -88,17 +91,59 @@ export interface FrameMeta {
 //     it to have timed. Same reason `votes` can be empty and `chainTransfers`
 //     null on that path -- a remote pose genuinely does not carry them, and
 //     the old fields showed the previous LOCAL run's instead.
-export type CameraPose = Omit<PoseResult, 'chain' | 'cpuChain' | 'readGrid' | 'timing'> & {
-  timing: PoseComputeTiming | null;
-  // What the drain pulled back FOR THIS POSE: the run's own fx/fy/regionId/
-  // regions/decode grid, for the overlays that used to recompute them. Empty
-  // until the tail reads them, and empty forever for a run nothing asked about.
+//
+// ── IT IS THE APP'S OWN TYPE NOW, NOT A PROJECTION OF PoseResult ──
+//
+// This was `Omit<PoseResult, 'chain' | 'cpuChain' | 'readGrid' | 'timing'>`.
+// PoseResult is deleted with `src/pose`, and it was NOT re-homed: it described
+// that pipeline's return shape -- a chain, a timing DAG, a backend-dependent
+// transfer ledger -- and `src/pose2` returns a plain struct instead. Deriving
+// the app's display type from it would have kept the old shape alive under a
+// new path, which is the one thing the rewrite was for.
+//
+// So the fields are spelled out, and the ones nothing can fill are typed
+// `null` rather than left as optimistic shapes:
+//   - `gridPeriodPhase` was the period search's full result, rowLines/colLines/
+//     debug included, and drove the debug plot;
+//   - `chainTransfers` was the bus-crossing ledger, which pose2 does not have a
+//     concept of (one crossing per frame, by construction).
+export interface CameraPose {
+  voteComposites: { root: number; line: CompositeLine }[];
+  votes: { n: THREE.Vector3; weight: number }[];
+  quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
+  gridPeriodPhase: null;
+  recoveredAxes: RecoveredAxes | null;
+  positionDecode: PositionDecodeResult | null;
+  chainTransfers: null;
+  timing: null;
+  // What the drain pulled back FOR THIS POSE, and see Intermediates: empty, and
+  // empty for every run, until pose2 grows an opt-in readback.
   //
-  // Inside the pose rather than beside it, and that is the point: a decode grid
-  // cannot be displayed next to a different run's axes when the two travel in
-  // one pointer.
+  // Inside the pose rather than beside it, and that is still the point: a decode
+  // grid cannot be displayed next to a different run's axes when the two travel
+  // in one pointer.
   intermediates: Intermediates;
-};
+}
+
+// ── The display half of the deleted pipeline's vocabulary ────────────────
+//
+// Three shapes the UI genuinely draws, re-declared here as the APP's own rather
+// than imported from a library that no longer exists. They are geometry, not
+// pipeline structure -- an axis triad, a decoded position, a line segment --
+// which is why these three came across and the rest did not.
+export interface RecoveredAxes { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3; distance: number }
+export interface CompositeLine { x1: number; y1: number; x2: number; y2: number }
+export interface PositionDecodeResult {
+  row: number; col: number; consistency: number; votes: number; totalWindows: number;
+  camPos: THREE.Vector3;
+  // The camera's TRUE world orientation, solved entirely from the pattern.
+  // Anything placed into the actual 3D scene needs this to convert
+  // recoveredAxes' Drow/Dcol/Dnormal (expressed in MATH_QUAT's fixed math
+  // frame) into true world space first.
+  recoveredCamQuat: THREE.Quaternion;
+  // Which of the 4 cardinal rotations the decode matched at -- display-only.
+  orientation: number;
+}
 
 // The deferred-visualization mailbox's payload -- the pose the tail is to
 // paint, plus the live pipeline result it has to read to finish painting it.
@@ -111,9 +156,11 @@ export type CameraPose = Omit<PoseResult, 'chain' | 'cpuChain' | 'readGrid' | 't
 // runs. It is what holds the arena slices, and the reason those do not travel
 // on CameraPose: this field has a stated expiry (the next reconstruction) and
 // the pose on screen does not.
+// `result` used to be the raw PoseResult, carried only until the tail ran,
+// holding the arena slices the tail read its intermediates from. There is no
+// PoseResult and no arena, so the payload is the pose alone.
 export interface PendingVisuals {
   pose: CameraPose;
-  result: PoseResult;
 }
 
 export interface CameraBase {

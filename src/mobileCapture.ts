@@ -18,7 +18,6 @@ import * as THREE from 'three';
 import { toGrayscale } from './decode.ts';
 import { config, fetchConfigFile } from './sphereLab/config.ts';
 import { globalState } from './sphereLab/state.ts';
-import { backendFromForceCPU } from './pose/backend.ts';
 // Only the data-side rebuild is needed here now. The board's world EXTENT
 // (C/R/GRID_STEP) is read by gameOverlay.ts instead, which is the only thing
 // on this page that still draws anything at board scale.
@@ -31,11 +30,25 @@ import {
   type ARCameraPose,
 } from './gameOverlay.ts';
 import { getAnalysisVFovRad } from './sphereLab/math/geometry.ts';
-import { computeGradient2x2Field } from './pose/stages/gradient/gradientField.ts';
-import { computeLsdRectanglesFromField } from './pose/stages/lsd/chain.ts';
-import type { LsdRectangle } from './pose/stages/lsd/types.ts';
-import { computePoseFromCapture, type PoseInput, type PoseResult } from './pose/poseCompute.ts';
-import type { Intermediates } from './sphereLab/camera/model.ts';
+import type { PositionDecodeResult, RecoveredAxes } from './sphereLab/camera/model.ts';
+import type { PipelineSettings } from './sphereLab/harness/input.ts';
+
+// ── THE ON-DEVICE POSE PATH IS DARK ──────────────────────────────────────
+//
+// This page ran the WHOLE pipeline locally (device-compute mode): gradient ->
+// LSD -> votes -> fit -> period/phase -> decode, via computePoseFromCapture, and
+// sent only the recovered pose over the wire. src/pose is deleted and this page
+// is not yet on src/pose2, so every capture now reports a FAILED DECODE.
+//
+// That is a real behaviour change and it is deliberate: a failed decode is a
+// state this page already handles everywhere (`ok: false`, no IMU anchor, the
+// overlay hides, intrinsics still publish), so the page runs end to end instead
+// of being half-deleted. What it does NOT do is recover a pose.
+//
+// Wiring pose2 in here is its own job: the phone needs a WebGPU device and a
+// per-resolution Pose2Context, which is a different lifecycle from the desktop's.
+type LocalPoseInput = { aspect: number; settings: PipelineSettings };
+type LocalPose = { recoveredAxes: RecoveredAxes | null; positionDecode: PositionDecodeResult | null };
 // Shared with the desktop rather than restated here, so the wire shape and
 // the recorded shape cannot drift apart -- this page PRODUCES the value that
 // camera/model.ts types on the receiving end.
@@ -196,7 +209,7 @@ arOverlayCheckbox.addEventListener('change', () => setAROverlayEnabled(arOverlay
 // Resolves a local computePoseFromCapture result (device-compute mode) into
 // the same ARCameraPose shape a poseSync message already arrives in -- see
 // updateOverlayCamera's own comment on why it stays agnostic to the source.
-function buildLocalARCameraPose(input: PoseInput, pose: PoseResult): ARCameraPose | null {
+function buildLocalARCameraPose(input: LocalPoseInput, pose: LocalPose): ARCameraPose | null {
   const decode = pose.positionDecode;
   if (!decode) return null;
   return {
@@ -792,7 +805,7 @@ fpsSlider.addEventListener('input', () => {
 // normal use, because the desktop's on-connect settingsSync overwrites all of
 // it within a second of the phone connecting, and only shows up in the narrow
 // window before that push lands.
-let cameraSettings: PoseInput['settings'] = { ...config.camera.common };
+let cameraSettings: PipelineSettings = { ...config.camera.common };
 // Tracks the last boardSize a settingsSync actually applied, so
 // rebuildFloorPatternData (which rebuilds the whole De Bruijn lookup table --
 // not cheap) only runs when boardSize genuinely changed, not on every
@@ -1984,68 +1997,11 @@ function captureAndSendFrame() {
   }, 'image/jpeg', 0.85);
 }
 
-// Diagnostic-only summary of state's intermediates, built when sendDebugInfo
-// is on -- NOT a full serialization of every field (composite lines/decode
-// grids carry THREE.Vector3-laden or large per-pixel data not worth wire
-// cost for a debug toggle whose whole point is staying cheap when off, and
-// affordable when on). Picked for "why is consistency/votes low" diagnosis:
-// composite/vote counts (LSD/join-walk health), the decode grid's actual
-// valid-sample ratio (directly explains few/no window agreement), and
-// gridPeriodPhase's own period/phase/height (sanity-checks the distance
-// estimate). All plain numbers -- JSON-safe with no reconstruction needed
-// on the desktop side.
-//
-// `pipeline` (see this session's "Ship auxiliary pipeline intermediates"
-// plan) is a SEPARATE, additional payload: the phone's own pipeline
-// intermediates verbatim, assigned back onto the exact same camera.last*
-// fields a desktop-compute capture already populates (pipeline/capture.ts's
-// ingestRemotePose), rather than re-derived into a summary shape like the
-// fields above. gridPeriodPhase/voteComposites are already sitting on
-// `state` at zero marginal cost; lsdRectangles is the one genuinely NEW
-// computation here (LSD rectangle data isn't retained anywhere in the
-// production pose pipeline -- see computeGradient2x2Composites in
-// pose/stages/votes/votes.ts, which discards them after reducing to composite
-// lines) -- a second, explicit LSD pass, mirroring the same
-// recompute-for-debug-display pattern overlays/lsdOverlay.ts's own
-// updateLsdOverlay already uses desktop-side. The per-pixel flood-fill
-// membership lists are not on the wire and never were: they scale with image
-// resolution rather than region count, and the desktop draws members only from
-// its OWN local run's regions. A rectangle is nine numbers and a flag now
-// (pose/stages/lsd/types.ts), so the wire shape below is the whole of it.
-function buildDebugPayload(pose: PoseResult, drained: Intermediates, lsdRects: LsdRectangle[]) {
-  const grid = drained.decodeGrid;
-  let validCount = 0, totalCount = 0;
-  if (grid) {
-    for (const row of grid.points) for (const pt of row) { totalCount++; if (pt.valid) validCount++; }
-  }
-  let correctCount = 0, wrongCount = 0;
-  if (drained.decodeCorrectness) {
-    for (const row of drained.decodeCorrectness) for (const cell of row) {
-      if (!cell) continue;
-      if (cell.correct) correctCount++; else wrongCount++;
-    }
-  }
-  const gpp = pose.gridPeriodPhase;
-  return {
-    compositeLineCount: pose.voteComposites.length,
-    voteCount: pose.votes.length,
-    gridPeriodPhase: gpp ? {
-      period: gpp.period, phiRow: gpp.phiRow, phiCol: gpp.phiCol, height: gpp.height,
-      chosenPeriod: gpp.debug.chosenPeriod, bracket: gpp.debug.bracket,
-      rowLineCount: gpp.rowLines.length, colLineCount: gpp.colLines.length,
-    } : null,
-    decodeGrid: grid ? { rows: grid.rows, cols: grid.cols, validCount, totalCount } : null,
-    decodeCorrectness: drained.decodeCorrectness ? { correctCount, wrongCount } : null,
-    pipeline: {
-      gridPeriodPhase: pose.gridPeriodPhase,
-      voteComposites: pose.voteComposites,
-      lsdRectangles: lsdRects.map((r) => ({
-        cx: r.cx, cy: r.cy, theta: r.theta, length: r.length, width: r.width,
-        accepted: r.accepted, nfaLog10: r.nfaLog10, lineScore: r.lineScore,
-      })),
-    },
-  };
-}
+// buildDebugPayload lived here: it summarized the decode grid, the period/phase
+// result, the vote composites and a SECOND explicit LSD pass into the debug blob
+// this page sends when `sendDebugInfo` is on. Every one of its inputs came from
+// the deleted pipeline, so it went with them, and the debug branch below no
+// longer attaches anything.
 
 // ── Device-compute: capture + run the pose pipeline locally + send just
 // the result ──────────────────────────────────────────────────────────────
@@ -2104,25 +2060,11 @@ async function captureComputeAndSendPose() {
     // the pipeline reads exactly these two fields and returns everything else.
     const poseInput = { aspect: cw / ch, settings: cameraSettings };
     const t0 = performance.now();
-    // The phone's globalState is THIS page's own module instance, kept in sync
-    // by settingsSync (see below) -- converted to a Backend right here so the
-    // pipeline itself never reads it. Same conversion the desktop does.
-    const pose = await computePoseFromCapture(
-      poseInput, grayTopDown, cw, ch, backendFromForceCPU(globalState.forceCPU),
-    );
-    // Reads the decode grid RIGHT HERE rather than deferring: buildDebugPayload
-    // below needs it and this page has no visual mailbox to read it in later.
-    // The read is what costs -- 0.45MB -- and it happens because this page
-    // genuinely draws it, which is the whole of what the old `wants(...)`
-    // request was expressing.
-    const drained: Intermediates = {};
-    if (pose.readGrid) {
-      const g = await pose.readGrid();
-      drained.decodeGrid = g.grid;
-      drained.decodeRotated = g.rotated;
-      drained.decodeCorrectness = g.correctness;
-    }
-    const timing = pose.timing;
+    // Was computePoseFromCapture over grayTopDown. See LocalPose's header: the
+    // capture still happens and is still measured, and the result is an
+    // undecoded pose, which every consumer below already handles.
+    void grayTopDown;
+    const pose: LocalPose = { recoveredAxes: null, positionDecode: null };
     const totalMs = performance.now() - t0;
     const pd = pose.positionDecode;
     recordPose({
@@ -2202,26 +2144,13 @@ async function captureComputeAndSendPose() {
           orientation: pd.orientation,
         } : null,
       };
-      // Both off by default, independently toggled -- see their own
-      // checkbox comments above. Neither is computed at all unless its
-      // toggle is on, so leaving both off costs nothing beyond the
-      // checkbox reads themselves. The second LSD pass below (see
-      // buildDebugPayload's own comment on `pipeline.lsdRectangles`) is
-      // the one genuinely NEW computation sendDebugInfo pays for -- never
-      // runs unless this branch is taken.
-      if (sendDebugInfo) {
-        const field = computeGradient2x2Field(grayTopDown, cw, ch);
-        const lsdRects = await computeLsdRectanglesFromField(field, {
-          toleranceDeg: cameraSettings.lsdToleranceDeg,
-          rhoNoiseThreshold: cameraSettings.lsdRhoNoiseThreshold,
-          rhoHighThreshold: cameraSettings.lsdRhoHighThreshold,
-          cclSteps: cameraSettings.lsdCclSteps,
-          minRegionSize: cameraSettings.lsdMinRegionSize,
-          nfaEpsilon: cameraSettings.lsdNfaEpsilon,
-          nfaTestExponent: cameraSettings.lsdNfaTestExponent,
-        }, backendFromForceCPU(globalState.forceCPU));
-        msg.debug = buildDebugPayload(pose, drained, lsdRects);
-      }
+      // `sendDebugInfo` used to attach a debug blob here: the decode grid's
+      // coverage, the period/phase result, the vote composites, and a SECOND
+      // explicit LSD pass run purely for the desktop's rectangle overlay. All of
+      // it came from the deleted pipeline. The toggle and its checkbox stay --
+      // the image half below is independent of it -- but there is nothing left
+      // to attach.
+      void sendDebugInfo;
       // Raw bytes now (poseResultWire.ts), not a base64 dataUrl -- toBlob's
       // callback is awaited HERE, inside captureComputeAndSendPose's own
       // try block, so devicePoseComputing (which this function's own
@@ -2244,8 +2173,11 @@ async function captureComputeAndSendPose() {
     // toggle is seeing the phone's TRUE compute speed, and timing is
     // deliberately excluded from the wire payload for now, see this
     // session's on-device-pose-recovery plan).
+    // The per-stage breakdown came off the deleted pipeline's own timing struct.
+    // The wall-clock half is this page's own measurement and still means what it
+    // always did -- it is just measuring a capture with no pose behind it.
     const fps = totalMs > 0 ? 1000 / totalMs : 0;
-    poseReadoutEl.textContent = `pose ${totalMs.toFixed(0)}ms (${fps.toFixed(1)}fps)  votes ${timing.votesMs.toFixed(0)} fit ${timing.fitMs.toFixed(0)} pose ${timing.poseMs.toFixed(0)} dist ${timing.distanceMs.toFixed(0)} decode ${timing.decodeMs.toFixed(0)}`
+    poseReadoutEl.textContent = `pose ${totalMs.toFixed(0)}ms (${fps.toFixed(1)}fps)`
       + (pd ? '' : '  [no fix]');
   } finally {
     devicePoseComputing = false;

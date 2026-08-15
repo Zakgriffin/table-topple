@@ -5,8 +5,8 @@ import { physicalSettingsFrom } from './camera/settings.ts';
 import type { PhysicalCameraSettings } from './camera/settings.ts';
 import { SphereLabConfigSchema } from './configSchema.ts';
 import type { SphereLabConfig } from './configSchema.ts';
-import { backendFromForceCPU } from '../pose/backend.ts';
-import type { Backend } from '../pose/backend.ts';
+import { backendFromForceCPU } from './backend.ts';
+import type { Backend } from './backend.ts';
 
 // ── A fixture: a capture that carries the configuration it is to be run under ──
 //

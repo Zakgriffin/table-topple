@@ -12,12 +12,11 @@ import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { recomputeFromLastCapture, runAxesReconstruction, updateChainTransfersReadout } from '../pipeline/axesReconstruction.ts';
 import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
-import { backendFromForceCPU } from '../../pose/backend.ts';
+import { backendFromForceCPU } from '../backend.ts';
 import { buildProjectedTexture } from '../pipeline/projectedBins.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
-import { isWebGPUSupported } from '../../pose/gpu/device.ts';
+import { isWebGPUSupported } from '../../gpu/device.ts';
 import { profilerReset, profilerSetDevToolsMirror } from '../profiling/profiler.ts';
-import { invalidateHashTableCache } from '../../pose/stages/decode/decodeTally.gpu.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../state.ts';
 import { type FieldView } from '../types.ts';
@@ -360,7 +359,11 @@ bindSlider('boardSize', config.global.boardSize, (v) => {
   globalState.boardSize = v;
   rebuildFloorPattern(v); // re-crops the torus, rebuilds the decode lookup table, resizes the floor mesh/texture/reference lines
   rebuildGridLineKs(); // reads HALF_R/HALF_C, which rebuildFloorPattern just updated -- must run after it
-  invalidateHashTableCache(); // GPU decode-tally's hash table was built from the OLD debruijnLookup
+  // The GPU decode-tally's hash table used to be cached here and invalidated on
+  // a board-size change. That cache died with src/pose. src/pose2 rebuilds its
+  // board buffers per context (board.ts), so there is nothing to invalidate --
+  // but a context built against the OLD board is now stale, and wiring that up
+  // is part of swapping the app onto pose2.
   for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render/re-decode against the new board
   pushSettingsSyncToAllPhysical();
 }, (v) => v.toFixed(0));

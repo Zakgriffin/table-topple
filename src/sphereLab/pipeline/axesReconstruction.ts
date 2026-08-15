@@ -8,18 +8,13 @@ import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo, updateRecoveredFlo
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { globalState } from '../state.ts';
 import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
-import { backendFromForceCPU } from '../../pose/backend.ts';
+import { backendFromForceCPU } from '../backend.ts';
 import { captureDistortedGrayscale } from './capture.ts';
 import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './projectedBins.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
-import { readSliceF32, readSliceU32 } from '../../pose/gpu/device.ts';
-import { readRegionMembers } from '../../pose/stages/lsd/lsdFit.gpu.ts';
-import type { GrownRegion } from '../../pose/stages/lsd/types.ts';
 import type { Intermediates } from '../camera/model.ts';
-import { computePoseFromCapture, type PoseResult } from '../../pose/poseCompute.ts';
 import { type StageRecord, spanEnd } from '../profiling/profiler.ts';
-import { poseSpan } from '../../pose/timing/stages.ts';
 import { appSpan } from '../profiling/stages.ts';
 
 // Shared pole-marker/gizmo/floor-overlay/readout tail -- called after EITHER
@@ -102,18 +97,17 @@ export function applyPoseVisualizations(camera: Camera, isActive: boolean, extra
     } else {
       lines.push(`degenerate fit`);
     }
-    const gpp = pose?.gridPeriodPhase;
-    if (pose?.recoveredAxes && gpp) {
+    // The PERIOD half of this line is gone with `gridPeriodPhase`; the distance
+    // is still on recoveredAxes and is still worth printing on its own.
+    if (pose?.recoveredAxes) {
       const trueDist = isSimulated(camera) ? camera.camPos.y : NaN;
       const dist = pose.recoveredAxes.distance;
       if (haveGroundTruth) {
         const err = (Math.abs(dist - trueDist) / trueDist) * 100;
-        lines.push(`distance ${dist.toFixed(2)} (${err.toFixed(1)}% err)  true ${trueDist.toFixed(2)}  period ${gpp.period.toFixed(4)}  [gridPeriodPhase]`);
+        lines.push(`distance ${dist.toFixed(2)} (${err.toFixed(1)}% err)  true ${trueDist.toFixed(2)}`);
       } else {
-        lines.push(`distance ${dist.toFixed(2)}  period ${gpp.period.toFixed(4)}  [gridPeriodPhase]`);
+        lines.push(`distance ${dist.toFixed(2)}`);
       }
-    } else if (pose?.quadricPair) {
-      lines.push(`distance: no period found (gridPeriodPhase)`);
     }
     const decode = pose?.positionDecode;
     if (decode) {
@@ -149,23 +143,11 @@ export function updateChainTransfersReadout(camera: Camera | undefined) {
     lsdChainTransfers.textContent = 'LSD chain: select a camera to see its bus traffic.';
     return;
   }
-  const s = camera.pose?.chainTransfers;
-  if (!s) {
-    lsdChainTransfers.textContent = 'LSD chain: no capture yet.';
-    return;
-  }
-  const mb = s.bytes / 1048576;
-  const size = mb >= 0.01 ? `${mb.toFixed(2)} MB` : `${s.bytes} B`;
-  const head = `LSD chain: ${s.crossings} crossing${s.crossings === 1 ? '' : 's'}, ${size}`;
-  if (s.entries.length === 0) {
-    // Genuinely zero, not missing: an all-CPU chain never touches the bus.
-    lsdChainTransfers.textContent = `${head} -- nothing crosses (all-CPU chain).`;
-    return;
-  }
-  const detail = s.entries
-    .map((e) => `${e.what}${e.direction === 'up' ? '↑' : '↓'}`)
-    .join(' ');
-  lsdChainTransfers.textContent = `${head}  [${detail}]`;
+  // `chainTransfers` was the bus-crossing ledger the deleted pipeline kept, and
+  // it is typed `null` on CameraPose now: src/pose2 crosses the bus once per
+  // frame by construction, so there is no per-run traffic to summarize and the
+  // ledger that measured it is gone too.
+  lsdChainTransfers.textContent = 'LSD chain: no bus ledger (src/pose2 reads back once per frame).';
 }
 
 // ── Axes/position reconstruction (the big orchestrator) ──────────────────
@@ -244,7 +226,7 @@ async function runVisualTailBody(camera: Camera, posted: PendingVisuals): Promis
   // reconstruction that landed while the readback was in flight would otherwise
   // get its axes overwritten by the previous frame's, decode grid and all.
   {
-    const got = await readDisplayIntermediates(camera, posted.result);
+    const got = await readDisplayIntermediates(camera);
     if (camera.pose === posted.pose) camera.pose = { ...posted.pose, intermediates: got };
   }
 
@@ -292,11 +274,11 @@ async function runVisualTailBody(camera: Camera, posted: PendingVisuals): Promis
   // whole tail defers as one unit instead of only its expensive half.
   // The payload's own timings, not a camera field: this line describes the run
   // being painted, and the drain runs long after that run returned.
-  const t = posted.pose.timing;
-  let timingLine: string | undefined;
-  if (t) {
-    timingLine = `votes ${t.votesMs.toFixed(0)}ms  fit ${t.fitMs.toFixed(0)}ms  pose ${t.poseMs.toFixed(0)}ms  distance ${t.distanceMs.toFixed(0)}ms  project ${projectMs.toFixed(0)}ms  decode ${t.decodeMs.toFixed(0)}ms`;
-  }
+  // The per-stage breakdown (votes/fit/pose/distance/decode) came off the
+  // deleted pipeline's PoseComputeTiming. pose2 does not report host-side stage
+  // spans -- it is one submit -- so only the projection's own time is left, and
+  // it is the app's own measurement.
+  const timingLine = `project ${projectMs.toFixed(0)}ms`;
   applyPoseVisualizations(camera, isActive, timingLine);
   spanEnd(overlaySpan);
 
@@ -421,90 +403,28 @@ export function drainVisuals(camera: Camera): void {
 // real cost change -- flipping one of these re-runs the pose stages instead of
 // recomputing one field on the CPU -- and it is the trade the whole step is
 // making: one pipeline, asked, instead of a second one, duplicated.
-async function readDisplayIntermediates(camera: Camera, result: PoseResult): Promise<Intermediates> {
-  const s = camera.settings;
-  const out: Intermediates = {};
-  // `pose.drain` is opened HERE now, by the app, and that is the honest place
-  // for it: the drain was never a pipeline stage, it is the display half
-  // deciding to pay for a readback. The library still names it as the OWNER of
-  // those transfers, so the crossings join inside this span exactly as before.
-  const drainSpan = poseSpan('pose.drain');
-  try {
-
-    // fx/fy: the contamination rasters, the top-gradient raster, the hover
-    // arrows, and the LSD edge-connectivity preview.
-    const needField = s.showTrueContamination || s.showReconstructedContamination
-      || s.showTopGradient
-      || s.showGradientArrow || s.showLevelLineArrow
-      || s.showLsdRawRegions;
-    // The three LSD debug views. ALL THREE need the region member lists now,
-    // not just the raw-region one: a rectangle no longer carries its own
-    // members, so the rejected raster and the segment hues join `rects[i]` to
-    // `regions[i]` (see LsdRectangle). That is why these two conditions are the
-    // same condition, and updateLsdOverlay requires both arrays together.
-    //
-    // `regionId` stays gated on the raw-region view alone -- it is a separate
-    // n*4 readback and only the hover highlight looks up a pixel's region.
-    const needRects = s.showLsdSegments || s.showLsdRejected || s.showLsdRawRegions;
-    const needRegions = needRects;
-    const needRegionId = s.showLsdRawRegions;
-
-    // ── the reads, written out ──
-    //
-    // This used to be `displayIntermediates(camera)` returning a SET OF NAMES
-    // that went into the pipeline as `want`, and a `pending.resolve()` here that
-    // drained whatever had been named. Two halves that had to agree, several call
-    // sites away from each other, plus a handle carrying ownership of device
-    // buffers between them.
-    //
-    // Now the settings decide what to read and the reads happen here. The
-    // conditions are the same conditions; what is gone is the mechanism that used
-    // to carry them across the boundary -- and with it the question of who frees
-    // what, since the pipeline's arena frees all of it at the next run.
-    const { chain, cpuChain } = result;
-    if (cpuChain) {
-      // Already host arrays: no readback, no widening, no transfer. Handing them
-      // over is a pointer copy, which is why the CPU path pays literally nothing
-      // for display data.
-      if (needField) { out.fx = cpuChain.fx; out.fy = cpuChain.fy; }
-      if (needRegionId) out.regionId = cpuChain.regionId;
-      if (needRegions) out.regions = cpuChain.regions as GrownRegion[];
-    } else if (chain) {
-      const { arena, n } = chain;
-      if (needField) {
-        out.fx = new Float64Array(await readSliceF32(arena, chain.fx, n * 4, 'fx', 'pose.drain'));
-        out.fy = new Float64Array(await readSliceF32(arena, chain.fy, n * 4, 'fy', 'pose.drain'));
-      }
-      if (needRegionId) {
-        const raw = await readSliceU32(arena, chain.regionId, n * 4, 'regionId', 'pose.drain');
-        // BIT REINTERPRETATION, not a numeric convert -- that is what makes the
-        // -1 sentinel survive the trip (collect's scatter writes a real -1).
-        out.regionId = new Int32Array(raw.buffer.slice(0));
-      }
-      if (needRegions) {
-        out.regions = (await readRegionMembers(
-          arena, chain.regions, chain.regionCount, chain.memberCount, 'pose.drain',
-        )) as GrownRegion[];
-      }
-    }
-    // Host-side on both backends, so this is never a read.
-    if (needRects) out.rects = result.rects;
-
-    // The decode grid, 0.45MB. Projected-Cam and the world-floor decal are the
-    // only things that draw it, but it is read unconditionally for now because
-    // several readouts consume `decodeRotated` outside those views; narrowing it
-    // is a separate change with its own display consequences.
-    if (result.readGrid) {
-      const g = await result.readGrid();
-      out.decodeGrid = g.grid;
-      out.decodeRotated = g.rotated;
-      out.decodeCorrectness = g.correctness;
-    }
-    return out;
-  } finally {
-    spanEnd(drainSpan);
-  }
+// ── THE DRAIN READS NOTHING NOW ──────────────────────────────────────────
+//
+// This decided, from the display toggles, which of the run's intermediates to
+// pull back off the device -- fx/fy for the contamination and gradient rasters,
+// regionId + the region CSR for the three LSD views, the decode grid and its
+// correctness array for the lattice -- and it was the ONE place that paid for
+// them, once, after the pose was already final.
+//
+// Every one of those reads went through the deleted pipeline's arena slices
+// (`readSliceF32`/`readSliceU32`/`readRegionMembers`) against a `PoseResult`
+// that no longer exists. src/pose2 keeps all of it on the device and reads back
+// 128 bytes of pose, so there is nothing here to read yet -- see §22 of
+// full_system_breakdown.md for what an opt-in readback would have to add.
+//
+// The SHAPE stays: a deferred drain that republishes the pose with its
+// intermediates filled in. That is the seam an opt-in readback plugs into, and
+// keeping it means the tail's ordering guarantees (and the identity check that
+// stops an older pose overwriting a newer one) do not have to be rebuilt.
+async function readDisplayIntermediates(_camera: Camera): Promise<Intermediates> {
+  return {};
 }
+
 
 // ── The one place a pose result lands on a Camera ─────────────────────────
 //
@@ -526,51 +446,47 @@ async function readDisplayIntermediates(camera: Camera, result: PoseResult): Pro
 // they arrive with the drain, which republishes this same object with them in
 // it. Starting empty is the point -- the previous run's decode grid can no
 // longer be read next to this run's axes, because it is not in this object.
-function applyPoseResult(camera: Camera, result: PoseResult): void {
-  const { chain, cpuChain, readGrid, ...rest } = result;
-  void chain; void cpuChain; void readGrid;
-  const pose: CameraPose = { ...rest, intermediates: {} };
+function applyPoseResult(camera: Camera, pose: CameraPose): void {
   camera.pose = pose;
   // Posts to the mailbox. The pose is final; the tail is what is deferred. The
-  // RESULT rides along rather than the pose, because it is what holds the arena
-  // slices -- and those expire at the next reconstruction, which is exactly why
-  // they are not on the pose that stays on screen.
-  camera.pendingVisuals = { pose, result };
+  // raw result used to ride along here because it held the arena slices the
+  // drain read from -- there is no result type and no arena, so the payload is
+  // the pose alone.
+  camera.pendingVisuals = { pose };
 }
 
+// An empty pose, which is what a local reconstruction can produce until the app
+// is swapped onto src/pose2. Spelled out rather than left implicit so that
+// wiring pose2 in is a matter of filling these fields from a Pose2Result.
+function emptyPose(): CameraPose {
+  return {
+    voteComposites: [], votes: [], quadricPair: null, gridPeriodPhase: null,
+    recoveredAxes: null, positionDecode: null, chainTransfers: null, timing: null,
+    intermediates: {},
+  };
+}
+
+// ── THE RECONSTRUCTION ITSELF, and it does not reconstruct ───────────────
+//
+// This called `computePoseFromCapture` -- every stage from the 2x2 gradient
+// through the position decode -- and published the result. src/pose is deleted
+// and the app is NOT yet wired to src/pose2, so the capture still happens, the
+// button still cycles, the projection and the overlays still run, and the pose
+// they run against is empty.
+//
+// THE WIRING THAT GOES HERE is `createPose2Context` once per camera (it owns the
+// device buffers and wants to outlive a frame) plus `runPose2(ctx, gray,
+// settings)` per capture, mapping its plain result onto CameraPose. The reason
+// that is not done in this commit is that it is a design decision about the app
+// boundary -- where the context lives, what happens on a resize, how the phone's
+// remote path shares it -- and doing it inside a deletion would have buried it.
 async function recomputeStages(camera: Camera) {
-  const { gray, w, h } = camera.lastAxesCaptureGray!;
-
-  // Every stage from the 2x2-gradient composite lines through
-  // runPositionDecode lives in pose/poseCompute.ts's computePoseFromCapture --
-  // a pure function of a capture plus the two camera parameters a real Camera
-  // structurally satisfies (PoseInput), so it can also run standalone on the
-  // phone and headless in node. computeProjectedBinsAuto/paintProjectedTexture
-  // (in runVisualTail) are deliberately NOT part of that shared prefix --
-  // confirmed not on the critical path to a pose (distance is already
-  // finalized by gridPeriodPhase before that stage would run); they exist
-  // only to feed Projected-Cam/World-floor-decal DISPLAY.
-  // Dropped, not released. A payload this camera never drained (a newer
-  // reconstruction superseded it before runVisualTail ran) used to own the
-  // chain's device buffers and would hold them until device loss, so it had to
-  // be released here, before the next run, so two sets never coexisted. The
-  // arena frees the previous run's slices itself at the top of the next one, so
-  // all that is left is to stop pointing at them.
+  const cap = camera.lastAxesCaptureGray;
+  if (!cap) return;
+  // Dropped, not released: a payload this camera never drained used to own the
+  // chain's device buffers. There are none to own now.
   camera.pendingVisuals = null;
-
-  // Nothing is asked for up front any more -- see computePoseFromCapture. The
-  // last thing that was (the region CSR, for each rectangle's member list) is
-  // read in the drain below like everything else, ONCE, now that a rectangle
-  // joins to its region by index instead of carrying a copy.
-  const result = await computePoseFromCapture(
-    camera, gray, w, h, backendFromForceCPU(globalState.forceCPU),
-  );
-  // Publishes the pose AND posts the tail's payload -- the pose is final here,
-  // and everything past this point is display. Deferred, that display work
-  // stops being awaited inside the reconstruction's own window, where it
-  // serialized ~20ms of GPU work against the same device queue the pose stages
-  // were using.
-  applyPoseResult(camera, result);
+  applyPoseResult(camera, emptyPose());
 }
 
 export function runAxesReconstruction(camera: Camera) {

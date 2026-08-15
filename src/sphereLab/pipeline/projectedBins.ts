@@ -6,9 +6,9 @@ import { projectSamplesGPU } from './projectSamples.gpu.ts';
 import { spanEnd } from '../profiling/profiler.ts';
 import { appSpan } from '../profiling/stages.ts';
 import { type ProjectedBins, type ProjectedSamplesDense } from '../types.ts';
-import { type GradientField } from '../../pose/results.ts';
-import { type Backend } from '../../pose/backend.ts';
-import { computeGradientField } from '../../pose/stages/gradient/gradientField.ts';
+import { type GradientField } from '../types.ts';
+import { type Backend } from '../backend.ts';
+import { computeGradientField } from './gradientField.ts';
 
 // ── The projection stage: DISPLAY, not pose ───────────────────────────────
 //

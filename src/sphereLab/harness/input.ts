@@ -2,7 +2,6 @@ import { decodeGray, fixtureSettings } from '../fixture.ts';
 import type { Fixture } from '../fixture.ts';
 // Type-only, so this module stays pure and node can import it -- see
 // fixture.ts's header for why that matters and what enforces it.
-import type { PoseInput } from '../../pose/poseCompute.ts';
 
 // ── What a harness runs ON ────────────────────────────────────────────────
 //
@@ -32,7 +31,32 @@ import type { PoseInput } from '../../pose/poseCompute.ts';
 // capture, they now run on the real orientation. Deltas from before this change
 // are not comparable to deltas after it, which costs nothing: every historical
 // number here is void for the config-pinning reason anyway.
-export type PipelineSettings = PoseInput['settings'];
+// ── The detector's tuning, DECLARED HERE now ─────────────────────────────
+//
+// This was `PoseInput['settings']` -- a projection of the deleted pipeline's
+// input type, which is where the fields were declared. It is written out
+// instead of re-homing PoseInput, because a settings bag is exactly the part of
+// that type worth keeping and the rest (the aspect, the backend, the chain) was
+// the pipeline's business.
+//
+// These are all real user-facing defaults in sphere-lab.config.json, and
+// src/pose2 takes the same numbers per stage -- it deliberately does not import
+// the config, so the values in the config file and the ones a pose2 stage is
+// handed have to keep matching by convention rather than by type.
+export interface PipelineSettings {
+  lsdToleranceDeg: number;
+  // rhoNoiseThreshold is hysteresis' LOW bar (participate in edges);
+  // rhoHighThreshold is its HIGH bar (a component must contain at least one
+  // pixel above it to survive at all).
+  lsdRhoNoiseThreshold: number; lsdRhoHighThreshold: number;
+  lsdCclSteps: number; // debug round scrubber only -- 0 = run to fixpoint
+  lsdMinRegionSize: number;
+  lsdNfaEpsilon: number; lsdNfaTestExponent: number;
+  lsdMinLengthPx: number;
+  horizFovDeg: number;
+  gridPeriodPhaseGapLowerBound: number;
+  minGrazingCos: number;
+}
 
 export interface HarnessInput {
   // Where this came from, carried into reports so a result names its input.

@@ -3,7 +3,6 @@ import * as THREE from 'three';
 import { create, globals } from 'webgpu';
 import { validateFixture } from '../src/sphereLab/fixture.ts';
 import { inputFromFixture } from '../src/sphereLab/harness/input.ts';
-import { computePoseFromCapture } from '../src/pose/poseCompute.ts';
 import { type SimDims, type SimPose } from '../src/pose2/sim.ts';
 import { type PoseObservation, type SweepSpec, runSweep, summarize } from '../src/pose2/sweep.ts';
 import { boardDims } from '../src/pose2/board.ts';
@@ -19,14 +18,17 @@ import { vFovRadOf } from '../src/pose2/sim.ts';
 // Renders a grid of known camera poses, runs a pipeline over each, and reports
 // accuracy and timing against ground truth.
 //
-//   --pipeline pose  (default)  src/pose on the CPU backend -- THE BASELINE
-//   --pipeline pose2            src/pose2, all GPU, one readback
-//   --pipeline both             one after the other, same poses, same renders
+//   --pipeline pose2  (the only one left)  src/pose2, all GPU, one readback
 //
-// The two columns are directly comparable because the harness is
-// PIPELINE-AGNOSTIC: a Runner takes a grayscale image and returns what it
-// recovered. That is the whole reason "is the rewrite at least as accurate"
-// gets an answer rather than an opinion.
+// THE `pose` AND `both` ARMS ARE GONE, with src/pose itself. They ran the old
+// pipeline over the same poses and the same renders, which is what produced the
+// two directly comparable columns in section 19 of full_system_breakdown.md --
+// identical accuracy to every printed digit, 27.9 -> 13.5 ms median. That
+// comparison is RECORDED but can no longer be RE-RUN.
+//
+// The harness underneath is still deliberately pipeline-agnostic: a Runner takes
+// a grayscale image and returns what it recovered. Nothing about the surviving
+// arm depends on there being only one.
 
 const argv = process.argv.slice(2);
 const has = (f: string) => argv.includes(f);
@@ -66,28 +68,6 @@ const spec: SweepSpec = quick
 
 const total = spec.heights.length * spec.tilts.length * spec.yaws.length * spec.offsets.length;
 let done = 0;
-// computePoseFromCapture, NOT runPoseOn: the harness wrapper drains fx, fy,
-// regionId, the region CSR and the decode grid into host arrays, and this sweep
-// discards every one of them. At 180 poses that churn exhausted the V8 heap.
-const cpuRunner = async (gray: Float64Array, d: SimDims, p: SimPose): Promise<PoseObservation> => {
-  const input = { aspect: d.w / d.h, settings: base.settings };
-  // Logged BEFORE the run, so a pose that kills the process names itself. A
-  // progress counter printed afterwards tells you nothing about the one that
-  // died.
-  const mb = (process.memoryUsage().heapUsed / 1048576).toFixed(0);
-  console.error(`  [${++done}/${total}] h=${p.height} tilt=${p.tiltDeg} yaw=${p.yawDeg} at (${p.overRow},${p.overCol})  heap ${mb}MB`);
-  const t0 = performance.now();
-  const pose = await computePoseFromCapture(input, gray, d.w, d.h, 'cpu');
-  const ms = performance.now() - t0;
-  return {
-    camPos: pose.positionDecode?.camPos ?? null,
-    height: pose.recoveredAxes?.distance ?? null,
-    period: pose.gridPeriodPhase?.period ?? null,
-    consistency: pose.positionDecode?.consistency ?? null,
-    ms,
-  };
-};
-
 // ── src/pose2: all GPU, one readback ──────────────────────────────────────
 //
 // The settings come from the SAME fixture the baseline runner uses. src/pose2
@@ -158,15 +138,21 @@ const gpuInstance = create([]);
  */
 const alias = has('--alias');
 
-const which = val('--pipeline', 'pose');
-const reports: string[] = [];
-for (const name of which === 'both' ? ['pose', 'pose2'] : [which]) {
-  done = 0;
-  console.error(`rendering + running ${total} poses at ${dims.w}x${dims.h}, supersample ${supersample} through src/${name}...`);
-  const runner = name === 'pose2' ? await makePose2Runner() : cpuRunner;
-  const rows = await runSweep(spec, runner);
-  const tag = name === 'pose' ? ' (cpu)' : alias ? ' (gpu, POOLED)' : ' (gpu)';
-  reports.push(summarize(rows, `src/${name}${tag} @ ${dims.w}x${dims.h}`));
+// `--pipeline` is still accepted so an old invocation says what happened rather
+// than silently sweeping something else. There is only one pipeline now.
+const which = val('--pipeline', 'pose2');
+if (which !== 'pose2') {
+  console.error(
+    `--pipeline ${which} is gone: src/pose was deleted, so only pose2 can be swept.\n` +
+    `The two-pipeline comparison it produced is recorded in full_system_breakdown.md §19.`,
+  );
+  process.exit(1);
 }
+
+done = 0;
+console.error(`rendering + running ${total} poses at ${dims.w}x${dims.h}, supersample ${supersample} through src/pose2...`);
+const runner = await makePose2Runner();
+const rows = await runSweep(spec, runner);
 console.error('');
-for (const r of reports) { console.error(r); console.error(''); }
+console.error(summarize(rows, `src/pose2${alias ? ' (gpu, POOLED)' : ' (gpu)'} @ ${dims.w}x${dims.h}`));
+console.error('');

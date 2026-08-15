@@ -24,31 +24,25 @@ import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './set
 // stencil by a row, so flipRows(computeField(g)) and computeField(flipRows(g))
 // are different arrays.
 //
-// ── AND IT IS EMPTY NOW ──
+// ── EVERY FIELD IS OPTIONAL, AND THAT IS THE MECHANISM ──
 //
-// It used to carry `regions`, `rects`, `decodeGrid`, `decodeRotated` and
-// `decodeCorrectness` as well. Those were typed by the deleted pipeline
-// (GrownRegion, LsdRectangle, DecodeSampleGrid, DecodeCellDebug) and, more to
-// the point, nothing produces them: `src/pose2` keeps every one of those on the
-// device and reads back 128 bytes of pose. There is no opt-in intermediate
-// readback yet -- see full_system_breakdown.md §22.
+// `src/pose2` keeps its intermediates on the device and reads back 128 bytes of
+// pose. What lands here is whatever a given capture ASKED for -- see
+// pipeline/axesReconstruction.ts's INSPECT (what may be read) and inspectFor
+// (what this frame requested), and full_system_breakdown.md §18's "Reading a
+// buffer back" for the mechanism. A reader must treat absent as the normal case:
+// a field nobody asked for is not here, and that is the mechanism working.
 //
-// ── AND IT IS FILLING UP AGAIN (2026-08-15) ──
+// FILLED WITH THE POSE, not after it. There is no drain: pose2 has one fence, so
+// these ride in the same staging buffer as the pose and the published pose is
+// already complete.
 //
-// `src/pose2` grew an opt-in readback (full_system_breakdown.md §18, "Reading a
-// buffer back"), so these are populated again -- for whichever buffers
-// pipeline/axesReconstruction.ts's INSPECT declares and the frame asks for. A
-// reader must still treat absent as the normal case: a field nobody asked for is
-// not there, and that is the mechanism working rather than a failure.
-//
-// FILLED WITH THE POSE, not after it. There is no drain any more -- pose2 has one
-// fence, so the intermediates land in the same staging buffer as the pose and the
-// published pose is already complete.
-//
-// `regionId` IS NOT COMING BACK. pose2 does not compute a per-pixel region id at
-// all, and the region CSR carries the same information -- see the display-wiring
-// notes. The one thing it bought (hover -> which region) is an inverse-map pass
-// over `members` on this side.
+// `regionId` IS NOT COMING BACK, and its absence is not a gap. pose2 computes no
+// per-pixel region id at all, and the region CSR carries the same information;
+// the one thing it bought -- hover to region -- is an inverse-map pass on this
+// side. `regions`, `rects`, `decodeGrid`, `decodeRotated` and `decodeCorrectness`
+// were also here once, typed by the deleted pipeline; each comes back, if it
+// does, as a buffer name and an unpacker, not as that pipeline's vocabulary.
 export interface Intermediates {
   /** f32 from the device, not the f64 the app's own gradient functions produce.
    *  See types.ts's FloatField for why nothing converts. */
@@ -123,7 +117,17 @@ export interface FrameMeta {
 //     concept of (one crossing per frame, by construction).
 export interface CameraPose {
   voteComposites: { root: number; line: CompositeLine }[];
+  // The vote NORMALS, one per detected line, and only when a display toggle asked
+  // for them -- they are hundreds of thousands of vec4s on a real capture, so the
+  // pipeline is not asked to send them for nobody. EMPTY IS NOT "NO LINES": read
+  // `lineCount` for that, which always arrives.
   votes: { n: THREE.Vector3; weight: number }[];
+  // How many lines the detector actually found, off the pose block itself rather
+  // than off `votes.length`. Its own field precisely BECAUSE `votes` is optional:
+  // a readout keyed to the array would report zero whenever the circles overlay
+  // happened to be switched off, which reads as a detection failure.
+  // -1 where nothing counted -- a remote pose carries no line count.
+  lineCount: number;
   quadricPair: { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3 } | null;
   gridPeriodPhase: null;
   recoveredAxes: RecoveredAxes | null;

@@ -97,8 +97,12 @@ export function applyPoseVisualizations(camera: Camera, isActive: boolean, extra
     // recovered axes, not the vote vectors they were fit from. This used to
     // read a camera field the remote path never wrote, so it showed whatever
     // the last LOCAL reconstruction on this camera had counted.
-    const voteCount = pose?.votes.length ?? 0;
-    const lines = [`${voteCount} votes  (${voteCount} fed to fit)`];
+    // The DETECTOR's count, not the vote array's length -- the array only arrives
+    // when a toggle asked for it (see inspectFor), and keying this line to it
+    // reported "0 votes" on a perfectly good frame whenever the circles overlay
+    // was off. -1 means nothing counted, which is the remote path.
+    const lineCount = pose?.lineCount ?? -1;
+    const lines = [lineCount < 0 ? 'no local line count (remote pose)' : `${lineCount} lines voted`];
     if (rowDirRecovered && colDirRecovered) {
       if (orientationErrorLine) lines.push(orientationErrorLine);
     } else {
@@ -442,7 +446,7 @@ function applyPoseResult(camera: Camera, pose: CameraPose): void {
 // wiring pose2 in is a matter of filling these fields from a Pose2Result.
 function emptyPose(): CameraPose {
   return {
-    voteComposites: [], votes: [], quadricPair: null, gridPeriodPhase: null,
+    voteComposites: [], votes: [], lineCount: 0, quadricPair: null, gridPeriodPhase: null,
     recoveredAxes: null, positionDecode: null, chainTransfers: null, timing: null,
     intermediates: {},
   };
@@ -482,7 +486,7 @@ const MAX_LINES = 16384;
 // Cheap by construction: this camera plans with `alias` off (the default), where
 // every buffer already holds its own slot for the whole frame, so declaring one
 // costs staging bytes and nothing else. See src/pose2/buffers.ts's PlanOptions.
-const INSPECT = ['triad', 'layout', 'fx', 'fy'] as const;
+const INSPECT = ['triad', 'layout', 'fx', 'fy', 'votes'] as const;
 
 // ── WHAT THIS FRAME ACTUALLY ASKS FOR ────────────────────────────────────
 //
@@ -516,6 +520,11 @@ function inspectFor(camera: Camera): readonly string[] {
   const fields = s.showTopGradient || s.showTrueContamination || s.showReconstructedContamination
     || s.showGradientArrow || s.showLevelLineArrow;
   if (fields) want.push('fx', 'fy');
+  // The same gate updateGradientCirclesDebug applies to itself (it returns
+  // immediately when neither is on), stated one stage earlier so the bytes are
+  // not fetched either. Its own comment is the reason it matters: a real capture
+  // is hundreds of thousands of votes, which is why showTopCircles defaults off.
+  if (s.showTopCircles || s.showAxisVectors) want.push('votes');
   return want;
 }
 
@@ -568,6 +577,31 @@ function pose2SettingsFor(camera: Camera): Pose2Settings {
 // Each implies the one above it in practice, and none of them is derived from
 // another here: a collapsed "did it work" flag is what §15 warns about, one
 // level up.
+// One vote per detected line: (nx, ny, nz, weight), a vec4 per slot, in
+// MATH_QUAT's fixed math frame -- which is the frame updateGradientCirclesDebug
+// rotates OUT of, and the frame the stage tests score these against.
+//
+// ZERO-WEIGHT VOTES ARE DROPPED, not passed on. A line whose two endpoints
+// back-project to a degenerate plane votes with weight 0 rather than not voting
+// (the buffer is written for every line, so the slot exists either way). Keeping
+// them would put a zero into the min/max the circle colouring normalizes
+// against, which is a display bug with no upstream cause.
+function unpackVotes(bytes: ArrayBuffer | undefined, lineCount: number): { n: THREE.Vector3; weight: number }[] {
+  if (!bytes) return [];
+  const v = new Float32Array(bytes);
+  // Clamped: `lineCount` is what the detector FOUND, and lines.emit truncates to
+  // maxLines when it overflows (§15's lineOverflow). The buffer holds the kept
+  // ones, so the buffer's own length is the authority.
+  const n = Math.min(lineCount, v.length / 4);
+  const out: { n: THREE.Vector3; weight: number }[] = [];
+  for (let i = 0; i < n; i++) {
+    const weight = v[i * 4 + 3]!;
+    if (weight <= 0) continue;
+    out.push({ n: new THREE.Vector3(v[i * 4]!, v[i * 4 + 1]!, v[i * 4 + 2]!), weight });
+  }
+  return out;
+}
+
 function toCameraPose(frame: Pose2Frame): CameraPose {
   const { pose, inspected } = frame;
   // Three vec3<f32> at stride 16 -- see BUFFERS.triad. The stride is why this is
@@ -580,11 +614,12 @@ function toCameraPose(frame: Pose2Frame): CameraPose {
   const Drow = axis(0), Dcol = axis(1), Dnormal = axis(2);
 
   return {
-    // Both empty until the vote and line buffers are inspected -- the composite
-    // lines and the vote circles are their own step. Empty, not absent: every
-    // reader already had to treat "no votes" as ordinary.
+    // Empty until the line buffer is inspected -- the composite lines are their
+    // own step. Empty, not absent: every reader already had to treat "no lines"
+    // as ordinary.
     voteComposites: [],
-    votes: [],
+    votes: unpackVotes(inspected['votes'], pose.lineCount),
+    lineCount: pose.lineCount,
     quadricPair: fitOk ? { Drow, Dcol, Dnormal } : null,
     gridPeriodPhase: null,
     // `distance` IS the camera's height above the floor -- the same quantity the

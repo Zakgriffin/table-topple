@@ -358,6 +358,9 @@ export async function ingestRemotePose(
   const pose: CameraPose = {
     voteComposites: pipelineDebug?.voteComposites ?? [],
     votes: [],
+    // -1, not 0: the phone sends a pose, not a detector report, so "how many
+    // lines" has no answer on this path. Zero would be an answer, and a wrong one.
+    lineCount: -1,
     // quadricPair (Drow/Dcol/Dnormal BEFORE gridPeriodPhase gating, see
     // pose/poseCompute.ts's PoseResult) is never transmitted over the wire --
     // whenever recoveredAxes is non-null, gridPeriodPhase already succeeded on

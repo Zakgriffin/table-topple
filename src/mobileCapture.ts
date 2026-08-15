@@ -1514,7 +1514,7 @@ const POSE_RING_CAPACITY = 600;
 interface PoseRecord {
   tDrawn: number;              // nowMs() at the moment the frame was pulled off the video element
   frameMeta: FrameMeta | null;
-  // `computeMs` is GONE (profiling_rewrite.md §7): a ring of durations
+  // `computeMs` is GONE: a ring of durations
   // alongside the profiler was a second way to measure one, and this one was
   // measuring an empty statement anyway -- see the TODO at its write site. When
   // this page runs a pipeline again, its duration is a SPAN, not a field here.
@@ -2069,8 +2069,8 @@ async function captureComputeAndSendPose() {
     const poseInput = { aspect: cw / ch, settings: cameraSettings };
     // ── TODO(phone-on-pose2): THE SPAN GOES HERE ─────────────────────────
     //
-    // `profiling_rewrite.md` Phase 7 says this becomes a profiler span. It does
-    // not, yet, and deliberately: there is NOTHING HERE TO TIME. The pose
+    // This is where a profiler span belongs. There is not one yet, and that is
+    // deliberate: there is NOTHING HERE TO TIME. The pose
     // computation went with `src/pose`, so what stood between the two
     // `performance.now()` calls that used to be here was `void grayTopDown;`
     // and an object literal -- the stopwatch reported ~0ms every frame, and a

@@ -118,7 +118,8 @@ function gpuBreakdown(): string {
   const grand = rows.reduce((a, r) => a + r.med, 0);
   const lines = [
     `GPU pass breakdown over ${posesTimed} timed pose(s) -- per-pose totals per stage,`,
-    `sorted by median. Lengths are measured; see profiling_rewrite.md on placement.`,
+    `sorted by median. These are LENGTHS, which are exact; a pass's position in`,
+    `the frame is anchored to the submit and is a lower bound, not a measurement.`,
     `   ${'stage'.padEnd(24)} ${'med'.padStart(8)} ${'p90'.padStart(8)}  ${'%'.padStart(5)}`,
   ];
   for (const r of rows) {

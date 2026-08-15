@@ -10,9 +10,9 @@ import type { GpuFrameTiming } from '../src/pose2/pose.ts';
 
 // ── The join, and the clock boundary ──────────────────────────────────────
 //
-// `profiling_rewrite.md` Phase 4. No device needed: everything here is arithmetic
-// over records, which is the point -- the translation is the only part of the
-// profiler that can be wrong in a way the pipeline cannot show you.
+// No device needed: everything here is arithmetic over records, which is the
+// point -- the translation is the only part of the profiler that can be wrong in
+// a way the pipeline cannot show you.
 
 const spin = (ms: number) => { const t = performance.now(); while (performance.now() - t < ms); };
 

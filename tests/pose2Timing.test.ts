@@ -12,9 +12,9 @@ import { ORDER } from '../src/sphereLab/floorPattern.ts';
 
 // ── GPU timing: the device feature, and the path where it is ABSENT ───────
 //
-// `profiling_rewrite.md` Phase 2. `timestamp-query` is requested at device
-// creation when the adapter offers it, and cannot be asked for later -- so a
-// device either can be timed for its whole life or cannot.
+// `timestamp-query` is requested at device creation when the adapter offers it,
+// and cannot be asked for later -- so a device either can be timed for its whole
+// life or cannot.
 //
 // The half worth testing is the ABSENT one, because it is the half that will
 // never run on the developer's machine. This adapter offers the feature (§5

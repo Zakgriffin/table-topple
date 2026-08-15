@@ -40,6 +40,11 @@ const APP_STAGES = {
   // ── the capture path ──
   'app.reconstruct': { label: 'axesReconstruction', within: null },
   'app.capture': { label: 'capture+preprocess', within: 'app.reconstruct' },
+  // The whole pipeline as ONE span, which is all the host can see: pose2 is one
+  // submit and one fence, so this is upload -> submit -> the map resolving, with
+  // no interior the host could time. Per-stage numbers, if they come back, are
+  // GPU timestamps and do not land here.
+  'app.pose': { label: 'pose2 (submit + readback)', within: 'app.reconstruct', inputs: ['app.capture'] },
   // A real stage, not a gap: it is opened when a physical camera finishes and
   // closed when the next frame arrives, so its duration is the shutter-to-
   // shutter idle the auto-capture interval is spending.
@@ -51,7 +56,10 @@ const APP_STAGES = {
 
   // ── the deferred display tail ──
   'app.tail': { label: 'visual tail (deferred)', within: null },
-  'app.project': { label: 'projectBins (display + decode-marginals bins)', within: 'app.tail', inputs: ['pose.drain'] },
+  // NO `inputs` any more. It named `pose.drain`, which was the tail's readback of
+  // the display intermediates -- deleted along with the drain itself, since pose2
+  // hands them back with the pose. Nothing in the tail precedes the projection now.
+  'app.project': { label: 'projectBins (display + decode-marginals bins)', within: 'app.tail' },
   'app.overlays': { label: 'poleMarkers+overlays', within: 'app.tail', inputs: ['app.project'] },
   // Runs inside the tail's projection AND straight off a mode switch, with no
   // tail above it at all. Both are legitimate, which is exactly the case the

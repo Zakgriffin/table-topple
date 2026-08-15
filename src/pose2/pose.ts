@@ -1000,6 +1000,89 @@ export function encodeFinish(ctx: Ctx): void {
     { kind: 'direct', x: 1 });
 }
 
+/**
+ * §15's status word, by name.
+ *
+ * The bits are set in WGSL, tabulated in §15 and read here -- three places, and
+ * this is the only one a caller can reach. Named rather than left as literals at
+ * each call site: a host testing `status & 32` is a number that means nothing at
+ * the point of reading and cannot be grepped back to the pass that sets it.
+ *
+ * FOUR KINDS, and §15's point is that they must stay distinguishable. `ordinary`
+ * means the frame does not contain a decodable board, which is an outcome and
+ * not a fault; `cap` means raise a constant; `budget` means the round count was
+ * too small; `gridOverflow` is diagnostic and the frame decoded correctly
+ * anyway. A caller that collapses these into "failed" makes a real capacity
+ * problem look like an empty frame.
+ */
+export const POSE2_STATUS = {
+  /** budget -- grow did not converge inside the encoded round count. */
+  growNotConverged: 1 << 0,
+  /** cap -- more line-support regions than maxRegions. */
+  regionOverflow: 1 << 1,
+  /** ordinary */
+  noRegions: 1 << 2,
+  /** cap -- more accepted segments than maxLines. */
+  lineOverflow: 1 << 3,
+  /** ordinary */
+  noVotes: 1 << 4,
+  /** ordinary -- an all-zero scatter matrix, so there is no triad. */
+  fitDegenerate: 1 << 5,
+  /** ordinary */
+  gppNoSamples: 1 << 6,
+  /** ordinary */
+  gppNoCandidates: 1 << 7,
+  /** ordinary -- fewer than 4 valid rays, so there is no lattice. */
+  layoutInvalid: 1 << 8,
+  /** DIAGNOSTIC, never a failure -- the hull exceeded one board period and was
+   *  clamped, and the frame decoded correctly anyway (§12). */
+  gridOverflow: 1 << 9,
+  /** ordinary */
+  decodeNoAnchor: 1 << 10,
+} as const;
+
+/**
+ * The 128-byte `layout` block, decoded -- the lattice description `decode.build`
+ * and `finish` both read off the device.
+ *
+ * Host-readable because it is the display's only source for the recovered TRIAD
+ * and the camera's distance from the floor: the pose block carries a quaternion
+ * and a position, not the axes those are expressed against.
+ *
+ * The offsets are hand-derived from DECODE_LAYOUT_WGSL's `Layout`, and that is
+ * exactly the trap that shader's header records -- the three axes are `vec4`
+ * with only `xyz` used SO THAT these offsets are the obvious ones. As `vec3`
+ * they would be 12 bytes with align 16, and every scalar after them would pack
+ * four bytes earlier than a reader written from the field order expects: not a
+ * wrong value, a DIFFERENT FIELD, for every read from the first scalar on.
+ */
+export interface Pose2Layout {
+  Drow: { x: number; y: number; z: number };
+  Dcol: { x: number; y: number; z: number };
+  normal: { x: number; y: number; z: number };
+  distance: number; tanHalf: number; aspect: number; minGrazingCos: number;
+  uPhase: number; vPhase: number; cellPitch: number; binThreshold: number;
+  rows: number; cols: number; imageW: number; imageH: number;
+  kMinU: number; kMinV: number; zeroI: number; zeroJ: number;
+  /** 0 when decode.layout found no usable lattice. Everything above is then
+   *  meaningless -- including the triad, which it copies rather than derives. */
+  valid: number;
+}
+
+export function decodeLayout(bytes: ArrayBuffer): Pose2Layout {
+  const f = new Float32Array(bytes);
+  const u = new Uint32Array(bytes);
+  const i = new Int32Array(bytes);
+  const v3 = (at: number) => ({ x: f[at]!, y: f[at + 1]!, z: f[at + 2]! });
+  return {
+    Drow: v3(0), Dcol: v3(4), normal: v3(8),
+    distance: f[12]!, tanHalf: f[13]!, aspect: f[14]!, minGrazingCos: f[15]!,
+    uPhase: f[16]!, vPhase: f[17]!, cellPitch: f[18]!, binThreshold: f[19]!,
+    rows: u[20]!, cols: u[21]!, imageW: u[22]!, imageH: u[23]!,
+    kMinU: i[24]!, kMinV: i[25]!, zeroI: u[26]!, zeroJ: u[27]!, valid: u[28]!,
+  };
+}
+
 /** The 128 bytes, decoded. The one place a host reads anything off this pipeline. */
 export interface Pose2Result {
   status: number;

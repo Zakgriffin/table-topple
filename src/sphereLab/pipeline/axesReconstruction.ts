@@ -1,7 +1,15 @@
 import * as THREE from 'three';
 import { type Camera, type CameraPose, type PendingVisuals } from '../camera/model.ts';
 import { activeCamera, isPhysical, isSimulated } from '../camera/store.ts';
-import { COL_DIR, ROW_DIR, SPHERE_RADIUS } from '../constants.ts';
+import { COL_DIR, GRID_STEP, ROW_DIR, SPHERE_RADIUS } from '../constants.ts';
+import { ORDER } from '../floorPattern.ts';
+import { getGPUDevice } from '../../gpu/device.ts';
+import { boardDims } from '../../pose2/board.ts';
+import { POSE2_STATUS, decodeLayout } from '../../pose2/pose.ts';
+import {
+  type Pose2Context, type Pose2Frame, type Pose2Settings,
+  createPose2Context, destroyPose2Context, runPose2,
+} from '../../pose2/run.ts';
 import { angleBetweenDegV } from '../math/geometry.ts';
 import { updatePositionReadoutText } from '../overlays/projectedCamOverlays.ts';
 import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo, updateRecoveredFloorOutline } from '../overlays/recoveredOverlays.ts';
@@ -9,11 +17,10 @@ import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { globalState } from '../state.ts';
 import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
 import { backendFromForceCPU } from '../backend.ts';
-import { captureDistortedGrayscale } from './capture.ts';
+import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
 import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './projectedBins.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
-import type { Intermediates } from '../camera/model.ts';
 import { type StageRecord, spanEnd } from '../profiling/profiler.ts';
 import { appSpan } from '../profiling/stages.ts';
 
@@ -205,30 +212,27 @@ async function runVisualTail(camera: Camera, posted: PendingVisuals): Promise<vo
 async function runVisualTailBody(camera: Camera, posted: PendingVisuals): Promise<void> {
   const isActive = camera === activeCamera();
 
-  // FIRST, before anything reads the pose's intermediates. The pose itself was
-  // published the moment it was final; its per-pixel fields and its decode grid
-  // were left on the device (see pose/intermediates.ts) so the pose did not have
-  // to wait 0.45MB for display data. This is the moment they land, and the
-  // second half of applyPoseResult's seam: the same pose object, republished
-  // with `intermediates` filled in. updateGradientCirclesDebug,
-  // applyPoseVisualizations and every mode overlay below are downstream of it.
+  // ── THE DRAIN IS GONE, AND SO IS THE WRITE IT EXISTED TO GUARD ──────────
   //
-  // This is the ONE thing in this function that is not idempotent-by-reading-
-  // settled-state: it consumes a handle. resolve() is itself idempotent -- a
-  // second call re-hands the same object rather than draining twice -- so a
-  // second drain over the same payload paints the same thing.
+  // This began by awaiting the display intermediates and REPUBLISHING the pose
+  // with them filled in -- the second half of applyPoseResult's seam. That
+  // existed because the old pipeline finalized the pose early and host-side, so
+  // the display's own reads were a SECOND round trip, worth deferring so the
+  // pose did not wait 0.45MB for data only an overlay wanted.
   //
-  // THE IDENTITY CHECK IS THE POINT OF THE PAYLOAD. Publishing is the only
-  // thing here that can write over a newer pose, so it happens only while the
-  // pose this drain was handed is still the one on screen. Unreachable today
-  // (drainVisuals and the two reconstruction entry points exclude each other),
-  // and that exclusion is exactly what this makes droppable: without it, a
-  // reconstruction that landed while the readback was in flight would otherwise
-  // get its axes overwritten by the previous frame's, decode grid and all.
-  {
-    const got = await readDisplayIntermediates(camera);
-    if (camera.pose === posted.pose) camera.pose = { ...posted.pose, intermediates: got };
-  }
+  // pose2 has ONE fence. The pose is not known until the map resolves either,
+  // and the inspected buffers ride in the same staging buffer behind it (see
+  // src/pose2/run.ts), so there is nothing left to defer: the pose published by
+  // recomputeStages is already complete.
+  //
+  // What went with it is the reason this function had a non-idempotent step at
+  // all. It now reads settled state and writes none, so the identity check that
+  // stopped an older pose overwriting a newer one has nothing to guard -- and
+  // the payload narrows to its remaining job, naming WHICH pose to paint.
+  //
+  // The tail itself stays, for the job that is still real: the projection and
+  // the texture paint are display GPU work on the same queue as the pose, and
+  // keeping them off the capture path is what deferral buys.
 
   // Painting projectedPreviewTex is a real GPU texture upload -- worth
   // skipping unless this camera's Projected-Cam view is what's actually
@@ -403,28 +407,6 @@ export function drainVisuals(camera: Camera): void {
 // real cost change -- flipping one of these re-runs the pose stages instead of
 // recomputing one field on the CPU -- and it is the trade the whole step is
 // making: one pipeline, asked, instead of a second one, duplicated.
-// ── THE DRAIN READS NOTHING NOW ──────────────────────────────────────────
-//
-// This decided, from the display toggles, which of the run's intermediates to
-// pull back off the device -- fx/fy for the contamination and gradient rasters,
-// regionId + the region CSR for the three LSD views, the decode grid and its
-// correctness array for the lattice -- and it was the ONE place that paid for
-// them, once, after the pose was already final.
-//
-// Every one of those reads went through the deleted pipeline's arena slices
-// (`readSliceF32`/`readSliceU32`/`readRegionMembers`) against a `PoseResult`
-// that no longer exists. src/pose2 keeps all of it on the device and reads back
-// 128 bytes of pose, so there is nothing here to read yet -- see §22 of
-// full_system_breakdown.md for what an opt-in readback would have to add.
-//
-// The SHAPE stays: a deferred drain that republishes the pose with its
-// intermediates filled in. That is the seam an opt-in readback plugs into, and
-// keeping it means the tail's ordering guarantees (and the identity check that
-// stops an older pose overwriting a newer one) do not have to be rebuilt.
-async function readDisplayIntermediates(_camera: Camera): Promise<Intermediates> {
-  return {};
-}
-
 
 // ── The one place a pose result lands on a Camera ─────────────────────────
 //
@@ -466,27 +448,184 @@ function emptyPose(): CameraPose {
   };
 }
 
-// ── THE RECONSTRUCTION ITSELF, and it does not reconstruct ───────────────
+// ── THE POSE2 CONTEXT: one per camera, per capture size ──────────────────
 //
-// This called `computePoseFromCapture` -- every stage from the 2x2 gradient
-// through the position decode -- and published the result. src/pose is deleted
-// and the app is NOT yet wired to src/pose2, so the capture still happens, the
-// button still cycles, the projection and the overlays still run, and the pose
-// they run against is empty.
+// It owns the pipeline's device buffers and the board's hash table, so it has to
+// outlive a frame -- and every buffer is sized from (w, h) at plan time, so it
+// must NOT outlive a resize.
 //
-// THE WIRING THAT GOES HERE is `createPose2Context` once per camera (it owns the
-// device buffers and wants to outlive a frame) plus `runPose2(ctx, gray,
-// settings)` per capture, mapping its plain result onto CameraPose. The reason
-// that is not done in this commit is that it is a design decision about the app
-// boundary -- where the context lives, what happens on a resize, how the phone's
-// remote path shares it -- and doing it inside a deletion would have buried it.
+// A WeakMap rather than a field on Camera: this is a CACHE KEYED ON a camera,
+// not a property of one, and camera/model.ts would otherwise have to name a
+// pipeline type to hold it. Same shape, and the same reasoning, as
+// projectedBins.ts's srcGradCache.
+const poseContexts = new WeakMap<Camera, { ctx: Pose2Context; w: number; h: number }>();
+
+// Caps on the two counts the pipeline cannot bound from the image alone. Shared
+// with the sweep's own choice so a Sphere Lab capture and a swept pose overflow
+// at the same point -- `lineOverflow`/`regionOverflow` mean "raise a constant"
+// (§15), and they should mean it at the same constant in both places.
+const MAX_REGIONS = 16384;
+const MAX_LINES = 16384;
+
+// ── WHAT THE DISPLAY READS BACK, declared once ───────────────────────────
+//
+// The catalogue, not the per-frame selection: it sizes the one staging buffer,
+// so a display toggle becomes a per-frame decision instead of a context rebuild.
+// It GROWS as each overlay is re-pointed at pose2 -- adding a name here is safe
+// and costs a rebuild on the next capture.
+//
+// `triad` and `layout` are here because the POSE ITSELF needs them, not merely
+// an overlay: the 128-byte pose block carries a position and a quaternion, and
+// the app's `recoveredAxes`/`quadricPair` are the axis triad those are expressed
+// against, which does not fit in the block's seven spare slots.
+//
+// Cheap by construction: this camera plans with `alias` off (the default), where
+// every buffer already holds its own slot for the whole frame, so inspection
+// costs staging bytes and nothing else. See src/pose2/buffers.ts's PlanOptions.
+const INSPECT = ['triad', 'layout'] as const;
+
+async function poseContextFor(camera: Camera, w: number, h: number): Promise<Pose2Context | null> {
+  const held = poseContexts.get(camera);
+  if (held && held.w === w && held.h === h) return held.ctx;
+  const device = await getGPUDevice();
+  if (!device) return null;
+  // Destroyed here rather than left to GC: a supersample drag walks through a
+  // dozen sizes, and each context is ~16 MiB of device buffers.
+  if (held) destroyPose2Context(held.ctx);
+  const ctx = createPose2Context(device, {
+    w, h, maxRegions: MAX_REGIONS, maxLines: MAX_LINES, ...boardDims(),
+  }, { inspect: INSPECT });
+  poseContexts.set(camera, { ctx, w, h });
+  return ctx;
+}
+
+// Straight off this camera's own sliders. The pipeline takes no defaults -- see
+// config.ts: every one of these has exactly one source, and it is the JSON.
+function pose2SettingsFor(camera: Camera): Pose2Settings {
+  const s = camera.settings;
+  const vFovRad = getAnalysisVFovRad(camera);
+  return {
+    grow: { rhoLow: s.lsdRhoNoiseThreshold, toleranceDeg: s.lsdToleranceDeg },
+    collect: { rhoHigh: s.lsdRhoHighThreshold, minRegionSize: s.lsdMinRegionSize },
+    lsdFit: {
+      rho: s.lsdRhoNoiseThreshold, toleranceDeg: s.lsdToleranceDeg,
+      nfaTestExponent: s.lsdNfaTestExponent, nfaEpsilon: s.lsdNfaEpsilon,
+    },
+    lines: { minLengthPx: s.lsdMinLengthPx },
+    votes: { vFovRad },
+    gpp: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
+    layout: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
+    order: ORDER,
+  };
+}
+
+// ── The pipeline's answer, as the app DISPLAYS it ────────────────────────
+//
+// THREE INDEPENDENT SUCCESS GATES, and keeping them independent is the point --
+// the old app displayed pole markers off a successful orientation fit even when
+// the position decode failed underneath it, and that is genuinely useful (it
+// says "the axes are right, the position is not").
+//
+//   quadricPair      the fit produced a triad          !fitDegenerate
+//   recoveredAxes    ...and a lattice to scale it      layout.valid
+//   positionDecode   ...and an anchor in the board     pose.ok
+//
+// Each implies the one above it in practice, and none of them is derived from
+// another here: a collapsed "did it work" flag is what §15 warns about, one
+// level up.
+function toCameraPose(frame: Pose2Frame): CameraPose {
+  const { pose, inspected } = frame;
+  // Three vec3<f32> at stride 16 -- see BUFFERS.triad. The stride is why this is
+  // `i * 4` and not `i * 3`, and getting it wrong reads Drow.w as Dcol.x.
+  const t = new Float32Array(inspected['triad']!);
+  const axis = (i: number) => new THREE.Vector3(t[i * 4]!, t[i * 4 + 1]!, t[i * 4 + 2]!);
+  const layout = decodeLayout(inspected['layout']!);
+
+  const fitOk = (pose.status & POSE2_STATUS.fitDegenerate) === 0;
+  const Drow = axis(0), Dcol = axis(1), Dnormal = axis(2);
+
+  return {
+    // Both empty until the vote and line buffers are inspected -- the composite
+    // lines and the vote circles are their own step. Empty, not absent: every
+    // reader already had to treat "no votes" as ordinary.
+    voteComposites: [],
+    votes: [],
+    quadricPair: fitOk ? { Drow, Dcol, Dnormal } : null,
+    gridPeriodPhase: null,
+    // `distance` IS the camera's height above the floor -- the same quantity the
+    // pose block reports as `height`, read here off the block that also carries
+    // the axes it belongs with, so the two cannot be paired across a frame.
+    recoveredAxes: fitOk && layout.valid === 1
+      ? { Drow, Dcol, Dnormal, distance: layout.distance }
+      : null,
+    positionDecode: pose.ok
+      ? {
+        row: pose.boardRow, col: pose.boardCol,
+        consistency: pose.consistency, votes: pose.votes, totalWindows: pose.totalWindows,
+        camPos: new THREE.Vector3(pose.position.x, pose.position.y, pose.position.z),
+        recoveredCamQuat: new THREE.Quaternion(
+          pose.quaternion.x, pose.quaternion.y, pose.quaternion.z, pose.quaternion.w),
+        orientation: pose.orientation,
+      }
+      : null,
+    chainTransfers: null,
+    timing: null,
+    // FILLED HERE, not by the drain, and that is the structural change pose2
+    // brings. The old pipeline finalized the pose early and host-side, so the
+    // display's own reads were a SECOND round trip worth deferring. pose2 has one
+    // fence: the pose is not known until the map resolves either, and the
+    // intermediates ride in the same staging buffer behind it. There is nothing
+    // left to defer, so the pose that gets published is already complete.
+    intermediates: {},
+  };
+}
+
+// ── THE RECONSTRUCTION ITSELF ────────────────────────────────────────────
+//
+// One upload, one submit, one readback, one pose. Everything between the capture
+// and `camera.pose` is inside `runPose2`; this function is the app boundary and
+// nothing more -- a context, this camera's settings, and the mapping onto the
+// app's own display type.
+//
+// A FAILED FRAME PUBLISHES AN EMPTY POSE RATHER THAN KEEPING THE LAST ONE. An
+// ordinary frame with no decodable board (§15's `ordinary` bits) is not an
+// error, and leaving the previous capture's pose on screen would show a stale
+// answer as if it were this frame's.
 async function recomputeStages(camera: Camera) {
   const cap = camera.lastAxesCaptureGray;
   if (!cap) return;
   // Dropped, not released: a payload this camera never drained used to own the
   // chain's device buffers. There are none to own now.
   camera.pendingVisuals = null;
-  applyPoseResult(camera, emptyPose());
+
+  const ctx = await poseContextFor(camera, cap.w, cap.h);
+  if (!ctx) {
+    if (camera === activeCamera()) axesReadout.textContent = 'no WebGPU device -- pose recovery is unavailable';
+    applyPoseResult(camera, emptyPose());
+    return;
+  }
+
+  const poseSpan = appSpan('app.pose');
+  let frame: Pose2Frame;
+  try {
+    // Narrowed at the boundary: the capture path produces f64 and the pipeline
+    // takes f32 (§4). The one place that conversion is paid, and it is paid here
+    // rather than inside the library so `runPose2` keeps a single input shape.
+    frame = await runPose2(ctx, Float32Array.from(cap.gray), pose2SettingsFor(camera), INSPECT);
+  } catch (e) {
+    // pose2 throws rather than falling back -- by design, and this is the app
+    // boundary that has to say so out loud. An ORDINARY undecodable frame does
+    // NOT come through here: it returns a pose with `ok` false and §15's bits
+    // set. Anything that throws is the device or a caller mistake, so it gets a
+    // readout of its own rather than being flattened into "no board found".
+    console.error('[pose2] reconstruction failed:', e);
+    if (camera === activeCamera()) axesReadout.textContent = `pose2 failed: ${e instanceof Error ? e.message : String(e)}`;
+    applyPoseResult(camera, emptyPose());
+    return;
+  } finally {
+    spanEnd(poseSpan);
+  }
+  applyPoseResult(camera, toCameraPose(frame));
 }
 
 export function runAxesReconstruction(camera: Camera) {

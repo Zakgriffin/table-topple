@@ -33,13 +33,27 @@ import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './set
 // device and reads back 128 bytes of pose. There is no opt-in intermediate
 // readback yet -- see full_system_breakdown.md §22.
 //
-// The three plain-array fields stay because they are shapes, not pipeline
-// vocabulary, and the paint path is written against them. They are never filled
-// today; a reader must treat absent as the normal case, which it always had to.
+// ── AND IT IS FILLING UP AGAIN (2026-08-15) ──
+//
+// `src/pose2` grew an opt-in readback (full_system_breakdown.md §18, "Reading a
+// buffer back"), so these are populated again -- for whichever buffers
+// pipeline/axesReconstruction.ts's INSPECT declares and the frame asks for. A
+// reader must still treat absent as the normal case: a field nobody asked for is
+// not there, and that is the mechanism working rather than a failure.
+//
+// FILLED WITH THE POSE, not after it. There is no drain any more -- pose2 has one
+// fence, so the intermediates land in the same staging buffer as the pose and the
+// published pose is already complete.
+//
+// `regionId` IS NOT COMING BACK. pose2 does not compute a per-pixel region id at
+// all, and the region CSR carries the same information -- see the display-wiring
+// notes. The one thing it bought (hover -> which region) is an inverse-map pass
+// over `members` on this side.
 export interface Intermediates {
-  fx?: Float64Array;
-  fy?: Float64Array;
-  regionId?: Int32Array;
+  /** f32 from the device, not the f64 the app's own gradient functions produce.
+   *  See types.ts's FloatField for why nothing converts. */
+  fx?: Float32Array;
+  fy?: Float32Array;
 }
 
 // requestVideoFrameCallback's metadata for one decoded video frame, captured

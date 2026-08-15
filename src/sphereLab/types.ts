@@ -50,4 +50,13 @@ export interface ProjectedSamplesDense {
 // consume it.
 //
 // fx/fy are the components at radius r, in a w x h grid.
-export interface GradientField { fx: Float64Array; fy: Float64Array; w: number; h: number; r: number }
+//
+// EITHER WIDTH, and that is not laziness. The app's own gradients
+// (pipeline/gradientField.ts, computed from a preview image) are f64; the pose
+// run's are f32, because src/pose2 works in f32 on the device and hands its
+// buffers back as raw bytes. Every consumer here only INDEXES these -- nothing
+// writes through the interface -- so widening the type is the whole change, and
+// the alternative is converting 307k values twice a frame to satisfy a
+// declaration. That is the same narrowing loop §4 deleted from the input side.
+export type FloatField = Float64Array | Float32Array;
+export interface GradientField { fx: FloatField; fy: FloatField; w: number; h: number; r: number }

@@ -480,9 +480,44 @@ const MAX_LINES = 16384;
 // against, which does not fit in the block's seven spare slots.
 //
 // Cheap by construction: this camera plans with `alias` off (the default), where
-// every buffer already holds its own slot for the whole frame, so inspection
+// every buffer already holds its own slot for the whole frame, so declaring one
 // costs staging bytes and nothing else. See src/pose2/buffers.ts's PlanOptions.
-const INSPECT = ['triad', 'layout'] as const;
+const INSPECT = ['triad', 'layout', 'fx', 'fy'] as const;
+
+// ── WHAT THIS FRAME ACTUALLY ASKS FOR ────────────────────────────────────
+//
+// The catalogue above is what MAY be read; this is what crosses the bus, and
+// keeping them apart is the point of the mechanism. `fx`/`fy` are 1.17 MiB each
+// at 480x640 -- at the default capture interval, pulling them back for nobody is
+// several MB/s spent on an overlay that is switched off.
+//
+// THIS FUNCTION IS ONE HALF OF A CONTRACT. overlays/pipelineField.ts returns null
+// when the fields were not requested, and its consumers then draw NOTHING rather
+// than recomputing a gradient of their own -- a silent fallback would reinstate
+// the duplicated stage exactly where it is hardest to notice. So a toggle listed
+// in one place and not the other fails as a blank overlay, which is visible,
+// instead of as a second implementation, which is not.
+//
+// It also mirrors preview.ts's `overlaysNeedGray`, one stage earlier and for the
+// same class of mistake. A new toggle whose overlay calls `pipelineField()`
+// belongs in BOTH.
+//
+// Every toggle here must also INVALIDATE: turning one on cannot paint from a run
+// that was never asked for its input, so the handlers in
+// overlays/hoverDebugOverlays.ts call recomputeFromLastCapture rather than the
+// overlay's own updater. That is a real cost -- flipping one re-runs the pose --
+// and it is the trade: one pipeline, asked, instead of a second one, duplicated.
+function inspectFor(camera: Camera): readonly string[] {
+  const s = camera.settings;
+  // Not optional: `recoveredAxes` and `quadricPair` are the axis triad the pose
+  // block's position and quaternion are expressed against, and it does not fit
+  // in that block. These two are the pose, not an overlay.
+  const want = ['triad', 'layout'];
+  const fields = s.showTopGradient || s.showTrueContamination || s.showReconstructedContamination
+    || s.showGradientArrow || s.showLevelLineArrow;
+  if (fields) want.push('fx', 'fy');
+  return want;
+}
 
 async function poseContextFor(camera: Camera, w: number, h: number): Promise<Pose2Context | null> {
   const held = poseContexts.get(camera);
@@ -576,7 +611,17 @@ function toCameraPose(frame: Pose2Frame): CameraPose {
     // fence: the pose is not known until the map resolves either, and the
     // intermediates ride in the same staging buffer behind it. There is nothing
     // left to defer, so the pose that gets published is already complete.
-    intermediates: {},
+    //
+    // TOP-DOWN, which is the trap overlays/pipelineField.ts exists to hold: these
+    // are the pipeline's own buffers and every display surface is bottom-up. The
+    // flip belongs at the PAINT, and it is not a row reversal -- it also negates
+    // the vertical derivative.
+    // Present only when this frame asked -- see inspectFor. `pipelineField()`
+    // turning up null is the mechanism working, not a failure.
+    intermediates: {
+      ...(inspected['fx'] ? { fx: new Float32Array(inspected['fx']) } : {}),
+      ...(inspected['fy'] ? { fy: new Float32Array(inspected['fy']) } : {}),
+    },
   };
 }
 
@@ -611,7 +656,7 @@ async function recomputeStages(camera: Camera) {
     // Narrowed at the boundary: the capture path produces f64 and the pipeline
     // takes f32 (§4). The one place that conversion is paid, and it is paid here
     // rather than inside the library so `runPose2` keeps a single input shape.
-    frame = await runPose2(ctx, Float32Array.from(cap.gray), pose2SettingsFor(camera), INSPECT);
+    frame = await runPose2(ctx, Float32Array.from(cap.gray), pose2SettingsFor(camera), inspectFor(camera));
   } catch (e) {
     // pose2 throws rather than falling back -- by design, and this is the app
     // boundary that has to say so out loud. An ORDINARY undecodable frame does

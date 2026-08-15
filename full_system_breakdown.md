@@ -54,17 +54,13 @@ protect is checkable by reading one screen.
    stage tests were worth having; that re-reading is ON HOLD and no
    `tests/pose2*` test is to be deleted on its evidence or anyone else's. The
    deliberation stays open — the hold is not its outcome.
-3. **Phase 3 — replace.** Swap the app onto this pipeline, then delete
-   `src/pose/`. **All of `src/pose` goes**, including the tests that exist only
-   to exercise it: `arena`, `cpuPipeline`, `intermediates`, `libraryBoundary`
-   and `profilerJoin`. That deletion is NOT in tension with item 2 — the tests
-   being deliberated over are the `tests/pose2*` ones, which are not in the pose
-   directory and do not die with it.
-
-   Two things it drags with it, both listed in §19: `scripts/hull-measure.ts`
-   imports `src/pose` and is a measurement harness rather than a shipping path,
-   and `scripts/sweep.ts`'s `--pipeline pose` arm imports `computePoseFromCapture`
-   and is what makes the two-pipeline comparison possible at all.
+3. ~~**Phase 3 — replace.**~~ **HALF DONE 2026-08-14. `src/pose` is DELETED**
+   (along with its five own tests, the nine harness verifiers, `hull-measure`,
+   and the sweep's `pose`/`both` arms). **The app is NOT wired to pose2 yet** —
+   every display path that read a pose or an intermediate is an empty state that
+   says so in its own file. The remaining work is the wiring, and
+   `pipeline/axesReconstruction.ts`'s `recomputeStages` is where it goes. See
+   §19's Phase 3 entry for what is left and what the deletion cost.
 
 ### What is NOT done
 
@@ -2774,8 +2770,32 @@ One process note: every mutation run recorded above was done while `src/pose2/`
 was UNTRACKED, so restoration was from a file copy verified with `diff` rather
 than from git. The work was committed 2026-08-14; see START HERE.
 
-**Phase 3 -- replace.** Swap the app onto this pipeline, then delete
-`src/pose/`. NOT STARTED. Four things to know before it is:
+**Phase 3 -- replace. HALF DONE 2026-08-14: `src/pose` IS DELETED, and the app
+is NOT yet wired to this pipeline.**
+
+That order was deliberate, on the user's call: cut cleanly and break things on
+purpose, rather than fit the new pipeline into the old one's shape while the old
+one is still standing. So the tree is in a stated intermediate state --
+`tsc --noEmit` clean, 90 tests green, `npm run sweep` scoring pose2, all four
+HTML entry points building -- with every display path that read a pose or an
+intermediate rendering an EMPTY STATE and saying so in its own file.
+
+**What is left of Phase 3** is the wiring: `createPose2Context` per camera plus
+`runPose2` per capture, mapped onto `CameraPose`. `pipeline/axesReconstruction.ts`'s
+`recomputeStages` is where it goes and its header says so. The open questions are
+app-boundary ones -- where the context lives, what a resize does, how the phone's
+own path gets a device -- which is exactly why they were not answered inside a
+deletion.
+
+**What the deletion cost, recorded because it is not recoverable:** the
+`--pipeline pose`/`both` sweep arms (so §19's two-pipeline table can be read but
+not re-run), `scripts/hull-measure.ts` (so §12's measurement is likewise final),
+and the three simulator-validation tests in `pose2Sim.test.ts` -- see that file,
+and note they were deliberately NOT re-pointed at pose2, since renderPose and the
+pipeline share `cornerDir` and the check would have gone circular.
+
+Four things that were known before it started, kept because three of them turned
+out to matter:
 
 - **A TEST THAT IS STAYING IMPORTS FROM THE DIRECTORY THAT IS GOING.**
   `tests/pose2Stages.test.ts:15` imports `rotatedZeroIndex` from

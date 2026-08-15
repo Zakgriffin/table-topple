@@ -94,8 +94,16 @@
   #overlayPanel button.active#toggleDistinctnessCurve { background: rgba(120,220,255,0.55); color: #fff; border-color: #78dcff; }
   #overlayPanel button.active#toggleProductCurve { background: rgba(190,120,255,0.6); color: #fff; border-color: #be78ff; }
   #overlayPanel button.active#toggleHideField { background: rgba(90,90,90,0.7); color: #fff; border-color: #999; }
+  /* The generic blue: toggles whose overlay has no signature colour of its own,
+     unlike the ones above (red contamination, green top-gradient, cyan raw
+     regions...) which are styled to match what they draw. The sample lattice
+     belongs here because its dots are black/white with green/red rings, i.e.
+     four colours and no one of them. It was MISSING from this list, which is
+     the whole of why that button never lit up -- the handler set .active
+     correctly and nothing styled it. */
   #overlayPanel button.active#toggleGradientArrow,
   #overlayPanel button.active#toggleLevelLineArrow,
+  #overlayPanel button.active#toggleSampleLattice,
   #overlayPanel button.active#toggleTrueCardinalOrientation { background: rgba(60,140,255,0.5); color: #fff; border-color: #6af; }
   #overlayPanel button:disabled,
   #panel .panelBtn:disabled { opacity: 0.35; cursor: not-allowed; }
@@ -256,7 +264,7 @@
   <div id="projectedToggles" class="section">
     <h2>Projected view</h2>
     <button id="toggleTrueCardinalOrientation">use true cardinal orientation</button>
-    <button id="toggleSampleLattice">sample lattice (from grid period/phase)</button>
+    <button id="toggleSampleLattice">sample lattice</button>
   </div>
 </div>
 <div id="insideHint">drag to look around &middot; scroll to zoom &middot; you are standing at the camera's optical center</div>

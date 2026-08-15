@@ -7,11 +7,19 @@ it that size", and "what was decided and why".
 
 ---
 
-## START HERE — state as of 2026-08-14
+## START HERE — state as of 2026-08-15
 
-**Status: BUILT, END TO END.** Every declared stage runs on device. An image goes
-in and a camera pose comes out: one upload, one submit, one 128-byte readback, no
-host in the middle. `npm test` is 144 green; `npx tsc --noEmit` is clean.
+**Status: BUILT, END TO END, AND SPHERE LAB IS ON IT.** Every declared stage runs
+on device. An image goes in and a camera pose comes out: one upload, one submit,
+one readback, no host in the middle. `npm test` is 99 green; `npx tsc --noEmit`
+is clean; all four HTML entry points build.
+
+**Phase 3 is done for the desktop app and NOT for the phone.**
+`pipeline/axesReconstruction.ts` runs the real pipeline and Sphere Lab recovers a
+pose again. `src/mobileCapture.ts` does not — it needs its own device and
+per-resolution context, which is a different lifecycle and deliberately not
+shared. Until then the phone reports `[no fix]` on every frame and the IMU-fusion
+A/B has nothing to anchor to.
 
 Branch `consolidate-and-purge`. **COMMITTED 2026-08-14, in five commits** —
 the headless-WebGPU toolchain, this document, the pipeline, the oracles, and the
@@ -38,29 +46,30 @@ because it is still the safer habit when the working tree holds other changes.
 | §14 finish | `finish` |
 | the shared scan | **all three uses are live** — collect's, lines' and gpp's |
 
-**The entry point is `src/pose2/run.ts`**: `createPose2Context(device, dims)` once,
-then `runPose2(ctx, gray, settings)` per frame. That file is deliberately the only
-place the upload, the submit and the readback appear, so the count rule 1 exists to
-protect is checkable by reading one screen.
+**The entry point is `src/pose2/run.ts`**:
+`createPose2Context(device, dims, { alias?, inspect? })` once, then
+`runPose2(ctx, gray, settings, inspect?)` per frame, returning
+`{ pose, inspected }`. That file is deliberately the only place the upload, the
+submit and the readback appear, so the count rule 1 exists to protect is
+checkable by reading one screen — and `inspect` does not change that count, only
+the bytes. See §18's "Reading a buffer back".
 
 ### What to do next
 
-1. **Read the sweep numbers** — `npm run sweep -- --pipeline both` scores
-   `src/pose` and `src/pose2` over the same 180 poses and the same renders. This
-   is §19's acceptance criterion and it is the thing that decides whether the
-   rewrite succeeded. The baseline to beat is in §19.
-2. **DO NOT RETIRE ANY STAGE TEST. Standing instruction from the user,
+1. **DO NOT RETIRE ANY STAGE TEST. Standing instruction from the user,
    2026-08-14.** §19's calibration note argues the sweep should now say which
    stage tests were worth having; that re-reading is ON HOLD and no
    `tests/pose2*` test is to be deleted on its evidence or anyone else's. The
    deliberation stays open — the hold is not its outcome.
-3. ~~**Phase 3 — replace.**~~ **HALF DONE 2026-08-14. `src/pose` is DELETED**
-   (along with its five own tests, the nine harness verifiers, `hull-measure`,
-   and the sweep's `pose`/`both` arms). **The app is NOT wired to pose2 yet** —
-   every display path that read a pose or an intermediate is an empty state that
-   says so in its own file. The remaining work is the wiring, and
-   `pipeline/axesReconstruction.ts`'s `recomputeStages` is where it goes. See
-   §19's Phase 3 entry for what is left and what the deletion cost.
+2. **Put the phone on pose2.** The other half of Phase 3, and independent of
+   everything below. `src/mobileCapture.ts` needs a WebGPU device and a
+   per-resolution `Pose2Context`; the desktop's lifecycle in
+   `axesReconstruction.ts` is a model, not a thing to share.
+3. **Re-point the Sphere Lab overlays** at the inspected buffers, one at a time.
+   The full inventory — which overlay reads which buffer, which need an app-side
+   re-derivation, and the two that this pipeline genuinely does not express —
+   is NOT in this document, because §22 keeps the display path out of it. It is
+   in the session memory as `project_pose2_display_wiring`.
 
 ### What is NOT done
 
@@ -71,7 +80,11 @@ protect is checkable by reading one screen.
   that a whole-pipeline pass rate cannot tell you WHICH claim it is testing, and
   the mutation runs are the evidence, since six of them found a green test that
   was green for the wrong reason. A sweep would have localized none of those.
-- **Phase 3, replace.** Not started. See §19.
+- **The phone.** See above.
+- **Most Sphere Lab overlays are still dark.** The pose-driven ones are back (the
+  recovered gizmo, the pole markers, the floor overlay and outline, Projected-Cam,
+  the reconstructed-contamination overlay); everything that draws a pipeline
+  INTERMEDIATE is waiting on step 3 above.
 - Two smaller ones: the hull was measured on `src/pose`'s detected lines and the
   grazing band (tilts 45–55) has not been checked against pose2's own detector;
   and open decision 9's `worst < 0.05` gate still has only ~1.4x headroom.
@@ -2353,6 +2366,39 @@ Then add the assertion: walk every bind group at creation and throw if two
 entries resolve to the same `GPUBuffer`. ~15 lines, runs once, converts a silent
 async validation failure into a loud startup throw.
 
+### Reading a buffer back: a live range, not an exception (BUILT 2026-08-15)
+
+The display path wants buffers the pose path has no use for. **A buffer somebody
+reads after the last stage is live to the END OF THE FRAME**, and saying it that
+way feeds it to the colouring above instead of adding a rule the colouring has to
+remember. A rule that only fires under `alias` is a rule that gets tested last and
+rots first.
+
+`planPool(dims, { inspect })` extends those intervals; `createPose2Context` takes
+the same list as a CATALOGUE (it sizes one staging buffer, so no frame allocates)
+and `runPose2` takes a per-frame SUBSET of it. The copies go into that same
+staging buffer, in the same encoder, behind the same fence: **one submit, one
+fence, one map, more bytes.** A frame that asks for nothing maps exactly the
+128-byte pose block. Asking for something undeclared throws — under `alias` the
+alternative is a copy that succeeds and returns another stage's plausible bytes.
+
+Storage buffers only: they are the only kind `createBuffers` gives `COPY_SRC`.
+
+**Two things the measurement corrected**, both against the obvious guess:
+
+- **`fx`/`fy` alias nothing at 480x640; `lines` and `votes` do** (with
+  `colSamples` and `rowSamples`) — and both of those are buffers an overlay
+  draws. The cost is per DISPLACED buffer, not per name: `lines` costs +1 slot,
+  `layout` costs nothing (already last in its slot), and under `alias: false`
+  the whole thing is free.
+- **The obvious test does not work.** Comparing inspected bytes with pooling on
+  and off — the shape this section used for the pooling itself — **passes** under
+  a mutation that copies every region to one staging offset, because it runs the
+  same broken code twice and gets the same wrong answer. What catches it is
+  asserting properties the ALIASING PARTNER lacks: line endpoints inside the
+  frame, vote normals unit-length, `layout.distance` agreeing with the
+  independently-reported `pose.height`. See `tests/pose2Inspect.test.ts`.
+
 ### THE ONE TRAP: liveness is defined by BINDING, not by USE
 
 Grow's four entry points share one explicit bind-group layout, so `compress`
@@ -2985,10 +3031,18 @@ which is now measured, and on that list -- not on the line count.
 ## 22. What this document does not cover
 
 - The display and overlay paths. They read `geom`, region members and per-cell
-  correctness arrays, none of which the pose path needs. If the rewrite keeps
-  them, they are separate opt-in buffers and separate readbacks, and they should
-  not influence any decision above.
-- The app boundary — the payload mailbox, `camera.pose`, the dev bridge.
+  correctness arrays, none of which the pose path needs. ~~If the rewrite keeps
+  them, they are separate opt-in buffers and separate readbacks~~ — **the "and
+  separate readbacks" half is WRONG and was settled by building it 2026-08-15:
+  opt-in, yes, but they ride the SAME staging buffer behind the SAME fence** (see
+  §18). One consequence worth having here even though the rest is out of scope:
+  `decode.correctness` writes only counters into `result`, so **there is no
+  per-cell correctness array to read** — a display that wants one re-derives it
+  from `packed` + `layout` + `result` + `sphereLab/floorPattern`, which is safe
+  because that leaf is the same one `board.ts` imports (open decision 5b).
+- The app boundary — the payload mailbox, `camera.pose`, the dev bridge. **The
+  desktop half is now built**; the per-overlay inventory lives in the session
+  memory as `project_pose2_display_wiring`, deliberately not here.
 - IMU fusion.
 - The lens model. Every projection here assumes a pinhole camera with one
   parameter (vertical FOV). Radial distortion breaks the "straight lines

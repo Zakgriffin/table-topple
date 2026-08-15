@@ -89,7 +89,7 @@ async function makePose2Runner() {
     }
     console.error(`  [${++done}/${total}] h=${p.height} tilt=${p.tiltDeg} yaw=${p.yawDeg} at (${p.overRow},${p.overCol})`);
     const t0 = performance.now();
-    const out = await runPose2(ctx, Float32Array.from(gray), {
+    const { pose: out } = await runPose2(ctx, Float32Array.from(gray), {
       grow: { rhoLow: st.lsdRhoNoiseThreshold, toleranceDeg: st.lsdToleranceDeg },
       collect: { rhoHigh: st.lsdRhoHighThreshold, minRegionSize: st.lsdMinRegionSize },
       lsdFit: {

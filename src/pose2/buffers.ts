@@ -63,6 +63,12 @@ export interface PoolPlan {
   dedicated: string[];
   liveness: Map<string, Interval>;
   /**
+   * The buffers this plan promises are readable after the last stage. See
+   * PlanOptions.inspect; carried so run.ts can size one staging buffer and
+   * reject a per-frame request for anything not declared here.
+   */
+  inspect: readonly string[];
+  /**
    * The derived clear schedule: for each stage index, the `zero` buffers to
    * clear immediately before it. Derived rather than declared, because with
    * pooling a frame-start clear is wrong -- the memory is still someone else's
@@ -85,6 +91,25 @@ export interface PlanOptions {
    * comparing poses is a free self-check for aliasing and clear-schedule bugs.
    */
   alias?: boolean;
+  /**
+   * Buffers the caller intends to read back once the frame is done -- the
+   * display path of §22, which wants fx/fy or the region CSR and which the pose
+   * path itself has no use for.
+   *
+   * DECLARED here rather than discovered per frame, for two reasons that are
+   * both about not deciding anything on the hot path:
+   *
+   *   - under `alias` it is an INPUT TO THE COLOURING (see planPool), so the
+   *     slot stays exclusive by construction rather than by an exception the
+   *     colouring has to remember;
+   *   - it sizes the single staging buffer, so no frame allocates.
+   *
+   * STORAGE buffers only. They are the only kind `createBuffers` gives
+   * COPY_SRC, and a uniform/indirect/persistent name here would fail at copy
+   * time -- which WebGPU reports asynchronously, i.e. as the silent no-op this
+   * file exists to convert into a throw.
+   */
+  inspect?: readonly string[];
   /** Defaults to STAGES. Overridable so a test can plan a deliberately broken
    * pipeline and assert that validate() catches it. */
   stages?: readonly Stage[];
@@ -159,7 +184,20 @@ function colour(
 export function planPool(dims: Dims, opts: PlanOptions = {}): PoolPlan {
   const alias = opts.alias ?? false;
   const stages = opts.stages ?? STAGES;
+  const inspect = opts.inspect ?? [];
   const liveness = computeLiveness(stages);
+
+  // Checked before anything is derived from it, so the message names the
+  // caller's mistake rather than surfacing three steps later as a missing slot.
+  for (const name of inspect) {
+    const spec = BUFFERS[name];
+    if (!spec) throw new Error(`inspect names '${name}', which is not in BUFFERS`);
+    if (spec.kind !== 'storage') {
+      throw new Error(
+        `inspect names '${name}', which is a ${spec.kind} buffer. Only storage buffers are created ` +
+        `with COPY_SRC, and copying from one that is not fails asynchronously -- as a silent no-op, not an error.`);
+    }
+  }
 
   // The scan is three passes because its block sums fit in ONE workgroup. If
   // that ever stopped holding, the spine would scan a prefix of them and every
@@ -196,11 +234,25 @@ export function planPool(dims: Dims, opts: PlanOptions = {}): PoolPlan {
     if (!liveness.has(name)) throw new Error(`BUFFERS declares '${name}', but no stage binds it`);
   }
 
+  // ── INSPECTION IS A LIVE RANGE, NOT AN EXCEPTION ──
+  //
+  // A buffer somebody reads after the last stage is live to the END OF THE
+  // FRAME. Stating it that way and feeding it to the same colouring is what
+  // makes the slot exclusive; the alternative -- a set of names the colouring
+  // has to skip -- is a second rule, and a rule that only fires under `alias`
+  // is a rule that gets tested last and rots first.
+  //
+  // Applied to `effective` and NOT to `liveness`: the derived table is a fact
+  // about the pipeline declaration, and both validate() and the clear schedule
+  // read it. A caller's display request is not a fact about the pipeline.
+  const lastStage = stages.length - 1;
   const effective = alias
-    ? liveness
+    ? new Map([...liveness].map(([k, v]) =>
+      [k, inspect.includes(k) ? { first: v.first, last: lastStage } : v] as const))
     // The degenerate table: everything live for the whole frame, so the
-    // colouring below hands out one slot each.
-    : new Map([...liveness].map(([k]) => [k, { first: 0, last: stages.length - 1 }] as const));
+    // colouring below hands out one slot each -- and inspection is already
+    // satisfied, which is why Sphere Lab can inspect freely with `alias` off.
+    : new Map([...liveness].map(([k]) => [k, { first: 0, last: lastStage }] as const));
 
   const bytesOf = (name: string) => specOf(name).bytes(dims);
   const storage = Object.keys(BUFFERS).filter((n) => specOf(n).kind === 'storage');
@@ -220,7 +272,7 @@ export function planPool(dims: Dims, opts: PlanOptions = {}): PoolPlan {
   const pooledBytes = slots.reduce((a, s) => a + s.bytes, 0);
   const totalBytes = pooledBytes + dedicated.reduce((a, n) => a + bytesOf(n), 0);
 
-  const plan: PoolPlan = { dims, stages, slots, assignment, dedicated, liveness, clears, totalBytes, pooledBytes };
+  const plan: PoolPlan = { dims, stages, slots, assignment, dedicated, liveness, inspect, clears, totalBytes, pooledBytes };
   validate(plan);
   return plan;
 }
@@ -317,6 +369,15 @@ export function assertBinds(plan: PoolPlan, stageId: string, names: readonly str
   // input that could have reached the slot check was one this function rejects
   // earlier -- and the test covering it was passing on the set-comparison error
   // while claiming to cover the collision.
+}
+
+/**
+ * Byte size of one declared buffer under these dims. Exported so run.ts can lay
+ * out the staging buffer without a second copy of the size arithmetic -- the
+ * same reason liveness and the clear schedule are derived rather than written.
+ */
+export function bufferBytes(dims: Dims, name: string): number {
+  return specOf(name).bytes(dims);
 }
 
 /** Human-readable slot map, for the buffer labels and for eyeballing a plan. */

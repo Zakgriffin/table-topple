@@ -115,6 +115,73 @@ test('pooling saves what the plan claims and nothing is lost', () => {
   assert.ok(savedMiB > 3.8 && savedMiB < 4.4, `expected ~4.1 MiB saved, got ${savedMiB.toFixed(2)}`);
 });
 
+// ── Inspection: a live range, not an exception ────────────────────────────
+
+test('WITHOUT the declaration, an inspected buffer would be read back CLOBBERED', () => {
+  // THE DECISIVENESS STEP, and it comes first on purpose. The test below is
+  // worth nothing unless `alias: true` genuinely parks a later buffer in
+  // `lines`' slot -- if it did not, that test would stay green with the whole
+  // mechanism deleted, which is the shape six earlier mutations in this rewrite
+  // hid behind.
+  //
+  // Measured, not chosen: at 480x640 `lines` (maxLines*16) dies at gpp.classify
+  // and `colSamples` is born at gpp.compact, so the colouring hands the second
+  // the first's slot. Reading `lines` after the last stage would return
+  // colSamples' bytes -- a wrong answer that looks like a detector fault, since
+  // both arrays are plausible-looking f32.
+  const plain = planPool(DIMS, { alias: true });
+  const slot = plain.slots[plain.assignment.get('lines')!]!;
+  const after = slot.occupants.slice(slot.occupants.indexOf('lines') + 1);
+  assert.deepEqual(after, ['colSamples'],
+    'lines no longer aliases anything -- this fixture can no longer see the mechanism, pick another buffer');
+});
+
+test('a declared-inspectable buffer holds its slot to the end of the frame', () => {
+  const declared = planPool(DIMS, { alias: true, inspect: ['lines'] });
+  const slot = declared.slots[declared.assignment.get('lines')!]!;
+  assert.deepEqual(slot.occupants, ['lines'], 'an inspected buffer shares with nobody');
+
+  // And the cost is REAL and visible, which is the honest half: colSamples has
+  // to go somewhere, and there is nowhere free at that size.
+  const plain = planPool(DIMS, { alias: true });
+  assert.equal(declared.slots.length, plain.slots.length + 1);
+  assert.ok(declared.totalBytes > plain.totalBytes);
+  // Carried on the plan so run.ts sizes one staging buffer from it, and so a
+  // per-frame request for anything else is a throw rather than a wrong answer.
+  assert.deepEqual([...declared.inspect], ['lines']);
+});
+
+test('inspecting a buffer that is already last in its slot costs nothing', () => {
+  // Stated because it is what makes a generous `inspect` catalogue affordable:
+  // the price is paid per buffer that actually gets displaced, not per name.
+  // `layout` shares slot with three earlier occupants and is the last of them,
+  // so it is already readable at end of frame and declaring it changes nothing.
+  const plain = planPool(DIMS, { alias: true });
+  const declared = planPool(DIMS, { alias: true, inspect: ['layout'] });
+  assert.equal(declared.slots.length, plain.slots.length);
+  assert.equal(declared.totalBytes, plain.totalBytes);
+});
+
+test('inspection is free under alias: false, because everything already holds its own slot', () => {
+  const plain = planPool(DIMS, { alias: false });
+  const declared = planPool(DIMS, { alias: false, inspect: ['lines', 'votes', 'fx', 'fy'] });
+  assert.equal(declared.slots.length, plain.slots.length);
+  assert.equal(declared.totalBytes, plain.totalBytes);
+  // Which is the whole reason Sphere Lab can inspect freely: the degenerate
+  // liveness table already says every buffer is live for the whole frame.
+});
+
+test('inspect rejects a name that cannot be copied from, rather than failing at copy time', () => {
+  // Uniform/indirect/persistent buffers are not created with COPY_SRC (see
+  // createBuffers), and copying from one is a validation error WebGPU reports
+  // ASYNCHRONOUSLY -- a silently no-op encoder, not an exception. So the name is
+  // rejected where the mistake is, not three steps downstream.
+  assert.throws(() => planPool(DIMS, { inspect: ['gradientUni'] }), /is a uniform buffer/);
+  assert.throws(() => planPool(DIMS, { inspect: ['lineArgs'] }), /is an? indirect buffer/);
+  assert.throws(() => planPool(DIMS, { inspect: ['torus'] }), /is a persistent buffer/);
+  assert.throws(() => planPool(DIMS, { inspect: ['nosuchbuffer'] }), /not in BUFFERS/);
+});
+
 test('no stage binds two buffers that share a slot', () => {
   // Tautological on a plan derived from the same stage list -- two buffers
   // listed in one stage are both live in it by construction. Asserted anyway,

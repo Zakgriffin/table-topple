@@ -49,19 +49,32 @@ protect is checkable by reading one screen.
    `src/pose` and `src/pose2` over the same 180 poses and the same renders. This
    is §19's acceptance criterion and it is the thing that decides whether the
    rewrite succeeded. The baseline to beat is in §19.
-2. **Then the sweep says which stage tests were worth having** (§19's calibration
-   note), and the priority inverts: run it first, and let it localize.
+2. **DO NOT RETIRE ANY STAGE TEST. Standing instruction from the user,
+   2026-08-14.** §19's calibration note argues the sweep should now say which
+   stage tests were worth having; that re-reading is ON HOLD and no
+   `tests/pose2*` test is to be deleted on its evidence or anyone else's. The
+   deliberation stays open — the hold is not its outcome.
 3. **Phase 3 — replace.** Swap the app onto this pipeline, then delete
-   `src/pose/`. Note `scripts/hull-measure.ts` imports `src/pose` and is a
-   measurement harness rather than a shipping path.
+   `src/pose/`. **All of `src/pose` goes**, including the tests that exist only
+   to exercise it: `arena`, `cpuPipeline`, `intermediates`, `libraryBoundary`
+   and `profilerJoin`. That deletion is NOT in tension with item 2 — the tests
+   being deliberated over are the `tests/pose2*` ones, which are not in the pose
+   directory and do not die with it.
+
+   Two things it drags with it, both listed in §19: `scripts/hull-measure.ts`
+   imports `src/pose` and is a measurement harness rather than a shipping path,
+   and `scripts/sweep.ts`'s `--pipeline pose` arm imports `computePoseFromCapture`
+   and is what makes the two-pipeline comparison possible at all.
 
 ### What is NOT done
 
-- **The sweep has not been used to retire any stage test.** §19's calibration note
-  says that is what should happen now that it can run. Whether it SHOULD is
-  unsettled — the user's position as of 2026-08-14 is that the stage tests may be
-  worth keeping regardless, and the mutation run below is an argument for that:
-  a whole-pipeline pass rate cannot tell you which claim it is testing.
+- **The sweep has not been used to retire any stage test, and is not to be.**
+  §19's calibration note says that is what should happen now that it can run.
+  **It is on hold by the user's instruction, 2026-08-14: none of those tests go
+  yet.** The deliberation is genuinely open — the argument for keeping them is
+  that a whole-pipeline pass rate cannot tell you WHICH claim it is testing, and
+  the mutation runs are the evidence, since six of them found a green test that
+  was green for the wrong reason. A sweep would have localized none of those.
 - **Phase 3, replace.** Not started. See §19.
 - Two smaller ones: the hull was measured on `src/pose`'s detected lines and the
   grazing band (tilts 45–55) has not been checked against pose2's own detector;
@@ -2762,7 +2775,28 @@ was UNTRACKED, so restoration was from a file copy verified with `diff` rather
 than from git. The work was committed 2026-08-14; see START HERE.
 
 **Phase 3 -- replace.** Swap the app onto this pipeline, then delete
-`src/pose/`. NOT STARTED. Two things to know before it is:
+`src/pose/`. NOT STARTED. Four things to know before it is:
+
+- **A TEST THAT IS STAYING IMPORTS FROM THE DIRECTORY THAT IS GOING.**
+  `tests/pose2Stages.test.ts:15` imports `rotatedZeroIndex` from
+  `src/pose/stages/decode/decodeGrid.ts`, and uses it at one call site to check
+  decode's winning orientation. So deleting `src/pose` breaks a `pose2` stage
+  test, which is the one thing the standing instruction above says must not
+  happen. It is an eight-line index permutation over four rotation cases --
+  RE-DERIVE it into the test from the definition rather than copying it across,
+  which is the same rule the twin follows and matters more here, not less: once
+  `src/pose` is gone a copy stops being an independent second source and becomes
+  an unowned duplicate of nothing.
+- **Which tests die WITH `src/pose`**, so the deletion is not mistaken for
+  test-retirement: `arena`, `cpuPipeline`, `intermediates`, `libraryBoundary`
+  and `profilerJoin` exercise `src/pose` and nothing else. `fixture` and
+  `provenance` touch neither pipeline and survive. Every `tests/pose2*` file and
+  `tests/gpuHarness.test.ts` stay.
+- The remaining two mentions of `src/pose` inside `pose2` are COMMENTS -- in
+  `src/pose2/buffers.ts` and `tests/pose2Buffers.test.ts`, both pointing at
+  `arena.ts`'s BumpPlanner split as prior art. They will dangle, which is
+  cosmetic, but they are the kind of reference that reads as a live dependency
+  to a grep.
 
 - The entry point is `src/pose2/run.ts`, which returns a `Pose2Result` -- a plain
   struct, no THREE types, no chain, no timing DAG. The app boundary (the payload
@@ -2781,12 +2815,20 @@ above, means the LSD front half and anything with a hand-checkable closed form.
 Left in place because they are written and green, recorded here because the
 density was wrong.
 
-**THE PRECONDITION IS NOW MET.** That paragraph used to say the sweep could not
-score `src/pose2` at all until `finish` (§14) landed. It has, so the priority
-inverts as promised: **run the sweep first, and let it say which stage tests were
-worth having.** That re-reading has not been done -- the stage tests were all
-written before the sweep could run, and nothing has yet been retired on its
-evidence.
+**THE PRECONDITION IS NOW MET, AND THE ACTION IS ON HOLD ANYWAY.** That
+paragraph used to say the sweep could not score `src/pose2` at all until
+`finish` (§14) landed. It has, so the priority inverts as promised: run the
+sweep first, and let it say which stage tests were worth having.
+
+**But nothing is to be retired on that reading. User instruction, 2026-08-14.**
+The re-reading has not been done and the stage tests stay regardless of what it
+would say. The counter-argument to this whole calibration note, and the reason
+the hold is not merely caution: **a sweep scores the pipeline, so it can say a
+pose came out wrong but not WHICH claim broke** -- and the six green-for-the-
+wrong-reason tests recorded above were each found by a mutation run against a
+specific stage, which no aggregate pass rate localizes. The density may still
+have been wrong; that is a different question from whether these particular
+tests should go, and it is still open.
 
 ### Practical obstacles, both real
 

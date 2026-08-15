@@ -486,7 +486,7 @@ const MAX_LINES = 16384;
 // Cheap by construction: this camera plans with `alias` off (the default), where
 // every buffer already holds its own slot for the whole frame, so declaring one
 // costs staging bytes and nothing else. See src/pose2/buffers.ts's PlanOptions.
-const INSPECT = ['triad', 'layout', 'fx', 'fy', 'votes', 'lines', 'lineScan', 'counts'] as const;
+const INSPECT = ['triad', 'layout', 'fx', 'fy', 'votes', 'lines', 'lineScan', 'counts', 'rects'] as const;
 
 // ── WHAT THIS FRAME ACTUALLY ASKS FOR ────────────────────────────────────
 //
@@ -528,6 +528,12 @@ function inspectFor(camera: Camera): readonly string[] {
   // The segments themselves, plus what is needed to say WHICH REGION produced
   // each one -- see unpackComposites. All three are kilobytes.
   if (s.showLsdComposite) want.push('lines', 'lineScan', 'counts');
+  // The fitted rectangles, for the segment outlines and the accept/reject
+  // readout. EITHER toggle: the rejected view is the same buffer filtered the
+  // other way, so gating on showLsdSegments alone would leave it dark whenever
+  // it was the only one on. `counts` may already be in the list -- runPose2
+  // dedupes.
+  if (s.showLsdSegments || s.showLsdRejected) want.push('rects', 'counts');
   return want;
 }
 
@@ -705,6 +711,8 @@ function toCameraPose(frame: Pose2Frame): CameraPose {
     intermediates: {
       ...(inspected['fx'] ? { fx: new Float32Array(inspected['fx']) } : {}),
       ...(inspected['fy'] ? { fy: new Float32Array(inspected['fy']) } : {}),
+      ...(inspected['rects'] ? { rects: new Float32Array(inspected['rects']) } : {}),
+      ...(inspected['counts'] ? { regionCount: new Uint32Array(inspected['counts'])[0] } : {}),
     },
   };
 }

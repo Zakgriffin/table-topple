@@ -48,6 +48,19 @@ export interface Intermediates {
    *  See types.ts's FloatField for why nothing converts. */
   fx?: Float32Array;
   fy?: Float32Array;
+  /**
+   * One fitted rectangle per REGION, flat: 10 f32 each --
+   * cx, cy, theta, length, width, nfaLog10, accepted, pad, n, k. Indexed by
+   * region, so `regionCount` (below) bounds it, not the array's length.
+   *
+   * FLAT, and deliberately not unpacked into objects here: `src/pose2` hands back
+   * bytes and the one consumer walks them once per capture. A parallel array of
+   * ten-field objects would be the old pipeline's LsdRectangle type rebuilt on
+   * this side, which is what CameraPose exists to avoid.
+   */
+  rects?: Float32Array;
+  /** How many entries of `rects` are real. Off `counts`, not off the array. */
+  regionCount?: number;
 }
 
 // requestVideoFrameCallback's metadata for one decoded video frame, captured

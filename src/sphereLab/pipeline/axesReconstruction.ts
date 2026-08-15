@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { type Camera, type CameraPose, type PendingVisuals } from '../camera/model.ts';
+import { type Camera, type CameraPose, type CompositeLine, type PendingVisuals } from '../camera/model.ts';
 import { activeCamera, isPhysical, isSimulated } from '../camera/store.ts';
 import { COL_DIR, GRID_STEP, ROW_DIR, SPHERE_RADIUS } from '../constants.ts';
 import { ORDER } from '../floorPattern.ts';
@@ -486,7 +486,7 @@ const MAX_LINES = 16384;
 // Cheap by construction: this camera plans with `alias` off (the default), where
 // every buffer already holds its own slot for the whole frame, so declaring one
 // costs staging bytes and nothing else. See src/pose2/buffers.ts's PlanOptions.
-const INSPECT = ['triad', 'layout', 'fx', 'fy', 'votes'] as const;
+const INSPECT = ['triad', 'layout', 'fx', 'fy', 'votes', 'lines', 'lineScan', 'counts'] as const;
 
 // ── WHAT THIS FRAME ACTUALLY ASKS FOR ────────────────────────────────────
 //
@@ -525,6 +525,9 @@ function inspectFor(camera: Camera): readonly string[] {
   // not fetched either. Its own comment is the reason it matters: a real capture
   // is hundreds of thousands of votes, which is why showTopCircles defaults off.
   if (s.showTopCircles || s.showAxisVectors) want.push('votes');
+  // The segments themselves, plus what is needed to say WHICH REGION produced
+  // each one -- see unpackComposites. All three are kilobytes.
+  if (s.showLsdComposite) want.push('lines', 'lineScan', 'counts');
   return want;
 }
 
@@ -602,6 +605,54 @@ function unpackVotes(bytes: ArrayBuffer | undefined, lineCount: number): { n: TH
   return out;
 }
 
+// The detected segments, each tagged with the region it came from.
+//
+// ── THE TAG IS THE REGION INDEX, AND THAT IS A DELIBERATE DEPARTURE ──
+//
+// The old app hashed a colour from `root`: the region's LOWEST-INDEX MEMBER
+// PIXEL. Reproducing that exactly is possible -- it is `members[regionOffsets[r]]`
+// -- but it costs the full region CSR (1.17 MiB of `members`) on a view that
+// otherwise needs kilobytes, and `root` was never meaningful: lsdOverlay.ts's own
+// comment calls it "just some deterministic, stable member pixel to hash off of".
+//
+// What DOES matter is that this view and the raw-regions raster agree, so a
+// segment and the blob it was fitted to come out the same colour. Hashing the
+// region index satisfies that in both, and the raster can keep using the CSR it
+// needs for its pixels anyway. The visible change is that the palette is
+// shuffled relative to the old app; the property the palette is FOR is kept.
+//
+// ── HOW A LINE FINDS ITS REGION, without re-deriving the predicate ──
+//
+// `lineScan` is the exclusive prefix of the accept flags, so region r emitted a
+// line exactly when its running index INCREMENTS -- and that line is at
+// lineScan[r].x. Reading it this way rather than re-testing `rects`'s accepted
+// flag and length matters: the predicate lives in LINES_FLAG_WGSL, and a second
+// copy here would drift silently the first time a threshold moves.
+function unpackComposites(
+  lines: ArrayBuffer | undefined, lineScan: ArrayBuffer | undefined,
+  counts: ArrayBuffer | undefined, lineCount: number,
+): { root: number; line: CompositeLine }[] {
+  if (!lines || !lineScan || !counts) return [];
+  const seg = new Float32Array(lines);
+  const scan = new Uint32Array(lineScan);
+  const regionCount = new Uint32Array(counts)[0] ?? 0;
+  const emitted = Math.min(lineCount, seg.length / 4);
+  const out: { root: number; line: CompositeLine }[] = [];
+  for (let r = 0; r < regionCount; r++) {
+    // vec2 per entry, and only .x carries the flag -- see BUFFERS.lineFlag.
+    const at = scan[r * 2]!;
+    // The tail past the last region compares against the total, which is what
+    // `lineScan[r + 1]` would have held had the scan run one element further.
+    const next = r + 1 < regionCount ? scan[(r + 1) * 2]! : emitted;
+    if (next <= at || at >= emitted) continue;
+    out.push({
+      root: r,
+      line: { x1: seg[at * 4]!, y1: seg[at * 4 + 1]!, x2: seg[at * 4 + 2]!, y2: seg[at * 4 + 3]! },
+    });
+  }
+  return out;
+}
+
 function toCameraPose(frame: Pose2Frame): CameraPose {
   const { pose, inspected } = frame;
   // Three vec3<f32> at stride 16 -- see BUFFERS.triad. The stride is why this is
@@ -614,10 +665,8 @@ function toCameraPose(frame: Pose2Frame): CameraPose {
   const Drow = axis(0), Dcol = axis(1), Dnormal = axis(2);
 
   return {
-    // Empty until the line buffer is inspected -- the composite lines are their
-    // own step. Empty, not absent: every reader already had to treat "no lines"
-    // as ordinary.
-    voteComposites: [],
+    voteComposites: unpackComposites(
+      inspected['lines'], inspected['lineScan'], inspected['counts'], pose.lineCount),
     votes: unpackVotes(inspected['votes'], pose.lineCount),
     lineCount: pose.lineCount,
     quadricPair: fitOk ? { Drow, Dcol, Dnormal } : null,

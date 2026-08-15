@@ -53,14 +53,23 @@ export function clearArrowOverlays() {
 // computations of the same thing" mismatch a past version of this file
 // already had and fixed -- see this file's git history.
 //
-// Two color modes over the SAME line set, not two different line sets:
-// default is a unique per-line color hashed from that line's own merge-
-// group root (overlays/lsdOverlay.ts's hashSeedIndexToHueDeg); toggling
-// showCompositeLineFamilies switches every line to blue=row family /
-// red=column family instead, shaded by each line's own RANK within its
-// family (sorted by its rectified `value` -- the same order the
-// period/phase fit itself assigns integer indices in) -- gray for any line
-// gridPeriodPhase itself skipped (e.g. a degenerate gnomonic projection).
+// ── THE COORDINATES ARE TOP-DOWN, whatever the paragraph above once said ──
+//
+// An earlier version of this comment claimed the endpoints came from a
+// row-flipped gray. They do not, and the arithmetic below never matched that
+// claim: `rasterY = fieldH - 1 - fy` followed by measuring UP from the rect's
+// bottom is the composition that maps a TOP-DOWN fy=0 to the TOP of the rect.
+// src/pose2's `lines` are in the pipeline's own top-down pixel space, which is
+// the dominant convention everywhere except the preview textures, so this is
+// correct as written -- and it was correct-looking either way round, which is
+// why the stale comment survived. See overlays/pipelineField.ts.
+//
+// COLOUR: a unique per-line hue hashed from the index of the REGION the segment
+// was fitted to (overlays/lsdOverlay.ts's hashSeedIndexToHueDeg). The
+// showCompositeLineFamilies mode -- blue=row, red=column, shaded by each line's
+// rank within its family -- needs the period search's rectified values, which
+// are `rowSamples`/`colSamples` and are not requested yet, so the toggle
+// currently recolours nothing.
 function drawCompositeLines(camera: Camera) {
   while (lsdCompositeGroup.firstChild) lsdCompositeGroup.removeChild(lsdCompositeGroup.firstChild);
   const settings = camera.settings;

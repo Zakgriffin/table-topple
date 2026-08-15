@@ -1,7 +1,8 @@
-import { type Camera } from '../camera/model.ts';
+import { type Camera, type DecodeLattice } from '../camera/model.ts';
 import { persistConfig } from '../config.ts';
 import { activeCamera } from '../camera/store.ts';
-import { gridPeriodPhasePlotSvg, gridPeriodPhaseProjectedCanvas, gridPeriodPhaseProjectedCtx, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleProductCurveBtn, toggleValueHistogramBtn } from '../ui/dom.ts';
+import { type ProjectedBins } from '../types.ts';
+import { gridPeriodPhasePlotSvg, projectedSvgOverlay, sampleLatticeGroup, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleProductCurveBtn, toggleValueHistogramBtn } from '../ui/dom.ts';
 import { svgEl, svgText } from './svgUtil.ts';
 
 // ── Grid period/phase debug visualizations — the PLOT is still empty ─────
@@ -69,58 +70,84 @@ bindHistogramToggle(toggleProductCurveBtn,
 // pipeline output, and the plot will want them back.
 
 export function hideGridPeriodPhaseProjected() {
-  gridPeriodPhaseProjectedCanvas.style.display = 'none';
+  while (sampleLatticeGroup.firstChild) sampleLatticeGroup.removeChild(sampleLatticeGroup.firstChild);
+  projectedSvgOverlay.style.display = 'none';
+  // The memo below has to be dropped WITH the elements it describes, or coming
+  // back to Projected-Cam against an unchanged pose would find "nothing changed"
+  // and leave the group empty.
+  drawn = null;
 }
+
+// What the group currently holds, so an unchanged frame costs a few comparisons
+// instead of a thousand DOM nodes.
+//
+// THIS MEMO IS NOT AN OPTIMIZATION, IT IS WHY SVG IS VIABLE HERE. main.ts calls
+// the draw below from animate(), i.e. every frame while Projected-Cam is on
+// screen. Clearing and rebuilding a few hundred <circle> elements at 60Hz is a
+// different proposition from a few hundred canvas arcs, and it is also pure
+// waste: the drawing changes only when the POSE changes (a new lattice object),
+// the rect moves (a resize), or the rotation/toggle flips.
+//
+// Compared by IDENTITY on the two objects, which is exact rather than a
+// heuristic: `intermediates.lattice` and `lastProjectedBins` are both rebuilt
+// per capture, so a new one is a new object and an unchanged one is the same
+// pointer.
+let drawn: {
+  lattice: DecodeLattice; bins: ProjectedBins;
+  x: number; y: number; w: number; h: number; rot: number;
+} | null = null;
 
 // ── THE SAMPLE LATTICE IS BACK; THE RECTIFIED LINES ARE NOT ──────────────
 //
-// This canvas drew two things over the Projected-Cam rect. The LATTICE -- one
-// dot per decode sample, filled by the bit it read and ringed by whether that
-// bit matched the printed board -- is below, off `intermediates.lattice` (see
-// pipeline/decodeLattice.ts).
+// One dot per decode sample, filled by the bit it read and ringed by whether
+// that bit matched the printed board -- off `intermediates.lattice`, see
+// pipeline/decodeLattice.ts.
 //
-// The RECTIFIED LINES (blue row family, red column family) are still dark. They
-// came from `gpp.rowLines`/`colLines`, which do not exist: pose2's `rowSamples`/
-// `colSamples` carry (value, weight, crossMin, crossMax) per line, which is
-// enough to reconstruct a segment, but that is a separate readback and a
-// separate decision about what the segment MEANS in this view.
+// SVG, LIKE THE THROUGH-CAM OVERLAYS, and no longer a canvas. Same shape as
+// overlays/lsdOverlay.ts: a full-viewport <svg> that never moves, with children
+// placed in SCREEN coordinates. What that buys is real -- the dots are vectors
+// rather than 2.5px rasters, so they stay crisp at any zoom or DPR, they are
+// inspectable in devtools, and the element stops being resized and repositioned
+// on every animation frame. What it costs is that a rebuild is now DOM work, and
+// the memo above is what keeps that off the frame loop.
+//
+// The RECTIFIED LINES (blue row family, red column family) that shared this
+// surface are still dark. They came from `gpp.rowLines`/`colLines`, which do not
+// exist: pose2's `rowSamples`/`colSamples` carry (value, weight, crossMin,
+// crossMax) per line, which is enough to reconstruct a segment, but that is a
+// separate readback and a separate decision about what the segment MEANS here.
 //
 // The lattice sits in FLOOR (u, v), the same space projectedBins.ts bins the
 // image into, so placing a dot is a bin lookup and no geometry -- see
-// DecodeLattice. `rotationSteps` rotates the canvas to match the true-cardinal
-// display toggle applied to the texture underneath it.
+// DecodeLattice. `rotationSteps` matches the true-cardinal display rotation
+// applied to the texture underneath.
 export function drawGridPeriodPhaseProjected(
   camera: Camera, x: number, y: number, w: number, h: number, rotationSteps = 0,
 ) {
   const lattice = camera.settings.showSampleLattice ? camera.pose?.intermediates.lattice : undefined;
   const bins = camera.lastProjectedBins;
-  // Hidden rather than cleared-and-shown: an empty canvas over the rect would
-  // still intercept nothing but would leave a stale frame visible for one tick
-  // if the sizing below were ever skipped.
   if (!lattice || !bins) { hideGridPeriodPhaseProjected(); return; }
+  if (drawn && drawn.lattice === lattice && drawn.bins === bins
+    && drawn.x === x && drawn.y === y && drawn.w === w && drawn.h === h && drawn.rot === rotationSteps) return;
 
-  const canvas = gridPeriodPhaseProjectedCanvas, ctx = gridPeriodPhaseProjectedCtx;
-  canvas.style.display = 'block';
-  canvas.style.left = x + 'px';
-  canvas.style.top = y + 'px';
-  canvas.width = Math.round(w);
-  canvas.height = Math.round(h);
-  canvas.style.width = w + 'px';
-  canvas.style.height = h + 'px';
-  ctx.setTransform(1, 0, 0, 1, 0, 0);
-  ctx.clearRect(0, 0, canvas.width, canvas.height);
-  if (rotationSteps !== 0) {
-    ctx.translate(canvas.width / 2, canvas.height / 2);
-    ctx.rotate(rotationSteps * (Math.PI / 2));
-    ctx.translate(-canvas.width / 2, -canvas.height / 2);
-  }
+  while (sampleLatticeGroup.firstChild) sampleLatticeGroup.removeChild(sampleLatticeGroup.firstChild);
+  projectedSvgOverlay.style.display = 'block';
+  // ONE transform on the group instead of the canvas's translate/rotate/
+  // translate. SVG's rotate() takes the centre directly, and its positive
+  // direction is clockwise in this y-down space, which is the same sense
+  // ctx.rotate had.
+  if (rotationSteps === 0) sampleLatticeGroup.removeAttribute('transform');
+  else sampleLatticeGroup.setAttribute('transform', `rotate(${rotationSteps * 90} ${x + w / 2} ${y + h / 2})`);
 
   // U is MIRRORED in this view (see projectedBins.ts's own bu), which is why
-  // this reads `maxU - u` where v reads `v - minV`.
+  // this reads `maxU - u` where v reads `v - minV`. Screen coordinates now, so
+  // the rect's own origin is added -- the canvas was positioned AT the rect and
+  // drew from zero.
   const { rows, cols, uAt, vAt, packed, correct } = lattice;
+  const frag = document.createDocumentFragment();
   for (let i = 0; i < rows; i++) {
     const bv = (vAt[i]! - bins.minV) / bins.binWidthV;
-    const py = (1 - bv / bins.h) * canvas.height;
+    const cy = y + (1 - bv / bins.h) * h;
     for (let j = 0; j < cols; j++) {
       const p = packed[i * cols + j]!;
       // Bit 0 clear means decode.build could not resolve the cell at all --
@@ -128,21 +155,25 @@ export function drawGridPeriodPhaseProjected(
       // rather than a dot claiming a reading it never took.
       if ((p & 1) === 0) continue;
       const bu = (bins.maxU - uAt[j]!) / bins.binWidthU;
-      const px = (bu / bins.w) * canvas.width;
+      const cx = x + (bu / bins.w) * w;
 
       // A SET bit is the DARK cell -- decode.build thresholds with `<`, so the
       // fill here is the cell as printed, not as sampled brightness.
       const bit = (p >> 1) & 1;
-      const verdict = correct ? correct[i * cols + j]! : -1;
-      ctx.beginPath();
-      ctx.arc(px, py, 2.5, 0, Math.PI * 2);
-      ctx.fillStyle = bit ? '#000' : '#fff';
-      ctx.fill();
       // No ring where there is no verdict: an undecoded frame, or a
       // re-derivation that failed its own check against the device's counters.
-      ctx.strokeStyle = verdict < 0 ? 'rgba(0,0,0,0.6)' : (verdict === 1 ? '#0f0' : '#f00');
-      ctx.lineWidth = verdict < 0 ? 1 : 1.5;
-      ctx.stroke();
+      const verdict = correct ? correct[i * cols + j]! : -1;
+      frag.appendChild(svgEl('circle', {
+        cx, cy, r: 2.5,
+        fill: bit ? '#000' : '#fff',
+        stroke: verdict < 0 ? 'rgba(0,0,0,0.6)' : (verdict === 1 ? '#0f0' : '#f00'),
+        'stroke-width': verdict < 0 ? 1 : 1.5,
+      }));
     }
   }
+  // One insertion rather than one per dot: appending into a live tree makes the
+  // browser consider layout for each child.
+  sampleLatticeGroup.appendChild(frag);
+
+  drawn = { lattice, bins, x, y, w, h, rot: rotationSteps };
 }

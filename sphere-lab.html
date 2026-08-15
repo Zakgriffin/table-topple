@@ -49,8 +49,13 @@
     position: fixed; z-index: 5; pointer-events: none;
     color: #fff; font-size: 12px; text-shadow: 0 0 4px #000;
   }
-  #gridPeriodPhaseProjected {
-    position: fixed; z-index: 7; pointer-events: none; display: none;
+  /* The Projected-Cam overlay surface, same shape as #lsdSvgOverlay below: a
+     full-viewport fixed SVG that overlays draw into in SCREEN coordinates,
+     rather than an element sized and positioned to the content rect. It
+     replaces a canvas that was moved and resized every frame. */
+  #projectedSvgOverlay {
+    position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 7;
+    pointer-events: none; display: none;
   }
   #lsdSvgOverlay {
     position: fixed; top: 0; left: 0; width: 100vw; height: 100vh; z-index: 6; pointer-events: none;
@@ -216,7 +221,7 @@
 <canvas id="throughCamCanvas"></canvas>
 <div id="pipFrame"></div>
 <div id="pipLabel">through camera</div>
-<canvas id="gridPeriodPhaseProjected"></canvas>
+<svg id="projectedSvgOverlay"><g id="sampleLatticeGroup"></g></svg>
 <svg id="lsdSvgOverlay"><g id="lsdRectanglesGroup"></g><g id="lsdCompositeGroup"></g><g id="gradientArrowGroup"></g><g id="levelLineArrowGroup"></g><g id="growthCandidateGroup"></g></svg>
 <button id="overlayPanelToggle" title="show/hide overlay panel">&rsaquo;</button>
 <div id="overlayPanel">

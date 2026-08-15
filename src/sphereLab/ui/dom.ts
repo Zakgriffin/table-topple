@@ -21,8 +21,12 @@ export const toggleGapHistogramBtn = document.getElementById('toggleGapHistogram
 export const toggleValueHistogramBtn = document.getElementById('toggleValueHistogram') as HTMLButtonElement;
 export const toggleDistinctnessCurveBtn = document.getElementById('toggleDistinctnessCurve') as HTMLButtonElement;
 export const toggleProductCurveBtn = document.getElementById('toggleProductCurve') as HTMLButtonElement;
-export const gridPeriodPhaseProjectedCanvas = document.getElementById('gridPeriodPhaseProjected') as HTMLCanvasElement;
-export const gridPeriodPhaseProjectedCtx = gridPeriodPhaseProjectedCanvas.getContext('2d')!;
+// The Projected-Cam overlay surface. Same shape as lsdSvgOverlay below -- a
+// full-viewport SVG whose children are positioned in screen coordinates -- so
+// the two views' overlays are written the same way. It replaced a canvas that
+// was moved and resized on every animation frame.
+export const projectedSvgOverlay = document.getElementById('projectedSvgOverlay') as unknown as SVGSVGElement;
+export const sampleLatticeGroup = document.getElementById('sampleLatticeGroup') as unknown as SVGGElement;
 export const overlayPanel = document.getElementById('overlayPanel') as HTMLDivElement;
 export const overlayPanelToggle = document.getElementById('overlayPanelToggle') as HTMLButtonElement;
 export const contamToggles = document.getElementById('contamToggles') as HTMLDivElement;

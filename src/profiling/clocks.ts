@@ -1,5 +1,5 @@
 import { type Span, spanIngest } from './profiler.ts';
-import type { GpuFrameTiming } from '../../../pose/pose.ts';
+import type { GpuFrameTiming } from '../pose/pose.ts';
 
 // ── THE CLOCK BOUNDARY ────────────────────────────────────────────────────
 //

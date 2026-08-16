@@ -1,5 +1,4 @@
 import * as THREE from 'three';
-import { BOARD_UNITS_PER_METRE } from '../poseViewer/shared/constants.ts';
 
 // ── IMU dead-reckoning between absolute pose fixes ───────────────────────
 //
@@ -73,11 +72,18 @@ interface ImuTrackerConfig {
   enablePositionPrediction: boolean;
 }
 
-export function defaultImuTrackerConfig(): ImuTrackerConfig {
+/**
+ * `boardUnitsPerMetre` is REQUIRED rather than defaulted, because it is the one
+ * field here that is a fact about somebody's PRINTED BOARD rather than about an
+ * IMU. It used to read Pose Viewer's constant directly, which made this
+ * platform layer depend on one of the apps -- and silently gave any other app
+ * that app's board scale. Each caller passes its own.
+ */
+export function defaultImuTrackerConfig(boardUnitsPerMetre: number): ImuTrackerConfig {
   return {
     gyroBiasDegPerSec: new THREE.Vector3(0, 0, 0),
     accelBiasMps2: new THREE.Vector3(0, 0, 0),
-    boardUnitsPerMetre: BOARD_UNITS_PER_METRE,
+    boardUnitsPerMetre,
     // SOLVED 2026-08-05 from three tilt snaps, hand-verified against the
     // prediction that a positive device-x tilt must show as negative camera-x.
     // Identity is the real answer, not a placeholder: the rear camera looks

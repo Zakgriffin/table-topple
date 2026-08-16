@@ -22,9 +22,9 @@ import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleRe
 import { buildDecodeLattice } from './decodeLattice.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
-import { type Span, spanEnd } from '../../shared/profiling/profiler.ts';
-import { ingestGpuFrame } from '../../shared/profiling/clocks.ts';
-import { appSpan } from '../../shared/profiling/stages.ts';
+import { type Span, spanEnd } from '../../../profiling/profiler.ts';
+import { ingestGpuFrame } from '../../../profiling/clocks.ts';
+import { appSpan } from '../../../profiling/stages.ts';
 
 // Shared pole-marker/gizmo/floor-overlay/readout tail -- called after EITHER
 // a real local reconstruction (recomputeStages below) or an already-computed

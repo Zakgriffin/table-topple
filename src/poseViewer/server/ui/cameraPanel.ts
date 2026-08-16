@@ -16,7 +16,7 @@ import { backendFromForceCPU } from '../../shared/backend.ts';
 import { buildProjectedTexture } from '../pipeline/projectedBins.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { isWebGPUSupported } from '../../../gpu/device.ts';
-import { profilerReset, profilerSetDevToolsMirror } from '../../shared/profiling/profiler.ts';
+import { profilerReset, profilerSetDevToolsMirror } from '../../../profiling/profiler.ts';
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../../shared/state.ts';
 import { type FieldView } from '../../shared/types.ts';

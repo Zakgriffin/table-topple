@@ -10,8 +10,8 @@ import { type PoseContext, createPoseContext, runPose } from '../src/pose/run.ts
 import { board } from '../src/poseViewer/shared/floorPattern.ts';
 import { GRID_STEP } from '../src/poseViewer/shared/constants.ts';
 import { DAWN_NODE_FLAGS, requestDeviceWithOptionalTimestamps } from '../src/gpu/device.ts';
-import { getRecords, profilerReset, spanEnd, spanStart } from '../src/poseViewer/shared/profiling/profiler.ts';
-import { ingestGpuFrame } from '../src/poseViewer/shared/profiling/clocks.ts';
+import { getRecords, profilerReset, spanEnd, spanStart } from '../src/profiling/profiler.ts';
+import { ingestGpuFrame } from '../src/profiling/clocks.ts';
 
 // ── The pose sweep, runnable ──────────────────────────────────────────────
 //

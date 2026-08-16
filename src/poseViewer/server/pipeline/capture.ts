@@ -3,9 +3,9 @@ import { type Camera, type CameraPose, type FrameMeta, type PhysicalCamera, type
 import { activeCamera, isSimulated } from '../camera/store.ts';
 import { toGrayscale } from '../../../pose/grayscale.ts';
 import { renderer, scene } from '../scene/renderer.ts';
-import { spanEnd } from '../../shared/profiling/profiler.ts';
-import { appSpan } from '../../shared/profiling/stages.ts';
-import { ingestLinkSpans } from '../../shared/profiling/clocks.ts';
+import { spanEnd } from '../../../profiling/profiler.ts';
+import { appSpan } from '../../../profiling/stages.ts';
+import { ingestLinkSpans } from '../../../profiling/clocks.ts';
 import { globalState } from '../../shared/state.ts';
 import { layoutPip } from '../ui/layout.ts';
 import { applyPoseVisualizations, runAxesReconstruction } from './axesReconstruction.ts';

@@ -18,6 +18,7 @@ import * as THREE from 'three';
 import { toGrayscale } from '../../pose/grayscale.ts';
 import { config, fetchConfigFile } from '../shared/config.ts';
 import { globalState } from '../shared/state.ts';
+import { BOARD_UNITS_PER_METRE } from '../shared/constants.ts';
 // Only the data-side rebuild is needed here: this page draws the viewfinder and
 // nothing at board scale. THE AR OVERLAY LEFT -- it is Table Topple's, and it
 // now lives in src/tableTopple/client/. See this file's header.
@@ -44,13 +45,22 @@ type LocalPose = { recoveredAxes: RecoveredAxes | null; positionDecode: Position
 // the recorded shape cannot drift apart -- this page PRODUCES the value that
 // camera/model.ts types on the receiving end.
 import type { FrameMeta } from '../shared/camera/model.ts';
+import {
+  type ProbeResult, type ResCandidate,
+  RES_PROBE_DELAY_MS, applyFrameRate, applyZoom, buildResCandidateList, detectAxesSwapped,
+  probeResolution, readFrameRate, readZoomRange, requestPlainStream, requestStreamAt, sleep, zoomAt,
+} from '../../capture/stream.ts';
+import {
+  type MotionPermission, type MotionSample,
+  isMotionListening, motionRateHz, startMotion, stopMotion,
+} from '../../capture/motion.ts';
 import { ImuTracker, defaultImuTrackerConfig } from '../../capture/imuTracker.ts';
 import {
   axisDiversity, defaultDeviceToCamera, scoreConventions, snapToNearestOctahedral, triadSolve,
   type RotationPair,
 } from '../../capture/imuFrames.ts';
 import { packPoseResultWithImage } from '../shared/devBridge/poseResultWire.ts';
-import { nowMs } from '../shared/clock.ts';
+import { nowMs } from '../../clock.ts';
 
 const video = document.getElementById('v') as HTMLVideoElement;
 const captureCanvas = document.getElementById('captureCanvas') as HTMLCanvasElement;
@@ -155,107 +165,38 @@ chromeToggleBtn.addEventListener('click', () => {
   chromeToggleBtn.blur();
 });
 
-// ── Camera + zoom (ported from src/main.ts:33-99, same reasoning) ─────────
+// ── Camera + zoom ────────────────────────────────────────────────────────
+//
+// The stream itself, and everything hard-won about negotiating one, is
+// src/capture/stream.ts. This half is the page: which control reflects what,
+// and what the status line says.
 
 let currentStream: MediaStream | null = null;
 let currentFacing = 'environment';
-let zoomMin = 1, zoomMax = 1;
-
-function sliderToZoom(t: number): number {
-  return zoomMin * Math.pow(zoomMax / zoomMin, t);
-}
+let zoomRange: { min: number; max: number } | null = null;
 
 function setupZoomControl() {
-  const track = currentStream?.getVideoTracks()[0];
-  let caps: any = null;
-  try { caps = track && 'getCapabilities' in track ? (track as any).getCapabilities() : null; }
-  catch { caps = null; }
-
-  if (caps && caps.zoom && caps.zoom.min > 0 && caps.zoom.max > caps.zoom.min) {
-    zoomSlider.disabled = false;
-    zoomMin = caps.zoom.min;
-    zoomMax = caps.zoom.max;
-    zoomSlider.min = '0';
-    zoomSlider.max = '1';
-    zoomSlider.step = '0.001';
-    zoomSlider.value = '0';
-    track!.applyConstraints({ advanced: [{ zoom: zoomMin } as any] }).catch(() => {});
-  } else {
-    zoomSlider.disabled = true;
-  }
+  zoomRange = readZoomRange(currentStream);
+  if (!zoomRange) { zoomSlider.disabled = true; return; }
+  zoomSlider.disabled = false;
+  zoomSlider.min = '0';
+  zoomSlider.max = '1';
+  zoomSlider.step = '0.001';
+  zoomSlider.value = '0';
+  applyZoom(currentStream, zoomRange.min);
 }
 
 zoomSlider.addEventListener('input', () => {
-  const track = currentStream?.getVideoTracks()[0];
-  const zoom = sliderToZoom(parseFloat(zoomSlider.value));
-  track?.applyConstraints({ advanced: [{ zoom } as any] }).catch(() => {});
+  if (zoomRange) applyZoom(currentStream, zoomAt(zoomRange, parseFloat(zoomSlider.value)));
 });
 
-// ── Sent-image resolution ───────────────────────────────────────────────
+// ── Sent-image resolution, the page's half ──────────────────────────────
 //
-// There's no standard API to enumerate a camera's true discrete capture
-// modes (MediaTrackCapabilities.width/height only report independent
-// {min,max} RANGES, no paired combinations, no aspect-ratio pairing) -- see
-// this session's chat. So instead of guessing at a continuous slider, this
-// SWEEPS a heuristic candidate list of common real camera resolutions
-// against the actual device, one at a time, as a basic (top-level, not
-// `advanced`) EXACT constraint -- unlike a bare/advanced constraint (which
-// spec'd to silently drop if unsatisfiable, see applyExactResolution's own
-// comment), an `{exact: ...}` BASIC constraint genuinely rejects
-// (OverconstrainedError) when the camera can't do it, giving a real
-// per-candidate yes/no signal. Includes both (w,h) and (h,w) for every
-// entry -- also genuinely ambiguous, device to device, whether
-// width/height constraints operate in the camera's true sensor-native
-// (always landscape) space or a device-orientation-corrected space, so
-// probing both resolves that empirically instead of guessing.
-//
-// MANUALLY triggered (see #detectResBtn below), NOT run automatically on
-// every camera start -- a real phone crashed during this sweep earlier this
-// session. RES_PROBE_DELAY_MS pacing was originally added on the theory
-// that back-to-back stream reconfigurations themselves were the problem;
-// that turned out NOT to be the fix (confirmed: pacing alone didn't stop
-// the crash) -- the actual cause was the continuous, unthrottled,
-// full-native-resolution redraw of the now-VISIBLE captureCanvas on every
-// rAF tick (see drawCurrentFrameToCanvas/previewLongEdgeCap and
-// drawFullResFrameToSendCanvas), which this sweep's larger candidates made
-// worse but didn't require to trigger. Kept manual-only regardless (still a
-// heavier, more visible operation than users want running automatically),
-// and the delay stays too (still reasonable pacing for a UI that's visibly
-// flashing through candidates), but neither should be credited with fixing
-// the crash itself.
-const RES_PROBE_DELAY_MS = 300;
-function sleep(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-const RES_CANDIDATES_BASE: { w: number; h: number }[] = [
-  { w: 640, h: 480 }, { w: 1024, h: 768 }, { w: 1280, h: 960 }, { w: 1600, h: 1200 },
-  { w: 2048, h: 1536 }, { w: 3264, h: 2448 }, { w: 4032, h: 3024 },
-  { w: 640, h: 360 }, { w: 1280, h: 720 }, { w: 1920, h: 1080 }, { w: 2560, h: 1440 }, { w: 3840, h: 2160 },
-];
-// 'untested': never probed. 'supported': verified live -- a fresh stream
-// requested at exactly (w,h) (see requestStreamAt) came back reporting
-// EXACTLY (w,h). 'rejected': either the request threw, or it resolved but
-// came back at some OTHER resolution than requested (the swapped-
-// orientation case this whole verification step exists to catch).
-type ResCandidateStatus = 'untested' | 'supported' | 'rejected';
-interface ResCandidate { w: number; h: number; status: ResCandidateStatus }
+// WHY there is a sweep at all, WHY the constraints are shaped the way they are,
+// and WHAT the axis swap is, all live in src/capture/stream.ts -- that is the
+// platform knowledge, and both clients need it. What is left here is the
+// dropdown, the probe-log table, and the sequencing of a sweep against them.
 let resCandidates: ResCandidate[] = [];
-
-function buildResCandidateList(): ResCandidate[] {
-  const seen = new Set<string>();
-  const list: ResCandidate[] = [];
-  for (const { w, h } of RES_CANDIDATES_BASE) {
-    for (const [cw, ch] of [[w, h], [h, w]] as const) {
-      const key = `${cw}x${ch}`;
-      if (seen.has(key)) continue;
-      seen.add(key);
-      list.push({ w: cw, h: ch, status: 'untested' });
-    }
-  }
-  list.sort((a, b) => a.w * a.h - b.w * b.h);
-  return list;
-}
 
 // Rebuilds the <option> list from the current resCandidates -- called
 // after every probe (not just once at the end) so the dropdown fills in
@@ -288,46 +229,6 @@ function renderResOptions() {
   if (Array.from(resSelect.options).some((o) => o.value === currentValue)) resSelect.value = currentValue;
 }
 
-// Requests a genuinely FRESH stream at exactly (w,h), pinned to the SAME
-// physical camera via deviceId -- deliberately NOT
-// track.applyConstraints() on an already-running track. Confirmed against
-// a reference tool built for exactly this problem (addpipe/
-// webcam-resolution-tester): applyConstraints() has uneven real-world
-// support for actually renegotiating a running camera's resolution,
-// especially across orientations, on mobile -- it can silently clamp to
-// the nearest resolution along whatever orientation the camera already
-// happens to be running, rather than a genuine renegotiation. A brand-new
-// getUserMedia() call forces the SAME full negotiation a fresh page load
-// would get.
-//
-// width/height are `ideal`, NOT `exact` -- confirmed live this session:
-// `exact` made literally every candidate fail, not just the swapped-
-// orientation ones. Real camera hardware (Android in particular) only
-// exposes a small, FIXED list of actual stream configurations;
-// MediaTrackCapabilities' width/height are independent min/max RANGES that
-// make arbitrary in-between pairs look achievable when they mostly aren't
-// -- `exact` rejects outright the instant a requested pair isn't one of
-// the camera's own literal supported modes, even when something very
-// close genuinely is available. `ideal` never fails that way: the browser
-// always negotiates to its nearest actual supported config and hands back
-// a real stream, which the caller then checks against what it actually got
-// (video.videoWidth/videoHeight) -- same "verify, don't trust" principle
-// as everywhere else in this section, just against a constraint type that
-// doesn't spuriously reject in the first place. deviceId stays `exact`
-// deliberately -- pinning the SAME physical camera across a teardown/
-// rebuild is a real hard requirement, unlike the resolution itself.
-// Returns null on any failure (camera busy, permission revoked, etc.) --
-// never throws.
-async function requestStreamAt(deviceId: string | undefined, w: number, h: number): Promise<MediaStream | null> {
-  try {
-    return await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: w }, height: { ideal: h } },
-    });
-  } catch {
-    return null;
-  }
-}
-
 // Reconnects to a plain, unconstrained stream on the SAME physical camera
 // (deviceId if known, else falls back to facingMode) -- used to bring the
 // viewfinder back after a failed/rejected resolution request or after the
@@ -337,10 +238,7 @@ async function requestStreamAt(deviceId: string | undefined, w: number, h: numbe
 // wants showing in the dropdown).
 async function reconnectPlainStream(deviceId: string | undefined) {
   try {
-    const newStream = await navigator.mediaDevices.getUserMedia({
-      video: deviceId ? { deviceId: { exact: deviceId } } : { facingMode: { ideal: currentFacing } },
-    });
-    await adoptStream(newStream);
+    await adoptStream(await requestPlainStream(deviceId, currentFacing));
     refreshCamStatusResolution();
   } catch (e: any) {
     camStatus.textContent = 'camera error: ' + e.message;
@@ -419,22 +317,12 @@ function setupDefaultResOption() {
   resSelect.disabled = false;
 }
 
-// One row per probe attempt -- see the probeLogPanel toggle in
-// mobile-capture.html. Answers, per candidate: what did we ask for, did
-// getUserMedia even resolve, what did the camera actually settle on (via
-// `ideal`, so this is meaningful even on failure -- see requestStreamAt's
-// own comment), and did that match what was requested. Kept around for the
-// whole session (not just the latest sweep) so a user can compare multiple
-// sweep runs if they want; cleared only by an explicit "clear" action --
-// there isn't one yet, so in practice this just grows across sweeps, which
-// is fine for a debug tool nobody leaves running unattended.
-interface ProbeLogEntry {
-  requestedW: number; requestedH: number;
-  resolved: boolean; error: string;
-  actualW: number | null; actualH: number | null;
-  matched: boolean;
-}
-let probeLog: ProbeLogEntry[] = [];
+// The probe-log table's backing rows. `ProbeResult` is capture/stream.ts's --
+// what was asked for, whether getUserMedia resolved, what the camera settled
+// on. Kept for the whole session (not just the latest sweep) so runs can be
+// compared; there is no clear action yet, so in practice it grows across
+// sweeps, which is fine for a debug tool nobody leaves running.
+let probeLog: ProbeResult[] = [];
 
 // e.matched (on the entry itself) is always the RAW, direct requested-vs-
 // actual comparison -- never mutated once a probe finishes, so it stays a
@@ -480,51 +368,6 @@ probeLogCloseBtn.addEventListener('click', () => probeLogPanel.classList.remove(
 // verifying against the TRUE target in video.videoWidth/videoHeight.
 let resolutionAxesSwapped = false;
 
-// One throwaway probe for the sweep below: opens a fresh, ISOLATED stream
-// on a hidden <video> at exactly (w,h) via requestStreamAt, reads what
-// actually came back, then tears it down -- never touches the main
-// video/currentStream (sweepResolutionCandidates already stopped that for
-// the sweep's duration). Mirrors the reference tool's own approach
-// (addpipe/webcam-resolution-tester): a disposable probe per candidate,
-// rather than repeatedly reconfiguring one live track. Always requests the
-// RAW, un-swap-compensated (w,h) -- resolutionAxesSwapped isn't known yet
-// during a sweep's own probing (that's what this data is FOR determining),
-// see sweepResolutionCandidates' post-hoc pass for where compensation
-// actually gets applied. Returns the full ProbeLogEntry (not just a
-// pass/fail verdict) so the sweep loop can do that later reinterpretation
-// without re-probing anything.
-async function probeResolution(deviceId: string | undefined, w: number, h: number): Promise<ProbeLogEntry> {
-  const entry: ProbeLogEntry = { requestedW: w, requestedH: h, resolved: false, error: '', actualW: null, actualH: null, matched: false };
-  probeLog.push(entry);
-  let stream: MediaStream;
-  try {
-    stream = await navigator.mediaDevices.getUserMedia({
-      video: { deviceId: deviceId ? { exact: deviceId } : undefined, width: { ideal: w }, height: { ideal: h } },
-    });
-  } catch (e: any) {
-    entry.error = e?.message || String(e);
-    renderProbeLog();
-    return entry;
-  }
-  entry.resolved = true;
-  const probeVideo = document.createElement('video');
-  probeVideo.muted = true;
-  probeVideo.playsInline = true;
-  probeVideo.srcObject = stream;
-  try {
-    await probeVideo.play();
-    entry.actualW = probeVideo.videoWidth;
-    entry.actualH = probeVideo.videoHeight;
-    entry.matched = probeVideo.videoWidth === w && probeVideo.videoHeight === h;
-  } catch (e: any) {
-    entry.error = e?.message || String(e);
-  } finally {
-    stream.getTracks().forEach((t) => t.stop());
-    renderProbeLog();
-  }
-  return entry;
-}
-
 // Manually triggered ONLY (see detectResBtn's click handler) -- each probe
 // is a REAL, isolated stream open+close (see probeResolution), paced by
 // RES_PROBE_DELAY_MS between every attempt. The main viewfinder goes dark
@@ -558,7 +401,7 @@ async function sweepResolutionCandidates() {
   currentStream.getTracks().forEach((t) => t.stop());
 
   let i = 0;
-  const attempts: { cand: ResCandidate; entry: ProbeLogEntry }[] = [];
+  const attempts: { cand: ResCandidate; entry: ProbeResult }[] = [];
   for (const cand of resCandidates) {
     if (cand.status !== 'untested') continue; // the injected native pair above is already known-good
     i++;
@@ -577,13 +420,7 @@ async function sweepResolutionCandidates() {
   // what was requested, this platform swaps axes -- so every candidate
   // that LOOKED rejected only because of that swap gets reclassified as
   // supported, using data already in hand.
-  let straight = 0, swapped = 0;
-  for (const { entry } of attempts) {
-    if (entry.actualW == null) continue;
-    if (entry.actualW === entry.requestedW && entry.actualH === entry.requestedH) straight++;
-    else if (entry.actualW === entry.requestedH && entry.actualH === entry.requestedW) swapped++;
-  }
-  resolutionAxesSwapped = swapped > straight;
+  resolutionAxesSwapped = detectAxesSwapped(attempts.map((a) => a.entry));
   // Refreshes the table's header/rows for the (possibly new) verdict even
   // when it comes back false -- a PRIOR sweep could have left the header
   // reading "match (flipped)?" and this run needs to be able to correct
@@ -603,30 +440,19 @@ async function sweepResolutionCandidates() {
 }
 detectResBtn.addEventListener('click', () => sweepResolutionCandidates());
 
-// ── Frame rate ───────────────────────────────────────────────────────────
+// ── Frame rate, the page's half ─────────────────────────────────────────
 //
-// A lever against motion blur (see this session's chat): requesting a
-// higher frame rate caps how long auto-exposure is allowed to leave the
-// shutter open, since a frame's exposure can't exceed its own interval --
-// works even where manual exposureTime control (a separate, far less
-// widely supported constraint, notably absent on iOS Safari) isn't. Bounds
-// are 1fps (a full second between frames, the slowest anyone would want) up
-// to getCapabilities().frameRate.max -- "as fast as we can go" per an
-// explicit ask -- with fallbacks (the currently-negotiated rate, then a
-// flat 30) for a track that doesn't report frameRate capabilities at all
-// (frameRate.max is part of the base Media Capture spec, unlike zoom/
-// exposure, so this is expected to work broadly, but nothing guarantees it
-// on every device).
+// Why a frame-rate control exists at all -- it is a lever against MOTION BLUR,
+// not smoothness -- is in capture/stream.ts's readFrameRate. Bounds are 1fps (a
+// full second between frames, the slowest anyone would want) up to whatever the
+// camera admits to.
 const FPS_MIN = 1;
 let fpsMax = FPS_MIN;
 
 function setupFramerateControl() {
-  const track = currentStream?.getVideoTracks()[0];
-  let caps: any = null;
-  try { caps = track && 'getCapabilities' in track ? (track as any).getCapabilities() : null; }
-  catch { caps = null; }
-  const current = track?.getSettings().frameRate;
-  fpsMax = Math.max(FPS_MIN, Math.round(caps?.frameRate?.max ?? current ?? 30));
+  const { max, negotiated } = readFrameRate(currentStream);
+  const current = negotiated ?? undefined;
+  fpsMax = Math.max(FPS_MIN, max);
 
   if (fpsMax <= FPS_MIN) {
     fpsSlider.disabled = true;
@@ -652,8 +478,7 @@ function setupFramerateControl() {
 fpsSlider.addEventListener('input', () => {
   const fps = parseInt(fpsSlider.value, 10);
   fpsValue.textContent = `${fps}`;
-  const track = currentStream?.getVideoTracks()[0];
-  track?.applyConstraints({ advanced: [{ frameRate: fps } as any] }).catch(() => {});
+  applyFrameRate(currentStream, fps);
 });
 
 // ── On-device compute: settings mirror ──────────────────────────────────
@@ -868,24 +693,11 @@ setInterval(() => {
 // both acceleration fields in m/s^2.
 const IMU_SEND_INTERVAL_MS = 100;
 
-interface ImuSample {
-  t: number;              // nowMs() inside the handler -- see the delay caveat below
-  rrAlpha: number; rrBeta: number; rrGamma: number;   // rotationRate, deg/s
-  ax: number; ay: number; az: number;                 // acceleration, gravity REMOVED by the OS
-  agx: number; agy: number; agz: number;              // accelerationIncludingGravity, raw-er
-  interval: number;       // sampling interval, NORMALIZED TO ms -- see normalizeImuInterval
-}
+// A recorded sample is capture/motion.ts's `MotionSample` -- the device frame,
+// the units, and the iOS interval quirk are all documented there, because they
+// are platform facts rather than facts about this page.
+type ImuSample = MotionSample;
 
-// `DeviceMotionEvent.interval` IS IN SECONDS ON iOS, despite the spec saying
-// milliseconds -- measured 2026-08-04, the device reported 0.0166667 while
-// actually delivering 58.8Hz. Taken literally as ms that reads as a 60kHz
-// sensor, which is what the phone readout was displaying before this.
-// A 60Hz sensor is 16.7ms or 0.0167s and nothing real sits near 1, so the
-// units are separable by magnitude with an enormous margin either side.
-function normalizeImuInterval(raw: number | undefined): number {
-  if (!raw || raw <= 0) return 0;
-  return raw < 1 ? raw * 1000 : raw;
-}
 // THE AUTHORITATIVE RECORDING LIVES HERE, ON THE PHONE. This was briefly the
 // other way round (desktop-side only, with just the newest sample kept here)
 // and that was reversed on 2026-08-04 by an explicit architectural decision:
@@ -903,40 +715,14 @@ const IMU_RING_CAPACITY = 3600; // 60s at 60Hz
 let imuRing: ImuSample[] = [];
 let imuLastSample: ImuSample | null = null;
 let imuUnsent: ImuSample[] = [];
-let imuListening = false;
-let imuPermission: 'unknown' | 'granted' | 'denied' | 'unsupported' = 'unknown';
-// Rolling rate estimate, from the handler's own arrival times rather than
-// the event's self-reported `interval` -- the two disagreeing is itself worth
-// seeing, since it means the browser is coalescing or throttling delivery.
-let imuArrivalTimes: number[] = [];
-let imuLastRateHz: number | null = null;
+let imuPermission: MotionPermission = 'unknown';
 let imuTotalSamples = 0;
 
-function onDeviceMotion(e: DeviceMotionEvent) {
-  // NOTE ON `t`: this is when the HANDLER RAN, not when the sensor sampled.
-  // Between them sit the OS's own batching and the browser's task queue, and
-  // that delay is exactly the constant offset phase B has to estimate (by
-  // cross-correlating |rotationRate| against angular rate differenced from
-  // the vision poses). Recorded as-is rather than "corrected" by a guess.
-  const t = nowMs();
-  const rr = e.rotationRate;
-  const a = e.acceleration;
-  const ag = e.accelerationIncludingGravity;
-  const s: ImuSample = {
-    t,
-    rrAlpha: rr?.alpha ?? 0, rrBeta: rr?.beta ?? 0, rrGamma: rr?.gamma ?? 0,
-    ax: a?.x ?? 0, ay: a?.y ?? 0, az: a?.z ?? 0,
-    agx: ag?.x ?? 0, agy: ag?.y ?? 0, agz: ag?.z ?? 0,
-    interval: normalizeImuInterval(e.interval),
-  };
+function onMotionSample(s: MotionSample) {
   // Fed unconditionally, not only when the toggle is on: the tracker needs
-  // continuous integration to have anything to say the moment it IS turned
-  // on, and pushSample is a handful of flops. Whether its output is USED is
-  // the toggle's business, further down.
-  // Fed from `s`, not from the raw event: the DOM types make every component
-  // individually nullable, and `s` has already resolved that the same way the
-  // recording does -- so the tracker and the dataset can never disagree about
-  // what a given sample was.
+  // continuous integration to have anything to say the moment it IS turned on,
+  // and pushSample is a handful of flops. Whether its output is USED is the
+  // toggle's business, further down.
   imuTracker.pushSample({
     t: s.t,
     rotationRate: { alpha: s.rrAlpha, beta: s.rrBeta, gamma: s.rrGamma },
@@ -952,13 +738,6 @@ function onDeviceMotion(e: DeviceMotionEvent) {
   if (imuRing.length > IMU_RING_CAPACITY) imuRing.splice(0, imuRing.length - IMU_RING_CAPACITY);
   imuUnsent.push(s);
   imuTotalSamples++;
-
-  imuArrivalTimes.push(t);
-  if (imuArrivalTimes.length > 60) imuArrivalTimes.shift();
-  if (imuArrivalTimes.length >= 2) {
-    const span = imuArrivalTimes[imuArrivalTimes.length - 1] - imuArrivalTimes[0];
-    imuLastRateHz = span > 0 ? ((imuArrivalTimes.length - 1) / span) * 1000 : null;
-  }
 }
 
 // iOS (13+) gates devicemotion behind an explicit permission prompt that MUST
@@ -967,44 +746,15 @@ function onDeviceMotion(e: DeviceMotionEvent) {
 // requestPermission at all, where feature-detecting it away and just
 // subscribing is the correct behaviour, not a fallback.
 async function startImu(): Promise<void> {
-  if (imuListening) return;
-  if (typeof DeviceMotionEvent === 'undefined') {
-    imuPermission = 'unsupported';
-    updateImuReadout();
-    return;
-  }
-  const DME = DeviceMotionEvent as any;
-  if (typeof DME.requestPermission === 'function') {
-    try {
-      // Called AS A METHOD on DeviceMotionEvent, not via a detached
-      // reference -- it's a static method and pulling it into a local first
-      // would invoke it with `this` undefined, which some WebKit versions
-      // reject outright.
-      const res = await DME.requestPermission();
-      imuPermission = res === 'granted' ? 'granted' : 'denied';
-    } catch {
-      // Thrown when the call didn't originate from a user gesture, which is
-      // a DIFFERENT failure from the user tapping "deny" -- surfaced as
-      // denied either way here, but the distinction is why the readout says
-      // to re-tap rather than "permission refused".
-      imuPermission = 'denied';
-    }
-  } else {
-    imuPermission = 'granted';
-  }
-  if (imuPermission !== 'granted') { updateImuReadout(); return; }
-  window.addEventListener('devicemotion', onDeviceMotion);
-  imuListening = true;
+  if (isMotionListening()) return;
+  imuPermission = await startMotion(onMotionSample);
   updateImuReadout();
 }
 
 function stopImu() {
-  if (!imuListening) return;
-  window.removeEventListener('devicemotion', onDeviceMotion);
-  imuListening = false;
+  if (!isMotionListening()) return;
+  stopMotion();
   imuUnsent = [];
-  imuArrivalTimes = [];
-  imuLastRateHz = null;
   updateImuReadout();
 }
 
@@ -1028,13 +778,14 @@ function updateImuReadout() {
   if (!imuCheckbox.checked) { imuReadoutEl.textContent = ''; return; }
   if (imuPermission === 'unsupported') { imuReadoutEl.textContent = 'IMU: not supported on this browser'; return; }
   if (imuPermission === 'denied') { imuReadoutEl.textContent = 'IMU: permission denied — re-tap the checkbox'; return; }
-  if (!imuListening) { imuReadoutEl.textContent = 'IMU: starting…'; return; }
+  if (!isMotionListening()) { imuReadoutEl.textContent = 'IMU: starting…'; return; }
   const last = imuLastSample;
   if (!last) { imuReadoutEl.textContent = 'IMU: on, no samples yet'; return; }
   const aMag = Math.hypot(last.ax, last.ay, last.az);
   const agMag = Math.hypot(last.agx, last.agy, last.agz);
   const rrMag = Math.hypot(last.rrAlpha, last.rrBeta, last.rrGamma);
-  const rate = imuLastRateHz !== null ? `${imuLastRateHz.toFixed(0)}Hz` : '—';
+  const rateHz = motionRateHz();
+  const rate = rateHz !== null ? `${rateHz.toFixed(0)}Hz` : '—';
   const lines = [
     `IMU ${rate} (self-reported ${last.interval ? (1000 / last.interval).toFixed(0) + 'Hz' : '—'})  n=${imuTotalSamples}`,
     `|a| ${aMag.toFixed(2)}  |a+g| ${agMag.toFixed(2)} m/s²  |w| ${rrMag.toFixed(1)} °/s`,
@@ -1087,7 +838,7 @@ function updateImuReadout() {
 // fighting over. A ~100ms batch is ~6 samples, well inside the prediction
 // horizon this data is for.
 setInterval(() => {
-  if (!imuListening || imuUnsent.length === 0) return;
+  if (!isMotionListening() || imuUnsent.length === 0) return;
   if (!ws || ws.readyState !== WebSocket.OPEN) { imuUnsent = []; return; }
   const batch = imuUnsent;
   imuUnsent = [];
@@ -1099,7 +850,7 @@ setInterval(() => {
     // at human speed, and per-sample would trip the size argument this
     // batching exists to make.
     screenAngle: (screen as any).orientation?.angle ?? 0,
-    rateHz: imuLastRateHz,
+    rateHz: motionRateHz(),
     samples: batch.map((s) => [s.t, s.rrAlpha, s.rrBeta, s.rrGamma, s.ax, s.ay, s.az, s.agx, s.agy, s.agz, s.interval]),
   }));
 }, IMU_SEND_INTERVAL_MS);
@@ -1131,7 +882,7 @@ if (imuCheckbox.checked) void startImu();
 // part that depends on deviceToCamera being right AND on boardUnitsPerMetre,
 // neither of which is verified yet, and both fail silently rather than
 // loudly. Orientation prediction and the gate are safe to run today.
-const imuTracker = new ImuTracker(defaultImuTrackerConfig());
+const imuTracker = new ImuTracker(defaultImuTrackerConfig(BOARD_UNITS_PER_METRE));
 let useImuCorrection = config.phone.imuCorrection;
 // The last pose the tracker ACCEPTED, so the frame-convention pairs below
 // measure vision rotation across the same span the gyro integrated over. Using
@@ -1409,7 +1160,7 @@ interface PoseRecord {
 }
 let poseRing: PoseRecord[] = [];
 function recordPose(r: PoseRecord) {
-  if (!imuListening) return; // one switch arms the whole recording
+  if (!isMotionListening()) return; // one switch arms the whole recording
   poseRing.push(r);
   if (poseRing.length > POSE_RING_CAPACITY) poseRing.splice(0, poseRing.length - POSE_RING_CAPACITY);
 }
@@ -1443,7 +1194,7 @@ function recordPose(r: PoseRecord) {
       n: imuRing.length,
       spanSec: imuRing.length > 1 ? (imuRing[imuRing.length - 1].t - imuRing[0].t) / 1000 : 0,
       medianDtMs: sorted.length ? sorted[Math.floor(sorted.length / 2)] : null,
-      rateHz: imuLastRateHz,
+      rateHz: motionRateHz(),
       samples: imuRing,
     },
     poses: { n: poseRing.length, records: poseRing },

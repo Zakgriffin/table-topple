@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { type ProjectedBins } from '../types.ts';
-import { type Span } from '../profiling/profiler.ts';
+import { type Span } from '../../../profiling/profiler.ts';
 import { type PhysicalCameraSettings, type SimulatedCameraSettings } from './settings.ts';
 
 // ── The decode sample lattice, as the Projected-Cam overlay draws it ──────

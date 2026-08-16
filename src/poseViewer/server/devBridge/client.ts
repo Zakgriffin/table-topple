@@ -9,7 +9,7 @@ import { globalState } from '../../shared/state.ts';
 import { configStatus } from '../ui/dom.ts';
 import { renderCameraTabs, refreshCameraPanel } from '../ui/cameraPanel.ts';
 import { throughCamCanvas } from '../ui/dom.ts';
-import { nowMs } from '../../shared/clock.ts';
+import { nowMs } from '../../../clock.ts';
 
 // Desktop-side cap on the relayed IMU ring, matching mobileCapture.ts's own
 // IMU_RING_CAPACITY -- ~40s at the ~60Hz browsers actually deliver. Both ends

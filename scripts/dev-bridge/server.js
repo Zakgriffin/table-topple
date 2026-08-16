@@ -295,20 +295,6 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Browser -> a specific phone: the exact mirror image of realCapture/
-    // poseResult (capture -> browser) -- the desktop ships its own
-    // recovered pose back down to the phone that sent the image, so the
-    // phone's AR overlay (mobile-capture.html) can work even when it isn't
-    // computing a pose itself. Routed identically to settingsSync/
-    // captureReady (find the one capture socket matching captureId, send
-    // directly), not broadcast -- a pose only ever means something to the
-    // one phone it was recovered from.
-    if (msg.type === 'poseSync' && msg.captureId) {
-      for (const [capWs, id] of captureSockets) {
-        if (id === msg.captureId) { send(capWs, msg); break; }
-      }
-      return;
-    }
   });
 
   ws.on('close', () => {

@@ -1,17 +1,17 @@
 import { readFileSync } from 'node:fs';
 import * as THREE from 'three';
 import { create, globals } from 'webgpu';
-import { validateFixture } from '../src/poseViewer/fixture.ts';
-import { inputFromFixture } from '../src/poseViewer/harness/input.ts';
+import { validateFixture } from '../src/poseViewer/shared/fixture.ts';
+import { inputFromFixture } from '../src/poseViewer/shared/harness/input.ts';
 import { type SimDims, type SimPose, type SimWorld, vFovRadOf } from '../src/pose/sim.ts';
 import { type PoseObservation, type SweepSpec, runSweep, summarize } from '../src/pose/sweep.ts';
 import { boardDims } from '../src/pose/board.ts';
 import { type PoseContext, createPoseContext, runPose } from '../src/pose/run.ts';
-import { board } from '../src/poseViewer/floorPattern.ts';
-import { GRID_STEP } from '../src/poseViewer/constants.ts';
+import { board } from '../src/poseViewer/shared/floorPattern.ts';
+import { GRID_STEP } from '../src/poseViewer/shared/constants.ts';
 import { DAWN_NODE_FLAGS, requestDeviceWithOptionalTimestamps } from '../src/gpu/device.ts';
-import { getRecords, profilerReset, spanEnd, spanStart } from '../src/poseViewer/profiling/profiler.ts';
-import { ingestGpuFrame } from '../src/poseViewer/profiling/clocks.ts';
+import { getRecords, profilerReset, spanEnd, spanStart } from '../src/poseViewer/shared/profiling/profiler.ts';
+import { ingestGpuFrame } from '../src/poseViewer/shared/profiling/clocks.ts';
 
 // ── The pose sweep, runnable ──────────────────────────────────────────────
 //

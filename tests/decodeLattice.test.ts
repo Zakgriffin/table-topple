@@ -7,9 +7,9 @@ import { decodeLayout } from '../src/pose/pose.ts';
 import type { Dims } from '../src/pose/pipeline.ts';
 import { renderPose, vFovRadOf } from '../src/pose/sim.ts';
 import type { SimWorld } from '../src/pose/sim.ts';
-import { GRID_STEP } from '../src/poseViewer/constants.ts';
-import { board } from '../src/poseViewer/floorPattern.ts';
-import { buildDecodeLattice } from '../src/poseViewer/pipeline/decodeLattice.ts';
+import { GRID_STEP } from '../src/poseViewer/shared/constants.ts';
+import { board } from '../src/poseViewer/shared/floorPattern.ts';
+import { buildDecodeLattice } from '../src/poseViewer/server/pipeline/decodeLattice.ts';
 
 // POSE VIEWER's board, not tests/helpers/board.ts's -- `buildDecodeLattice` is
 // app code and reads the app's `board` module binding, so the frame it is

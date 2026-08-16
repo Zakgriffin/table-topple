@@ -1,10 +1,10 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { validateFixture } from '../../src/poseViewer/fixture.ts';
-import type { Fixture } from '../../src/poseViewer/fixture.ts';
-import { inputFromFixture } from '../../src/poseViewer/harness/input.ts';
-import type { HarnessInput } from '../../src/poseViewer/harness/input.ts';
+import { validateFixture } from '../../src/poseViewer/shared/fixture.ts';
+import type { Fixture } from '../../src/poseViewer/shared/fixture.ts';
+import { inputFromFixture } from '../../src/poseViewer/shared/harness/input.ts';
+import type { HarnessInput } from '../../src/poseViewer/shared/harness/input.ts';
 
 // The node-side fixture loader. The browser's is cameraInput.ts's
 // fixtureInput(), which fetches the same file over the dev server; both go

@@ -30,7 +30,7 @@ import { randomUUID } from 'crypto';
 
 const PORT = 8787;
 const FRAME_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'latest-frame.png');
-// The one config file (see src/poseViewer/config.ts). Two levels up from
+// The one config file (see src/poseViewer/shared/config.ts). Two levels up from
 // scripts/dev-bridge/ -- the browser cannot write to the project directory
 // itself, so promoting the live config onto disk has to come through here.
 const CONFIG_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'pose-viewer.config.json');

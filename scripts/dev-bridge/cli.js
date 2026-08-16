@@ -33,7 +33,7 @@
 // when it was saved, and a number measured against one is a number measured
 // against the other. A fixture also carries the CONFIG it is to be run under,
 // and restore refuses if the page has drifted from it -- see
-// src/poseViewer/fixture.ts.
+// src/poseViewer/shared/fixture.ts.
 //
 // RACE CONDITION WARNING, learned the hard way: poseViewer.ts's eval handler
 // runs `eval(msg.code)` synchronously and replies immediately with whatever

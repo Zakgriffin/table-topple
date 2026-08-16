@@ -8,7 +8,7 @@
 // before the browser is involved.
 //
 // It imports the schema module directly. Node strips the TypeScript itself
-// (v23+), and src/poseViewer/configSchema.ts is deliberately pure -- no fetch,
+// (v23+), and src/poseViewer/shared/configSchema.ts is deliberately pure -- no fetch,
 // no localStorage, no top-level await -- precisely so this is possible. If
 // that module ever grows a browser dependency, this script is what breaks
 // first, which is the intended alarm.
@@ -17,7 +17,7 @@ import { readFileSync } from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { Value } from '@sinclair/typebox/value';
-import { PoseViewerConfigSchema } from '../src/poseViewer/configSchema.ts';
+import { PoseViewerConfigSchema } from '../src/poseViewer/shared/configSchema.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const CONFIG_PATH = path.join(ROOT, 'pose-viewer.config.json');

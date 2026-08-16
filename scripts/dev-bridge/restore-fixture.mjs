@@ -1,4 +1,4 @@
-// Pushes a fixture (see src/poseViewer/fixture.ts) back into the live page:
+// Pushes a fixture (see src/poseViewer/shared/fixture.ts) back into the live page:
 // its pixels, and a check that the page is configured the way the fixture says
 // it should be run.
 //
@@ -34,7 +34,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configDiff, fixtureSummary, validateFixture } from '../../src/poseViewer/fixture.ts';
+import { configDiff, fixtureSummary, validateFixture } from '../../src/poseViewer/shared/fixture.ts';
 import { evalJsonInPage } from './pageEval.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');

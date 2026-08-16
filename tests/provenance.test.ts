@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { provenance } from '../src/sphereLab/harness/input.ts';
-import type { HarnessInput } from '../src/sphereLab/harness/input.ts';
+import { provenance } from '../src/poseViewer/harness/input.ts';
+import type { HarnessInput } from '../src/poseViewer/harness/input.ts';
 import { loadInput } from './helpers/fixtures.ts';
 
 // ── What a report has to carry to be comparable to another one ────────────

@@ -18,7 +18,7 @@ import { GRID_STEP } from './constants.ts';
 //
 //  1. The pose library IMPORTED THIS FILE -- so the library depended on one of
 //     the apps, and any other app importing the library transitively imported
-//     Sphere Lab.
+//     Pose Viewer.
 //  2. There was exactly ONE BOARD PER PROCESS. Two apps could not each pick
 //     their own De Bruijn parameters, because the parameters were not passed
 //     anywhere -- they were read off module scope by whoever needed them.
@@ -52,7 +52,7 @@ export const ORDER = parseInt(
 );
 
 // The STARTING size only. config.global.boardSize is the real source of truth
-// (see sphere-lab.config.json), but config is FETCHED rather than imported, so
+// (see pose-viewer.config.json), but config is FETCHED rather than imported, so
 // it is not available at module init -- the board is rebuilt at the configured
 // size once it lands. ORDER5_CANDIDATE's own cropSize is the searched crop's
 // natural size and so the right thing to start from.

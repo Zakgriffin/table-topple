@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Sphere Lab — Mobile Capture</title>
+<title>Pose Viewer — Mobile Capture</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { background: #000; overflow: hidden; height: 100%; }
@@ -60,7 +60,7 @@
     backdrop-filter: blur(4px); transition: background 0.15s ease;
   }
   #shutter:active { background: rgba(255,255,255,0.45); }
-  /* Sphere Lab is still crunching the last frame -- shown regardless of
+  /* Pose Viewer is still crunching the last frame -- shown regardless of
      photo/video mode. #shutter.sent (the brief post-send flash) is declared
      after this on purpose so it wins for its 300ms even if a capture
      happens to land right as we optimistically go not-ready. */
@@ -305,7 +305,7 @@
        on alone does nothing until that has been granted at least once. -->
   <label><input type="checkbox" id="imuCorrection"> use IMU correction</label>
   <!-- Explicit, because this page has no other way to pick up a config edit:
-       it does not write the localStorage overlay at all (only sphere-lab.html
+       it does not write the localStorage overlay at all (only pose-viewer-server.html
        does), so its toggles are whatever the FILE said at load. Re-reads the
        file and applies it in place rather than reloading -- a reload here
        would drop the camera stream and the websocket, and the desktop would
@@ -325,7 +325,7 @@
   <button id="modeVideoBtn" data-mode="video">video</button>
 </div>
 <button id="switchCam" title="switch camera">&#8635;</button>
-<button id="shutter" title="capture and send to Sphere Lab"></button>
+<button id="shutter" title="capture and send to Pose Viewer"></button>
 <script type="module" src="/src/mobileCapture.ts"></script>
 </body>
 </html>

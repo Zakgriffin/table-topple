@@ -16,7 +16,7 @@
 // Both of these are DERIVED from the config schemas rather than declared
 // here, and re-exported so the dozen existing importers keep their import
 // path. Each used to be a hand-written union that had to be kept in step with
-// the schema (and with sphere-lab.html's radio/button lists) by eye; now a
+// the schema (and with pose-viewer-server.html's radio/button lists) by eye; now a
 // config file naming a field view or a mode that does not exist is a
 // validation error rather than a silently accepted string.
 export type { Mode } from './configSchema.ts';

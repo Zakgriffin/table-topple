@@ -472,7 +472,7 @@ const NO_POSE: CameraPose = {};
 const poseContexts = new WeakMap<Camera, { ctx: PoseContext; w: number; h: number }>();
 
 // Caps on the two counts the pipeline cannot bound from the image alone. Shared
-// with the sweep's own choice so a Sphere Lab capture and a swept pose overflow
+// with the sweep's own choice so a Pose Viewer capture and a swept pose overflow
 // at the same point -- `lineOverflow`/`regionOverflow` mean "raise a constant"
 // (§15), and they should mean it at the same constant in both places.
 const MAX_REGIONS = 16384;

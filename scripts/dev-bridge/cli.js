@@ -1,7 +1,7 @@
 // Talks to server.js to either eval arbitrary JS inside the live
-// sphere-lab.html page (direct eval in its module scope — sees cameras,
+// pose-viewer-server.html page (direct eval in its module scope — sees cameras,
 // activeCamera(), scene, globalState, everything declared top-level in
-// sphereLab.ts) or pull a fresh screenshot of the canvas.
+// poseViewer.ts) or pull a fresh screenshot of the canvas.
 //
 // Since the N-camera refactor (Stage A), most per-camera state (settings,
 // pose, capture buffers, decode results) lives on Camera objects rather
@@ -14,7 +14,7 @@
 //   node scripts/dev-bridge/cli.js screenshot
 //
 // Add --phone to run the snippet inside mobile-capture.html on the connected
-// phone instead of the Sphere Lab tab (--phone=<captureId> when more than one
+// phone instead of the Pose Viewer tab (--phone=<captureId> when more than one
 // is attached). That page's module scope is what's visible there:
 //   node scripts/dev-bridge/cli.js eval --phone "currentStream.getVideoTracks()[0].getSettings()"
 // It exists because reloading the phone is expensive in a way reloading the
@@ -33,9 +33,9 @@
 // when it was saved, and a number measured against one is a number measured
 // against the other. A fixture also carries the CONFIG it is to be run under,
 // and restore refuses if the page has drifted from it -- see
-// src/sphereLab/fixture.ts.
+// src/poseViewer/fixture.ts.
 //
-// RACE CONDITION WARNING, learned the hard way: sphereLab.ts's eval handler
+// RACE CONDITION WARNING, learned the hard way: poseViewer.ts's eval handler
 // runs `eval(msg.code)` synchronously and replies immediately with whatever
 // that expression returns -- it does NOT await promises or wait for queued
 // work. runAxesReconstruction(camera) in particular queues its real work via
@@ -76,7 +76,7 @@ if (!cmd || !['eval', 'screenshot'].includes(cmd)) {
 }
 
 // --phone / --phone=<captureId> retargets an eval at mobile-capture.html
-// instead of a Sphere Lab tab (see server.js's routing block). Stripped out of
+// instead of a Pose Viewer tab (see server.js's routing block). Stripped out of
 // `rest` before the code is joined so it can appear either side of the
 // snippet. Screenshot has no phone form -- it reads the desktop's THREE
 // canvas.
@@ -91,7 +91,7 @@ const id = Math.random().toString(36).slice(2);
 const ws = new WebSocket(`ws://localhost:${PORT}`);
 
 const timeout = setTimeout(() => {
-  console.error('timeout waiting for a response — is server.js running, and is sphere-lab.html open in a browser?');
+  console.error('timeout waiting for a response — is server.js running, and is pose-viewer-server.html open in a browser?');
   process.exit(1);
 }, 8000);
 

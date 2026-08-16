@@ -1,27 +1,27 @@
 // Phone-side capture page: live camera viewfinder + hardware zoom (ported
 // from src/main.ts's tracker page, same architecture) with a shutter button
-// that sends the current frame to any open Sphere Lab tab over the dev
+// that sends the current frame to any open Pose Viewer tab over the dev
 // bridge relay -- see scripts/dev-bridge/server.js's 'realCapture' handling
-// and sphereLab.ts's ingestRealCapture. Doesn't run any of the actual
+// and poseViewer.ts's ingestRealCapture. Doesn't run any of the actual
 // analysis pipeline itself; this page's only job is getting a real photo
 // off the phone and onto the laptop.
 //
 // Two capture modes: single (tap the shutter each time, as before) and
-// video (streams frames automatically). Sphere Lab's own reconstruction
+// video (streams frames automatically). Pose Viewer's own reconstruction
 // pass is slow enough that it needs to say something about pacing -- see
 // the "Capture mode + readiness" section below. Exactly what that signal
 // "Not ready" is purely a status indicator for the shutter button's yellow
-// "working" state -- Sphere Lab's capture mailbox can always take a fresher
+// "working" state -- Pose Viewer's capture mailbox can always take a fresher
 // frame, busy or not, so sending is never blocked by it.
 
 import * as THREE from 'three';
 import { toGrayscale } from './decode.ts';
-import { config, fetchConfigFile } from './sphereLab/config.ts';
-import { globalState } from './sphereLab/state.ts';
+import { config, fetchConfigFile } from './poseViewer/config.ts';
+import { globalState } from './poseViewer/state.ts';
 // Only the data-side rebuild is needed here now. The board's world EXTENT
 // (C/R/GRID_STEP) is read by gameOverlay.ts instead, which is the only thing
 // on this page that still draws anything at board scale.
-import { rebuildFloorPatternData } from './sphereLab/floorPattern.ts';
+import { rebuildFloorPatternData } from './poseViewer/floorPattern.ts';
 // What the AR overlay actually draws -- the board game, hosted here. Kept in
 // its own module so that nothing under src/game has to be edited to render on
 // this page; see its header for why that boundary is load-bearing.
@@ -29,9 +29,9 @@ import {
   fitBoardToPattern, renderOverlay, syncOverlayRendererSize, updateOverlayCamera,
   type ARCameraPose,
 } from './gameOverlay.ts';
-import { getAnalysisVFovRad } from './sphereLab/math/geometry.ts';
-import type { PositionDecodeResult, RecoveredAxes } from './sphereLab/camera/model.ts';
-import type { PipelineSettings } from './sphereLab/harness/input.ts';
+import { getAnalysisVFovRad } from './poseViewer/math/geometry.ts';
+import type { PositionDecodeResult, RecoveredAxes } from './poseViewer/camera/model.ts';
+import type { PipelineSettings } from './poseViewer/harness/input.ts';
 
 // ── THE ON-DEVICE POSE PATH IS DARK ──────────────────────────────────────
 //
@@ -52,14 +52,14 @@ type LocalPose = { recoveredAxes: RecoveredAxes | null; positionDecode: Position
 // Shared with the desktop rather than restated here, so the wire shape and
 // the recorded shape cannot drift apart -- this page PRODUCES the value that
 // camera/model.ts types on the receiving end.
-import type { FrameMeta } from './sphereLab/camera/model.ts';
-import { ImuTracker, defaultImuTrackerConfig } from './sphereLab/imu/imuTracker.ts';
+import type { FrameMeta } from './poseViewer/camera/model.ts';
+import { ImuTracker, defaultImuTrackerConfig } from './poseViewer/imu/imuTracker.ts';
 import {
   axisDiversity, defaultDeviceToCamera, scoreConventions, snapToNearestOctahedral, triadSolve,
   type RotationPair,
-} from './sphereLab/imu/imuFrames.ts';
-import { packPoseResultWithImage } from './sphereLab/devBridge/poseResultWire.ts';
-import { nowMs } from './sphereLab/clock.ts';
+} from './poseViewer/imu/imuFrames.ts';
+import { packPoseResultWithImage } from './poseViewer/devBridge/poseResultWire.ts';
+import { nowMs } from './poseViewer/clock.ts';
 
 const video = document.getElementById('v') as HTMLVideoElement;
 const captureCanvas = document.getElementById('captureCanvas') as HTMLCanvasElement;
@@ -88,15 +88,15 @@ const arCanvas = document.getElementById('arCanvas') as HTMLCanvasElement;
 const arOverlayCheckbox = document.getElementById('arOverlayEnabled') as HTMLInputElement;
 const imuCheckbox = document.getElementById('imuEnabled') as HTMLInputElement;
 const imuCorrectionCheckbox = document.getElementById('imuCorrection') as HTMLInputElement;
-// Deliberately NOT the same ids sphere-lab.html uses for its own pair:
-// sphereLab/ui/dom.ts runs getElementById at module scope and is loaded on
+// Deliberately NOT the same ids pose-viewer-server.html uses for its own pair:
+// poseViewer/ui/dom.ts runs getElementById at module scope and is loaded on
 // this page too (via scene/renderer.ts), so sharing an id would hand the
 // desktop's binding this page's button.
 const reloadConfigBtn = document.getElementById('reloadConfigBtn') as HTMLButtonElement;
 const reloadConfigStatus = document.getElementById('reloadConfigStatus') as HTMLDivElement;
 // mobile-capture.html carries no `checked` attributes -- config.phone owns
 // these five defaults, the same way config.camera owns every desktop control
-// (see sphereLab/config.ts).
+// (see poseViewer/config.ts).
 //
 // Applying is a DISPATCH, not a plain assignment, so each box's own change
 // listener runs: setComputeMode tells the desktop, the IMU one asks for the
@@ -120,7 +120,7 @@ function applyPhoneConfig(phone: typeof config.phone, silent: boolean): void {
 }
 applyPhoneConfig(config.phone, true);
 
-// Re-reads sphere-lab.config.json and applies config.phone in place. Unlike
+// Re-reads pose-viewer.config.json and applies config.phone in place. Unlike
 // the desktop's load button this does NOT reload: a reload here drops the
 // camera stream and the websocket, and the desktop sees the reconnect as an
 // entirely new phone (a fresh captureId means a fresh camera tab). The surface
@@ -128,7 +128,7 @@ applyPhoneConfig(config.phone, true);
 // in place is both possible and honest here in a way it is not over there.
 //
 // Nothing to discard first, either: this page never writes the localStorage
-// overlay -- only sphere-lab.html does -- so the file is already the only
+// overlay -- only pose-viewer-server.html does -- so the file is already the only
 // thing it was reading.
 reloadConfigBtn.addEventListener('click', async () => {
   reloadConfigStatus.textContent = 'loading…';
@@ -789,7 +789,7 @@ fpsSlider.addEventListener('input', () => {
 // ── On-device compute: settings mirror ──────────────────────────────────
 //
 // globalState here is THIS page's own module instance (mobile-capture.html
-// is a separate Vite entry point from sphere-lab.html -- a totally separate
+// is a separate Vite entry point from pose-viewer-server.html -- a totally separate
 // JS realm/module graph, not shared memory), so mutating it locally from a
 // settingsSync message is safe -- see this session's on-device-pose-recovery
 // plan. Source of truth stays the desktop's own sliders; this just mirrors
@@ -852,7 +852,7 @@ function applySettingsSync(msg: any) {
 // This cost a full 60-second dataset on 2026-08-05: 12% "success" rate,
 // consistency 0.515, 2 votes of 2924 windows, position jumping hundreds of
 // units between consecutive frames -- all of it initially read as a
-// motion-blur problem, which it was not. sphere-lab.html had simply been
+// motion-blur problem, which it was not. pose-viewer-server.html had simply been
 // closed, so main.ts's neverSyncedSettings push never fired.
 //
 // Surfaced THREE ways on purpose, because a warning nobody is looking at is
@@ -874,7 +874,7 @@ let nominalFrameRate: number | null = null;
 let lastMediaTime: number | null = null;
 let frameIntervalsMs: number[] = [];
 
-// The frame clock, and now everything else's clock too -- see sphereLab/clock.ts.
+// The frame clock, and now everything else's clock too -- see poseViewer/clock.ts.
 // This used to be defined here, with a header explaining that every NEW
 // timestamp in this file used it rather than Date.now() while the older
 // sentAt/pulledAt/encodedAt stamps kept Date.now(). That split is gone: those
@@ -936,7 +936,7 @@ rvfc?.(onVideoFrame);
 // backpressureBlockedTicks/readinessBlockedTicks say WHY a send was
 // skipped: backpressure means the previous frame is still physically
 // draining over the network (see canSend()'s own comment), readiness means
-// Sphere Lab itself said not to send yet (shouldn't happen much when
+// Pose Viewer itself said not to send yet (shouldn't happen much when
 // pipelined).
 let loopTicks = 0;
 let backpressureBlockedTicks = 0;
@@ -1152,7 +1152,7 @@ function updateImuReadout() {
   // (see settingsSyncedAt), so this outranks anything else this readout has
   // to say. Deliberately phrased as an instruction, not a status.
   if (computeOnDevice && settingsSyncedAt === null) {
-    imuReadoutEl.textContent = '⚠ NO SETTINGS SYNC — open sphere-lab.html on the desktop.\n'
+    imuReadoutEl.textContent = '⚠ NO SETTINGS SYNC — open pose-viewer-server.html on the desktop.\n'
       + 'Pose results are INVALID until it does (wrong board size).';
     return;
   }
@@ -1533,7 +1533,7 @@ interface PoseRecord {
   consistency: number | null;
   // `votes` and `totalWindows` -- the winning anchor's vote count and how many
   // windows voted at all -- were here and are gone with the display type that
-  // carried them (sphereLab/camera/model.ts's PositionDecodeResult). Nothing
+  // carried them (poseViewer/camera/model.ts's PositionDecodeResult). Nothing
   // read them on either side. They are pose-BLOCK quantities in src/pose, so
   // when this page is wired onto that pipeline they come back off the block
   // directly rather than through a display struct.
@@ -1677,12 +1677,12 @@ function scheduleReconnect() {
 
 // ── Capture mode + readiness ────────────────────────────────────────────
 //
-// Sphere Lab's reconstruction pass is slow enough that it needs to tell us
+// Pose Viewer's reconstruction pass is slow enough that it needs to tell us
 // when it's actually done with the last frame (see main.ts's animate loop,
 // which watches axesCapturing and pushes captureReady over this same
 // socket) -- both photo and video mode respect it, not just video, per an
 // explicit ask: the shutter turns yellow and single-mode taps become a
-// no-op whenever Sphere Lab isn't ready, exactly like video mode already
+// no-op whenever Pose Viewer isn't ready, exactly like video mode already
 // has to gate its automatic sends.
 let captureMode: 'single' | 'video' = 'single';
 let readyTimeoutTimer: number | undefined;
@@ -1734,11 +1734,11 @@ let sendCapturedImage = config.phone.sendCapturedImage;
 sendDebugInfoCheckbox.addEventListener('change', () => { sendDebugInfo = sendDebugInfoCheckbox.checked; });
 sendCapturedImageCheckbox.addEventListener('change', () => { sendCapturedImage = sendCapturedImageCheckbox.checked; });
 
-// If nothing ever answers (no Sphere Lab tab open, or one that closed mid-
+// If nothing ever answers (no Pose Viewer tab open, or one that closed mid-
 // crunch) don't stay stuck yellow/stalled forever -- fall back to assuming
 // ready after a while. A real captureReady message always overrides this.
 const READY_TIMEOUT_MS = 8000;
-// Display only. Nothing gates on this any more: Sphere Lab's capture mailbox
+// Display only. Nothing gates on this any more: Pose Viewer's capture mailbox
 // always accepts the freshest frame, so the yellow shutter reports that the
 // desktop is busy without ever blocking a send.
 function setReady(ready: boolean) {
@@ -1755,7 +1755,7 @@ function connectRelay() {
   ws.addEventListener('open', () => {
     ws!.send(JSON.stringify({ role: 'capture' }));
     // A reconnect gets a brand-new captureId server-side (see server.js),
-    // which Sphere Lab will treat as a fresh phone -- re-announce whatever
+    // which Pose Viewer will treat as a fresh phone -- re-announce whatever
     // mode was already selected, and drop any stale not-ready state from
     // before the drop, since it belonged to the OLD captureId.
     ws!.send(JSON.stringify({ type: 'captureMode', mode: captureMode }));
@@ -1784,7 +1784,7 @@ function connectRelay() {
     } else if (msg.type === 'eval' && msg.id) {
       // ── Dev bridge, phone side ──────────────────────────────────────────
       //
-      // Mirrors sphere-lab.html's own eval handler so this page can be
+      // Mirrors pose-viewer-server.html's own eval handler so this page can be
       // inspected live. It exists because a RELOAD COSTS FAR MORE HERE than
       // it does on the desktop: it drops the iOS motion-permission grant
       // (which can only be re-obtained from a user gesture), re-negotiates
@@ -1803,7 +1803,7 @@ function connectRelay() {
       //
       // Direct eval, so the expression sees this module's own top-level
       // scope (currentStream, cameraSettings, imuLastSample, ...) the same
-      // way the desktop's sees sphereLab's.
+      // way the desktop's sees poseViewer's.
       let result: any, ok = true;
       try {
         result = eval(msg.code);
@@ -1825,7 +1825,7 @@ connectRelay();
 // ── Shutter / video streaming ────────────────────────────────────────────
 //
 // Sent at the stream's own actual negotiated resolution (see
-// drawCurrentFrameToCanvas) -- NOT just a transfer-speed knob: Sphere Lab's
+// drawCurrentFrameToCanvas) -- NOT just a transfer-speed knob: Pose Viewer's
 // ingestRealCapture resizes a physical camera's analysis buffers to match
 // whatever resolution actually arrives (unlike a simulated capture, there's
 // no further downsample step after this), so this IS the real analysis
@@ -1839,7 +1839,7 @@ connectRelay();
 // captureComputeAndSendPose's own comment on why device-compute doesn't
 // need this gate at all.
 function sendGateStatus(): 'ok' | 'backpressure' | 'not-ready' {
-  // Transport-level backpressure, independent of whether Sphere Lab wants
+  // Transport-level backpressure, independent of whether Pose Viewer wants
   // more data: bufferedAmount > 0 means the PREVIOUS frame hasn't actually
   // left the device yet (queued by the browser/OS faster than the network
   // can drain it). Without this, an unthrottled video loop (pipelined mode
@@ -1997,7 +1997,7 @@ function captureAndSendFrame() {
     ws.send(blob);
     shutterBtn.classList.add('sent');
     setTimeout(() => shutterBtn.classList.remove('sent'), 300);
-    // Deliberately NOT setting sphereLabReady false here. Sphere Lab's mailbox
+    // Deliberately NOT setting poseViewerReady false here. Pose Viewer's mailbox
     // can always take another frame, so forcing the yellow state on would make
     // it lie about whether the desktop is actually still crunching -- and
     // nothing would clear it, since the desktop only reports genuine busy/idle
@@ -2016,7 +2016,7 @@ function captureAndSendFrame() {
 //
 // The bufferedAmount backpressure gate above is irrelevant here -- a
 // serialized pose is a few hundred bytes, never queues -- and there's no
-// "Sphere Lab busy" readiness gate either, since the desktop does no work
+// "Pose Viewer busy" readiness gate either, since the desktop does no work
 // at all on this path (see ingestRemotePose, pipeline/capture.ts). The
 // natural pacing is "compute (now the actual bottleneck), then send, then
 // start the next capture" -- devicePoseLoop below just does that, no
@@ -2230,7 +2230,7 @@ shutterBtn.addEventListener('click', () => {
   captureAndSendFrame();
 });
 
-// Ticks every frame; only actually sends in video mode. Sphere Lab's own
+// Ticks every frame; only actually sends in video mode. Pose Viewer's own
 // mailbox is what paces this -- it always takes the freshest frame and drops
 // stale ones -- so the only gate left is 'backpressure'. loopTicks/etc. count
 // every outcome so a diagnostic script can tell which one actually explains

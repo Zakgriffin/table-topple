@@ -3,9 +3,9 @@ import { test } from 'node:test';
 import {
   type Span, formatSpanTree, getRecords, joinRecords, profilerReset,
   profilerSetDevToolsMirror, spanEnd, spanIngest, spanStart,
-} from '../src/sphereLab/profiling/profiler.ts';
-import { ALL_STAGES, appSpan, joinAll } from '../src/sphereLab/profiling/stages.ts';
-import { GPU_UNATTRIBUTED_ID, ingestGpuFrame, ingestLinkSpans } from '../src/sphereLab/profiling/clocks.ts';
+} from '../src/poseViewer/profiling/profiler.ts';
+import { ALL_STAGES, appSpan, joinAll } from '../src/poseViewer/profiling/stages.ts';
+import { GPU_UNATTRIBUTED_ID, ingestGpuFrame, ingestLinkSpans } from '../src/poseViewer/profiling/clocks.ts';
 import type { GpuFrameTiming } from '../src/pose/pose.ts';
 
 // ── The join, and the clock boundary ──────────────────────────────────────

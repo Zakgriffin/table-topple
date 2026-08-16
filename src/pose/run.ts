@@ -177,7 +177,7 @@ export interface PoseOptions {
    * does to the pooling, and `runPose` for the per-frame half.
    *
    * A CATALOGUE rather than a per-frame list because it sizes the staging
-   * buffer, and re-sizing that is an allocation. Sphere Lab declares every
+   * buffer, and re-sizing that is an allocation. Pose Viewer declares every
    * buffer any overlay can draw, once, and then asks per capture for whichever
    * toggles are actually on -- so flipping a toggle costs bytes on the next
    * frame and never a reallocation.

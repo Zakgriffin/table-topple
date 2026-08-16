@@ -9,7 +9,7 @@
 // every fixture saved before it holding the old shape, and a fixture is the
 // thing a recorded number refers to. This turns that into one line of output.
 //
-// The second is the purity alarm. This imports src/sphereLab/fixture.ts
+// The second is the purity alarm. This imports src/poseViewer/fixture.ts
 // directly (node strips the TypeScript), which only works because that module
 // -- and configSchema.ts and camera/settings.ts below it -- have no fetch, no
 // localStorage and no top-level await. If any of them ever grows a browser
@@ -19,7 +19,7 @@
 import { readdirSync, readFileSync, existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { decodeGray, fixtureSummary, validateFixture } from '../src/sphereLab/fixture.ts';
+import { decodeGray, fixtureSummary, validateFixture } from '../src/poseViewer/fixture.ts';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const FIXTURES_DIR = path.join(ROOT, 'fixtures');

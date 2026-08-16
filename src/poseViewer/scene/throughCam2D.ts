@@ -13,7 +13,7 @@ import { throughCamCanvas, throughCamCtx } from '../ui/dom.ts';
 // resolution the phone/camera was actually set to (see this session's
 // chat). throughCamCanvas's own intrinsic width/height are set to
 // camera.rtSize directly (resizeThroughCamCanvas below); CSS max-width/
-// max-height (sphere-lab.html) letterboxes that for on-screen display, the
+// max-height (pose-viewer-server.html) letterboxes that for on-screen display, the
 // same split mobile-capture.html's own captureCanvas already uses. A
 // screenshot/download of THIS canvas therefore always returns the camera's
 // true resolution, independent of window size.

@@ -248,7 +248,7 @@ function onHoverPointerLeave() {
 }
 canvas.addEventListener('pointermove', onHoverPointerMove);
 canvas.addEventListener('pointerleave', onHoverPointerLeave);
-// throughCamCanvas is NOT pointer-events:none (see sphere-lab.html's own
+// throughCamCanvas is NOT pointer-events:none (see pose-viewer-server.html's own
 // comment -- it needs to be the real right-click target for "Save Image
 // As"), so while it's on top in Through-Cam mode, events land on it
 // instead of passing through to canvas#gl -- needs its own copy of the

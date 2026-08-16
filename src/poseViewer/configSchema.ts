@@ -6,7 +6,7 @@ import { CameraSettingsCommonSchema, FieldViewSchema, SimulatedOnlySettingsSchem
 //
 // Split from config.ts so that this module is PURE: no fetch, no
 // localStorage, no top-level await, nothing that assumes a browser. That is
-// what lets scripts/check-config.mjs validate sphere-lab.config.json from the
+// what lets scripts/check-config.mjs validate pose-viewer.config.json from the
 // command line against the very same schema the page will use, instead of
 // finding out at boot.
 //
@@ -96,7 +96,7 @@ export const PhysicalOverridesSchema = Type.Object({
   fieldView: FieldViewSchema,
 }, strict);
 
-export const SphereLabConfigSchema = Type.Object({
+export const PoseViewerConfigSchema = Type.Object({
   global: GlobalSettingsSchema,
   camera: Type.Object({
     common: CameraSettingsCommonSchema,
@@ -108,4 +108,4 @@ export const SphereLabConfigSchema = Type.Object({
 
 export type GlobalSettings = Static<typeof GlobalSettingsSchema>;
 export type PhoneSettings = Static<typeof PhoneSettingsSchema>;
-export type SphereLabConfig = Static<typeof SphereLabConfigSchema>;
+export type PoseViewerConfig = Static<typeof PoseViewerConfigSchema>;

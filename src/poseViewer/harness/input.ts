@@ -39,7 +39,7 @@ import type { Fixture } from '../fixture.ts';
 // that type worth keeping and the rest (the aspect, the backend, the chain) was
 // the pipeline's business.
 //
-// These are all real user-facing defaults in sphere-lab.config.json, and
+// These are all real user-facing defaults in pose-viewer.config.json, and
 // src/pose takes the same numbers per stage -- it deliberately does not import
 // the config, so the values in the config file and the ones a pose stage is
 // handed have to keep matching by convention rather than by type.

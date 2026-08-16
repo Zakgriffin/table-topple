@@ -43,13 +43,13 @@ export const FORMATION: Rank[] = [
  *  shoulders (the widest figure) so nobody overlaps. */
 export const RANK_SPACING = 2.2;
 
-// Palette lifted from Sphere Lab (scene/renderer.ts's 0x0a0a0f clear color,
+// Palette lifted from Pose Viewer (scene/renderer.ts's 0x0a0a0f clear color,
 // floor.ts's red/blue row/column line families) so the two pages read as one
 // project. Nothing here is shared code -- this page is deliberately isolated
 // from the pose pipeline -- just the same colors.
 export const COLOR_BG = 0x0a0a0f;
 
-// Team colors, one per court. Red and blue are Sphere Lab's row/column line
+// Team colors, one per court. Red and blue are Pose Viewer's row/column line
 // families exactly (floor.ts's 0xff5555 / 0x5599ff); green and yellow are
 // chosen to sit at the same weight rather than at their pure hues -- a raw
 // 0x00ff00 or 0xffff00 is far brighter than either original and would make

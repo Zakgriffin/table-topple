@@ -167,7 +167,7 @@ test('inspection is free under alias: false, because everything already holds it
   const declared = planPool(DIMS, { alias: false, inspect: ['lines', 'votes', 'fx', 'fy'] });
   assert.equal(declared.slots.length, plain.slots.length);
   assert.equal(declared.totalBytes, plain.totalBytes);
-  // Which is the whole reason Sphere Lab can inspect freely: the degenerate
+  // Which is the whole reason Pose Viewer can inspect freely: the degenerate
   // liveness table already says every buffer is live for the whole frame.
 });
 

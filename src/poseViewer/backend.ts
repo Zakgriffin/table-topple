@@ -21,7 +21,7 @@
 // moved here from the old pipeline's `backend.ts` instead of dying with it -- the concept
 // belongs to the app now, not to a pose library that no longer exists.
 //
-// The `forceCPU` checkbox in sphere-lab.config.json is still the app-side
+// The `forceCPU` checkbox in pose-viewer.config.json is still the app-side
 // control, and `backendFromForceCPU` is still the single conversion point.
 export type Backend = 'cpu' | 'gpu';
 

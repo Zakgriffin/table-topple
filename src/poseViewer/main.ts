@@ -1,4 +1,4 @@
-// Great Sphere Lab — a visual testbed, not part of the tracking pipeline.
+// Great Pose Viewer — a visual testbed, not part of the tracking pipeline.
 //
 // Point of the exercise: a straight floor line, together with a camera's
 // optical center, spans a plane through that center. Intersect that plane
@@ -56,7 +56,7 @@
 // what pose would have to hand back for it to draw again.
 //
 // `tests/libraryBoundary.test.ts` checked that the library imported nothing from
-// sphereLab except the shared leaves below. It is deleted with the library whose
+// poseViewer except the shared leaves below. It is deleted with the library whose
 // boundary it policed; pose has a stricter version of the same property, since
 // it reaches outside itself in exactly one place (board.ts).
 //
@@ -265,7 +265,7 @@ function animate() {
           .catch((e) => console.error('[poseResult] ingest failed:', e))
           .finally(() => { camera.captureIngestBusy = false; });
       }
-      // Tell the phone behind a physical camera whether Sphere Lab is still
+      // Tell the phone behind a physical camera whether Pose Viewer is still
       // crunching the last frame -- axesCapturing, exactly what drives the
       // shutter button's yellow "working" state. Purely informational on the
       // phone: the freshest-wins mailbox absorbs a send at any time, so it can

@@ -2,7 +2,7 @@
   "fixtureVersion": 1,
   "name": "default",
   "savedAt": "2026-08-06T23:04:08.335Z",
-  "note": "Migrated from the pre-fixture scripts/dev-bridge/saved-capture.json (2026-07-19), so its samples are BYTE-ROUNDED -- that format stored one byte per pixel, and the unrounded float64 gray it came from is gone. Every later fixture is exact; this one is the pixels the old restore path was already feeding the pipeline, widened to float64. Its config is sphere-lab.config.json as of the migration, not a record of what the page held when the photo was taken -- that was never captured, which is why fixtures exist.",
+  "note": "Migrated from the pre-fixture scripts/dev-bridge/saved-capture.json (2026-07-19), so its samples are BYTE-ROUNDED -- that format stored one byte per pixel, and the unrounded float64 gray it came from is gone. Every later fixture is exact; this one is the pixels the old restore path was already feeding the pipeline, widened to float64. Its config is pose-viewer.config.json as of the migration, not a record of what the page held when the photo was taken -- that was never captured, which is why fixtures exist.",
   "config": {
     "global": {
       "mode": "world",

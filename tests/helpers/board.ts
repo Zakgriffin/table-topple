@@ -4,7 +4,7 @@ import type { SimWorld } from '../../src/pose/sim.ts';
 
 // ── The board the library's own tests decode against ─────────────────────
 //
-// Constructed here rather than imported from `sphereLab/floorPattern.ts`, which
+// Constructed here rather than imported from `poseViewer/floorPattern.ts`, which
 // is where every one of these tests used to get it. That import was the same
 // layering inversion the library itself had: a test of the pose pipeline should
 // not need one of the apps to exist, let alone that app's ambient board.

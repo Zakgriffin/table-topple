@@ -1,4 +1,4 @@
-// Pushes a fixture (see src/sphereLab/fixture.ts) back into the live page:
+// Pushes a fixture (see src/poseViewer/fixture.ts) back into the live page:
 // its pixels, and a check that the page is configured the way the fixture says
 // it should be run.
 //
@@ -22,7 +22,7 @@
 // the fixture's config, and that is deliberate: cameraPanel.ts's load button
 // spells out why re-driving settings in place is a second code path that can
 // disagree with boot about what a config means. The two honest ways to make
-// the page match are both already there -- edit sphere-lab.config.json to the
+// the page match are both already there -- edit pose-viewer.config.json to the
 // fixture's values and hit "load config from disk", or accept the difference
 // knowingly with --force, which prints the diff and restores anyway.
 //
@@ -34,7 +34,7 @@
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { configDiff, fixtureSummary, validateFixture } from '../../src/sphereLab/fixture.ts';
+import { configDiff, fixtureSummary, validateFixture } from '../../src/poseViewer/fixture.ts';
 import { evalJsonInPage } from './pageEval.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
@@ -76,7 +76,7 @@ if (diff.length > 0) {
   console.error(`\n${diff.length} setting(s) differ (fixture -> page), ${verb}:`);
   for (const line of diff) console.error(`    ${line}`);
   if (!force) {
-    console.error('\n  Make the page match: edit sphere-lab.config.json to these values and use the');
+    console.error('\n  Make the page match: edit pose-viewer.config.json to these values and use the');
     console.error('  "load config from disk" button (it reloads, which is the boot path, so it cannot');
     console.error('  disagree with a fresh page). Or pass --force to restore under the page\'s own config.');
     process.exit(1);

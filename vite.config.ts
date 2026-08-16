@@ -39,7 +39,7 @@ export default defineConfig({
       // (mixed-content blocking). Riding this proxy means the phone only
       // ever has to trust the ONE cert it already accepted for the page
       // itself, instead of a second one for the dev-bridge's own port.
-      // Laptop-side Sphere Lab tabs keep connecting directly to
+      // Laptop-side Pose Viewer tabs keep connecting directly to
       // ws://localhost:8787, unchanged -- this proxy is only needed for the
       // non-localhost (phone) case.
       '/dev-bridge': {

@@ -251,7 +251,7 @@ export function planPool(dims: Dims, opts: PlanOptions = {}): PoolPlan {
       [k, inspect.includes(k) ? { first: v.first, last: lastStage } : v] as const))
     // The degenerate table: everything live for the whole frame, so the
     // colouring below hands out one slot each -- and inspection is already
-    // satisfied, which is why Sphere Lab can inspect freely with `alias` off.
+    // satisfied, which is why Pose Viewer can inspect freely with `alias` off.
     : new Map([...liveness].map(([k]) => [k, { first: 0, last: lastStage }] as const));
 
   const bytesOf = (name: string) => specOf(name).bytes(dims);

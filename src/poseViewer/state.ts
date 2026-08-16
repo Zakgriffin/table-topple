@@ -10,5 +10,5 @@ import { config } from './config.ts';
 // nothing to mirror first. (Per-camera settings cannot work that way -- there
 // are N cameras and one config template, so those are copied back by
 // config.ts's syncCameraIntoConfig.) See config.ts for what each field means
-// and sphere-lab.config.json for its value.
+// and pose-viewer.config.json for its value.
 export const globalState = config.global;

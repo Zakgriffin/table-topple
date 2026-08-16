@@ -3,7 +3,7 @@ import {
   formatSpanTree, getRecords, joinRecords, spanStart,
 } from './profiler.ts';
 
-// ── Sphere Lab's own stages ──────────────────────────────────────────────
+// ── Pose Viewer's own stages ──────────────────────────────────────────────
 //
 // The app's own instrumented stages: the capture path, the deferred display
 // tail, and the projection that only exists to feed display.

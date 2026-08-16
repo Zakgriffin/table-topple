@@ -1,13 +1,13 @@
 // Local debug bridge: relays "run this JS in the page" and "grab a
 // screenshot" requests from the CLI (cli.js, invoked by whoever's
-// debugging) to whichever browser tab(s) have sphere-lab.html open, and
+// debugging) to whichever browser tab(s) have pose-viewer-server.html open, and
 // relays the results back. Also relays real camera captures from
 // mobile-capture.html (a phone, usually reached through vite's /dev-bridge
-// websocket proxy -- see vite.config.ts) out to every connected Sphere Lab
+// websocket proxy -- see vite.config.ts) out to every connected Pose Viewer
 // tab, broadcast-style, no request/response pairing needed for those.
 //
 // Multi-browser-client now (a Set, not a single slot) so a capture can reach
-// more than one open Sphere Lab tab at once, per an explicit ask -- eval/
+// more than one open Pose Viewer tab at once, per an explicit ask -- eval/
 // screenshot requests still only ever go to whichever browser last
 // connected, unchanged, since those were never meant to fan out.
 //
@@ -30,10 +30,10 @@ import { randomUUID } from 'crypto';
 
 const PORT = 8787;
 const FRAME_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), 'latest-frame.png');
-// The one config file (see src/sphereLab/config.ts). Two levels up from
+// The one config file (see src/poseViewer/config.ts). Two levels up from
 // scripts/dev-bridge/ -- the browser cannot write to the project directory
 // itself, so promoting the live config onto disk has to come through here.
-const CONFIG_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'sphere-lab.config.json');
+const CONFIG_PATH = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'pose-viewer.config.json');
 // randomUUID()'s canonical string form is always exactly this many ASCII
 // chars (8-4-4-4-12 hex digits + 4 hyphens) -- a fixed-width prefix means a
 // receiving browser tab (devBridge/client.ts) can slice a binary
@@ -101,7 +101,7 @@ wss.on('connection', (ws) => {
     if ((msg.type === 'eval' || msg.type === 'screenshot') && msg.id) {
       pending.set(msg.id, ws);
       // msg.target routes an eval to a PHONE (mobile-capture.html) instead of
-      // a Sphere Lab tab -- 'phone' for the only connected one, or an explicit
+      // a Pose Viewer tab -- 'phone' for the only connected one, or an explicit
       // captureId when more than one is attached. Screenshot stays
       // browser-only: it reads the desktop's THREE canvas, which has no
       // counterpart on the phone.
@@ -129,7 +129,7 @@ wss.on('connection', (ws) => {
         return;
       }
       if (!latestBrowserSocket || latestBrowserSocket.readyState !== latestBrowserSocket.OPEN) {
-        send(ws, { type: msg.type + 'Result', id: msg.id, ok: false, error: 'no browser connected — is sphere-lab.html open?' });
+        send(ws, { type: msg.type + 'Result', id: msg.id, ok: false, error: 'no browser connected — is pose-viewer-server.html open?' });
         pending.delete(msg.id);
         return;
       }
@@ -161,9 +161,9 @@ wss.on('connection', (ws) => {
     }
 
     // Capture source (mobile-capture.html) -> broadcast to EVERY connected
-    // Sphere Lab tab, not just the latest one -- this is the one message
+    // Pose Viewer tab, not just the latest one -- this is the one message
     // type meant to fan out. captureId (this connection's own assigned id)
-    // rides along so Sphere Lab can tell which phone a photo came from.
+    // rides along so Pose Viewer can tell which phone a photo came from.
     // realCapture no longer carries the image itself (see the isBinary
     // branch above) -- just sentAt/pulledAt/encodedAt, which the receiving
     // tab holds onto until the binary frame carrying this same captureId
@@ -212,7 +212,7 @@ wss.on('connection', (ws) => {
     }
 
     // Capture source -> broadcast, same fan-out as realCapture -- announces
-    // a video/single toggle flip on the phone so every open Sphere Lab tab
+    // a video/single toggle flip on the phone so every open Pose Viewer tab
     // can reflect it (and auto-creates a tab the same way realCapture does,
     // so toggling to video before ever taking a photo still shows up).
     if (msg.type === 'captureMode' && msg.mode) {
@@ -267,7 +267,7 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Browser -> a specific phone: is Sphere Lab ready to receive/process
+    // Browser -> a specific phone: is Pose Viewer ready to receive/process
     // another frame from it (the
     // phone uses that to decide if "not ready" should still block sending
     // -- see mobileCapture.ts). Routed the same way kickCapture is (find

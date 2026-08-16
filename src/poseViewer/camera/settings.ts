@@ -7,7 +7,7 @@ import type { Static } from '@sinclair/typebox';
 // split into what's common to both camera types and what's type-specific.
 //
 // There are no default VALUES here -- every one of them lives in
-// sphere-lab.config.json, and config.ts is what turns that file into a
+// pose-viewer.config.json, and config.ts is what turns that file into a
 // settings object. This file deliberately imports nothing but TypeBox and has
 // no side effects at all, so config.ts can import it without a cycle and
 // scripts/check-config.mjs can import it outside a browser.
@@ -28,7 +28,7 @@ const strict = { additionalProperties: false } as const;
 
 // The field-view radio group's legal values, and the source of the FieldView
 // type -- which used to be a hand-maintained union in types.ts that had to be
-// kept in step with this list by eye. The radio options in sphere-lab.html are
+// kept in step with this list by eye. The radio options in pose-viewer-server.html are
 // still a third copy: markup is beyond what a schema can reach.
 export const FieldViewSchema = Type.Union([
   Type.Literal('raw'),

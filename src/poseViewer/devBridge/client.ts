@@ -242,7 +242,7 @@ export function pushPoseSync(cam: PhysicalCamera) {
         // -- just holds the timing fields until the binary frame carrying
         // this same captureId arrives right behind it, which is what
         // actually builds cam.pendingCapture. msg.sentAt/pulledAt/encodedAt
-        // (nowMs() on the phone, see sphereLab/clock.ts) fall back to
+        // (nowMs() on the phone, see poseViewer/clock.ts) fall back to
         // "now" for an old/unpatched phone client so the derived durations
         // degrade to ~0 instead of NaN.
         if (msg.captureId) {
@@ -296,7 +296,7 @@ export function pushPoseSync(cam: PhysicalCamera) {
         // comment), same pattern as captureMode. Which of realCapture vs
         // poseResult actually arrives is decided by the phone itself (its
         // own message type), not by this field -- this is just what lets
-        // Sphere Lab's UI show which mode a given phone is in.
+        // Pose Viewer's UI show which mode a given phone is in.
         const cam = findOrCreatePhysicalCamera(msg.captureId);
         if (cam) {
           cam.computeMode = msg.mode === 'device' ? 'device' : 'desktop';

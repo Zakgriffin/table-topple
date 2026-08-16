@@ -3,8 +3,8 @@ import type { Static } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import { physicalSettingsFrom } from './camera/settings.ts';
 import type { PhysicalCameraSettings } from './camera/settings.ts';
-import { SphereLabConfigSchema } from './configSchema.ts';
-import type { SphereLabConfig } from './configSchema.ts';
+import { PoseViewerConfigSchema } from './configSchema.ts';
+import type { PoseViewerConfig } from './configSchema.ts';
 import { backendFromForceCPU } from './backend.ts';
 import type { Backend } from './backend.ts';
 
@@ -57,7 +57,7 @@ export const FixtureSchema = Type.Object({
   // it was taken. Always present, possibly empty -- an optional field is one
   // more shape for every consumer to branch on.
   note: Type.String(),
-  config: SphereLabConfigSchema,
+  config: PoseViewerConfigSchema,
   capture: Type.Object({
     w: Type.Integer({ minimum: 1 }),
     h: Type.Integer({ minimum: 1 }),
@@ -180,7 +180,7 @@ export function fixtureBackend(fixture: Fixture): Backend {
 //
 // Walks the UNION of both key sets so a key present on one side only is
 // reported rather than skipped -- that is the shape a version skew takes.
-export function configDiff(a: SphereLabConfig, b: SphereLabConfig): string[] {
+export function configDiff(a: PoseViewerConfig, b: PoseViewerConfig): string[] {
   const out: string[] = [];
   const walk = (x: unknown, y: unknown, path: string): void => {
     const objish = (v: unknown) => typeof v === 'object' && v !== null;

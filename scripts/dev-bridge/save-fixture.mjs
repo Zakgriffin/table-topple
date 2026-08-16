@@ -1,6 +1,6 @@
 // Saves the capture currently loaded in the live page, PLUS the configuration
 // the page is running it under, to fixtures/<name>.json -- see
-// src/sphereLab/fixture.ts for what a fixture is and why the config half is
+// src/poseViewer/fixture.ts for what a fixture is and why the config half is
 // the point.
 //
 // Two jobs, and it is worth being clear that they are different:
@@ -20,7 +20,7 @@
 import { mkdirSync, existsSync, writeFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { FIXTURE_VERSION, fixtureSummary, validateFixture } from '../../src/sphereLab/fixture.ts';
+import { FIXTURE_VERSION, fixtureSummary, validateFixture } from '../../src/poseViewer/fixture.ts';
 import { evalJsonInPage } from './pageEval.mjs';
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');

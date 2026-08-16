@@ -1,6 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { configDiff, decodeGray, encodeGray, fixtureBackend, fixtureSettings, validateFixture } from '../src/sphereLab/fixture.ts';
+import { configDiff, decodeGray, encodeGray, fixtureBackend, fixtureSettings, validateFixture } from '../src/poseViewer/fixture.ts';
 import { loadFixture, loadInput } from './helpers/fixtures.ts';
 
 // The format itself. Cheap, and it is what every other test in this suite

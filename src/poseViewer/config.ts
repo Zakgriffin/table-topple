@@ -2,15 +2,15 @@ import type { Static, TObject, TSchema } from '@sinclair/typebox';
 import { Value } from '@sinclair/typebox/value';
 import { CameraSettingsCommonSchema, physicalSettingsFrom, simulatedSettingsFrom, SimulatedOnlySettingsSchema } from './camera/settings.ts';
 import type { CameraSettingsCommon, PhysicalCameraSettings, SimulatedCameraSettings } from './camera/settings.ts';
-import { GlobalSettingsSchema, PhoneSettingsSchema, PhysicalOverridesSchema, SphereLabConfigSchema } from './configSchema.ts';
-import type { SphereLabConfig } from './configSchema.ts';
+import { GlobalSettingsSchema, PhoneSettingsSchema, PhysicalOverridesSchema, PoseViewerConfigSchema } from './configSchema.ts';
+import type { PoseViewerConfig } from './configSchema.ts';
 
 // ── One config object, one file on disk ──────────────────────────────────
 //
-// Every configurable value in Sphere Lab lives in sphere-lab.config.json and
+// Every configurable value in Pose Viewer lives in pose-viewer.config.json and
 // nowhere else. There are deliberately NO literal defaults left in TypeScript
 // and no `value=`/`checked` attributes left on the controls in
-// sphere-lab.html -- both used to be defaults in their own right, and which of
+// pose-viewer-server.html -- both used to be defaults in their own right, and which of
 // the two won depended on whether a control was global (the HTML attribute
 // won, because bindSlider applies it at load) or per-camera (the TypeScript
 // literal won, because refreshCameraPanel overwrites the DOM from the camera
@@ -30,7 +30,7 @@ import type { SphereLabConfig } from './configSchema.ts';
 // camera/settings.ts, which are pure so `npm run check:config` can validate the
 // file from the command line rather than at boot.
 
-// Fetched, not imported. A static `import config from '../sphere-lab.config.json'`
+// Fetched, not imported. A static `import config from '../pose-viewer.config.json'`
 // would put the file in vite's module graph, so saving it would trigger an HMR
 // full reload -- which wipes whatever capture/measurement is on screen, i.e.
 // exactly the state you were trying to preserve by saving. Fetching keeps the
@@ -41,8 +41,8 @@ import type { SphereLabConfig } from './configSchema.ts';
 // ever runs `npm run dev`, where vite serves the project root at `/`, so the
 // fetch resolves. If a real build is ever added, the file has to be copied into
 // the output -- the failure is loud (this throws at boot), not silent.
-const CONFIG_URL = '/sphere-lab.config.json';
-const STORAGE_KEY = 'sphereLab.config';
+const CONFIG_URL = '/pose-viewer.config.json';
+const STORAGE_KEY = 'poseViewer.config';
 
 // ── Two different trust levels, two different reactions ─────────────────
 //
@@ -66,12 +66,12 @@ function describe(schema: TSchema, value: unknown, path: string): string {
   return first ? `${at}: ${first.message} (got ${JSON.stringify(first.value)})` : `${at}: invalid`;
 }
 
-function validate(raw: unknown): SphereLabConfig {
-  if (Value.Check(SphereLabConfigSchema, raw)) return raw;
+function validate(raw: unknown): PoseViewerConfig {
+  if (Value.Check(PoseViewerConfigSchema, raw)) return raw;
   // Every error, not just the first: a stale config file after a rename tends
   // to have one problem per renamed setting, and fixing them one boot at a
   // time is miserable.
-  const errors = [...Value.Errors(SphereLabConfigSchema, raw)]
+  const errors = [...Value.Errors(PoseViewerConfigSchema, raw)]
     .map((e) => `  ${e.path || '/'}: ${e.message} (got ${JSON.stringify(e.value)})`);
   throw new Error(`config: ${CONFIG_URL} is invalid\n${errors.join('\n')}`);
 }
@@ -102,7 +102,7 @@ function overlay<T extends TObject>(base: Static<T>, saved: unknown, schema: T, 
 // The file alone, validated, with no localStorage overlay applied. Shared by
 // boot and by the "load config from disk" buttons, so that what a load reads
 // is byte-for-byte what a fresh boot would read.
-export async function fetchConfigFile(): Promise<SphereLabConfig> {
+export async function fetchConfigFile(): Promise<PoseViewerConfig> {
   const res = await fetch(CONFIG_URL, { cache: 'no-store' });
   if (!res.ok) throw new Error(`config: GET ${CONFIG_URL} failed (${res.status})`);
   return validate(await res.json());
@@ -115,7 +115,7 @@ export function discardSavedOverlay(): void {
   localStorage.removeItem(STORAGE_KEY);
 }
 
-async function load(): Promise<SphereLabConfig> {
+async function load(): Promise<PoseViewerConfig> {
   const disk = await fetchConfigFile();
 
   let saved: Record<string, unknown> = {};
@@ -134,7 +134,7 @@ async function load(): Promise<SphereLabConfig> {
 // loaded config at its own first line. That is what lets the rest of the app
 // keep reading settings synchronously, with no "config not ready yet" state to
 // thread through 40 call sites.
-export const config: SphereLabConfig = await load();
+export const config: PoseViewerConfig = await load();
 
 // Where persistConfig finds the camera whose settings it should capture.
 //
@@ -201,7 +201,7 @@ export function createDefaultPhysicalSettings(): PhysicalCameraSettings {
 }
 
 // Hands the current config to the dev bridge, which writes it over
-// sphere-lab.config.json. Sent as an already-serialized string so what lands
+// pose-viewer.config.json. Sent as an already-serialized string so what lands
 // on disk is exactly what the browser is holding.
 export function configAsJson(): string {
   return JSON.stringify(config, null, 2) + '\n';

@@ -1,4 +1,4 @@
-// ── WebGPU device bootstrap + the few buffer helpers sphereLab still uses ──
+// ── WebGPU device bootstrap + the few buffer helpers poseViewer still uses ──
 //
 // Lazily requested on first use, not at module load -- WebGPU may not be
 // available (older browser, older iOS), so nothing should touch navigator.gpu
@@ -8,7 +8,7 @@
 //
 // It lived at the old pipeline's `gpu/device.ts` and was 516 lines. It moved here when
 // the old pipeline was deleted, because it never was pose math: it is generic device
-// plumbing, and sphereLab's OWN projection overlay (pipeline/projectSamples.gpu.ts)
+// plumbing, and poseViewer's OWN projection overlay (pipeline/projectSamples.gpu.ts)
 // depends on it and always did.
 //
 // Roughly three quarters of it was instrumentation for the old pipeline's

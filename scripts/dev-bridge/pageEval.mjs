@@ -27,7 +27,7 @@ export function evalInPage(code, { timeoutMs = 20000 } = {}) {
     const ws = new WebSocket(`ws://localhost:${PORT}`);
     const timer = setTimeout(() => {
       ws.close();
-      reject(new Error('timed out waiting for the page -- is server.js running, and is sphere-lab.html open in a browser?'));
+      reject(new Error('timed out waiting for the page -- is server.js running, and is pose-viewer-server.html open in a browser?'));
     }, timeoutMs);
 
     ws.on('open', () => {

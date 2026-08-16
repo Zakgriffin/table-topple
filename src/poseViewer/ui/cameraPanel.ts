@@ -30,7 +30,7 @@ import { layoutPip } from './layout.ts';
 registerActiveCameraSettingsSource(() => activeCamera()?.settings ?? null);
 
 // Promotes the live config (disk defaults + this browser's localStorage
-// overlay) back onto sphere-lab.config.json, through the dev bridge -- a
+// overlay) back onto pose-viewer.config.json, through the dev bridge -- a
 // browser page cannot write to the project directory itself. Deliberately
 // explicit rather than a write-through on every slider: the file is the
 // reviewable default, and a config that churned on every drag would be
@@ -52,7 +52,7 @@ saveConfigBtn.addEventListener('click', () => {
 // broken config leaves you exactly where you were, with the reason on screen,
 // rather than dropping your edits and then failing to come back up.
 loadConfigBtn.addEventListener('click', async () => {
-  if (!confirm('Discard this browser\'s config edits and reload from sphere-lab.config.json?\n\nThe current capture is lost.')) return;
+  if (!confirm('Discard this browser\'s config edits and reload from pose-viewer.config.json?\n\nThe current capture is lost.')) return;
   configStatus.textContent = 'loading…';
   try {
     await fetchConfigFile();
@@ -152,7 +152,7 @@ export function refreshCameraPanel() {
   if (!cam) return;
 
   // Every slider/checkbox inside cameraSettingsSectionsEl reads its
-  // accent-color from --cam-accent (see sphere-lab.html's CSS -- falls back
+  // accent-color from --cam-accent (see pose-viewer-server.html's CSS -- falls back
   // to the fixed green everywhere else, e.g. the Global tab's own controls,
   // which aren't tied to any one camera) -- setting it once here, on the
   // shared container, is enough for every control inside to pick it up via

@@ -228,7 +228,7 @@ export const ORDER5_CANDIDATE: TorusCandidate = {
 // on r0/c0/cropSize -- but deriving it is the expensive part: tryTaps walks
 // the full 2^N - 1 states (33.5M for order 5) and buildTorus fills a
 // same-sized array. Cache it by (order, taps) so a caller that re-crops the
-// same candidate repeatedly (e.g. sphere-lab.html's board-size slider, which
+// same candidate repeatedly (e.g. pose-viewer-server.html's board-size slider, which
 // calls this on every 'input' tick while dragging) only pays for that O(1)
 // lookup plus the actual crop, which is O(cropSize^2) -- not the full O(2^N)
 // rebuild every time.

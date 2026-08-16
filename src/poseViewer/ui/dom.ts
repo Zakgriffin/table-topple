@@ -66,7 +66,7 @@ export const modeBtns: Record<Mode, HTMLButtonElement> = {
 // ── Control binding ──────────────────────────────────────────────────────
 //
 // Every binder takes its INITIAL VALUE as an argument rather than reading one
-// from the DOM. The controls in sphere-lab.html carry no `value=`/`checked`
+// from the DOM. The controls in pose-viewer-server.html carry no `value=`/`checked`
 // attribute anymore -- config.ts owns every default -- so `input.value` on a
 // range with no attribute is not "the default", it is the HTML spec's
 // midpoint of min and max, which is nobody's intended setting.

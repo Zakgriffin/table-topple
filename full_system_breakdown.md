@@ -17,13 +17,13 @@ it that size", and "what was decided and why".
 
 ## START HERE — state as of 2026-08-15
 
-**Status: BUILT, END TO END, AND SPHERE LAB IS ON IT.** Every declared stage runs
+**Status: BUILT, END TO END, AND POSE VIEWER IS ON IT.** Every declared stage runs
 on device. An image goes in and a camera pose comes out: one upload, one submit,
 one readback, no host in the middle. `npm test` is 99 green; `npx tsc --noEmit`
 is clean; all four HTML entry points build.
 
 **Phase 3 is done for the desktop app and NOT for the phone.**
-`pipeline/axesReconstruction.ts` runs the real pipeline and Sphere Lab recovers a
+`pipeline/axesReconstruction.ts` runs the real pipeline and Pose Viewer recovers a
 pose again. `src/mobileCapture.ts` does not — it needs its own device and
 per-resolution context, which is a different lifecycle and deliberately not
 shared. Until then the phone reports `[no fix]` on every frame and the IMU-fusion
@@ -73,7 +73,7 @@ the bytes. See §18's "Reading a buffer back".
    everything below. `src/mobileCapture.ts` needs a WebGPU device and a
    per-resolution `PoseContext`; the desktop's lifecycle in
    `axesReconstruction.ts` is a model, not a thing to share.
-3. **Re-point the Sphere Lab overlays** at the inspected buffers, one at a time.
+3. **Re-point the Pose Viewer overlays** at the inspected buffers, one at a time.
    The full inventory — which overlay reads which buffer, which need an app-side
    re-derivation, and the two that this pipeline genuinely does not express —
    is NOT in this document, because §22 keeps the display path out of it. It is
@@ -89,7 +89,7 @@ the bytes. See §18's "Reading a buffer back".
   the mutation runs are the evidence, since six of them found a green test that
   was green for the wrong reason. A sweep would have localized none of those.
 - **The phone.** See above.
-- **Most Sphere Lab overlays are still dark.** The pose-driven ones are back (the
+- **Most Pose Viewer overlays are still dark.** The pose-driven ones are back (the
   recovered gizmo, the pole markers, the floor overlay and outline, Projected-Cam,
   the reconstructed-contamination overlay); everything that draws a pipeline
   INTERMEDIATE is waiting on step 3 above.
@@ -174,7 +174,7 @@ wrong. That also yields the honest reachability statement, which "no test caught
 it" cannot distinguish from a true property on its own.
 
 **Where the settings constants live.** Every threshold this pipeline takes is a
-real user-facing default in **`sphere-lab.config.json`**, not a number invented
+real user-facing default in **`pose-viewer.config.json`**, not a number invented
 here, and the tests use those values so a fixture cannot drift from the shipping
 configuration. As of 2026-08-12: `lsdToleranceDeg 9.5`, `lsdRhoNoiseThreshold
 0.132`, `lsdRhoHighThreshold 0`, `lsdNfaEpsilon 1`, `lsdNfaTestExponent 5`,
@@ -706,7 +706,7 @@ passes**, and it is what lets the twin test assert region-for-region equality.
 
 **`regionId` is dropped, and it is free.** Verified 2026-08-12: nothing on the
 pose path reads it. Its only consumers are the hover overlay
-([lsdOverlay.ts:159](src/sphereLab/overlays/lsdOverlay.ts#L159)) and the verify
+([lsdOverlay.ts:159](src/poseViewer/overlays/lsdOverlay.ts#L159)) and the verify
 harnesses. Dropping it saves 1.172 MiB *and* removes a write from the scatter
 pass. If an overlay ever needs it back, it is a one-line addition to `scatter`
 plus a pinned pool slot (§18).
@@ -2995,7 +2995,7 @@ which is now measured, and on that list -- not on the line count.
 5. ~~**One file or two?**~~ **SETTLED** — `pose.ts` + `pose.wgsl.ts`, and the
    split is earning itself at 485 lines of WGSL.
 5b. ~~**Where the board pattern comes from.**~~ **CLOSED 2026-08-14 —
-   `sphereLab/floorPattern` IS a shared leaf**, imported by `src/pose/board.ts`,
+   `poseViewer/floorPattern` IS a shared leaf**, imported by `src/pose/board.ts`,
    which is the only file in `src/pose` that reaches outside itself. The
    argument is that the torus is DATA about the world, not an implementation:
    rule 2 deletes a second implementation of the ALGORITHM, and there is no
@@ -3046,7 +3046,7 @@ which is now measured, and on that list -- not on the line count.
   §18). One consequence worth having here even though the rest is out of scope:
   `decode.correctness` writes only counters into `result`, so **there is no
   per-cell correctness array to read** — a display that wants one re-derives it
-  from `packed` + `layout` + `result` + `sphereLab/floorPattern`, which is safe
+  from `packed` + `layout` + `result` + `poseViewer/floorPattern`, which is safe
   because that leaf is the same one `board.ts` imports (open decision 5b).
 - The app boundary — the payload mailbox, `camera.pose`, the dev bridge. **The
   desktop half is now built**; the per-overlay inventory lives in the session

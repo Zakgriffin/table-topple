@@ -1,17 +1,17 @@
 import { readFileSync } from 'node:fs';
 import * as THREE from 'three';
 import { create, globals } from 'webgpu';
-import { validateFixture } from '../src/sphereLab/fixture.ts';
-import { inputFromFixture } from '../src/sphereLab/harness/input.ts';
+import { validateFixture } from '../src/poseViewer/fixture.ts';
+import { inputFromFixture } from '../src/poseViewer/harness/input.ts';
 import { type SimDims, type SimPose, type SimWorld, vFovRadOf } from '../src/pose/sim.ts';
 import { type PoseObservation, type SweepSpec, runSweep, summarize } from '../src/pose/sweep.ts';
 import { boardDims } from '../src/pose/board.ts';
 import { type PoseContext, createPoseContext, runPose } from '../src/pose/run.ts';
-import { board } from '../src/sphereLab/floorPattern.ts';
-import { GRID_STEP } from '../src/sphereLab/constants.ts';
+import { board } from '../src/poseViewer/floorPattern.ts';
+import { GRID_STEP } from '../src/poseViewer/constants.ts';
 import { DAWN_NODE_FLAGS, requestDeviceWithOptionalTimestamps } from '../src/gpu/device.ts';
-import { getRecords, profilerReset, spanEnd, spanStart } from '../src/sphereLab/profiling/profiler.ts';
-import { ingestGpuFrame } from '../src/sphereLab/profiling/clocks.ts';
+import { getRecords, profilerReset, spanEnd, spanStart } from '../src/poseViewer/profiling/profiler.ts';
+import { ingestGpuFrame } from '../src/poseViewer/profiling/clocks.ts';
 
 // ── The pose sweep, runnable ──────────────────────────────────────────────
 //
@@ -44,7 +44,7 @@ const dims: SimDims = { w: Number(wStr), h: Number(hStr), horizFovDeg: 65 };
 const supersample = Number(val('--ss', '4'));
 const quick = has('--quick');
 
-// Sphere Lab's board and its cell pitch, so the sweep scores the pipeline
+// Pose Viewer's board and its cell pitch, so the sweep scores the pipeline
 // against the same floor the app runs on rather than one invented here. Both go
 // into the renders AND into the pipeline settings below -- they have to be the
 // same two values on each side or the sweep is comparing two worlds.

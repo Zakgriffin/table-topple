@@ -73,8 +73,8 @@ async function main() {
   console.log(`Order n=${order} -> window is ${order}x${order} cells, N=${N} bits, period L=2^${N}-1=${2 ** N - 1}`);
 
   // Order 5 has no known efficient construction free of D4 rotation/
-  // reflection collisions across its full ~33.5M-cell torus, so Sphere Lab
-  // (see src/sphereLab.ts) instead uses ORDER5_CANDIDATE, a searched 256x256
+  // reflection collisions across its full ~33.5M-cell torus, so Pose Viewer
+  // (see src/poseViewer.ts) instead uses ORDER5_CANDIDATE, a searched 256x256
   // sub-region with a low (~1%) residual collision rate. Mirror that choice
   // here so the printed sheet matches what the tracker actually decodes
   // against, rather than an unconstrained order-5 torus nobody uses.

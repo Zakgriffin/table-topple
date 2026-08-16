@@ -43,7 +43,7 @@ export async function refreshModeVisualizations(
     updateLsdOverlay(camera);
     updateHoverOverlays(lastHoverClientX, lastHoverClientY);
     // The grid period/phase SVG plot lives in the Through-Cam toggle panel
-    // (#contamToggles, sphere-lab.html), not Projected-Cam's, despite what
+    // (#contamToggles, pose-viewer-server.html), not Projected-Cam's, despite what
     // it's plotting -- self-gates on the pose's gridPeriodPhase existing internally.
     drawGridPeriodPhasePlot(camera);
   } else if (mode === 'projected') {

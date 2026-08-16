@@ -10,7 +10,7 @@ import type { Dims } from './pipeline.ts';
 //
 // ── THE LIBRARY OWNS THE PATTERN, AND CALLERS CONSTRUCT ONE ──
 //
-// This used to import `sphereLab/floorPattern.ts`, which made the pose library
+// This used to import `poseViewer/floorPattern.ts`, which made the pose library
 // depend on ONE OF THE APPS -- and worse, on ambient mutable module state
 // (`export let R, C, torus, ...`, rewritten in place by a rebuild function).
 // That shape allowed exactly ONE BOARD PER PROCESS, which is why two apps could

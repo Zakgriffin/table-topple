@@ -2,8 +2,8 @@ import * as THREE from 'three';
 import { camera, scene } from './game/scene.ts';
 import { step } from './game/sim.ts';
 import { BOARD_SIZE } from './game/constants.ts';
-import { board } from './sphereLab/floorPattern.ts';
-import { GRID_STEP } from './sphereLab/constants.ts';
+import { board } from './poseViewer/floorPattern.ts';
+import { GRID_STEP } from './poseViewer/constants.ts';
 
 // The board game, drawn over the live camera feed.
 //

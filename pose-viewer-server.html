@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Great Sphere Lab</title>
+<title>Great Pose Viewer</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #111; overflow: hidden; font-family: monospace; }
@@ -281,7 +281,7 @@
 
 <button id="panelToggle" title="show/hide panel">&lsaquo;</button>
 <div id="panel">
-  <h1>Great Sphere Lab</h1>
+  <h1>Great Pose Viewer</h1>
 
   <div id="cameraTabs" class="cameraTabRow"></div>
 
@@ -308,14 +308,14 @@
     <label class="chk" title="Runs the CPU reference implementations for every stage instead of the GPU ones. For checking whether a GPU stage is lying -- the shipping path is unchecked. Note the no-WebGPU fallback is separate and automatic: each stage falls back on its own if there is no device or a dispatch fails validation."><input type="checkbox" id="forceCPU"> force CPU reference path</label>
     <div class="hint" id="lsdChainTransfers" style="margin-bottom:0;"></div>
 
-    <!-- Every value in this panel lives in sphere-lab.config.json. Editing a
+    <!-- Every value in this panel lives in pose-viewer.config.json. Editing a
          control changes localStorage (the live overlay) only; these two move
          values between that overlay and the file, in either direction, through
          the dev bridge. Both need `npm run dev:bridge` running -- the readout
          below says so if not. -->
     <div class="subhead">config</div>
-    <button id="saveConfigBtn" class="panelBtn" title="Writes the whole live config (this browser's edits included) over sphere-lab.config.json, through the dev bridge. Needs `npm run dev:bridge`.">save config to disk</button>
-    <button id="loadConfigBtn" class="panelBtn" title="Discards this browser's local edits and reloads the page from sphere-lab.config.json exactly. The file is validated BEFORE anything is discarded, so a broken file leaves you where you are.">load config from disk</button>
+    <button id="saveConfigBtn" class="panelBtn" title="Writes the whole live config (this browser's edits included) over pose-viewer.config.json, through the dev bridge. Needs `npm run dev:bridge`.">save config to disk</button>
+    <button id="loadConfigBtn" class="panelBtn" title="Discards this browser's local edits and reloads the page from pose-viewer.config.json exactly. The file is validated BEFORE anything is discarded, so a broken file leaves you where you are.">load config from disk</button>
     <div class="hint" id="configStatus" style="margin-bottom:0;"></div>
 
     <!-- Deliberately last, and deliberately NOT persisted across reloads (see
@@ -342,7 +342,7 @@
     </div>
     <div id="physCameraDetailFields">
       <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="realCaptureFovDeg" min="20" max="150" step="1"><span class="val" id="realCaptureFovDegVal"></span></div>
-      <!-- Read-only: set on the phone (mobile-capture.html's video/single toggle), Sphere Lab only displays it -->
+      <!-- Read-only: set on the phone (mobile-capture.html's video/single toggle), Pose Viewer only displays it -->
       <div class="row"><span class="label">capture mode</span><span id="physCaptureModeReadout" class="val">single</span></div>
     </div>
   </div>
@@ -404,6 +404,6 @@
   </div>
 </div>
 
-<script type="module" src="/src/sphereLab/main.ts"></script>
+<script type="module" src="/src/poseViewer/main.ts"></script>
 </body>
 </html>

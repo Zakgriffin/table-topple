@@ -19,7 +19,7 @@ existed the only thing standing between them and that was a differential run in
 a live browser, by hand.
 
 **The GPU tier does not run here.** It needs a real `navigator.gpu`. Those are
-the `verify*` harnesses in `src/sphereLab/harness/`, driven from the browser
+the `verify*` harnesses in `src/poseViewer/harness/`, driven from the browser
 console over the dev bridge:
 
     await verifyLsdChain(cameraInput())
@@ -32,7 +32,7 @@ second suite.
 ## Everything runs on a fixture
 
 `fixtures/default.json` — pixels plus the config they are to be processed
-under, in one validated file. See `src/sphereLab/fixture.ts`. Nothing here
+under, in one validated file. See `src/poseViewer/fixture.ts`. Nothing here
 reaches for a live camera, a global, or an ambient setting, which is what makes
 a failure re-derivable a month later.
 

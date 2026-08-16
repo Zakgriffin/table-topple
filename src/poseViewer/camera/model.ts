@@ -396,12 +396,12 @@ export interface PhysicalCamera extends CameraBase {
   // ask whether there's really a connection behind it to kick.
   connectionId: string;
   // Purely a reflection of whatever mode.html's mode toggle last reported
-  // (see devBridge/client.ts's captureMode handler) -- Sphere Lab never
+  // (see devBridge/client.ts's captureMode handler) -- Pose Viewer never
   // sets this itself, only displays it (see ui/cameraPanel.ts).
   captureMode: 'single' | 'video';
   // Same idea, for the phone's "compute pose on this device" toggle (see
   // this session's on-device-pose-recovery plan) -- purely a reflection of
-  // devBridge/client.ts's computeMode handler, never set by Sphere Lab
+  // devBridge/client.ts's computeMode handler, never set by Pose Viewer
   // itself. 'device' means the phone sends {type:'poseResult'} (already-
   // computed pose, no image); 'desktop' (the default -- see
   // camera/factory.ts) means it keeps sending {type:'realCapture'} like
@@ -440,7 +440,7 @@ export interface PhysicalCamera extends CameraBase {
   // always overwritten with the newest arrived frame, never queued, so a
   // desktop that falls behind naturally drops stale frames instead of
   // working through a backlog. sentAt/pulledAt/encodedAt/receivedAt are all
-  // nowMs() (sphereLab/clock.ts) -- epoch ms, so they stay comparable across
+  // nowMs() (poseViewer/clock.ts) -- epoch ms, so they stay comparable across
   // the phone and the desktop the way bare performance.now() could not, but
   // also sub-millisecond and monotonic, which Date.now() was not. These four
   // were the last Date.now() holdouts and are what that module unified. So
@@ -524,7 +524,7 @@ export interface PhysicalCamera extends CameraBase {
   //     sendsAttempted (from the video loop itself) -- says WHY the loop
   //     skipped a tick: backpressure means bufferedAmount > 0 (a previous
   //     frame is still physically draining over the network, i.e.
-  //     bandwidth-bound), not-ready means Sphere Lab itself said to wait
+  //     bandwidth-bound), not-ready means Pose Viewer itself said to wait
   //     (shouldn't happen much when pipelined), and if loopTicks over the
   //     ~2s window is well under what 60Hz would predict, the phone's own
   //     requestAnimationFrame is being starved (backgrounded tab, thermal

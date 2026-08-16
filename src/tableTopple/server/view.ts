@@ -11,7 +11,7 @@ import { onModeChange } from '../shared/mode.ts';
 // Everything here assumes a page whose whole job is this game -- a canvas
 // called #gl, a viewport worth filling, a mouse to orbit with. That is exactly
 // the set of assumptions the AR overlay cannot make, which is why this is a
-// module of its own that only game.html's entry point (main.ts) imports.
+// module of its own that only table-topple-server.html's entry point (main.ts) imports.
 // Importing it from anywhere the simulation reaches would drag a WebGL context
 // and a #gl lookup into a host that has neither.
 

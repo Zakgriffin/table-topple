@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>Pose Viewer — Mobile Capture</title>
+<title>Pose Viewer Client</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body { background: #000; overflow: hidden; height: 100%; }
@@ -20,19 +20,11 @@
     transform: translate(-50%, -50%);
     max-width: 100vw; max-height: 100vh;
   }
-  /* AR overlay -- a transparent THREE.js canvas placed exactly over
-     captureCanvas (see gameOverlay.ts's syncOverlayRendererSize, which keeps
-     its intrinsic buffer dimensions identical to captureCanvas's own, so
-     the SAME letterbox fit below scales/positions both identically),
-     rendering the BOARD GAME (src/game, via src/gameOverlay.ts) from a
-     camera at the recovered pose (same FOV/aspect the pose pipeline itself
-     used) -- so when computeOnDevice's decode is good, the virtual board
-     visually lands on the real printed pattern in the live feed underneath
-     it. Both boards are 144 cells across, so that landing is 1:1, cell for
-     cell. No mirror class here either -- captureCanvas's own draw already
-     bakes in the front-camera flip at the pixel level (see
-     drawCurrentFrameToCanvas), so the AR overlay just lines up with
-     whatever's already correctly oriented. */
+  /* THE AR OVERLAY LEFT THIS PAGE. A transparent THREE.js canvas over
+     captureCanvas used to draw the board game from a camera at the recovered
+     pose; it is Table Topple's, and it now lives on
+     table-topple-client.html (src/tableTopple/client/overlay.ts). This page
+     is the capture-and-relay half only, and has no overlay canvas. */
   /* right, not 12px: #chromeToggle parks in that corner, and #relayStatus is
      the right-hand half of this flex row -- without the gap the two overlap. */
   #status {
@@ -93,7 +85,7 @@
   }
   #resBox span { color: #fff; font-family: monospace; font-size: 13px; }
   /* Candidates confirmed unsupported by sweepResolutionCandidates
-     (mobileCapture.ts) are left OUT of this list entirely, not shown
+     (client/camera.ts) are left OUT of this list entirely, not shown
      disabled -- the full detail of why each one failed lives in the probe
      log panel below instead (#probeLogPanel). */
   #resBox select {
@@ -112,7 +104,7 @@
   }
   #resBox button:disabled { opacity: 0.5; }
   /* Diagnostic table of every probe the last sweep actually ran -- see
-     mobileCapture.ts's ProbeLogEntry/renderProbeLog: what resolution was
+     client/camera.ts's probeResolution/renderProbeLog: what resolution was
      requested, did getUserMedia even resolve, what did the camera ACTUALLY
      settle on (via `ideal`, so this is populated even on a "no match"),
      and did that match the request. Hidden by default; #probeLogToggleBtn
@@ -141,7 +133,7 @@
   /* Frame rate -- bounds are 1fps (a full second between frames, the
      slowest end anyone would want) to whatever the camera's own
      getCapabilities().frameRate.max reports as fastest (see
-     setupFramerateControl in mobileCapture.ts) -- a lever against motion
+     setupFramerateControl in client/camera.ts) -- a lever against motion
      blur: a higher requested rate caps how long auto-exposure is allowed to
      leave the shutter open, since exposure can't exceed the frame interval. */
   #fpsBox {
@@ -195,7 +187,7 @@
      costs no vertical space in the flex column above it. */
   #imuReadout { color: #9cf; font-family: monospace; font-size: 11px; white-space: pre-line; line-height: 1.35; }
   #imuReadout:empty { display: none; }
-  /* Local-only timing/fps readout -- see mobileCapture.ts's own comment on
+  /* Local-only timing/fps readout -- see client/main.ts's own comment on
      why this is never sent over the network. */
   #poseReadout {
     position: fixed; top: max(36px, calc(env(safe-area-inset-top) + 24px)); left: 12px; right: 12px; z-index: 10;
@@ -230,7 +222,7 @@
     background: rgba(0,0,0,0.3); color: #777; border-color: rgba(255,255,255,0.12);
   }
   /* What "chrome" means, in one place, next to the elements it names -- the
-     alternative is a set of element handles in mobileCapture.ts that has to be
+     alternative is a set of element handles in client/dom.ts that has to be
      kept in step with this file by hand. Each of these beats its own
      `.visible` rule on specificity (id+class+type vs id+class), so a pose
      readout or probe log that happens to be open still hides.

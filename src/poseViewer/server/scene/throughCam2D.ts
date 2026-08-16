@@ -14,7 +14,7 @@ import { throughCamCanvas, throughCamCtx } from '../ui/dom.ts';
 // chat). throughCamCanvas's own intrinsic width/height are set to
 // camera.rtSize directly (resizeThroughCamCanvas below); CSS max-width/
 // max-height (pose-viewer-server.html) letterboxes that for on-screen display, the
-// same split mobile-capture.html's own captureCanvas already uses. A
+// same split pose-viewer-client.html's own captureCanvas already uses. A
 // screenshot/download of THIS canvas therefore always returns the camera's
 // true resolution, independent of window size.
 //
@@ -44,7 +44,7 @@ function bufferToImageData(data: Uint8Array, w: number, h: number): ImageData {
   return new ImageData(new Uint8ClampedArray(data.buffer as ArrayBuffer, data.byteOffset, data.length), w, h);
 }
 
-// Guards the resize the same way mobileCapture.ts's own preview canvas
+// Guards the resize the same way client/camera.ts's own preview canvas
 // does -- reassigning canvas.width/height clears the backing bitmap even
 // when set to the same value.
 export function resizeThroughCamCanvas(camera: Camera) {

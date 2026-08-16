@@ -143,8 +143,8 @@ export interface GpuFrameTiming {
   /**
    * `performance.now()` immediately before and after the submit/fence.
    *
-   * These are STAMPS, not a span -- the same role `mobileCapture`'s sentAt /
-   * pulledAt play for the phone link. They exist because they are the one
+   * These are STAMPS, not a span -- the same role a phone link's sentAt /
+   * pulledAt play for a relayed frame. They exist because they are the one
    * host-clock pair a caller CANNOT take for itself: the submit and the map
    * both happen inside `runPose`, so an outside bracket measures upload and
    * encode too and would anchor the GPU block earlier than it could have run.

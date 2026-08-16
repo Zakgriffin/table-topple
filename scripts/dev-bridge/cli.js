@@ -13,7 +13,7 @@
 //   node scripts/dev-bridge/cli.js eval "activeCamera().settings.camYawDeg"
 //   node scripts/dev-bridge/cli.js screenshot
 //
-// Add --phone to run the snippet inside mobile-capture.html on the connected
+// Add --phone to run the snippet inside pose-viewer-client.html on the connected
 // phone instead of the Pose Viewer tab (--phone=<captureId> when more than one
 // is attached). That page's module scope is what's visible there:
 //   node scripts/dev-bridge/cli.js eval --phone "currentStream.getVideoTracks()[0].getSettings()"
@@ -75,7 +75,7 @@ if (!cmd || !['eval', 'screenshot'].includes(cmd)) {
   process.exit(1);
 }
 
-// --phone / --phone=<captureId> retargets an eval at mobile-capture.html
+// --phone / --phone=<captureId> retargets an eval at pose-viewer-client.html
 // instead of a Pose Viewer tab (see server.js's routing block). Stripped out of
 // `rest` before the code is joined so it can appear either side of the
 // snippet. Screenshot has no phone form -- it reads the desktop's THREE

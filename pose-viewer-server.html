@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>Great Pose Viewer</title>
+<title>Pose Viewer Server</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   body { background: #111; overflow: hidden; font-family: monospace; }
@@ -281,7 +281,7 @@
 
 <button id="panelToggle" title="show/hide panel">&lsaquo;</button>
 <div id="panel">
-  <h1>Great Pose Viewer</h1>
+  <h1>Pose Viewer Server</h1>
 
   <div id="cameraTabs" class="cameraTabRow"></div>
 
@@ -342,7 +342,7 @@
     </div>
     <div id="physCameraDetailFields">
       <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="realCaptureFovDeg" min="20" max="150" step="1"><span class="val" id="realCaptureFovDegVal"></span></div>
-      <!-- Read-only: set on the phone (mobile-capture.html's video/single toggle), Pose Viewer only displays it -->
+      <!-- Read-only: set on the phone (pose-viewer-client.html's video/single toggle), Pose Viewer only displays it -->
       <div class="row"><span class="label">capture mode</span><span id="physCaptureModeReadout" class="val">single</span></div>
     </div>
   </div>

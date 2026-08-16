@@ -1,4 +1,4 @@
-// Great Pose Viewer — a visual testbed, not part of the tracking pipeline.
+// Pose Viewer Server — a visual testbed, not part of the tracking pipeline.
 //
 // Point of the exercise: a straight floor line, together with a camera's
 // optical center, spans a plane through that center. Intersect that plane
@@ -202,7 +202,7 @@ function animate() {
   requestAnimationFrame(animate);
 
   // Cheap pass, every camera: keeps gizmo transforms/visibility and the
-  // great-sphere overlays current for the always-on world view. Today
+  // vanishing-point sphere overlays current for the always-on world view. Today
   // that's exactly one camera; structured as a loop now so Stage B (N
   // simulated cameras, all visible at once) is a small diff here, not
   // another rewrite of this function.

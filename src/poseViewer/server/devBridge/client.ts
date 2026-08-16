@@ -11,7 +11,7 @@ import { renderCameraTabs, refreshCameraPanel } from '../ui/cameraPanel.ts';
 import { throughCamCanvas } from '../ui/dom.ts';
 import { nowMs } from '../../../clock.ts';
 
-// Desktop-side cap on the relayed IMU ring, matching mobileCapture.ts's own
+// Desktop-side cap on the relayed IMU ring, matching client/imu.ts's own
 // IMU_RING_CAPACITY -- ~40s at the ~60Hz browsers actually deliver. Both ends
 // keep a buffer because they answer different questions: the phone's survives
 // a websocket drop, this one is what a recording gets dumped from.
@@ -67,7 +67,7 @@ function buildCameraSettingsPayload(cam: PhysicalCamera) {
 // Pushes the current pipeline-tunable settings to one physical camera's
 // phone (source of truth stays the desktop's own sliders) -- see
 // server.js's settingsSync routing (finds the one capture socket matching
-// captureId, sends directly) and mobileCapture.ts's own receiving end.
+// captureId, sends directly) and client/relay.ts's own receiving end.
 // Called on: per-camera-settings slider changes (that one camera only, see
 // ui/cameraPanel.ts), global forceCPU/boardSize changes (every connected
 // physical camera), and the first time a physical camera is seen in
@@ -105,7 +105,7 @@ export function pushSettingsSync(cam: PhysicalCamera) {
   // held here, keyed by captureId, from whichever arrives first until the
   // OTHER one shows up and they can be combined into a PhysicalCamera's
   // pendingCapture. In practice the JSON always arrives first (see
-  // mobileCapture.ts's captureAndSendFrame, which sends both from the same
+  // client/main.ts's captureAndSendFrame, which sends both from the same
   // callback in that order), but keying by captureId rather than relying on
   // strict adjacency also keeps this correct if more than one phone is
   // sending at once and their broadcasts interleave in this tab's own
@@ -127,7 +127,7 @@ export function pushSettingsSync(cam: PhysicalCamera) {
     catch { scheduleReconnect(); return; }
     devBridgeSocket = ws;
     // Default binaryType is 'blob' -- realCapture's image bytes now arrive
-    // as a genuine binary frame (see mobileCapture.ts/server.js), and
+    // as a genuine binary frame (see client/relay.ts/server.js), and
     // ArrayBuffer is the more convenient shape to slice the leading
     // captureId prefix off of below.
     ws.binaryType = 'arraybuffer';
@@ -205,7 +205,7 @@ export function pushSettingsSync(cam: PhysicalCamera) {
         const dataUrl = source.toDataURL('image/png');
         ws.send(JSON.stringify({ type: 'screenshotResult', id: msg.id, ok: true, dataUrl }));
       } else if (msg.type === 'realCapture') {
-        // Broadcast from mobile-capture.html via the dev-bridge relay,
+        // Broadcast from pose-viewer-client.html via the dev-bridge relay,
         // tagged with the sending phone's own connectionId (server.js
         // assigns one per 'capture' connection). See findOrCreatePhysicalCamera
         // above for the auto-create-but-don't-activate reasoning. No image
@@ -239,7 +239,7 @@ export function pushSettingsSync(cam: PhysicalCamera) {
         // bytes at all here (see the ArrayBuffer branch above for the
         // sendCapturedImage-on case, which arrives as its own binary frame
         // instead of this JSON message), UNLESS just sendDebugInfo is on, in
-        // which case msg.debug rides along too -- see mobileCapture.ts's own
+        // which case msg.debug rides along too -- see client/main.ts's own
         // comments. Written into the SAME pendingPoseResult mailbox the
         // binary branch above uses (never calls ingestRemotePose directly)
         // so a message arriving while the camera is busy gets drained on the
@@ -294,7 +294,7 @@ export function pushSettingsSync(cam: PhysicalCamera) {
         const cam = msg.captureId ? findPhysicalCameraByConnection(msg.captureId) : undefined;
         if (cam && Array.isArray(msg.samples)) {
           for (const s of msg.samples) {
-            // Positional tuples on the wire (see mobileCapture.ts's send) --
+            // Positional tuples on the wire (see client/imu.ts's send) --
             // ~6 of these arrive 10x/second, and the field names cost more
             // bytes than the numbers do at that rate.
             cam.imuSamples.push({

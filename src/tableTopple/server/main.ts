@@ -1,4 +1,4 @@
-// Board game sandbox -- deliberately isolated from the De Bruijn/pose
+// Table Topple Server -- the board game sandbox, deliberately isolated from the De Bruijn/pose
 // reconstruction pipeline that the rest of this repo is about. The AR pose
 // work exists to eventually put a real board on a real table; this page is
 // where the game those poses are FOR gets designed, in a plain virtual scene

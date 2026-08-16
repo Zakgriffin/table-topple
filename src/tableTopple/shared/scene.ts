@@ -4,7 +4,7 @@ import * as THREE from 'three';
 // the renderer and the controls, which all live in view.ts instead.
 //
 // The split exists because this game now has TWO hosts. The standalone page
-// (game.html -> main.ts -> view.ts) owns a canvas, orbits a camera with the
+// (table-topple-server.html -> main.ts -> view.ts) owns a canvas, orbits a camera with the
 // mouse and fills the screen. The AR overlay on the capture page owns neither:
 // it draws this same world into a transparent canvas laid over the camera
 // feed, through a camera whose pose comes from the reconstruction pipeline.

@@ -490,7 +490,7 @@ switchCamBtn.addEventListener('click', async () => {
 // unconditionally every rAF tick (see main.ts's videoLoop), and drawing/
 // compositing a full-native-resolution (potentially 12+MP) on-screen canvas at
 // 60fps is what was crashing Chrome on a real phone -- CSS max-width/max-height
-// (mobile-capture.html) only scales the DISPLAYED box, it doesn't shrink
+// (pose-viewer-client.html) only scales the DISPLAYED box, it doesn't shrink
 // the actual pixel buffer drawImage has to fill and the compositor has to
 // upload, so a cap has to happen here instead. previewLongEdgeCap() is the
 // screen's own long edge in physical pixels -- rendering any larger than

@@ -1,4 +1,4 @@
-// Shared by mobileCapture.ts (pack) and devBridge/client.ts (unpack) so the
+// Shared by client/relay.ts (pack) and server/devBridge/client.ts (unpack) so the
 // two ends of this binary framing can't drift apart -- see this session's
 // "no more base64-in-JSON for poseResult's optional image" plan.
 //

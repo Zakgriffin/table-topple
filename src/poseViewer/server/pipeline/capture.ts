@@ -128,7 +128,7 @@ export function renderCamRT(camera: SimulatedCamera) {
 // introduce the pixel grid). GL's readback is natively bottom-up, but this
 // function's own contract is top-down -- the one dominant row convention the
 // reconstruction math (pose/stages/votes/votes.ts's toNDC) and every capture source
-// (this, ingestRealCapture, ingestRemotePose, mobileCapture.ts's on-device
+// (this, ingestRealCapture, ingestRemotePose, client/main.ts's on-device
 // pipeline) now share, so nothing downstream of a capture needs to know or
 // care which GPU/decode path produced it. flipRowsF64 (its own exact
 // inverse) is the one place that native bottom-up-ness gets converted, right
@@ -152,8 +152,8 @@ export function captureDistortedGrayscale(camera: SimulatedCamera): { gray: Floa
 // Decodes an incoming JPEG blob at whatever resolution it actually arrived
 // at -- no resampling of the image itself; resizeCaptureBuffers instead
 // reallocates the analysis buffers to MATCH it when it differs from what's
-// currently allocated, so the phone's own resolution slider (targetLongEdge
-// in mobileCapture.ts) is the real analysis resolution end-to-end, not a
+// currently allocated, so the phone's own resolution dropdown (see
+// client/camera.ts) is the real analysis resolution end-to-end, not a
 // cap on top of a further downsample. Converts to grayscale and stores it
 // top-down, matching canvas 2D getImageData's own native order -- no flip
 // needed here, since top-down is this whole pipeline's one dominant
@@ -240,13 +240,13 @@ export async function ingestRealCapture(
 }
 
 // Ingests an already-computed pose from a phone in device-compute mode (see
-// this session's on-device-pose-recovery plan and mobileCapture.ts's
+// this session's on-device-pose-recovery plan and client/main.ts's
 // computePoseFromCapture call) -- deserializes the plain-array-serialized
 // Vector3/Quaternion fields back into THREE objects and assigns directly
 // into ONE camera.pose, published in a single assignment, no pipeline call at all
 // (the phone already did that work). `debug`/`imageBytes` are both optional,
 // riding along only when the phone's own sendDebugInfo/sendCapturedImage
-// toggles are on (both default off) -- see mobileCapture.ts's own comments;
+// toggles are on (both default off) -- see client/main.ts's own comments;
 // this is the "richer optional payload" extensibility point the original
 // plan called out (debug intermediates/the actual capture for projection),
 // added on request for live diagnosis of a suspect on-device decode rather
@@ -338,14 +338,17 @@ export async function ingestRemotePose(
   };
   camera.pose = pose;
 
-  // Diagnostic-only debug summary (see mobileCapture.ts's buildDebugPayload)
-  // -- null whenever sendDebugInfo is off, INCLUDING clearing a prior
+  // Diagnostic-only debug summary -- null whenever sendDebugInfo is off,
+  // and null in PRACTICE either way right now: the phone's buildDebugPayload
+  // went with the deleted pipeline (see client/main.ts's note where it lived),
+  // so nothing attaches one. Kept because the field is still the extensibility
+  // point. Also clears a prior
   // frame's leftover value if the toggle just got switched off, same
   // "don't show stale data" principle as everything else in this function.
   camera.lastRemoteDebug = msg.debug ?? null;
 
   // No real image reaches the desktop in device-compute mode UNLESS the
-  // phone's sendCapturedImage toggle is on (see mobileCapture.ts) -- without
+  // phone's sendCapturedImage toggle is on (see client/main.ts) -- without
   // it, clear every real-pixel-derived buffer this cycle's pose data can't
   // refresh, rather than leaving stale content from a PRIOR capture on this
   // same camera visible (World-view fill, Through-Cam raw preview, a

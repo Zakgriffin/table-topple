@@ -58,7 +58,7 @@ export interface RegionCsr {
 }
 
 // requestVideoFrameCallback's metadata for one decoded video frame, captured
-// on the phone (mobileCapture.ts's onVideoFrame) and relayed with the frame
+// on the phone (client/camera.ts's rvfc loop) and relayed with the frame
 // it describes. All times are on the PHONE's clock, in epoch milliseconds,
 // except mediaTime/presentationTime/expectedDisplayTime which are on the
 // browser's own media/presentation timelines.
@@ -345,7 +345,7 @@ export interface CameraBase {
   // which device-compute mode never populates.
   recoveredFloorOutline: THREE.LineLoop;
 
-  // -- Great-sphere group: repositioned (not rotated) to the camera's own
+  // -- Vanishing-point sphere group: repositioned (not rotated) to the camera's own
   // origin each frame, since every direction it draws is expressed in WORLD
   // axes. --
   sphereAnchor: THREE.Object3D;
@@ -462,7 +462,7 @@ export interface PhysicalCamera extends CameraBase {
     // when the photons actually landed -- sentAt/pulledAt/encodedAt all
     // describe the SEND, which happens an unknown amount of time after
     // capture. A filter must timestamp its measurement from these, not from
-    // sentAt; see mobileCapture.ts's latestFrameMeta comment for why a
+    // sentAt; see client/camera.ts's latestFrameMeta comment for why a
     // constant timestamp error is specifically dangerous here (it produces
     // pose error proportional to velocity, which is indistinguishable from
     // the problem being solved).
@@ -509,7 +509,7 @@ export interface PhysicalCamera extends CameraBase {
   //
   // The raw phone-clock STAMPS survive on `lastCaptureTiming` below, because the
   // IMU work needs absolute capture times rather than durations.
-  // Self-reported by mobile-capture.html every ~2s (its flush interval).
+  // Self-reported by pose-viewer-client.html every ~2s (its flush interval).
   // Two distinct diagnostic purposes bundled in one message:
   //   - nominalFrameRate/avgIntervalMs/maxIntervalMs/sampleCount (from
   //     requestVideoFrameCallback) -- lets us tell "the round trip is slow"
@@ -544,13 +544,13 @@ export interface PhysicalCamera extends CameraBase {
   // the phone happened to be doing at the time.
   //
   // `t` is the phone's own high-resolution monotonic epoch clock
-  // (mobileCapture.ts's nowMs), stamped when the event HANDLER RAN -- which
+  // (clock.ts's nowMs), stamped when the event HANDLER RAN -- which
   // is not when the sensor sampled. That offset is a phase B calibration,
   // not a defect, and correcting it here by guesswork would destroy the
   // information needed to estimate it.
   //
   // Angular rates are DEGREES/SECOND and accelerations m/s^2, in the DEVICE
-  // frame, not the camera's -- see mobileCapture.ts's block comment on axes
+  // frame, not the camera's -- see capture/motion.ts's block comment on axes
   // before using any of this for anything.
   imuSamples: {
     t: number;
@@ -609,9 +609,10 @@ export interface RemotePoseMessage {
     } | null;
     decodeGrid: { rows: number; cols: number; validCount: number; totalCount: number } | null;
     decodeCorrectness: { correctCount: number; wrongCount: number } | null;
-    // The phone's own pipeline intermediates, verbatim -- see
-    // mobileCapture.ts's buildDebugPayload and this session's "Ship
-    // auxiliary pipeline intermediates" plan. Assigned onto camera.pose's
+    // The phone's own pipeline intermediates, verbatim -- see this session's
+    // "Ship auxiliary pipeline intermediates" plan. NOTHING SENDS THESE
+    // TODAY: the phone's buildDebugPayload went with the deleted pipeline
+    // (client/main.ts keeps a note where it lived). Assigned onto camera.pose's
     // own gridPeriodPhase/voteComposites below, the same fields a
     // desktop-compute capture already populates.
     pipeline?: {
@@ -626,7 +627,7 @@ export interface RemotePoseMessage {
       }[];
     };
   };
-  // Raw JPEG bytes (mobileCapture.ts's sendCanvas.toBlob output, never
+  // Raw JPEG bytes (client/main.ts's sendCanvas.toBlob output, never
   // base64) -- see poseResultWire.ts. Optional: only present when the
   // phone's sendCapturedImage toggle was on for this capture.
   imageBytes?: Uint8Array<ArrayBuffer>;

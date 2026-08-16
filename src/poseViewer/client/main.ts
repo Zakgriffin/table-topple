@@ -1,10 +1,10 @@
-// Phone-side capture page: live camera viewfinder + hardware zoom (ported
-// from src/main.ts's tracker page, same architecture) with a shutter button
-// that sends the current frame to any open Pose Viewer tab over the dev
-// bridge relay -- see scripts/dev-bridge/server.js's 'realCapture' handling
-// and poseViewer.ts's ingestRealCapture. Doesn't run any of the actual
-// analysis pipeline itself; this page's only job is getting a real photo
-// off the phone and onto the laptop.
+// Pose Viewer Client (pose-viewer-client.html): live camera viewfinder +
+// hardware zoom (ported from the deleted tracker page, same architecture)
+// with a shutter button that sends the current frame to any open Pose Viewer
+// Server tab over the dev bridge relay -- see scripts/dev-bridge/server.js's
+// 'realCapture' handling and server/pipeline/capture.ts's ingestRealCapture.
+// Doesn't run any of the actual analysis pipeline itself; this page's only
+// job is getting a real photo off the phone and onto the laptop.
 //
 // Two capture modes: single (tap the shutter each time, as before) and
 // video (streams frames automatically). Pose Viewer's own reconstruction
@@ -16,7 +16,7 @@
 //
 // ── WHAT IS LEFT IN THIS FILE ────────────────────────────────────────────
 //
-// The page's own subjects, and the boot sequence that starts them. Four
+// The page's own subjects, and the boot sequence that starts them. Six
 // modules carry the rest, each importable without this one:
 //
 //   dom.ts          every element, resolved once. the LEAF -- imports nothing
@@ -88,7 +88,7 @@ import {
   sendCapturedImageCheckbox, sendDebugInfoCheckbox, shutterBtn,
 } from './dom.ts';
 
-// mobile-capture.html carries no `checked` attributes -- config.phone owns
+// pose-viewer-client.html carries no `checked` attributes -- config.phone owns
 // these five defaults, the same way config.camera owns every desktop control
 // (see poseViewer/config.ts).
 //
@@ -139,7 +139,7 @@ reloadConfigBtn.addEventListener('click', async () => {
 // ── Hiding the page's own UI ─────────────────────────────────────────────
 //
 // One switch that takes every control off the screen, leaving the viewfinder
-// and nothing else -- see mobile-capture.html's
+// and nothing else -- see pose-viewer-client.html's
 // `body.chromeHidden` rule, which is where the list of what counts as chrome
 // lives. Kept there rather than as a set of element handles here so the list
 // sits next to the elements it names and cannot drift out of step with them.
@@ -160,7 +160,7 @@ chromeToggleBtn.addEventListener('click', () => {
 
 // ── On-device compute: settings mirror ──────────────────────────────────
 //
-// globalState here is THIS page's own module instance (mobile-capture.html
+// globalState here is THIS page's own module instance (pose-viewer-client.html
 // is a separate Vite entry point from pose-viewer-server.html -- a totally separate
 // JS realm/module graph, not shared memory), so mutating it locally from a
 // settingsSync message is safe -- see this session's on-device-pose-recovery

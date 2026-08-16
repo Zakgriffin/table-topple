@@ -2,7 +2,7 @@
 // screenshot" requests from the CLI (cli.js, invoked by whoever's
 // debugging) to whichever browser tab(s) have pose-viewer-server.html open, and
 // relays the results back. Also relays real camera captures from
-// mobile-capture.html (a phone, usually reached through vite's /dev-bridge
+// pose-viewer-client.html (a phone, usually reached through vite's /dev-bridge
 // websocket proxy -- see vite.config.ts) out to every connected Pose Viewer
 // tab, broadcast-style, no request/response pairing needed for those.
 //
@@ -59,7 +59,7 @@ function saveFrame(dataUrl) {
 wss.on('connection', (ws) => {
   ws.on('message', (raw, isBinary) => {
     // A capture source's realCapture image bytes now arrive as a genuine
-    // binary WebSocket frame (mobileCapture.ts), not base64-encoded inside
+    // binary WebSocket frame (poseViewer/client/relay.ts), not base64-encoded inside
     // a JSON message -- see this session's chat. Only a KNOWN capture
     // connection is trusted to send one (browser/controller connections
     // never do); everything else is JSON, handled below as before. Relayed
@@ -100,7 +100,7 @@ wss.on('connection', (ws) => {
     // were never meant to fan out to multiple tabs at once)
     if ((msg.type === 'eval' || msg.type === 'screenshot') && msg.id) {
       pending.set(msg.id, ws);
-      // msg.target routes an eval to a PHONE (mobile-capture.html) instead of
+      // msg.target routes an eval to a PHONE (pose-viewer-client.html) instead of
       // a Pose Viewer tab -- 'phone' for the only connected one, or an explicit
       // captureId when more than one is attached. Screenshot stays
       // browser-only: it reads the desktop's THREE canvas, which has no
@@ -109,7 +109,7 @@ wss.on('connection', (ws) => {
       // Worth the routing branch because a phone reload is expensive in a way
       // a desktop reload is not (iOS motion permission has to be re-granted
       // from a user gesture, and the camera stream re-negotiates) -- see
-      // mobileCapture.ts's own eval handler.
+      // poseViewer/client/relay.ts's own eval handler.
       if (msg.type === 'eval' && msg.target) {
         const entries = [...captureSockets.entries()].filter(([s]) => s.readyState === s.OPEN);
         const match = msg.target === 'phone'
@@ -117,7 +117,7 @@ wss.on('connection', (ws) => {
           : entries.find(([, id]) => id === msg.target);
         if (!match) {
           const why = entries.length === 0
-            ? 'no phone connected — is mobile-capture.html open?'
+            ? 'no phone connected — is pose-viewer-client.html open?'
             : msg.target === 'phone'
               ? `${entries.length} phones connected — pass --phone=<captureId>: ${entries.map(([, id]) => id).join(', ')}`
               : `no phone with captureId ${msg.target}`;
@@ -160,7 +160,7 @@ wss.on('connection', (ws) => {
       return;
     }
 
-    // Capture source (mobile-capture.html) -> broadcast to EVERY connected
+    // Capture source (pose-viewer-client.html) -> broadcast to EVERY connected
     // Pose Viewer tab, not just the latest one -- this is the one message
     // type meant to fan out. captureId (this connection's own assigned id)
     // rides along so Pose Viewer can tell which phone a photo came from.
@@ -238,7 +238,7 @@ wss.on('connection', (ws) => {
 
     // Capture source -> broadcast, same fan-out as realCapture/captureMode --
     // periodic self-reported stats on how often the phone's camera hardware
-    // is actually delivering new frames (see mobileCapture.ts's
+    // is actually delivering new frames (see poseViewer/client/camera.ts's
     // requestVideoFrameCallback loop), for telling "the round trip is slow"
     // apart from "the phone's camera isn't producing frames any faster than
     // this in the first place."
@@ -251,7 +251,7 @@ wss.on('connection', (ws) => {
     }
 
     // Capture source -> broadcast, same fan-out as frameStats: batched
-    // accelerometer/gyro samples from the phone (mobileCapture.ts's
+    // accelerometer/gyro samples from the phone (capture/motion.ts's
     // devicemotion handler), ~10 messages/second each carrying ~6 samples.
     // Recording only for now -- nothing in the pose pipeline consumes these
     // yet; see the motion-blur/IMU plan's phase A.
@@ -270,7 +270,7 @@ wss.on('connection', (ws) => {
     // Browser -> a specific phone: is Pose Viewer ready to receive/process
     // another frame from it (the
     // phone uses that to decide if "not ready" should still block sending
-    // -- see mobileCapture.ts). Routed the same way kickCapture is (find
+    // -- see poseViewer/client/relay.ts). Routed the same way kickCapture is (find
     // the one capture socket matching captureId), just sent instead of
     // closed.
     if (msg.type === 'captureReady' && msg.captureId) {

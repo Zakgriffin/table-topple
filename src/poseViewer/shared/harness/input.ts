@@ -75,8 +75,8 @@ export interface HarnessInput {
 // `poseStateFor` USED TO BE HERE, and its deletion is the clearest single
 // measure of what step 5f bought. It built a blank twelve-null-field
 // PoseComputeState for computePoseFromCapture to mutate -- boilerplate
-// mobileCapture.ts and reconstructionTiming.ts each hand-rolled their own copy
-// of, which was the reason to share it.
+// the phone page and the since-deleted reconstructionTiming.ts each hand-rolled
+// their own copy of, which was the reason to share it.
 //
 // There is nothing left to build. A HarnessInput already carries `aspect` and
 // `settings`, so it satisfies PoseInput as it stands, and the results come back

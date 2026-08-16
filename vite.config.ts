@@ -33,7 +33,7 @@ export default defineConfig({
     },
     proxy: {
       // Proxies the dev-bridge relay's websocket through this same HTTPS
-      // origin -- mobile-capture.html is loaded over https (required for
+      // origin -- pose-viewer-client.html is loaded over https (required for
       // getUserMedia on a phone), and a page loaded over https can't open a
       // plain insecure ws:// connection to anything except localhost
       // (mixed-content blocking). Riding this proxy means the phone only

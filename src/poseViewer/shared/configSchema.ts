@@ -75,7 +75,7 @@ export const GlobalSettingsSchema = Type.Object({
   forceCPU: Type.Boolean(),
 }, strict);
 
-// The phone page's own debug toggles (mobile-capture.html). Not part of
+// The phone page's own debug toggles (pose-viewer-client.html). Not part of
 // PoseInput['settings'] -- those are pushed down per-camera by
 // devBridge/client.ts's settingsSync and are already covered by camera.common
 // -- these are the switches that only mean anything on the device: whether it

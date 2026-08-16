@@ -128,7 +128,7 @@ export function updateGizmo(camera: SimulatedCamera): { hFovRad: number; vFovRad
   return { hFovRad, vFovRad };
 }
 
-// Great-sphere overlays (poles/circles/frustum/patch/recovered markers) --
+// Vanishing-point sphere overlays (poles/circles/frustum/patch/recovered markers) --
 // repositioned (not rotated) to the camera's own origin each frame. A
 // simulated camera anchors at its ground-truth camPos/camQuat, exactly as
 // before. A physical camera has no ground truth, so it anchors at its own

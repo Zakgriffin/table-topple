@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>De Bruijn Torus Tracker</title>
+<title>Table Topple Page Directory</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
   html, body {
@@ -10,8 +10,6 @@
     font-family: monospace; display: flex; align-items: center; justify-content: center;
   }
   .wrap { max-width: 640px; padding: 40px; }
-  h1 { font-size: 22px; margin-bottom: 8px; }
-  p.sub { color: #999; font-size: 13px; margin-bottom: 32px; }
   .cards { display: flex; gap: 20px; flex-wrap: wrap; }
   a.card {
     flex: 1; min-width: 240px; display: block; text-decoration: none; color: inherit;
@@ -26,27 +24,25 @@
 </head>
 <body>
 <div class="wrap">
-  <h1>De Bruijn Torus</h1>
-  <p class="sub">Pick a page.</p>
   <div class="cards">
     <a class="card" href="/pose-viewer-server.html">
       <h2>Pose Viewer Server</h2>
-      <p>Three.js testbed: virtual floor pattern, movable camera, and the vanishing-point sphere from the inside.</p>
+      <p>Testbed for pose reconstruction tuning and testing.</p>
       <span class="tag">&rarr; pose-viewer-server.html</span>
     </a>
-    <a class="card" href="/mobile-capture.html">
-      <h2>Mobile Capture</h2>
-      <p>Phone camera + zoom, no analysis pipeline -- takes a photo and relays it to any open Pose Viewer tab as a real capture.</p>
-      <span class="tag">&rarr; mobile-capture.html</span>
+    <a class="card" href="/pose-viewer-client.html">
+      <h2>Pose Viewer Client</h2>
+      <p>Accompanying client for image capture on mobile devices.</p>
+      <span class="tag">&rarr; pose-viewer-client.html</span>
     </a>
-    <a class="card" href="/game.html">
+    <a class="card" href="/table-topple-server.html">
       <h2>Table Topple Server</h2>
-      <p>The game the tracking is for. Plain Three.js sandbox -- orbit camera, gridded board, no pose pipeline attached.</p>
-      <span class="tag">&rarr; game.html</span>
+      <p>Board game server to host a game session.</p>
+      <span class="tag">&rarr; table-topple-server.html</span>
     </a>
     <a class="card" href="/table-topple-client.html">
       <h2>Table Topple Client</h2>
-      <p>The same world, on a phone held over the printed board: live camera, pose reconstructed on the device, game drawn over the feed where the real board is.</p>
+      <p>Accompanying client for board game players' mobile devices.</p>
       <span class="tag">&rarr; table-topple-client.html</span>
     </a>
   </div>

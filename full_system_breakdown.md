@@ -24,7 +24,7 @@ is clean; all four HTML entry points build.
 
 **Phase 3 is done for the desktop app and NOT for the phone.**
 `pipeline/axesReconstruction.ts` runs the real pipeline and Pose Viewer recovers a
-pose again. `src/mobileCapture.ts` does not — it needs its own device and
+pose again. `src/poseViewer/client/` does not — it needs its own device and
 per-resolution context, which is a different lifecycle and deliberately not
 shared. Until then the phone reports `[no fix]` on every frame and the IMU-fusion
 A/B has nothing to anchor to.
@@ -70,7 +70,7 @@ the bytes. See §18's "Reading a buffer back".
    `tests/pose*` test is to be deleted on its evidence or anyone else's. The
    deliberation stays open — the hold is not its outcome.
 2. **Put the phone on pose.** The other half of Phase 3, and independent of
-   everything below. `src/mobileCapture.ts` needs a WebGPU device and a
+   everything below. `src/poseViewer/client/` needs a WebGPU device and a
    per-resolution `PoseContext`; the desktop's lifecycle in
    `axesReconstruction.ts` is a model, not a thing to share.
 3. **Re-point the Pose Viewer overlays** at the inspected buffers, one at a time.

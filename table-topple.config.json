@@ -1,0 +1,18 @@
+{
+  "capture": {
+    "width": 480,
+    "height": 640,
+    "facing": "environment"
+  },
+  "pose": {
+    "horizFovDeg": 65,
+    "lsdToleranceDeg": 9.5,
+    "lsdRhoNoiseThreshold": 0.132,
+    "lsdRhoHighThreshold": 0,
+    "lsdNfaEpsilon": 1,
+    "lsdNfaTestExponent": 5,
+    "lsdMinRegionSize": 2,
+    "lsdMinLengthPx": 3,
+    "minGrazingCos": 0.1
+  }
+}

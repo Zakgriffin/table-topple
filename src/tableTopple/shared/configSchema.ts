@@ -1,0 +1,100 @@
+import { Type } from '@sinclair/typebox';
+import type { Static } from '@sinclair/typebox';
+
+// ── Table Topple's config file, its shape ────────────────────────────────
+//
+// Split from config.ts so that this module is PURE: no fetch, no
+// localStorage, no top-level await, nothing that assumes a browser. That is
+// what lets scripts/check-table-topple-config.mjs validate
+// table-topple.config.json from the command line against the very same schema
+// the page will use, instead of finding out at boot. Pose Viewer's
+// configSchema.ts is pure for exactly the same reason; if this module ever
+// grows a browser dependency, that script is what breaks first, which is the
+// intended alarm.
+//
+// ── WHY A SECOND CONFIG FILE AT ALL ──
+//
+// The isolation rule: Table Topple imports nothing from Pose Viewer, so it
+// cannot read pose-viewer.config.json, and the pose library deliberately ships
+// no defaults of its own -- it takes a settings object per stage precisely so
+// that thresholds stay a property of a board and a camera rather than of the
+// library. Something had to own these numbers on this side, and a second JSON
+// keeps the project's one hard rule intact: no default value exists anywhere
+// except a config file. Not in TypeScript, not as an attribute in the HTML.
+//
+// ── WHAT IT DOES NOT HAVE, AND WHY ──
+//
+// No localStorage overlay, no save button, no per-camera section. Pose Viewer
+// has all three because it is a lab with ~45 live controls; this client has no
+// settings UI at all, so an overlay would be a second source of truth that
+// nothing can write and nobody can inspect. If this page ever grows sliders,
+// the overlay is the thing to add, and config.ts is where it goes.
+
+const strict = { additionalProperties: false } as const;
+
+// ── Capture ──────────────────────────────────────────────────────────────
+//
+// One fixed resolution, requested once at boot, and one PoseContext built for
+// it that lives as long as the page. There is deliberately no dropdown and no
+// probe sweep: pose cost is strongly resolution-dependent, so pinning this to
+// the same 480x640 the sweep measures means this phone's numbers are directly
+// comparable to every measurement already taken, rather than being a fresh
+// unknown. Changing it is a config edit and a reload.
+//
+// A camera may legitimately refuse the request or hand back something else --
+// see capture/stream.ts on why that is normal rather than an error, and
+// client/camera.ts for what this page does about it (it believes the video
+// element, not the request).
+export const CaptureSettingsSchema = Type.Object({
+  width: Type.Number(),
+  height: Type.Number(),
+  facing: Type.Union([Type.Literal('environment'), Type.Literal('user')]),
+}, strict);
+export type CaptureSettings = Static<typeof CaptureSettingsSchema>;
+
+// ── Pose ─────────────────────────────────────────────────────────────────
+//
+// The thresholds `runPose` is handed every frame. The names match the library's
+// own stage settings rather than being renamed here, so a value can be traced
+// from this file to the stage that reads it without a translation table --
+// client/pose.ts is the only place they are regrouped, and it does nothing but
+// regroup them.
+//
+// THE VALUES START WHERE POSE VIEWER'S DO, AND THAT IS NOT LAZINESS: both
+// projects decode the same printed De Bruijn board through a phone camera, so
+// the tuning is a property of that board and that sensor, not of the app. They
+// are written out here rather than inherited because the two are now
+// independently editable -- if Table Topple ever prints a board at a different
+// contrast, this is the file that moves, and Pose Viewer's does not.
+export const PoseTuningSchema = Type.Object({
+  // Vertical FOV is DERIVED from this and the frame's aspect (see
+  // client/pose.ts). Horizontal is what a camera's spec sheet quotes, so it is
+  // what gets written down.
+  horizFovDeg: Type.Number(),
+  // Gradient-orientation agreement, in degrees, for a pixel to join a region.
+  lsdToleranceDeg: Type.Number(),
+  // rho LOW -- the participation floor. Below this a pixel never joins.
+  lsdRhoNoiseThreshold: Type.Number(),
+  // rho HIGH -- the survival bar for a grown region. At or below the floor,
+  // hysteresis degrades to plain single-threshold behaviour, which is what a 0
+  // here means.
+  lsdRhoHighThreshold: Type.Number(),
+  // NFA acceptance: a region is a line if its number of false alarms is under
+  // this, tested against 2^-exponent candidate rectangles.
+  lsdNfaEpsilon: Type.Number(),
+  lsdNfaTestExponent: Type.Number(),
+  // Minimum PIXELS in a connected component, applied before any line is fitted.
+  lsdMinRegionSize: Type.Number(),
+  // Minimum fitted-segment LENGTH in pixels. Not the same filter as
+  // lsdMinRegionSize, and the two are easy to confuse.
+  lsdMinLengthPx: Type.Number(),
+  // How close to edge-on the board may be before its geometry is refused.
+  minGrazingCos: Type.Number(),
+}, strict);
+export type PoseTuning = Static<typeof PoseTuningSchema>;
+
+export const TableToppleConfigSchema = Type.Object({
+  capture: CaptureSettingsSchema,
+  pose: PoseTuningSchema,
+}, strict);
+export type TableToppleConfig = Static<typeof TableToppleConfigSchema>;

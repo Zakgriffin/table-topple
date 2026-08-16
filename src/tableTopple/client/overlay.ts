@@ -3,14 +3,15 @@ import { camera, scene } from '../shared/scene.ts';
 import { step } from '../shared/sim.ts';
 import { BOARD_SIZE } from '../shared/constants.ts';
 import { CELL_PITCH, board } from '../shared/floorPattern.ts';
+import { arCanvas } from './dom.ts';
 
 // The board game, drawn over the live camera feed.
 //
-// This is the AR overlay on mobile-capture.html: the same world game.html
+// This is table-topple-client.html: the same world table-topple-server.html
 // renders, on a transparent canvas laid exactly over the viewfinder, seen
-// through a camera at the pose the reconstruction pipeline recovered. When the
-// decode is good, the virtual board lands on the printed De Bruijn pattern in
-// the real feed underneath it.
+// through a camera at the pose this device's own reconstruction recovered. When
+// the decode is good, the virtual board lands on the printed De Bruijn pattern
+// in the real feed underneath it.
 //
 // It replaces what used to be here -- a translucent blue rectangle and a red
 // marker cube. Those were a pose-correctness readout and nothing more. The
@@ -20,22 +21,27 @@ import { CELL_PITCH, board } from '../shared/floorPattern.ts';
 //
 // ── What this module is, and is not ──────────────────────────────────────
 //
-// It is the SECOND host of src/game, next to game.html's own main.ts, and it
-// exists as a separate file for a merge reason as much as a design one: the
-// board game is developed on its own branch, which touches only src/game.
-// Every adaptation needed to render that world here lives in this file and in
-// mobileCapture.ts, and nothing in src/game is edited on this side -- so the
-// two branches never diverge inside src/game and merges between them stay
-// clean. The seam that makes that possible is the split in src/game itself
-// (scene.ts = world, view.ts = game.html's presentation, sim.ts = one frame of
-// world with no drawing), which was cut once on the game branch and merged
-// here rather than being reinvented on main.
+// It is the SECOND host of this project's world, next to
+// table-topple-server.html's own main.ts. The seam that makes two hosts
+// possible is the split in shared/ itself: scene.ts is the world, server/view.ts
+// is the standalone page's presentation, sim.ts is one frame of world with no
+// drawing in it. This file is the presentation half for a host that owns no
+// canvas of its own, orbits nothing, and is told where the camera is.
 //
-// So: no keyboard, no pointer, no orbit controls, no pointer lock. src/game
-// only wires those when a host asks it to (wireKeys, wireAim, ...), and this
-// host never asks. The capture page's own taps stay the capture page's.
+// So: no keyboard, no pointer, no orbit controls, no pointer lock. shared/ only
+// wires those when a host asks it to (wireKeys, wireAim, ...), and this host
+// never asks -- there is no mouse on a phone held over a table, and the page's
+// own taps stay the page's.
+//
+// THIS FILE SPENT A PHASE AS DEAD CODE. It was written against the AR overlay
+// that used to live on Pose Viewer's capture page, survived the split into two
+// projects, and then sat imported by nothing, reaching for an `#arCanvas` no
+// page served. Phase 6 is the page. Its history explains the shape: the
+// adapters it was originally paired with converted Pose Viewer's pose and the
+// desktop's poseSync, and neither came across, because this client computes its
+// own pose locally and hands it here directly (see client/pose.ts).
 
-const canvas = document.getElementById('arCanvas') as HTMLCanvasElement;
+const canvas = arCanvas;
 
 // alpha + a zero clear alpha is the whole reason this can't reuse the game's
 // own renderer from view.ts: that one is opaque, because a full-screen game
@@ -44,10 +50,10 @@ const renderer = new THREE.WebGLRenderer({ canvas, alpha: true, antialias: true 
 renderer.setClearColor(0x000000, 0);
 renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
 
-// Near plane pulled in from the game's own 0.1: game.html's camera is always
-// at least controls.minDistance (3 units) from what it looks at, while this
-// one is wherever the phone happens to be -- including close enough over the
-// board that 0.1 would clip the near cells away.
+// Near plane pulled in from the game's own 0.1: the standalone page's camera is
+// always at least controls.minDistance (3 units) from what it looks at, while
+// this one is wherever the phone happens to be -- including close enough over
+// the board that 0.1 would clip the near cells away.
 camera.near = 0.05;
 
 // ── Fitting the game's board onto the physical one ───────────────────────
@@ -83,9 +89,10 @@ fitBoardToPattern();
 
 // ── Pose ─────────────────────────────────────────────────────────────────
 
-/** A camera pose to draw the board from. Two sources produce it -- this
- *  device's own reconstruction, and one synced down from the desktop -- and
- *  both normalize to this before arriving here (see mobileCapture.ts). */
+/** A camera pose to draw the board from. ONE source produces it -- this
+ *  device's own reconstruction, via client/pose.ts's toCameraPose. There was
+ *  briefly a second (a pose synced down from a desktop), and it is gone with
+ *  the decision that pose never leaves the client that computed it. */
 export interface ARCameraPose {
   camPos: THREE.Vector3; recoveredCamQuat: THREE.Quaternion; aspect: number; fovDeg: number;
 }
@@ -107,9 +114,9 @@ export function updateOverlayCamera(pose: ARCameraPose | null) {
   camera.updateProjectionMatrix();
 }
 
-// Mirrors captureCanvas's own INTRINSIC (cw,ch) directly, not its rendered CSS
+// Mirrors the viewfinder's own INTRINSIC (cw,ch) directly, not its rendered CSS
 // box -- both canvases share the exact same CSS letterbox fit (see
-// mobile-capture.html), so matching intrinsic dimensions is what keeps this
+// table-topple-client.html), so matching intrinsic dimensions is what keeps this
 // canvas scaled/positioned identically to the viewfinder underneath. `false`
 // (skip three.js's own inline-style sizing) since the stylesheet already owns
 // display sizing for both canvases identically. Only touches the GL backing
@@ -124,9 +131,15 @@ export function syncOverlayRendererSize(cw: number, ch: number) {
 /**
  * One frame: advance the world, then draw it.
  *
- * Called only while the overlay is switched on, so a hidden overlay costs
- * neither the simulation nor the draw -- this page is already CPU/GPU bound by
- * continuous pose recovery in video mode.
+ * Advancing the world happens even with no fix, and only the DRAW is skipped.
+ * That is deliberate: the simulation is the shared world, and pausing it
+ * whenever the camera loses the board would make the game's state a function of
+ * how steady someone's hand is. A lost decode should cost you the picture, not
+ * the match.
+ *
+ * This page is CPU/GPU bound by continuous pose recovery, so the cost matters --
+ * but `step` is the cheap half, and the renderer.clear() path below skips the
+ * expensive one.
  *
  * `dt` comes from the caller rather than a clock of this module's own, because
  * the caller is the one that knows how long the frame took and already caps it

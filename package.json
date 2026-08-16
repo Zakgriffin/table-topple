@@ -9,7 +9,7 @@
         "print:board": "node scripts/print-debruijn-board.ts",
         "test": "node --test --test-force-exit \"tests/**/*.test.ts\"",
         "check:types": "tsc --noEmit",
-        "check:config": "node scripts/check-config.mjs",
+        "check:config": "node scripts/check-config.mjs && node scripts/check-table-topple-config.mjs",
         "check:fixtures": "node scripts/check-fixtures.mjs",
         "fixture:save": "node scripts/dev-bridge/save-fixture.mjs",
         "fixture:restore": "node scripts/dev-bridge/restore-fixture.mjs",

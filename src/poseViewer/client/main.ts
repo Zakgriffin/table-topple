@@ -13,6 +13,33 @@
 // "Not ready" is purely a status indicator for the shutter button's yellow
 // "working" state -- Pose Viewer's capture mailbox can always take a fresher
 // frame, busy or not, so sending is never blocked by it.
+//
+// ── WHAT IS LEFT IN THIS FILE ────────────────────────────────────────────
+//
+// The page's own subjects, and the boot sequence that starts them. Four
+// modules carry the rest, each importable without this one:
+//
+//   dom.ts          every element, resolved once. the LEAF -- imports nothing
+//   camera.ts       the stream, its controls, and the two capture canvases
+//   imu.ts          recording, judging and correcting with the IMU
+//   relay.ts        one websocket, and everything that gates a send on it
+//   poseRecords.ts  the pose ring, and whether a recording is even valid
+//   inspect.ts      the declared scope a dev-bridge eval runs in
+//
+// What stays here is what genuinely belongs to the PAGE: the config mirror,
+// the capture/compute mode switches, the two send paths, the video loop and
+// its own tick accounting, and the wiring that hands each module the few
+// things only this file knows.
+//
+// ── WHY THE MODULES TAKE HOSTS INSTEAD OF IMPORTING THIS FILE ────────────
+//
+// This page hit a TEMPORAL DEAD ZONE fault as a single file -- a render loop
+// had to be *scheduled* rather than called, because it read bindings declared
+// below it. The fix that stuck is structural: nothing in client/ imports
+// main.ts, so no cycle can form and no module can be mid-initialization when
+// another reads it. Where a module needs something of this page's, this page
+// REGISTERS it, at the END of this file, where every binding those closures
+// read is already initialized. Keep that direction.
 
 import { toGrayscale } from '../../pose/grayscale.ts';
 import { config, fetchConfigFile } from '../shared/config.ts';
@@ -39,29 +66,26 @@ import type { PipelineSettings } from '../shared/harness/input.ts';
 // Wiring pose in here is its own job: the phone needs a WebGPU device and a
 // per-resolution PoseContext, which is a different lifecycle from the desktop's.
 type LocalPose = { recoveredAxes: RecoveredAxes | null; positionDecode: PositionDecodeResult | null };
-// Shared with the desktop rather than restated here, so the wire shape and
-// the recorded shape cannot drift apart -- this page PRODUCES the value that
-// camera/model.ts types on the receiving end.
-import type { FrameMeta } from '../shared/camera/model.ts';
+
 import {
-  type ProbeResult, type ResCandidate,
-  RES_PROBE_DELAY_MS, applyFrameRate, applyZoom, buildResCandidateList, detectAxesSwapped,
-  probeResolution, readFrameRate, readZoomRange, requestPlainStream, requestStreamAt, sleep, zoomAt,
-} from '../../capture/stream.ts';
-import { isMotionListening, motionRateHz } from '../../capture/motion.ts';
+  currentFacing, drawCurrentFrameToCanvas, drawFullResFrameToSendCanvas, hasLiveFrame,
+  latestFrameMeta, nominalFrameRate, sendCanvas, sendCtx, startCamera, takeFrameIntervalStats,
+} from './camera.ts';
 import {
-  FRAME_PAIR_CAP, WORLD_UP, attachImuHost, clearImuRing, framePairs, imuRing, imuStats,
-  imuTracker, lastAcceptedQuat, refreshImuFrameContext, rotationVectorBetween, setUpCamera,
-  useImuCorrection,
+  FRAME_PAIR_CAP, WORLD_UP, attachImuHost, framePairs, imuStats, imuTracker, lastAcceptedQuat,
+  refreshImuFrameContext, rotationVectorBetween, setUpCamera, useImuCorrection,
 } from './imu.ts';
+import { evalInScope } from './inspect.ts';
+import { noteSettingsSync, recordPose, settingsSyncedAt, syncedBoardSize } from './poseRecords.ts';
+import {
+  attachRelayHost, connectRelay, isRelayOpen, sendBinary, sendGateStatus, sendJson, setRelayStatus,
+} from './relay.ts';
 import { packPoseResultWithImage } from '../shared/devBridge/poseResultWire.ts';
 import { nowMs } from '../../clock.ts';
 import {
-  camStatus, captureCanvas, captureCtx, chromeToggleBtn, computeOnDeviceCheckbox, detectResBtn,
-  fpsSlider, fpsValue, imuCheckbox, imuCorrectionCheckbox, modeSingleBtn, modeVideoBtn,
-  poseReadoutEl, probeLogCloseBtn, probeLogMatchHeader, probeLogPanel, probeLogTbody,
-  probeLogToggleBtn, relayStatus, reloadConfigBtn, reloadConfigStatus, resSelect,
-  sendCapturedImageCheckbox, sendDebugInfoCheckbox, shutterBtn, switchCamBtn, video, zoomSlider,
+  camStatus, chromeToggleBtn, computeOnDeviceCheckbox, imuCheckbox, imuCorrectionCheckbox,
+  modeSingleBtn, modeVideoBtn, poseReadoutEl, reloadConfigBtn, reloadConfigStatus,
+  sendCapturedImageCheckbox, sendDebugInfoCheckbox, shutterBtn,
 } from './dom.ts';
 
 // mobile-capture.html carries no `checked` attributes -- config.phone owns
@@ -134,322 +158,6 @@ chromeToggleBtn.addEventListener('click', () => {
   chromeToggleBtn.blur();
 });
 
-// ── Camera + zoom ────────────────────────────────────────────────────────
-//
-// The stream itself, and everything hard-won about negotiating one, is
-// src/capture/stream.ts. This half is the page: which control reflects what,
-// and what the status line says.
-
-let currentStream: MediaStream | null = null;
-let currentFacing = 'environment';
-let zoomRange: { min: number; max: number } | null = null;
-
-function setupZoomControl() {
-  zoomRange = readZoomRange(currentStream);
-  if (!zoomRange) { zoomSlider.disabled = true; return; }
-  zoomSlider.disabled = false;
-  zoomSlider.min = '0';
-  zoomSlider.max = '1';
-  zoomSlider.step = '0.001';
-  zoomSlider.value = '0';
-  applyZoom(currentStream, zoomRange.min);
-}
-
-zoomSlider.addEventListener('input', () => {
-  if (zoomRange) applyZoom(currentStream, zoomAt(zoomRange, parseFloat(zoomSlider.value)));
-});
-
-// ── Sent-image resolution, the page's half ──────────────────────────────
-//
-// WHY there is a sweep at all, WHY the constraints are shaped the way they are,
-// and WHAT the axis swap is, all live in src/capture/stream.ts -- that is the
-// platform knowledge, and both clients need it. What is left here is the
-// dropdown, the probe-log table, and the sequencing of a sweep against them.
-let resCandidates: ResCandidate[] = [];
-
-// Rebuilds the <option> list from the current resCandidates -- called
-// after every probe (not just once at the end) so the dropdown fills in
-// live as the sweep progresses, rather than sitting inert/unexplained for
-// however long the whole sweep takes. 'rejected' candidates are left OUT
-// entirely now, not just disabled/grayed -- with everything shown genuinely
-// confirmed-good, there's no reason to also show a pile of known-bad
-// options (the full detail of WHY each one failed lives in the probe log
-// instead, see probeResolution/renderProbeLog).
-function renderResOptions() {
-  const currentValue = resSelect.value;
-  resSelect.innerHTML = '';
-  const shown = resCandidates.filter((c) => c.status !== 'rejected');
-  // Only reachable if setupDefaultResOption itself couldn't populate
-  // anything (video dimensions not ready yet), or every candidate probed
-  // so far has failed -- an empty <select> would just look broken rather
-  // than explaining what to do.
-  if (shown.length === 0) {
-    const opt = document.createElement('option');
-    opt.textContent = 'tap "detect" →';
-    resSelect.appendChild(opt);
-    return;
-  }
-  for (const c of shown) {
-    const opt = document.createElement('option');
-    opt.value = `${c.w}x${c.h}`;
-    opt.textContent = c.status === 'untested' ? `${c.w} × ${c.h} (untested)` : `${c.w} × ${c.h}`;
-    resSelect.appendChild(opt);
-  }
-  if (Array.from(resSelect.options).some((o) => o.value === currentValue)) resSelect.value = currentValue;
-}
-
-// Reconnects to a plain, unconstrained stream on the SAME physical camera
-// (deviceId if known, else falls back to facingMode) -- used to bring the
-// viewfinder back after a failed/rejected resolution request or after the
-// sweep finishes, WITHOUT going through startCamera itself: that also
-// calls setupDefaultResOption, which would blow away whatever candidates
-// list is currently populated (the very thing the caller usually still
-// wants showing in the dropdown).
-async function reconnectPlainStream(deviceId: string | undefined) {
-  try {
-    await adoptStream(await requestPlainStream(deviceId, currentFacing));
-    refreshCamStatusResolution();
-  } catch (e: any) {
-    camStatus.textContent = 'camera error: ' + e.message;
-  }
-}
-
-// Applies a candidate already CONFIRMED supported (either by the sweep, or
-// just whatever the camera is already streaming at by default) by
-// swapping the live feed to a fresh stream at exactly (w,h) -- see
-// requestStreamAt's own comment on why a fresh stream, not
-// applyConstraints(). Returns whether the camera actually ended up at
-// exactly (w,h), not just whether the request succeeded at all: a real
-// device can resolve successfully while still landing on a DIFFERENT
-// resolution than requested. Always refreshes camStatus with whatever the
-// camera ACTUALLY ends up at either way (see refreshCamStatusResolution),
-// so a mismatch or an outright rejection is visibly reported instead of
-// silently assumed to have worked. On rejection, reconnects to SOME
-// working stream rather than leaving the camera dead, since the old stream
-// already had to be stopped before requesting the new one (real camera
-// hardware generally can't have two opens on the same device at once).
-//
-// If resolutionAxesSwapped was detected by a prior sweep (see its own
-// comment), the REQUEST sent here is swapped to compensate -- w,h below
-// always mean the TRUE target (what video.videoWidth/videoHeight should
-// end up as), never the raw request.
-async function applyExactResolution(w: number, h: number): Promise<boolean> {
-  if (video.videoWidth === w && video.videoHeight === h) { refreshCamStatusResolution(); return true; } // already exactly there
-  const deviceId = currentStream?.getVideoTracks()[0]?.getSettings().deviceId;
-  if (currentStream) currentStream.getTracks().forEach((t) => t.stop());
-  const stream = resolutionAxesSwapped ? await requestStreamAt(deviceId, h, w) : await requestStreamAt(deviceId, w, h);
-  if (!stream) {
-    camStatus.textContent = `resolution ${w}x${h} REJECTED by camera`;
-    await reconnectPlainStream(deviceId);
-    return false;
-  }
-  await adoptStream(stream);
-  const ok = video.videoWidth === w && video.videoHeight === h;
-  if (!ok) camStatus.textContent = `resolution ${w}x${h} requested but camera gave ${video.videoWidth}x${video.videoHeight} instead`;
-  refreshCamStatusResolution();
-  return ok;
-}
-
-// Single source of truth for "what resolution is the camera actually at
-// right now" -- reads video.videoWidth/videoHeight (what real captures
-// actually use, see drawFullResFrameToSendCanvas) so camStatus and the
-// resolution dropdown can never drift from reality the way camStatus used
-// to (it was previously set ONCE in startCamera and never touched again,
-// so it kept showing the pre-selection resolution forever after). Also
-// re-syncs resSelect's displayed value, since a rejected/overridden
-// request means the dropdown's own selection can no longer be trusted to
-// reflect what's live either.
-function refreshCamStatusResolution() {
-  const w = video.videoWidth, h = video.videoHeight;
-  if (!w || !h) return;
-  camStatus.textContent = `${currentFacing} camera, ${w}x${h}`;
-  const value = `${w}x${h}`;
-  if (Array.from(resSelect.options).some((o) => o.value === value)) resSelect.value = value;
-}
-
-resSelect.addEventListener('change', () => {
-  const [w, h] = resSelect.value.split('x').map(Number);
-  applyExactResolution(w, h);
-});
-
-// Populates the dropdown with just whatever the camera is ALREADY
-// streaming at by default (from startCamera's own unconstrained
-// negotiation) -- a single, always-safe, zero-extra-requests option, so
-// the viewfinder/shutter are usable immediately without ever running the
-// (much more invasive) sweep below. Called from startCamera, same as
-// setupZoomControl/setupFramerateControl.
-function setupDefaultResOption() {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh) { resSelect.disabled = true; return; }
-  resCandidates = [{ w: vw, h: vh, status: 'supported' }];
-  renderResOptions();
-  resSelect.disabled = false;
-}
-
-// The probe-log table's backing rows. `ProbeResult` is capture/stream.ts's --
-// what was asked for, whether getUserMedia resolved, what the camera settled
-// on. Kept for the whole session (not just the latest sweep) so runs can be
-// compared; there is no clear action yet, so in practice it grows across
-// sweeps, which is fine for a debug tool nobody leaves running.
-let probeLog: ProbeResult[] = [];
-
-// e.matched (on the entry itself) is always the RAW, direct requested-vs-
-// actual comparison -- never mutated once a probe finishes, so it stays a
-// simple fact. Once resolutionAxesSwapped is known (see its own comment),
-// the MEANINGFUL match check is the flipped one instead, so this recomputes
-// it fresh at render time (never overwriting entry.matched) and relabels
-// the column header to say so -- otherwise the table would keep showing
-// "no" for rows the sweep has already reclassified as supported, which
-// would look like a contradiction rather than the correct, reinterpreted
-// answer.
-function renderProbeLog() {
-  probeLogMatchHeader.textContent = resolutionAxesSwapped ? 'match (flipped)?' : 'match?';
-  probeLogTbody.innerHTML = '';
-  for (const e of probeLog) {
-    const tr = document.createElement('tr');
-    const resolvedText = e.resolved ? 'yes' : `no${e.error ? ` — ${e.error}` : ''}`;
-    const actualText = e.actualW != null ? `${e.actualW}×${e.actualH}` : '—';
-    const effectiveMatch = resolutionAxesSwapped
-      ? (e.actualW === e.requestedH && e.actualH === e.requestedW)
-      : e.matched;
-    tr.innerHTML = `<td>${e.requestedW}×${e.requestedH}</td><td>${resolvedText}</td><td>${actualText}</td><td>${effectiveMatch ? 'yes' : 'no'}</td>`;
-    tr.className = effectiveMatch ? 'pass' : 'fail';
-    probeLogTbody.appendChild(tr);
-  }
-}
-probeLogToggleBtn.addEventListener('click', () => probeLogPanel.classList.toggle('visible'));
-probeLogCloseBtn.addEventListener('click', () => probeLogPanel.classList.remove('visible'));
-
-// Some platforms consistently report video.videoWidth/videoHeight SWAPPED
-// relative to whatever width/height was actually requested -- confirmed
-// live this session on Chrome for iOS, which (like every browser on iOS,
-// by Apple's own App Store rules) is required to use WebKit as its actual
-// engine regardless of branding. WebKit negotiates the camera in its own
-// fixed sensor-native space, then rotates the delivered frame to match the
-// phone's physical orientation WITHOUT also flipping which axis the
-// original request numbers meant -- so on a phone held in portrait, asking
-// for landscape dimensions comes back reporting portrait dimensions, and
-// vice versa, every single time. Detected empirically per sweep (see
-// sweepResolutionCandidates' own post-hoc majority-vote pass below), not
-// via user-agent sniffing -- same "verify, don't assume" principle as
-// everything else in this section. Once known, requestStreamAt/
-// applyExactResolution swap the REQUEST to compensate, while still
-// verifying against the TRUE target in video.videoWidth/videoHeight.
-let resolutionAxesSwapped = false;
-
-// Manually triggered ONLY (see detectResBtn's click handler) -- each probe
-// is a REAL, isolated stream open+close (see probeResolution), paced by
-// RES_PROBE_DELAY_MS between every attempt. The main viewfinder goes dark
-// for the sweep's duration (the live stream is stopped up front, below --
-// most camera hardware can't have two opens on one device at once) and
-// comes back once it's done; that's an accepted cost of getting a genuine
-// empirical answer instead of a guess.
-//
-// Applies nothing on its own once done, INCLUDING not restoring whatever
-// resolution was active before the sweep started -- the user picks what
-// they actually want from the now-populated dropdown afterward, same as
-// every other control in this file, rather than the sweep silently
-// deciding for them. Just reconnects to a plain unconstrained stream
-// (reconnectPlainStream, NOT startCamera -- that also calls
-// setupDefaultResOption, which would wipe out the candidate list this
-// sweep just spent time building) so the viewfinder isn't left dead.
-async function sweepResolutionCandidates() {
-  if (!currentStream) return;
-  resSelect.disabled = true;
-  detectResBtn.disabled = true;
-  probeLog = [];
-  renderProbeLog();
-  const deviceId = currentStream.getVideoTracks()[0]?.getSettings().deviceId;
-  const nativeW = video.videoWidth, nativeH = video.videoHeight;
-  resCandidates = buildResCandidateList();
-  if (nativeW && nativeH && !resCandidates.some((c) => c.w === nativeW && c.h === nativeH)) {
-    resCandidates.push({ w: nativeW, h: nativeH, status: 'supported' }); // this IS the video element's current live size, no probe needed
-    resCandidates.sort((a, b) => a.w * a.h - b.w * b.h);
-  }
-  renderResOptions();
-  currentStream.getTracks().forEach((t) => t.stop());
-
-  let i = 0;
-  const attempts: { cand: ResCandidate; entry: ProbeResult }[] = [];
-  for (const cand of resCandidates) {
-    if (cand.status !== 'untested') continue; // the injected native pair above is already known-good
-    i++;
-    detectResBtn.textContent = `detecting… ${i}/${resCandidates.length}`;
-    const entry = await probeResolution(deviceId, cand.w, cand.h);
-    cand.status = entry.matched ? 'supported' : 'rejected';
-    attempts.push({ cand, entry });
-    renderResOptions();
-    await sleep(RES_PROBE_DELAY_MS);
-  }
-
-  // Post-hoc majority vote, reusing the raw data every probe above already
-  // collected -- NOT a second sweep under the opposite assumption (see
-  // resolutionAxesSwapped's own comment on why that's unnecessary). If most
-  // resolved probes came back with actual dimensions swapped relative to
-  // what was requested, this platform swaps axes -- so every candidate
-  // that LOOKED rejected only because of that swap gets reclassified as
-  // supported, using data already in hand.
-  resolutionAxesSwapped = detectAxesSwapped(attempts.map((a) => a.entry));
-  // Refreshes the table's header/rows for the (possibly new) verdict even
-  // when it comes back false -- a PRIOR sweep could have left the header
-  // reading "match (flipped)?" and this run needs to be able to correct
-  // that back, not just flip it on.
-  renderProbeLog();
-  if (resolutionAxesSwapped) {
-    for (const { cand, entry } of attempts) {
-      if (entry.actualW === cand.h && entry.actualH === cand.w) cand.status = 'supported';
-    }
-    renderResOptions();
-  }
-
-  detectResBtn.textContent = 'detect';
-  detectResBtn.disabled = false;
-  resSelect.disabled = false;
-  await reconnectPlainStream(deviceId);
-}
-detectResBtn.addEventListener('click', () => sweepResolutionCandidates());
-
-// ── Frame rate, the page's half ─────────────────────────────────────────
-//
-// Why a frame-rate control exists at all -- it is a lever against MOTION BLUR,
-// not smoothness -- is in capture/stream.ts's readFrameRate. Bounds are 1fps (a
-// full second between frames, the slowest anyone would want) up to whatever the
-// camera admits to.
-const FPS_MIN = 1;
-let fpsMax = FPS_MIN;
-
-function setupFramerateControl() {
-  const { max, negotiated } = readFrameRate(currentStream);
-  const current = negotiated ?? undefined;
-  fpsMax = Math.max(FPS_MIN, max);
-
-  if (fpsMax <= FPS_MIN) {
-    fpsSlider.disabled = true;
-    return;
-  }
-  fpsSlider.disabled = false;
-  fpsSlider.min = String(FPS_MIN);
-  fpsSlider.max = String(fpsMax);
-  // No longer auto-applies fpsMax on load -- confirmed live this session
-  // (see the resolution dropdown's own comment on sweepResolutionCandidates)
-  // that an automatic, unprompted hardware reconfiguration on camera start
-  // can crash a real phone; frameRate is exactly that kind of call
-  // (applyConstraints -> real stream reconfiguration), so this now only
-  // REFLECTS whatever the browser already negotiated on its own, matching
-  // zoom/res's own "don't touch it automatically" posture -- the slider
-  // still visually defaults toward the fast end, but nothing actually
-  // fires until the user drags it themselves.
-  const initial = Math.min(fpsMax, Math.max(FPS_MIN, Math.round(current ?? fpsMax)));
-  fpsSlider.value = String(initial);
-  fpsValue.textContent = `${initial}`;
-}
-
-fpsSlider.addEventListener('input', () => {
-  const fps = parseInt(fpsSlider.value, 10);
-  fpsValue.textContent = `${fps}`;
-  applyFrameRate(currentStream, fps);
-});
-
 // ── On-device compute: settings mirror ──────────────────────────────────
 //
 // globalState here is THIS page's own module instance (mobile-capture.html
@@ -470,137 +178,57 @@ fpsSlider.addEventListener('input', () => {
 // it within a second of the phone connecting, and only shows up in the narrow
 // window before that push lands.
 let cameraSettings: PipelineSettings = { ...config.camera.common };
-// Tracks the last boardSize a settingsSync actually applied, so
-// rebuildFloorPatternData (which rebuilds the whole De Bruijn lookup table --
-// not cheap) only runs when boardSize genuinely changed, not on every
-// unrelated slider nudge riding along in the same message -- mirrors how
-// only the desktop's own board-size slider handler calls the THREE-side
-// rebuildFloorPattern today (see ui/cameraPanel.ts's 'boardSize' binding).
-let knownBoardSize: number | null = null;
 
+// WHEN a sync landed and WHAT board size it carried are poseRecords.ts's --
+// they say whether a recording is valid at all, so they live with the ring
+// they qualify. See its un-synced-defaults trap.
 function applySettingsSync(msg: any) {
+  let boardSize: number | null = null;
   if (msg.globalState) {
     // One flag where there were eight. An older desktop build sending the
     // per-stage set leaves this undefined -> false -> the GPU path, which is
     // what every one of those toggles defaulted to anyway, so a version skew
     // lands on the shipping configuration rather than on all-CPU.
     globalState.forceCPU = !!msg.globalState.forceCPU;
-    const boardSize = msg.globalState.boardSize;
-    if (typeof boardSize === 'number' && boardSize !== knownBoardSize) {
-      knownBoardSize = boardSize;
-      // Was MISSING, and the omission is why a settings diff read as a board
-      // mismatch: rebuildFloorPatternData updates the decode's actual inputs
-      // (R/C/torus/debruijnLookup in floorPattern.ts) but this page's own
-      // globalState.boardSize stayed at its hardcoded default forever. Harmless
-      // today -- nothing here reads it -- but it makes the phone misreport
-      // its own configuration, which is exactly how the far worse bug below
-      // stayed hidden.
-      globalState.boardSize = boardSize;
-      rebuildFloorPatternData(boardSize);
+    const incoming = msg.globalState.boardSize;
+    if (typeof incoming === 'number') {
+      boardSize = incoming;
+      // Only rebuild when it genuinely CHANGED: rebuildFloorPatternData
+      // rebuilds the whole De Bruijn lookup table, which is not cheap, and a
+      // settingsSync carries every slider whether or not any of them moved.
+      if (incoming !== syncedBoardSize()) {
+        // globalState.boardSize was MISSING here, and the omission is why a
+        // settings diff read as a board mismatch: rebuildFloorPatternData
+        // updates the decode's actual inputs (R/C/torus/debruijnLookup in
+        // floorPattern.ts) but this page's own globalState.boardSize stayed at
+        // its hardcoded default forever. Harmless today -- nothing here reads
+        // it -- but it makes the phone misreport its own configuration, which
+        // is exactly how the far worse bug in poseRecords.ts stayed hidden.
+        globalState.boardSize = incoming;
+        rebuildFloorPatternData(incoming);
+      }
     }
   }
   if (msg.cameraSettings) cameraSettings = { ...cameraSettings, ...msg.cameraSettings };
-  settingsSyncedAt = nowMs();
+  noteSettingsSync(boardSize);
 }
 
-// ── The un-synced-defaults trap ──────────────────────────────────────────
+// ── Loop-tick accounting ─────────────────────────────────────────────────
 //
-// null until the desktop has pushed a settingsSync. THIS PAGE WILL HAPPILY
-// COMPUTE POSES WITHOUT ONE, and silently produce garbage: the De Bruijn
-// table is built at module load from ORDER5_CANDIDATE's own cropSize of 256,
-// so a board that is actually 128 gets decoded against a completely
-// different torus. It does not error -- it returns ~chance-level matches
-// that still pass the gate for `positionDecode` being non-null.
+// Answers "is the video loop itself even running as often as expected on this
+// phone" independently of network/encode cost entirely. loopTicks counts every
+// requestAnimationFrame callback regardless of outcome; if loopTicks over a 2s
+// window is well under ~120 (60Hz), requestAnimationFrame itself is being
+// starved (backgrounded tab, thermal throttling, main-thread contention) -- a
+// phone-side scheduling problem, not network. Of the ticks that DO run,
+// backpressureBlockedTicks/readinessBlockedTicks say WHY a send was skipped:
+// backpressure means the previous frame is still physically draining over the
+// network (see relay.ts's sendGateStatus), readiness means Pose Viewer itself
+// said not to send yet (shouldn't happen much when pipelined).
 //
-// This cost a full 60-second dataset on 2026-08-05: 12% "success" rate,
-// consistency 0.515, 2 votes of 2924 windows, position jumping hundreds of
-// units between consecutive frames -- all of it initially read as a
-// motion-blur problem, which it was not. pose-viewer-server.html had simply been
-// closed, so main.ts's neverSyncedSettings push never fired.
-//
-// Surfaced THREE ways on purpose, because a warning nobody is looking at is
-// how this happened in the first place: on screen, and recorded into every
-// pose record AND the dump header so a dataset carries its own validity and
-// the analysis can reject it even if nobody saw the warning.
-let settingsSyncedAt: number | null = null;
-
-// ── Producer frame-rate diagnostics ─────────────────────────────────────
-//
-// Answers "is the camera hardware itself the bottleneck" independently of
-// anything the capture/relay round trip does. requestVideoFrameCallback
-// fires once per actually-decoded video frame (unlike requestAnimationFrame,
-// which just ticks at the display's own rate regardless of whether a new
-// camera frame has actually arrived), and its metadata.mediaTime is the
-// frame's own timestamp on the media timeline -- so diffing consecutive
-// mediaTimes measures real delivered-frame spacing, not callback jitter.
-let nominalFrameRate: number | null = null;
-let lastMediaTime: number | null = null;
-let frameIntervalsMs: number[] = [];
-
-// The frame clock, and now everything else's clock too -- see poseViewer/clock.ts.
-// This used to be defined here, with a header explaining that every NEW
-// timestamp in this file used it rather than Date.now() while the older
-// sentAt/pulledAt/encodedAt stamps kept Date.now(). That split is gone: those
-// three now use this as well, so the file has one clock rather than a rule about
-// which to reach for.
-
-// The most recent decoded video frame's own timing, republished by the rVFC
-// callback below and attached to whatever realCapture goes out next.
-//
-// WHY THIS EXISTS: captureAndSendFrame stamps `sentAt` at DRAW
-// time, which is not when the photons landed -- between them sit the sensor's
-// exposure, the camera stack's processing, and however long the frame sat in
-// the video element before the send gate let a capture through. Feeding a
-// filter a frame timestamped at draw time gives a constant unmodelled lag,
-// and a constant lag against a moving camera is a pose error PROPORTIONAL TO
-// VELOCITY -- i.e. exactly the symptom the IMU work is meant to remove, which
-// makes it the one error that can masquerade as success. See the motion-blur/
-// IMU plan's phase B.
-//
-// `captureTime` is the field actually wanted and it is NOT universally
-// implemented for getUserMedia sources (it is specified as optional, and is
-// most reliably present on WebRTC-sourced video). `presentationTime` is
-// always there. Both are recorded rather than one being picked here, because
-// which of them is trustworthy is a per-device question that phase B's
-// cross-correlation is meant to ANSWER, not one to guess at now.
-let latestFrameMeta: FrameMeta | null = null;
-
-function onVideoFrame(_now: number, metadata: any) {
-  if (lastMediaTime !== null) {
-    const dt = (metadata.mediaTime - lastMediaTime) * 1000;
-    if (dt > 0) frameIntervalsMs.push(dt);
-  }
-  lastMediaTime = metadata.mediaTime;
-  latestFrameMeta = {
-    mediaTime: metadata.mediaTime,
-    presentationTime: metadata.presentationTime,
-    expectedDisplayTime: metadata.expectedDisplayTime,
-    captureTime: metadata.captureTime ?? null,
-    processingDuration: metadata.processingDuration ?? null,
-    presentedFrames: metadata.presentedFrames ?? null,
-    observedAt: nowMs(),
-  };
-  rvfc?.(onVideoFrame);
-}
-// Cast: requestVideoFrameCallback isn't in every TS DOM lib version yet;
-// feature-detected at runtime regardless, so a missing type just means no
-// diagnostics on a browser too old to have shipped it.
-const rvfc = (video as any).requestVideoFrameCallback?.bind(video) as
-  ((cb: (now: number, metadata: any) => void) => void) | undefined;
-rvfc?.(onVideoFrame);
-
-// Loop-tick accounting -- answers "is the video loop itself even running as
-// often as expected on this phone" independently of network/encode cost
-// entirely. loopTicks counts every requestAnimationFrame callback
-// regardless of outcome; if loopTicks over a 2s window is well under
-// ~120 (60Hz), requestAnimationFrame itself is being starved (backgrounded
-// tab, thermal throttling, main-thread contention) -- a phone-side
-// scheduling problem, not network. Of the ticks that DO run,
-// backpressureBlockedTicks/readinessBlockedTicks say WHY a send was
-// skipped: backpressure means the previous frame is still physically
-// draining over the network (see canSend()'s own comment), readiness means
-// Pose Viewer itself said not to send yet (shouldn't happen much when
-// pipelined).
+// These describe the LOOP, so they live with it here. The camera's own half of
+// the diagnostics -- delivered-frame spacing and the hardware's nominal rate --
+// is camera.ts's; this is the one place the two are joined into one message.
 let loopTicks = 0;
 let backpressureBlockedTicks = 0;
 let readinessBlockedTicks = 0;
@@ -608,199 +236,19 @@ let sendsAttempted = 0;
 
 // Flushes whatever's accumulated every couple seconds -- see server.js's
 // frameStats broadcast and devBridge/client.ts's handler for where this
-// ends up (readable via dev-bridge eval as camera.lastFrameStats).
+// ends up. Read it on the DESKTOP, whose PhysicalCamera parks it as
+// `lastFrameStats` -- not to be confused with this client's own `camera`
+// eval namespace, which is client/camera.ts (see client/inspect.ts).
 setInterval(() => {
-  if (!ws || ws.readyState !== WebSocket.OPEN) return;
+  // Returns BEFORE draining anything: a window that could not be reported is
+  // not a window that happened, and clearing here would silently discard it.
+  if (!isRelayOpen()) return;
   const stats: any = { type: 'frameStats', nominalFrameRate, loopTicks, backpressureBlockedTicks, readinessBlockedTicks, sendsAttempted };
-  if (frameIntervalsMs.length > 0) {
-    stats.avgIntervalMs = frameIntervalsMs.reduce((a, b) => a + b, 0) / frameIntervalsMs.length;
-    stats.maxIntervalMs = Math.max(...frameIntervalsMs);
-    stats.sampleCount = frameIntervalsMs.length;
-  }
-  frameIntervalsMs = [];
+  const intervals = takeFrameIntervalStats();
+  if (intervals) Object.assign(stats, intervals);
   loopTicks = 0; backpressureBlockedTicks = 0; readinessBlockedTicks = 0; sendsAttempted = 0;
-  ws.send(JSON.stringify(stats));
+  sendJson(stats);
 }, 2000);
-
-// ── Pose records, the other half of a phase-A dataset ────────────────────
-//
-// One entry per ON-DEVICE reconstruction (captureComputeAndSendPose), stamped
-// on the SAME clock as imuRing. That co-stamping is the entire point of
-// keeping both here: the phase-A deliverable is a plot of measured pose
-// against IMU-predicted pose, and any clock difference between the two series
-// would show up as a velocity-proportional error -- indistinguishable from
-// the prediction being wrong, which is the one confusion this whole plan
-// cannot afford.
-//
-// Records regardless of whether the reconstruction SUCCEEDED. A failed decode
-// is not a gap in the data, it is a labelled event, and the fraction of
-// frames that fail under motion is itself one of the numbers phase A is
-// meant to produce -- dropping failures would silently make the pipeline look
-// better the faster the phone moves.
-const POSE_RING_CAPACITY = 600;
-interface PoseRecord {
-  tDrawn: number;              // nowMs() at the moment the frame was pulled off the video element
-  frameMeta: FrameMeta | null;
-  // `computeMs` is GONE: a ring of durations
-  // alongside the profiler was a second way to measure one, and this one was
-  // measuring an empty statement anyway -- see the TODO at its write site. When
-  // this page runs a pipeline again, its duration is a SPAN, not a field here.
-  ok: boolean;                 // did positionDecode produce anything
-  // Whether the desktop had pushed a settingsSync by the time THIS pose was
-  // computed. Per-record rather than per-session because a sync can land
-  // mid-run, which splits one recording into an invalid prefix and a valid
-  // remainder -- a session-level flag would have to call the whole thing one
-  // or the other, and would pick wrong either way.
-  synced: boolean;
-  boardSize: number | null;    // what the De Bruijn table was ACTUALLY built at
-  camPos: number[] | null;     // world position, from the De Bruijn decode
-  camQuat: number[] | null;
-  distance: number | null;
-  dnormal: number[] | null;
-  consistency: number | null;
-  // `votes` and `totalWindows` -- the winning anchor's vote count and how many
-  // windows voted at all -- were here and are gone with the display type that
-  // carried them (poseViewer/camera/model.ts's PositionDecodeResult). Nothing
-  // read them on either side. They are pose-BLOCK quantities in src/pose, so
-  // when this page is wired onto that pipeline they come back off the block
-  // directly rather than through a display struct.
-}
-let poseRing: PoseRecord[] = [];
-function recordPose(r: PoseRecord) {
-  if (!isMotionListening()) return; // one switch arms the whole recording
-  poseRing.push(r);
-  if (poseRing.length > POSE_RING_CAPACITY) poseRing.splice(0, poseRing.length - POSE_RING_CAPACITY);
-}
-
-// Pulled with `node scripts/dev-bridge/cli.js eval --phone "dumpRecording()"`.
-// Returned as a plain object rather than written to a file because a phone
-// browser has nowhere useful to write one -- the bridge IS the filesystem
-// here. At 60s of IMU plus a few hundred poses this is a few hundred KB of
-// JSON, comfortably inside one websocket message.
-//
-// `calibration` is computed here rather than offline because it needs the
-// AT-REST window to be meaningful and only this side knows what the sensor
-// actually reported; it is a summary, not a substitute for the raw arrays,
-// both of which are returned.
-(globalThis as any).dumpRecording = function dumpRecording() {
-  const dts: number[] = [];
-  for (let i = 1; i < imuRing.length; i++) dts.push(imuRing[i].t - imuRing[i - 1].t);
-  const sorted = [...dts].sort((a, b) => a - b);
-  return {
-    capturedAt: new Date().toISOString(),
-    clock: 'phone performance.timeOrigin + performance.now(), epoch ms, monotonic',
-    // Validity FIRST. A dump whose poses were computed before a settingsSync
-    // landed is not a weak dataset, it is a wrong one -- the decode ran
-    // against a different De Bruijn torus than the physical board.
-    settingsSyncedAt, boardSize: knownBoardSize,
-    posesBeforeSync: poseRing.filter((p) => !p.synced).length,
-    screenAngle: (screen as any).orientation?.angle ?? 0,
-    facing: currentFacing,
-    video: { w: video.videoWidth, h: video.videoHeight },
-    imu: {
-      n: imuRing.length,
-      spanSec: imuRing.length > 1 ? (imuRing[imuRing.length - 1].t - imuRing[0].t) / 1000 : 0,
-      medianDtMs: sorted.length ? sorted[Math.floor(sorted.length / 2)] : null,
-      rateHz: motionRateHz(),
-      samples: imuRing,
-    },
-    poses: { n: poseRing.length, records: poseRing },
-  };
-};
-(globalThis as any).clearRecording = function clearRecording() {
-  clearImuRing(); poseRing = [];
-  return { cleared: true };
-};
-
-// Makes `stream` the live camera feed -- swaps currentStream/video.srcObject
-// to it and re-binds everything tied to the SPECIFIC MediaStreamTrack
-// object (zoom, framerate), since a fresh getUserMedia() stream is a
-// genuinely NEW track even when it's the same physical camera as before;
-// controls left bound to the OLD (now-stopped) track would silently stop
-// working otherwise. Shared by startCamera and applyExactResolution/
-// sweepResolutionCandidates below, all of which now request a genuinely
-// fresh stream per resolution rather than reconfiguring one track in place
-// -- see this session's chat on why (a real-world reference tool aimed at
-// the exact same problem, addpipe/webcam-resolution-tester, does the same
-// -- MediaStreamTrack.applyConstraints() has uneven real-world support for
-// actually renegotiating a running camera's resolution, especially across
-// orientations, on mobile).
-async function adoptStream(stream: MediaStream) {
-  if (currentStream && currentStream !== stream) currentStream.getTracks().forEach((t) => t.stop());
-  currentStream = stream;
-  video.srcObject = stream;
-  await video.play();
-  const settings = stream.getVideoTracks()[0].getSettings();
-  currentFacing = settings.facingMode || currentFacing;
-  // No CSS mirror class anymore -- video itself is hidden (captureCanvas is
-  // now the visible viewfinder, see this session's chat), and
-  // drawCurrentFrameToCanvas already bakes the front-camera flip directly
-  // into captureCanvas's own pixels; a CSS transform on top of that would
-  // double-flip it.
-  setupZoomControl();
-  setupFramerateControl();
-  // The camera hardware's OWN nominal capture rate -- distinct from how
-  // often WE encode/send (see the frameStats reporting below), and a real
-  // alternative explanation raised for video mode's idle gap: auto-exposure
-  // in low light can drop a phone's actually-delivered frame rate well
-  // below its nominal one, independent of anything the round-trip does.
-  nominalFrameRate = settings.frameRate ?? null;
-}
-
-async function startCamera(desiredFacing: string) {
-  // No width/height constraint at all here, ideal or exact -- whatever
-  // resolution the browser's own default negotiation lands on is exactly
-  // as arbitrary as any other guess, so there's no reason to bias it
-  // toward "as high as possible" (the old `ideal: 7680x4320` trick) before
-  // the user's actually picked anything. setupDefaultResOption just
-  // reflects whatever this happens to be; sweepResolutionCandidates/the
-  // dropdown are the real way to choose a resolution deliberately.
-  const newStream = await navigator.mediaDevices.getUserMedia({
-    video: { facingMode: { ideal: desiredFacing } },
-  });
-  await adoptStream(newStream);
-  setupDefaultResOption(); // sweepResolutionCandidates is manual-only -- see its own comment on why
-  // No explicit AR-canvas resize call needed -- videoLoop's continuous
-  // drawCurrentFrameToCanvas (see its own comment) syncs captureCanvas AND
-  // the AR renderer together every rAF tick, starting from the very next one.
-  refreshCamStatusResolution();
-}
-
-switchCamBtn.addEventListener('click', async () => {
-  const next = currentFacing === 'user' ? 'environment' : 'user';
-  switchCamBtn.disabled = true;
-  try { await startCamera(next); }
-  catch (e: any) { camStatus.textContent = 'camera error: ' + e.message; }
-  finally { switchCamBtn.disabled = false; }
-});
-
-startCamera('environment').catch((e: any) => {
-  camStatus.textContent = 'camera error: ' + e.message;
-});
-
-// ── Relay connection ────────────────────────────────────────────────────
-//
-// Rides the SAME https origin the page itself was loaded from, via vite's
-// /dev-bridge websocket proxy (see vite.config.ts) -- a page loaded over
-// https (required here for getUserMedia) can't open a plain insecure ws://
-// connection to a non-localhost host, so this can't just point at the
-// dev-bridge's own ws://<lan-ip>:8787 directly the way a laptop-local tab
-// can. Works identically whether this page happens to be opened via the LAN
-// IP or localhost.
-let ws: WebSocket | null = null;
-let reconnectTimer: number | undefined;
-
-function setRelayStatus(text: string, down: boolean) {
-  relayStatus.textContent = `relay: ${text}`;
-  relayStatus.classList.toggle('down', down);
-}
-
-function scheduleReconnect() {
-  ws = null;
-  setRelayStatus('reconnecting…', true);
-  clearTimeout(reconnectTimer);
-  reconnectTimer = window.setTimeout(connectRelay, 2000);
-}
 
 // ── Capture mode + readiness ────────────────────────────────────────────
 //
@@ -817,7 +265,7 @@ function setCaptureMode(mode: 'single' | 'video') {
   captureMode = mode;
   modeSingleBtn.classList.toggle('active', mode === 'single');
   modeVideoBtn.classList.toggle('active', mode === 'video');
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'captureMode', mode }));
+  sendJson({ type: 'captureMode', mode });
   // Entering video mode while device-compute is already on (re)starts the
   // self-paced compute loop -- see devicePoseLoop's own comment.
   if (mode === 'video' && computeOnDevice) devicePoseLoop();
@@ -838,7 +286,7 @@ function setComputeMode(onDevice: boolean) {
   // Switching modes doesn't clear the currently-shown pose -- it stays on
   // screen until the next update, exactly like switching captureMode doesn't
   // blank the video feed.
-  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ type: 'computeMode', mode: onDevice ? 'device' : 'desktop' }));
+  sendJson({ type: 'computeMode', mode: onDevice ? 'device' : 'desktop' });
   if (onDevice && captureMode === 'video') devicePoseLoop();
 }
 computeOnDeviceCheckbox.addEventListener('change', () => setComputeMode(computeOnDeviceCheckbox.checked));
@@ -870,178 +318,19 @@ function setReady(ready: boolean) {
   if (!ready) readyTimeoutTimer = window.setTimeout(() => setReady(true), READY_TIMEOUT_MS);
 }
 
-function connectRelay() {
-  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  try { ws = new WebSocket(`${proto}//${location.host}/dev-bridge`); }
-  catch { scheduleReconnect(); return; }
-
-  ws.addEventListener('open', () => {
-    ws!.send(JSON.stringify({ role: 'capture' }));
-    // A reconnect gets a brand-new captureId server-side (see server.js),
-    // which Pose Viewer will treat as a fresh phone -- re-announce whatever
-    // mode was already selected, and drop any stale not-ready state from
-    // before the drop, since it belonged to the OLD captureId.
-    ws!.send(JSON.stringify({ type: 'captureMode', mode: captureMode }));
-    ws!.send(JSON.stringify({ type: 'computeMode', mode: computeOnDevice ? 'device' : 'desktop' }));
-    setReady(true);
-    setRelayStatus('connected', false);
-  });
-  ws.addEventListener('close', scheduleReconnect);
-  ws.addEventListener('error', () => {});
-  ws.addEventListener('message', (ev) => {
-    let msg: any;
-    try { msg = JSON.parse(ev.data); } catch { return; }
-    if (msg.type === 'captureReady') {
-      setReady(!!msg.ready);
-    } else if (msg.type === 'settingsSync') {
-      applySettingsSync(msg);
-    } else if (msg.type === 'eval' && msg.id) {
-      // ── Dev bridge, phone side ──────────────────────────────────────────
-      //
-      // Mirrors pose-viewer-server.html's own eval handler so this page can be
-      // inspected live. It exists because a RELOAD COSTS FAR MORE HERE than
-      // it does on the desktop: it drops the iOS motion-permission grant
-      // (which can only be re-obtained from a user gesture), re-negotiates
-      // the camera stream, and wipes any in-progress recording. Adding a
-      // readout and reloading -- the only option before this -- therefore
-      // costs a physical trip to the phone for every question asked of it,
-      // and phase B is made of exactly those questions (does this device
-      // report captureTime, what does getCapabilities say, what is the real
-      // devicemotion rate).
-      //
-      // SAME SYNCHRONOUS SEMANTICS as the desktop handler, deliberately: it
-      // does NOT await promises or queued work, so the race warning in
-      // cli.js's header applies here unchanged. Poll a flag across separate
-      // eval calls rather than trusting one round trip to have finished
-      // anything asynchronous.
-      //
-      // Direct eval, so the expression sees this module's own top-level
-      // scope (currentStream, cameraSettings, imuLastSample, ...) the same
-      // way the desktop's sees poseViewer's.
-      let result: any, ok = true;
-      try {
-        result = eval(msg.code);
-        // Structured-clone can't cross the wire; JSON can't hold a
-        // MediaStreamTrack or a cyclic THREE object. Round-tripping through
-        // JSON here means a non-serializable answer reports WHY rather than
-        // taking the socket down with a serialization throw at send time.
-        result = JSON.parse(JSON.stringify(result ?? null));
-      } catch (e: any) {
-        ok = false;
-        result = { error: String(e), stack: e?.stack };
-      }
-      ws!.send(JSON.stringify({ type: 'evalResult', id: msg.id, ok, value: result }));
-    }
-  });
-}
-connectRelay();
-
 // ── Shutter / video streaming ────────────────────────────────────────────
 //
 // Sent at the stream's own actual negotiated resolution (see
-// drawCurrentFrameToCanvas) -- NOT just a transfer-speed knob: Pose Viewer's
-// ingestRealCapture resizes a physical camera's analysis buffers to match
-// whatever resolution actually arrives (unlike a simulated capture, there's
-// no further downsample step after this), so this IS the real analysis
+// camera.ts's drawFullResFrameToSendCanvas) -- NOT just a transfer-speed knob:
+// Pose Viewer's ingestRealCapture resizes a physical camera's analysis buffers
+// to match whatever resolution actually arrives (unlike a simulated capture,
+// there's no further downsample step after this), so this IS the real analysis
 // resolution, not merely a cap on top of one.
-
-// Returns WHY, not just whether, so the video loop can count each reason
-// separately (see loopTicks and friends above) -- the whole point being to
-// tell "blocked because the network hasn't drained the last frame yet"
-// (bandwidth-bound) apart from "blocked for some other reason" instead of
-// collapsing both into one opaque boolean. Desktop-compute only -- see
-// captureComputeAndSendPose's own comment on why device-compute doesn't
-// need this gate at all.
-function sendGateStatus(): 'ok' | 'backpressure' | 'not-ready' {
-  // Transport-level backpressure, independent of whether Pose Viewer wants
-  // more data: bufferedAmount > 0 means the PREVIOUS frame hasn't actually
-  // left the device yet (queued by the browser/OS faster than the network
-  // can drain it). Without this, an unthrottled video loop (pipelined mode
-  // removed the old wait-for-ack gate, which used to cap the send rate as
-  // a side effect) will happily encode+queue a new multi-hundred-KB JPEG on
-  // every rAF tick regardless -- confirmed live: that produced a growing
-  // multi-SECOND queueing delay per frame, dwarfing every other stage in
-  // the pipeline. The mailbox on the desktop only helps once a message
-  // arrives; it can't do anything about a backlog stuck in transit.
-  if (ws && ws.bufferedAmount > 0) return 'backpressure';
-  return 'ok';
-}
-function canSend() {
-  return sendGateStatus() === 'ok';
-}
-
-// Draws the current video frame onto the VISIBLE captureCanvas -- but
-// downscaled to fit the screen's own physical pixel dimensions (aspect
-// preserved), not the camera's full negotiated resolution. This runs
-// unconditionally every rAF tick (see videoLoop), and drawing/compositing a
-// full-native-resolution (potentially 12+MP) on-screen canvas at 60fps is
-// what was crashing Chrome on a real phone -- CSS max-width/max-height
-// (mobile-capture.html) only scales the DISPLAYED box, it doesn't shrink
-// the actual pixel buffer drawImage has to fill and the compositor has to
-// upload, so a cap has to happen here instead. previewLongEdgeCap() is the
-// screen's own long edge in physical pixels -- rendering any larger than
-// that buys zero visible detail. The actual full-resolution frame sent to
-// the server is drawn separately, on demand, by drawFullResFrameToSendCanvas
-// below -- this function only ever feeds the live preview.
-function previewLongEdgeCap(): number {
-  const dpr = Math.min(window.devicePixelRatio || 1, 2);
-  return Math.max(window.innerWidth, window.innerHeight) * dpr;
-}
-
-function drawCurrentFrameToCanvas(): { cw: number; ch: number } {
-  const vw = video.videoWidth, vh = video.videoHeight;
-  if (!vw || !vh) { captureCanvas.width = 0; captureCanvas.height = 0; return { cw: 0, ch: 0 }; }
-  const scale = Math.min(1, previewLongEdgeCap() / Math.max(vw, vh));
-  const cw = Math.max(1, Math.round(vw * scale)), ch = Math.max(1, Math.round(vh * scale));
-  // Guards the resize -- reassigning canvas.width/height clears the
-  // backing bitmap even when set to the same value, so skipping it when
-  // unchanged avoids a pointless reallocation on every one of these ticks.
-  if (captureCanvas.width !== cw || captureCanvas.height !== ch) { captureCanvas.width = cw; captureCanvas.height = ch; }
-  if (currentFacing === 'user') {
-    captureCtx.save();
-    captureCtx.translate(cw, 0);
-    captureCtx.scale(-1, 1);
-    captureCtx.drawImage(video, 0, 0, cw, ch);
-    captureCtx.restore();
-  } else {
-    captureCtx.drawImage(video, 0, 0, cw, ch);
-  }
-  return { cw, ch };
-}
-
-// Off-DOM canvas dedicated to full-resolution capture -- kept separate from
-// the (now downscaled) preview captureCanvas above so the image actually
-// sent to the server still carries the full resolution the user picked via
-// the resolution dropdown. Never displayed, so no CSS/letterbox concerns;
-// only ever drawn into on demand, by captureAndSendFrame/
-// captureComputeAndSendPose below, which already only run when a capture is
-// actually happening (shutter tap, a canSend()-gated video-mode tick, or a
-// devicePoseLoop iteration) -- so no extra throttling logic is needed here,
-// unlike the continuous preview draw above.
-const sendCanvas = document.createElement('canvas');
-const sendCtx = sendCanvas.getContext('2d')!;
-
-function drawFullResFrameToSendCanvas(): { cw: number; ch: number } {
-  const cw = video.videoWidth, ch = video.videoHeight;
-  if (!cw || !ch) return { cw: 0, ch: 0 };
-  sendCanvas.width = cw; sendCanvas.height = ch;
-  if (currentFacing === 'user') {
-    sendCtx.save();
-    sendCtx.translate(cw, 0);
-    sendCtx.scale(-1, 1);
-    sendCtx.drawImage(video, 0, 0, cw, ch);
-    sendCtx.restore();
-  } else {
-    sendCtx.drawImage(video, 0, 0, cw, ch);
-  }
-  return { cw, ch };
-}
 
 // Grabs the current video frame and sends it, if there's anywhere to send
 // it to. Shared by the single-tap shutter and the video-mode loop below --
-// callers are responsible for checking sendGateStatus()/canSend() first
-// (video mode checks every tick; the shutter click handler checks once per
-// tap).
+// callers are responsible for checking sendGateStatus() first (video mode
+// checks every tick; the shutter click handler checks once per tap).
 // True from the moment a toBlob encode is kicked off until its callback
 // fires -- toDataURL (the old encode call) was synchronous, so two
 // overlapping captureAndSendFrame calls were never actually possible;
@@ -1057,7 +346,7 @@ function drawFullResFrameToSendCanvas(): { cw: number; ch: number } {
 // spirit of captureIngestBusy's own guard on the desktop decode side.
 let sendEncodeInFlight = false;
 function captureAndSendFrame() {
-  if (!currentStream || video.videoWidth === 0 || video.videoHeight === 0 || sendEncodeInFlight) return;
+  if (!hasLiveFrame() || sendEncodeInFlight) return;
   // Stamped here, before anything below -- the earliest point once the
   // send gate has already let this call through.
   const sentAt = nowMs();
@@ -1089,7 +378,7 @@ function captureAndSendFrame() {
     // instead of lumping both into one number and guessing which one a
     // given slow sample was.
     const encodedAt = nowMs();
-    if (!ws || ws.readyState !== WebSocket.OPEN) { setRelayStatus('not connected -- capture NOT sent', true); return; }
+    if (!isRelayOpen()) { setRelayStatus('not connected -- capture NOT sent', true); return; }
     // Metadata first, image bytes second -- devBridge/client.ts pairs a
     // realCapture JSON message with whichever binary frame arrives next
     // for that same captureId, so send order here matters.
@@ -1098,7 +387,7 @@ function captureAndSendFrame() {
     // in place, and the project's own measurement notes are emphatic about
     // not invalidating a working instrument to add a new one. This is the
     // field a filter should timestamp the measurement with; sentAt is draw
-    // time. See latestFrameMeta's comment for why the difference matters.
+    // time. See camera.ts's latestFrameMeta for why the difference matters.
     //
     // `drawnAt` is the honest upper bound on capture time and the fallback
     // when rVFC is unavailable: drawFullResFrameToSendCanvas has already run
@@ -1106,8 +395,8 @@ function captureAndSendFrame() {
     // at that moment. If latestFrameMeta.observedAt is far behind drawnAt,
     // the drawn frame is older than the last callback saw and the pairing is
     // suspect -- recorded so a replay can detect that rather than assume.
-    ws.send(JSON.stringify({ type: 'realCapture', sentAt, pulledAt, encodedAt, drawnAt, frameMeta: latestFrameMeta }));
-    ws.send(blob);
+    sendJson({ type: 'realCapture', sentAt, pulledAt, encodedAt, drawnAt, frameMeta: latestFrameMeta });
+    sendBinary(blob);
     shutterBtn.classList.add('sent');
     setTimeout(() => shutterBtn.classList.remove('sent'), 300);
     // Deliberately NOT setting poseViewerReady false here. Pose Viewer's mailbox
@@ -1127,7 +416,7 @@ function captureAndSendFrame() {
 // ── Device-compute: capture + run the pose pipeline locally + send just
 // the result ──────────────────────────────────────────────────────────────
 //
-// The bufferedAmount backpressure gate above is irrelevant here -- a
+// The bufferedAmount backpressure gate is irrelevant here -- a
 // serialized pose is a few hundred bytes, never queues -- and there's no
 // "Pose Viewer busy" readiness gate either, since the desktop does no work
 // at all on this path (see ingestRemotePose, pipeline/capture.ts). The
@@ -1137,13 +426,13 @@ function captureAndSendFrame() {
 // compute speed with no artificial pacing.
 //
 // Draws its own full-resolution frame into sendCanvas (see
-// drawFullResFrameToSendCanvas's own comment) rather than reading off the
+// camera.ts's drawFullResFrameToSendCanvas) rather than reading off the
 // visible captureCanvas, which is now downscaled to screen resolution for
 // the live preview -- pose recovery needs the actual full-resolution
 // capture, same as the desktop-compute send path.
 let devicePoseComputing = false;
 async function captureComputeAndSendPose() {
-  if (!currentStream || video.videoWidth === 0 || video.videoHeight === 0) return;
+  if (!hasLiveFrame()) return;
   devicePoseComputing = true;
   try {
     const { cw, ch } = drawFullResFrameToSendCanvas();
@@ -1203,10 +492,12 @@ async function captureComputeAndSendPose() {
     void grayTopDown; void poseInput;
     const pose: LocalPose = { recoveredAxes: null, positionDecode: null };
     const pd = pose.positionDecode;
+    // `synced` and `boardSize` are filled in by recordPose itself -- see
+    // poseRecords.ts on why a record cannot be allowed to disagree with the
+    // module that tracks them.
     recordPose({
       tDrawn, frameMeta: frameMetaAtDraw,
       ok: !!pd,
-      synced: settingsSyncedAt !== null, boardSize: knownBoardSize,
       camPos: pd ? pd.camPos.toArray() : null,
       camQuat: pd ? pd.recoveredCamQuat.toArray() : null,
       distance: pose.recoveredAxes ? pose.recoveredAxes.distance : null,
@@ -1255,7 +546,7 @@ async function captureComputeAndSendPose() {
     // frame the decode could not.
     if (useImuCorrection && imuTracker.hasFix()) imuStats.predicted++;
 
-    if (ws && ws.readyState === WebSocket.OPEN) {
+    if (isRelayOpen()) {
       const msg: any = {
         type: 'poseResult', w: cw, h: ch,
         recoveredAxes: pose.recoveredAxes ? {
@@ -1288,10 +579,10 @@ async function captureComputeAndSendPose() {
       // here by the guard this function already had.
       if (sendCapturedImage) {
         const blob = await new Promise<Blob | null>((resolve) => sendCanvas.toBlob(resolve, 'image/jpeg', 0.85));
-        if (blob) ws.send(packPoseResultWithImage(msg, blob));
-        else ws.send(JSON.stringify(msg));
+        if (blob) sendBinary(packPoseResultWithImage(msg, blob));
+        else sendJson(msg);
       } else {
-        ws.send(JSON.stringify(msg));
+        sendJson(msg);
       }
     }
 
@@ -1336,7 +627,7 @@ shutterBtn.addEventListener('click', () => {
     setTimeout(() => shutterBtn.classList.remove('sent'), 300);
     return;
   }
-  if (!canSend()) return;
+  if (sendGateStatus() !== 'ok') return;
   captureAndSendFrame();
 });
 
@@ -1351,7 +642,7 @@ function videoLoop() {
   // capture/compute mode, at the same cadence videoLoop itself already
   // ticks -- but only draws the screen-capped preview resolution
   // (previewLongEdgeCap), not the camera's full negotiated resolution. The
-  // capture functions below draw their OWN full-resolution frame into
+  // capture functions above draw their OWN full-resolution frame into
   // sendCanvas on demand instead of reading off this one, so what actually
   // gets analyzed/sent is unaffected by this downscale.
   drawCurrentFrameToCanvas();
@@ -1366,23 +657,41 @@ function videoLoop() {
   sendsAttempted++;
   captureAndSendFrame();
 }
-videoLoop();
 
-// ── Handing the IMU module the three things it cannot know ───────────────
+// ── Boot, and handing each module what it cannot know ────────────────────
 //
-// Registered at the END of this file, deliberately: these closures read
-// `computeOnDevice`, `settingsSyncedAt`, `currentFacing` and `ws`, all declared
-// above, and attaching earlier would be fine only by accident of when the first
-// call happens. This is the same hazard the AR render loop hit as a single file
-// -- reading a binding that had not been initialized yet -- made structural
-// instead of avoided by scheduling.
+// Everything below runs at the END of this file, deliberately: these closures
+// read `computeOnDevice`, `captureMode`, `cameraSettings` and friends, all
+// declared above, and attaching earlier would be fine only by accident of when
+// the first call happens. This is the same hazard the AR render loop hit as a
+// single file -- reading a binding that had not been initialized yet -- made
+// structural instead of avoided by scheduling.
+//
+// The order within this block matters in exactly one place: connectRelay()
+// must follow attachRelayHost(), because the socket's very first 'open' event
+// asks the host what modes to announce.
+
 attachImuHost({
   computingOnDevice: () => computeOnDevice,
-  settingsSyncedAt: () => settingsSyncedAt,
+  settingsSyncedAt,
   facing: () => (currentFacing === 'user' ? 'user' : 'environment'),
-  sendBatch: (payload) => {
-    if (!ws || ws.readyState !== WebSocket.OPEN) return false;
-    ws.send(JSON.stringify(payload));
-    return true;
-  },
+  sendBatch: (payload) => sendJson(payload),
 });
+
+attachRelayHost({
+  captureMode: () => captureMode,
+  computingOnDevice: () => computeOnDevice,
+  onSettingsSync: applySettingsSync,
+  onReadyChange: setReady,
+  // The dev-bridge eval's scope is DECLARED, in inspect.ts, rather than being
+  // whatever this file or relay.ts happens to import. See that file's header
+  // for why -- the surface has already degraded once without a compiler word.
+  evalCode: evalInScope,
+});
+connectRelay();
+
+startCamera('environment').catch((e: any) => {
+  camStatus.textContent = 'camera error: ' + e.message;
+});
+
+videoLoop();

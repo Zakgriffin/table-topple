@@ -3,13 +3,12 @@ import * as THREE from 'three';
 import { create, globals } from 'webgpu';
 import { validateFixture } from '../src/sphereLab/fixture.ts';
 import { inputFromFixture } from '../src/sphereLab/harness/input.ts';
-import { type SimDims, type SimPose } from '../src/pose2/sim.ts';
+import { type SimDims, type SimPose, type SimWorld, vFovRadOf } from '../src/pose2/sim.ts';
 import { type PoseObservation, type SweepSpec, runSweep, summarize } from '../src/pose2/sweep.ts';
 import { boardDims } from '../src/pose2/board.ts';
 import { type Pose2Context, createPose2Context, runPose2 } from '../src/pose2/run.ts';
-import { ORDER } from '../src/sphereLab/floorPattern.ts';
+import { board } from '../src/sphereLab/floorPattern.ts';
 import { GRID_STEP } from '../src/sphereLab/constants.ts';
-import { vFovRadOf } from '../src/pose2/sim.ts';
 import { DAWN_NODE_FLAGS, requestDeviceWithOptionalTimestamps } from '../src/gpu/device.ts';
 import { getRecords, profilerReset, spanEnd, spanStart } from '../src/sphereLab/profiling/profiler.ts';
 import { ingestGpuFrame } from '../src/sphereLab/profiling/clocks.ts';
@@ -45,6 +44,12 @@ const dims: SimDims = { w: Number(wStr), h: Number(hStr), horizFovDeg: 65 };
 const supersample = Number(val('--ss', '4'));
 const quick = has('--quick');
 
+// Sphere Lab's board and its cell pitch, so the sweep scores the pipeline
+// against the same floor the app runs on rather than one invented here. Both go
+// into the renders AND into the pipeline settings below -- they have to be the
+// same two values on each side or the sweep is comparing two worlds.
+const world: SimWorld = { board, cellPitch: GRID_STEP };
+
 // The fixture supplies detector tuning that is known to work on a real capture.
 // Inventing thresholds here would make the sweep measure the thresholds.
 const base = inputFromFixture(
@@ -53,7 +58,7 @@ const base = inputFromFixture(
 
 const spec: SweepSpec = quick
   ? {
-    heights: [10], tilts: [0, 20], yaws: [0], dims, supersample,
+    heights: [10], tilts: [0, 20], yaws: [0], dims, supersample, world,
     offsets: [{ row: 70.5, col: 70.5 }],
   }
   : {
@@ -66,7 +71,7 @@ const spec: SweepSpec = quick
     // Three neighbourhoods of the torus, because the pattern is only LOCALLY
     // unique -- sweeping one spot tests one decode neighbourhood.
     offsets: [{ row: 70.5, col: 70.5 }, { row: 20.5, col: 110.5 }, { row: 100.5, col: 30.5 }],
-    dims, supersample,
+    dims, supersample, world,
   };
 
 const total = spec.heights.length * spec.tilts.length * spec.yaws.length * spec.offsets.length;
@@ -149,8 +154,8 @@ async function makePose2Runner() {
   const runner = async (gray: Float64Array, d: SimDims, p: SimPose): Promise<PoseObservation> => {
     if (!ctx) {
       ctx = createPose2Context(device, {
-        w: d.w, h: d.h, maxRegions: 16384, maxLines: 16384, ...boardDims(),
-      }, { alias });
+        w: d.w, h: d.h, maxRegions: 16384, maxLines: 16384, ...boardDims(board),
+      }, board, { alias });
     }
     console.error(`  [${++done}/${total}] h=${p.height} tilt=${p.tiltDeg} yaw=${p.yawDeg} at (${p.overRow},${p.overCol})`);
     // A SPAN, not a stopwatch of its own. This is Phase 7's payoff: the sweep is
@@ -169,7 +174,6 @@ async function makePose2Runner() {
       votes: { vFovRad: vFovRadOf(d) },
       gpp: { vFovRad: vFovRadOf(d), cellPitch: GRID_STEP, minGrazingCos: st.minGrazingCos },
       layout: { vFovRad: vFovRadOf(d), cellPitch: GRID_STEP, minGrazingCos: st.minGrazingCos },
-      order: ORDER,
     });
     spanEnd(span);
     if (frame.gpu) ingestGpuFrame(frame.gpu, 'sweep.pose');
@@ -232,7 +236,7 @@ console.error(`rendering + running ${total} poses at ${dims.w}x${dims.h}, supers
 const runner = await makePose2Runner();
 const rows = await runSweep(spec, runner);
 console.error('');
-console.error(summarize(rows, `src/pose2${alias ? ' (gpu, POOLED)' : ' (gpu)'} @ ${dims.w}x${dims.h}`));
+console.error(summarize(rows, world, `src/pose2${alias ? ' (gpu, POOLED)' : ' (gpu)'} @ ${dims.w}x${dims.h}`));
 console.error('');
 console.error(gpuBreakdown());
 console.error('');

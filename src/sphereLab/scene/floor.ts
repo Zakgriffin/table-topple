@@ -1,18 +1,18 @@
 import * as THREE from 'three';
 import { DEBUG_LAYER, GRID_STEP, VIS_HALF_EXTENT } from '../constants.ts';
-import { C, HALF_C, HALF_R, ORDER, R, rebuildFloorPatternData, torus } from '../floorPattern.ts';
+import { HALF_C, HALF_R, ORDER, board, rebuildFloorPatternData } from '../floorPattern.ts';
 import { globalState } from '../state.ts';
 import { scene } from './renderer.ts';
 
 // -- Floor: the actual De Bruijn torus, tiled seamlessly (it IS a torus, so
 // repeat-wrapping the texture reproduces the true infinite pattern with no
 // seam — the same fact the real tracker relies on to work from any crop).
-// The pure DATA half (ORDER/debruijn/R/C/torus/debruijnLookup/HALF_C/
-// HALF_R/rebuildFloorPatternData) now lives in ../floorPattern.ts (no THREE/
-// DOM imports there) so it can be imported on a page with no #gl canvas --
-// this file re-exports them for every existing consumer and owns only the
-// THREE-side construction (texture/mesh/grid-line geometry) on top.
-export { ORDER, R, C, torus, debruijnLookup, HALF_C, HALF_R } from '../floorPattern.ts';
+// The pure DATA half (the `board` itself, ORDER, HALF_C/HALF_R,
+// rebuildFloorPatternData) lives in ../floorPattern.ts (no THREE/DOM imports
+// there) so it can be imported on a page with no #gl canvas. This file owns
+// only the THREE-side construction (texture/mesh/grid-line geometry) on top,
+// and imports the data like anyone else -- it used to re-export the whole set
+// for "every existing consumer", of which there were none left.
 
 const patternCanvas = document.createElement('canvas');
 const pctx = patternCanvas.getContext('2d')!;
@@ -28,6 +28,7 @@ const FLOOR_OUTLINE_BORDER = 1;
 export function rebuildFloorTexture() {
   const subdiv = globalState.floorCellOutlineSubdiv;
   const s = subdiv > 0 ? subdiv : 1;
+  const { R, C, torus } = board;
   const width = C * s, height = R * s;
   patternCanvas.width = width; patternCanvas.height = height;
   const img = pctx.createImageData(width, height);
@@ -35,8 +36,8 @@ export function rebuildFloorTexture() {
     for (let c = 0; c < C; c++) {
       // 1 -> dark, 0 -> light -- matches scripts/generate-debruijn-torus.ts's
       // canonical convention and binarize's "dark -> 1" intent (src/decode.ts).
-      const inner = torus[r][c] ? 20 : 235;
-      const outer = torus[r][c] ? 235 : 20;
+      const inner = torus[r]![c] ? 20 : 235;
+      const outer = torus[r]![c] ? 235 : 20;
       for (let sy = 0; sy < s; sy++) {
         const py = r * s + sy;
         const borderY = subdiv > 0 && (sy < FLOOR_OUTLINE_BORDER || sy >= s - FLOOR_OUTLINE_BORDER);
@@ -64,7 +65,7 @@ floorTex.repeat.set(1, 1); // exactly one instance of the torus, not tiled
 rebuildFloorTexture(); // paint the initial pattern now that floorTex/patternCanvas both exist
 
 const floorMat = new THREE.MeshStandardMaterial({ map: floorTex, roughness: 0.95 });
-export const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(C * GRID_STEP, R * GRID_STEP), floorMat);
+export const floorMesh = new THREE.Mesh(new THREE.PlaneGeometry(board.C * GRID_STEP, board.R * GRID_STEP), floorMat);
 floorMesh.rotation.x = -Math.PI / 2;
 scene.add(floorMesh);
 
@@ -112,7 +113,7 @@ export function rebuildFloorPattern(size: number) {
   rebuildFloorTexture();
 
   floorMesh.geometry.dispose();
-  floorMesh.geometry = new THREE.PlaneGeometry(C * GRID_STEP, R * GRID_STEP);
+  floorMesh.geometry = new THREE.PlaneGeometry(board.C * GRID_STEP, board.R * GRID_STEP);
 
   for (const [lines, axis] of [[rowGridLines, 'row'], [colGridLines, 'col']] as const) {
     lines.geometry.dispose();

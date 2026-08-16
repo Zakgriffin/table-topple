@@ -7,8 +7,7 @@ import { boardDims } from '../src/pose2/board.ts';
 import { MAX_TIMED_PASSES, createPose2Context, destroyPose2Context, runPose2 } from '../src/pose2/run.ts';
 import type { Dims } from '../src/pose2/pipeline.ts';
 import { renderPose, vFovRadOf } from '../src/pose2/sim.ts';
-import { GRID_STEP } from '../src/sphereLab/constants.ts';
-import { ORDER } from '../src/sphereLab/floorPattern.ts';
+import { TEST_BOARD, TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
 
 // ── GPU timing: the device feature, and the path where it is ABSENT ───────
 //
@@ -29,7 +28,7 @@ import { ORDER } from '../src/sphereLab/floorPattern.ts';
 // on the shared device can imitate it.
 
 const FRAME: Dims = {
-  w: 96, h: 128, maxRegions: 4096, maxLines: 4096, ...boardDims(),
+  w: 96, h: 128, maxRegions: 4096, maxLines: 4096, ...boardDims(TEST_BOARD),
 };
 const FRAME_DIMS = { w: FRAME.w, h: FRAME.h, horizFovDeg: 60 };
 const POSE = { height: 10, overRow: 40.1, overCol: 40.6, tiltDeg: 20, yawDeg: 15 };
@@ -40,13 +39,12 @@ const SETTINGS = {
   lsdFit: { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 },
   lines: { minLengthPx: 3 },
   votes: { vFovRad: vFovRadOf(FRAME_DIMS) },
-  gpp: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: GRID_STEP, minGrazingCos: 0.15 },
-  layout: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: GRID_STEP, minGrazingCos: 0.15 },
-  order: ORDER,
+  gpp: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: TEST_CELL_PITCH, minGrazingCos: 0.15 },
+  layout: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: TEST_CELL_PITCH, minGrazingCos: 0.15 },
 };
 
 async function frameOn(device: GPUDevice, gray: Float64Array) {
-  const ctx = createPose2Context(device, FRAME, {});
+  const ctx = createPose2Context(device, FRAME, TEST_BOARD, {});
   try {
     return await runPose2(ctx, Float32Array.from(gray), SETTINGS);
   } finally {
@@ -65,7 +63,7 @@ async function poseOn(device: GPUDevice, gray: Float64Array) {
 async function countedFrame(real: GPUDevice) {
   const c = countingDevice(real);
   try {
-    const frame = await frameOn(c.device, renderPose(POSE, FRAME_DIMS, 4));
+    const frame = await frameOn(c.device, renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4));
     return { frame, counts: c.counts };
   } finally {
     c.restore();
@@ -101,7 +99,7 @@ test('a bare device genuinely lacks the feature, so the absent path is real', as
 });
 
 test('the pipeline recovers the same pose on a device that cannot be timed', async () => {
-  const gray = renderPose(POSE, FRAME_DIMS, 4);
+  const gray = renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4);
 
   const bare = await getBareTestDevice();
   assert.ok(bare, 'could not create a second device');
@@ -175,7 +173,7 @@ test('the whole frame is still one submit, one fence, one map', async () => {
 
 test('grow repeats its stage ids, and the durations are real device time', async () => {
   await withDevice(async (real) => {
-    const frame = await frameOn(real, renderPose(POSE, FRAME_DIMS, 4));
+    const frame = await frameOn(real, renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4));
     assert.ok(frame.gpu);
 
     // Repetition is expected, not a bug to normalize away: hook/compress/gate
@@ -222,8 +220,8 @@ test('grow repeats its stage ids, and the durations are real device time', async
 // resolution only on an EARLY frame, where it is real.
 test('an early frame resolves individual passes, on the fine counter', async () => {
   await withDevice(async (device) => {
-    const gray = renderPose(POSE, FRAME_DIMS, 4);
-    const ctx = createPose2Context(device, FRAME, {});
+    const gray = renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4);
+    const ctx = createPose2Context(device, FRAME, TEST_BOARD, {});
     try {
       // The FIRST frame this context runs. Other tests in this file have
       // already run frames on the shared device, so this is not necessarily

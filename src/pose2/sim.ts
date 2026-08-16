@@ -1,6 +1,5 @@
 import * as THREE from 'three';
-import { C, R, torus } from '../sphereLab/floorPattern.ts';
-import { GRID_STEP, MATH_QUAT } from '../sphereLab/constants.ts';
+import type { Board } from './board.ts';
 
 // ── The simulator: render what a camera at a known pose would see ─────────
 //
@@ -32,17 +31,33 @@ import { GRID_STEP, MATH_QUAT } from '../sphereLab/constants.ts';
 // and a spread of orientations. Verified equivalence, not assumed.
 //
 // Everything here is WORLD space: the floor is the y = 0 plane, and board cell
-// (row, col) has its centre at ((col + 0.5 - C/2) * GRID_STEP, 0,
-// (row + 0.5 - R/2) * GRID_STEP) -- the exact formula finishPositionDecode
+// (row, col) has its centre at ((col + 0.5 - C/2) * cellPitch, 0,
+// (row + 0.5 - R/2) * cellPitch) -- the exact formula finishPositionDecode
 // uses to turn a decoded anchor back into a position, so a recovered camPos is
 // directly comparable to the one that generated the image.
+
+/**
+ * The world being rendered: which board is printed on the floor, and how big a
+ * cell is in world units.
+ *
+ * Both are the CALLER's to choose, and they have to be the same two values the
+ * reconstruction is given -- the board because the simulator has to render the
+ * pattern the decoder decodes, and `cellPitch` because it is what
+ * `GppSettings`/`LayoutSettings` carry into the pipeline. A disagreement here
+ * is not a subtle error: the sweep would be scoring one world against another.
+ */
+export interface SimWorld {
+  board: Board;
+  /** World units per pattern cell. The app's GRID_STEP. */
+  cellPitch: number;
+}
 
 /**
  * A camera pose, parameterized the way a sweep wants to vary it rather than
  * the way the maths wants to consume it.
  */
 export interface SimPose {
-  /** Height above the floor, in board units (1 unit = 1 cell = GRID_STEP). */
+  /** Height above the floor, in board units (1 unit = 1 cell = cellPitch). */
   height: number;
   /** Where the camera sits over the board, in fractional cell coordinates. */
   overRow: number;
@@ -77,11 +92,12 @@ export function vFovRadOf(d: SimDims): number {
  * World position of the camera. Board col maps to world +X and board row to
  * world +Z, which is finishPositionDecode's mapping, not a fresh choice.
  */
-export function camPosOf(p: SimPose): THREE.Vector3 {
+export function camPosOf(world: SimWorld, p: SimPose): THREE.Vector3 {
+  const { board: { R, C }, cellPitch } = world;
   return new THREE.Vector3(
-    (p.overCol + 0.5 - C / 2) * GRID_STEP,
+    (p.overCol + 0.5 - C / 2) * cellPitch,
     p.height,
-    (p.overRow + 0.5 - R / 2) * GRID_STEP,
+    (p.overRow + 0.5 - R / 2) * cellPitch,
   );
 }
 
@@ -176,13 +192,14 @@ export function rayDirInto(
  * anchor arithmetic is mod R/C, so a lattice spanning more than one period is
  * an ordinary case rather than an edge case.
  */
-export function renderPose(p: SimPose, dims: SimDims, supersample = 4): Float64Array {
+export function renderPose(world: SimWorld, p: SimPose, dims: SimDims, supersample = 4): Float64Array {
+  const { board: { R, C, torus }, cellPitch } = world;
   const { w, h } = dims;
   const gray = new Float64Array(w * h);
   const aspect = w / h;
   const tanHalf = Math.tan(vFovRadOf(dims) / 2);
   const quat = camQuatOf(p);
-  const cam = camPosOf(p);
+  const cam = camPosOf(world, p);
   const s = Math.max(1, Math.floor(supersample));
   const inv = 1 / (s * s);
   const dir = { x: 0, y: 0, z: 0 };
@@ -207,8 +224,8 @@ export function renderPose(p: SimPose, dims: SimDims, supersample = 4): Float64A
           const hx = cam.x + t * dir.x;
           const hz = cam.z + t * dir.z;
           // World -> board cell. Wrapped, because the pattern tiles.
-          const col = Math.floor(hx / GRID_STEP + C / 2);
-          const row = Math.floor(hz / GRID_STEP + R / 2);
+          const col = Math.floor(hx / cellPitch + C / 2);
+          const row = Math.floor(hz / cellPitch + R / 2);
           const rr = ((row % R) + R) % R;
           const cc = ((col % C) + C) % C;
           // torus 1 is a DARK cell: decodeGridBuild reads a bit as
@@ -261,8 +278,9 @@ export interface PoseTruth {
   DnormalMath: THREE.Vector3;
 }
 
-export function truthFor(p: SimPose): PoseTruth {
-  const camPos = camPosOf(p);
+export function truthFor(world: SimWorld, p: SimPose): PoseTruth {
+  const { board: { R, C }, cellPitch } = world;
+  const camPos = camPosOf(world, p);
   const camQuat = camQuatOf(p);
   const invQuat = camQuat.clone().invert();
   const colDirWorld = new THREE.Vector3(1, 0, 0);
@@ -273,7 +291,7 @@ export function truthFor(p: SimPose): PoseTruth {
     camPos,
     camQuat,
     height: p.height,
-    period: GRID_STEP / p.height,
+    period: cellPitch / p.height,
     anchorRow: ((Math.floor(p.overRow) % R) + R) % R,
     anchorCol: ((Math.floor(p.overCol) % C) + C) % C,
     colDirWorld, rowDirWorld, normalWorld,
@@ -282,8 +300,3 @@ export function truthFor(p: SimPose): PoseTruth {
     DnormalMath: normalWorld.clone().applyQuaternion(invQuat),
   };
 }
-
-/** Sanity: MATH_QUAT is the identity, so the math frame IS camera space. Kept
- *  as an executable statement rather than a comment because everything above
- *  depends on it. */
-export const MATH_FRAME_IS_CAMERA_SPACE = MATH_QUAT.equals(new THREE.Quaternion());

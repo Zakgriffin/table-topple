@@ -23,7 +23,7 @@
 
 import { PNG } from 'pngjs';
 import { createWriteStream } from 'node:fs';
-import { generateTorus, buildTorusFromCandidate, ORDER5_CANDIDATE, WINDOW_CHECK_LIMIT } from '../src/debruijn.ts';
+import { generateTorus, buildTorusFromCandidate, ORDER5_CANDIDATE, WINDOW_CHECK_LIMIT } from '../src/pose2/debruijn.ts';
 
 function parseArgs(argv: string[]): Record<string, string> {
   const args: Record<string, string> = {};

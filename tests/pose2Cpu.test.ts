@@ -5,6 +5,7 @@ import { createBuffers, planPool } from '../src/pose2/buffers.ts';
 import { cpuCollect, cpuGradient, cpuGrow, cpuLsdFit, logBinomialTail } from '../src/pose2/cpu.ts';
 import { encodeCollect, encodeGradient, encodeGrow, encodeLsdFit, makeCtx } from '../src/pose2/pose.ts';
 import { renderPose } from '../src/pose2/sim.ts';
+import { TEST_WORLD } from './helpers/board.ts';
 import type { Dims } from '../src/pose2/pipeline.ts';
 
 // ── GPU against the CPU twin ──────────────────────────────────────────────
@@ -114,7 +115,7 @@ test('grow: GPU and the twin agree on a rendered board frame', async () => {
   // this and ground truth cannot see it, which is precisely why the twin does.
   await withDevice(async (device) => {
     const dims = dimsFor(96, 128);
-    const rendered = renderPose(
+    const rendered = renderPose(TEST_WORLD, 
       { height: 10, tiltDeg: 20, yawDeg: 35, overRow: 70.5, overCol: 70.5 },
       { w: dims.w, h: dims.h, horizFovDeg: 65 }, 4,
     );
@@ -175,7 +176,7 @@ async function gpuCollect(device: GPUDevice, gray: Float32Array, dims: Dims): Pr
 test('collect: GPU and the twin agree region-for-region on a rendered frame', async () => {
   await withDevice(async (device) => {
     const dims = dimsFor(96, 128);
-    const rendered = renderPose(
+    const rendered = renderPose(TEST_WORLD, 
       { height: 10, tiltDeg: 20, yawDeg: 35, overRow: 70.5, overCol: 70.5 },
       { w: dims.w, h: dims.h, horizFovDeg: 65 }, 4,
     );
@@ -276,7 +277,7 @@ test('lsdFit: GPU and the twin agree rectangle-for-rectangle on a rendered frame
   await withDevice(async (device) => {
     const dims = dimsFor(96, 128);
     const n = dims.w * dims.h;
-    const rendered = renderPose(
+    const rendered = renderPose(TEST_WORLD, 
       { height: 10, tiltDeg: 20, yawDeg: 35, overRow: 70.5, overCol: 70.5 },
       { w: dims.w, h: dims.h, horizFovDeg: 65 }, 4,
     );

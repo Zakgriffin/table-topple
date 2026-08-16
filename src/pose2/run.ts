@@ -1,5 +1,5 @@
 import { canTimestamp } from '../gpu/device.ts';
-import { type BoardData, buildBoard, uploadBoard } from './board.ts';
+import { type Board, buildBoard, uploadBoard } from './board.ts';
 import { type Buffers, type PoolPlan, bufferBytes, createBuffers, planPool } from './buffers.ts';
 import type { Dims } from './pipeline.ts';
 import {
@@ -86,8 +86,6 @@ export interface Pose2Settings {
   votes: VoteSettings;
   gpp: GppSettings;
   layout: LayoutSettings;
-  /** The De Bruijn window size. 5, and the board is built around it. */
-  order: number;
 }
 
 /**
@@ -103,7 +101,13 @@ export interface Pose2Context {
   dims: Dims;
   plan: PoolPlan;
   bufs: Buffers;
-  board: BoardData;
+  /**
+   * The board this context decodes against. Kept because `runPose2` needs its
+   * `order` -- the De Bruijn window size is a property of the board, and having
+   * it ALSO in `Pose2Settings` made it a second declaration that could disagree
+   * with the pattern actually uploaded.
+   */
+  board: Board;
   staging: GPUBuffer;
   /**
    * Declared-inspectable buffer -> its byte size. The per-frame request is
@@ -182,13 +186,14 @@ export interface Pose2Options {
 }
 
 export function createPose2Context(
-  device: GPUDevice, dims: Dims, opts: Pose2Options = {},
+  device: GPUDevice, dims: Dims, board: Board, opts: Pose2Options = {},
 ): Pose2Context {
   const inspect = opts.inspect ?? [];
   const plan = planPool(dims, { alias: opts.alias ?? false, inspect });
   const bufs = createBuffers(device, plan);
-  const board = buildBoard(dims);
-  uploadBoard(device, bufs, board);
+  // Flattened and uploaded once, then dropped: the device copy is the one that
+  // matters from here, and `dims` is checked against the board on the way past.
+  uploadBoard(device, bufs, buildBoard(board, dims));
 
   const inspectable = new Map(inspect.map((name) => [name, bufferBytes(dims, name)]));
   // Sized for the whole catalogue at once, even though a frame that asks for
@@ -291,7 +296,7 @@ export async function runPose2(
   encodeGpp(c, s.gpp);
   encodeDecodeLayout(c, s.layout);
   encodeDecodeBuild(c);
-  encodeDecodeTally(c, { order: s.order });
+  encodeDecodeTally(c, { order: ctx.board.order });
   encodeFinish(c);
   // THE ONE READBACK, copied inside the same encoder so there is one submit too.
   // The inspected buffers join it here, in that same encoder: more bytes across

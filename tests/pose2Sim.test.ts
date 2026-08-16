@@ -1,7 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { C, R } from '../src/sphereLab/floorPattern.ts';
-import { GRID_STEP } from '../src/sphereLab/constants.ts';
+import { TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
 import { type SimDims, type SimPose, camPosOf, camQuatOf, rayDirInto, renderPose, vFovRadOf } from '../src/pose2/sim.ts';
 import { cornerDir } from '../src/sphereLab/math/geometry.ts';
 
@@ -63,7 +62,7 @@ test('rayDirInto is bit-for-bit cornerDir', () => {
 });
 
 test('render: produces a real image, not a constant', () => {
-  const gray = renderPose({ height: 12, overRow: 70, overCol: 70, tiltDeg: 20, yawDeg: 0 }, DIMS);
+  const gray = renderPose(TEST_WORLD, { height: 12, overRow: 70, overCol: 70, tiltDeg: 20, yawDeg: 0 }, DIMS);
   assert.equal(gray.length, DIMS.w * DIMS.h);
   let min = Infinity, max = -Infinity, sum = 0;
   for (const g of gray) { if (g < min) min = g; if (g > max) max = g; sum += g; }
@@ -79,16 +78,16 @@ test('render: a nadir view is centred on the cell under the camera', () => {
   // ray goes straight down, so it must sample exactly that cell -- which pins
   // the world<->board mapping and the ray direction together.
   const pose: SimPose = { height: 6, overRow: 70.5, overCol: 70.5, tiltDeg: 0, yawDeg: 0 };
-  const cam = camPosOf(pose);
-  assert.ok(Math.abs(cam.x - (70.5 + 0.5 - C / 2) * GRID_STEP) < 1e-12);
-  assert.ok(Math.abs(cam.z - (70.5 + 0.5 - R / 2) * GRID_STEP) < 1e-12);
+  const cam = camPosOf(TEST_WORLD, pose);
+  assert.ok(Math.abs(cam.x - (70.5 + 0.5 - TEST_WORLD.board.C / 2) * TEST_CELL_PITCH) < 1e-12);
+  assert.ok(Math.abs(cam.z - (70.5 + 0.5 - TEST_WORLD.board.R / 2) * TEST_CELL_PITCH) < 1e-12);
   assert.equal(cam.y, 6);
 });
 
 test('render: supersampling changes edge pixels but not cell interiors', () => {
   const pose: SimPose = { height: 10, overRow: 70, overCol: 70, tiltDeg: 15, yawDeg: 0 };
-  const a = renderPose(pose, DIMS, 1);
-  const b = renderPose(pose, DIMS, 3);
+  const a = renderPose(TEST_WORLD, pose, DIMS, 1);
+  const b = renderPose(TEST_WORLD, pose, DIMS, 3);
   let differing = 0, intermediate = 0;
   for (let i = 0; i < a.length; i++) {
     if (a[i] !== b[i]) differing++;

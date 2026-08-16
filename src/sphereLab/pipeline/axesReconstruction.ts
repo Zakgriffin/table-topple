@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { type Camera, type CameraPose, type CompositeLine, type PendingVisuals } from '../camera/model.ts';
 import { activeCamera, isPhysical, isSimulated } from '../camera/store.ts';
 import { COL_DIR, GRID_STEP, ROW_DIR, SPHERE_RADIUS } from '../constants.ts';
-import { ORDER } from '../floorPattern.ts';
+import { board } from '../floorPattern.ts';
 import { getGPUDevice } from '../../gpu/device.ts';
 import { boardDims } from '../../pose2/board.ts';
 import { POSE2_STATUS, decodeLayout } from '../../pose2/pose.ts';
@@ -583,9 +583,12 @@ async function poseContextFor(camera: Camera, w: number, h: number): Promise<Pos
   // Destroyed here rather than left to GC: a supersample drag walks through a
   // dozen sizes, and each context is ~16 MiB of device buffers.
   if (held) destroyPose2Context(held.ctx);
+  // Read live rather than captured: `board` is swapped wholesale by the
+  // board-size control, and a context outlives at most one such swap -- its
+  // buffer sizes are baked from these dims, so it is rebuilt, not reused.
   const ctx = createPose2Context(device, {
-    w, h, maxRegions: MAX_REGIONS, maxLines: MAX_LINES, ...boardDims(),
-  }, { inspect: INSPECT });
+    w, h, maxRegions: MAX_REGIONS, maxLines: MAX_LINES, ...boardDims(board),
+  }, board, { inspect: INSPECT });
   poseContexts.set(camera, { ctx, w, h });
   return ctx;
 }
@@ -606,7 +609,6 @@ function pose2SettingsFor(camera: Camera): Pose2Settings {
     votes: { vFovRad },
     gpp: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
     layout: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
-    order: ORDER,
   };
 }
 

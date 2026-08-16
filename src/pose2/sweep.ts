@@ -1,7 +1,5 @@
 import * as THREE from 'three';
-import { C, R } from '../sphereLab/floorPattern.ts';
-import { GRID_STEP } from '../sphereLab/constants.ts';
-import { type SimDims, type SimPose, renderPose, truthFor } from './sim.ts';
+import { type SimDims, type SimPose, type SimWorld, renderPose, truthFor } from './sim.ts';
 
 // ── The pose sweep ────────────────────────────────────────────────────────
 //
@@ -45,6 +43,9 @@ export interface SweepSpec {
   offsets: readonly { row: number; col: number }[];
   dims: SimDims;
   supersample?: number;
+  /** The board being rendered and its cell pitch. Must be the same two the
+   *  runner's pipeline is configured with -- see SimWorld. */
+  world: SimWorld;
 }
 
 export function generatePoses(spec: SweepSpec): SimPose[] {
@@ -98,8 +99,8 @@ export async function runSweep(spec: SweepSpec, runner: Runner): Promise<SweepRo
   const poses = generatePoses(spec);
   const rows: SweepRow[] = [];
   for (const pose of poses) {
-    const truth = truthFor(pose);
-    const gray = renderPose(pose, spec.dims, spec.supersample ?? 4);
+    const truth = truthFor(spec.world, pose);
+    const gray = renderPose(spec.world, pose, spec.dims, spec.supersample ?? 4);
     const obs = await runner(gray, spec.dims, pose);
 
     if (!obs.camPos) {
@@ -113,8 +114,8 @@ export async function runSweep(spec: SweepSpec, runner: Runner): Promise<SweepRo
 
     // Board coordinates, so the discrete part is literally an integer count of
     // cells rather than a distance that happens to look like one.
-    const dCol = (obs.camPos.x - truth.camPos.x) / GRID_STEP;
-    const dRow = (obs.camPos.z - truth.camPos.z) / GRID_STEP;
+    const dCol = (obs.camPos.x - truth.camPos.x) / spec.world.cellPitch;
+    const dRow = (obs.camPos.z - truth.camPos.z) / spec.world.cellPitch;
     const cellCol = Math.round(dCol);
     const cellRow = Math.round(dRow);
     const subCol = dCol - cellCol;
@@ -155,12 +156,12 @@ const f = (v: number, n = 3) => (Number.isFinite(v) ? v.toFixed(n) : '--');
  * axis the first sweep showed structure along; regroup when a different one
  * starts mattering.
  */
-export function summarize(rows: SweepRow[], label = 'sweep'): string {
+export function summarize(rows: SweepRow[], world: SimWorld, label = 'sweep'): string {
   const lines: string[] = [];
   const ok = rows.filter((r) => r.recovered);
   const anchorOk = ok.filter((r) => r.anchorErr === 0);
 
-  lines.push(`── ${label} ── ${rows.length} poses, board ${R}x${C}`);
+  lines.push(`── ${label} ── ${rows.length} poses, board ${world.board.R}x${world.board.C}`);
   lines.push(`   recovered      ${ok.length}/${rows.length}`);
   lines.push(`   anchor exact   ${anchorOk.length}/${ok.length}  (whole-cell offset of zero)`);
   lines.push('');

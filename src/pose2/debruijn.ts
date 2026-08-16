@@ -1,8 +1,13 @@
-// Shared De Bruijn torus construction — used by both the offline PNG
-// generator (scripts/generate-debruijn-torus.ts) and the browser tracker
-// (src/main.ts). Given just an order, both independently reconstruct the
-// identical pattern (the tap search is a deterministic function of N), so
-// there's no need to ship pixel data or a lookup table as a separate asset.
+// Shared De Bruijn torus construction — used by the offline PNG generator
+// (scripts/generate-debruijn-torus.ts) and by board.ts's createBoard, which is
+// what every app builds its board through. Given just an order, both
+// independently reconstruct the identical pattern (the tap search is a
+// deterministic function of N), so there's no need to ship pixel data or a
+// lookup table as a separate asset.
+//
+// It lives INSIDE the pose library because the library owns the De Bruijn
+// source of truth: a second copy of this construction could disagree with the
+// printed floor, and nothing downstream could detect that -- see board.ts.
 //
 // See scripts/generate-debruijn-torus.ts for the full construction writeup.
 

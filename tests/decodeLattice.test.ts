@@ -6,9 +6,15 @@ import { createPose2Context, destroyPose2Context, runPose2 } from '../src/pose2/
 import { decodeLayout } from '../src/pose2/pose.ts';
 import type { Dims } from '../src/pose2/pipeline.ts';
 import { renderPose, vFovRadOf } from '../src/pose2/sim.ts';
+import type { SimWorld } from '../src/pose2/sim.ts';
 import { GRID_STEP } from '../src/sphereLab/constants.ts';
-import { ORDER } from '../src/sphereLab/floorPattern.ts';
+import { board } from '../src/sphereLab/floorPattern.ts';
 import { buildDecodeLattice } from '../src/sphereLab/pipeline/decodeLattice.ts';
+
+// SPHERE LAB's board, not tests/helpers/board.ts's -- `buildDecodeLattice` is
+// app code and reads the app's `board` module binding, so the frame it is
+// checked against has to be rendered on that same floor.
+const WORLD: SimWorld = { board, cellPitch: GRID_STEP };
 
 // ── The app's host copy of decode.correctness ─────────────────────────────
 //
@@ -24,7 +30,7 @@ import { buildDecodeLattice } from '../src/sphereLab/pipeline/decodeLattice.ts';
 // wrong at 1, 2 and 3" -- so this test's real job is to reach the other three.
 
 const FRAME: Dims = {
-  w: 96, h: 128, maxRegions: 4096, maxLines: 4096, ...boardDims(),
+  w: 96, h: 128, maxRegions: 4096, maxLines: 4096, ...boardDims(board),
 };
 const FRAME_DIMS = { w: FRAME.w, h: FRAME.h, horizFovDeg: 60 };
 const INSPECT = ['layout', 'packed', 'result'] as const;
@@ -37,7 +43,6 @@ const SETTINGS = {
   votes: { vFovRad: vFovRadOf(FRAME_DIMS) },
   gpp: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: GRID_STEP, minGrazingCos: 0.15 },
   layout: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: GRID_STEP, minGrazingCos: 0.15 },
-  order: ORDER,
 };
 
 // Four yaws a quarter turn apart, which is what makes the winning orientation
@@ -47,12 +52,12 @@ const YAWS = [15, 105, 195, 285];
 
 test('the host lattice agrees with the device at every cardinal orientation', async () => {
   await withDevice(async (device) => {
-    const ctx = createPose2Context(device, FRAME, { inspect: INSPECT });
+    const ctx = createPose2Context(device, FRAME, board, { inspect: INSPECT });
     try {
       const orientations = new Set<number>();
       for (const yawDeg of YAWS) {
         const gray = renderPose(
-          { height: 10, overRow: 40.1, overCol: 40.6, tiltDeg: 20, yawDeg }, FRAME_DIMS, 4);
+          WORLD, { height: 10, overRow: 40.1, overCol: 40.6, tiltDeg: 20, yawDeg }, FRAME_DIMS, 4);
         const { pose, inspected } = await runPose2(ctx, Float32Array.from(gray), SETTINGS, INSPECT);
         assert.equal(pose.ok, true, `yaw ${yawDeg} did not decode -- nothing here is meaningful`);
         orientations.add(pose.orientation);

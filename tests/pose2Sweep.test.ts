@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import * as THREE from 'three';
-import { GRID_STEP } from '../src/sphereLab/constants.ts';
+import { TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
 import { type SimDims, type SimPose, camPosOf } from '../src/pose2/sim.ts';
 import { type PoseObservation, type SweepSpec, generatePoses, runSweep, summarize } from '../src/pose2/sweep.ts';
 
@@ -22,15 +22,15 @@ const DIMS: SimDims = { w: 32, h: 32, horizFovDeg: 65 };
 /** A runner that reports the true pose displaced by a known amount. */
 function fakeRunner(offset: { dCol: number; dRow: number; dHeight?: number }): (g: Float64Array, d: SimDims, p: SimPose) => Promise<PoseObservation> {
   return async (_gray, _dims, pose) => {
-    const truth = camPosOf(pose);
+    const truth = camPosOf(TEST_WORLD, pose);
     return {
       camPos: new THREE.Vector3(
-        truth.x + offset.dCol * GRID_STEP,
+        truth.x + offset.dCol * TEST_CELL_PITCH,
         truth.y + (offset.dHeight ?? 0),
-        truth.z + offset.dRow * GRID_STEP,
+        truth.z + offset.dRow * TEST_CELL_PITCH,
       ),
       height: pose.height + (offset.dHeight ?? 0),
-      period: GRID_STEP / pose.height,
+      period: TEST_CELL_PITCH / pose.height,
       consistency: 0.9,
       ms: 1,
     };
@@ -39,13 +39,13 @@ function fakeRunner(offset: { dCol: number; dRow: number; dHeight?: number }): (
 
 const ONE_POSE: SweepSpec = {
   heights: [10], tilts: [0], yaws: [0], offsets: [{ row: 70.5, col: 70.5 }],
-  dims: DIMS, supersample: 1,
+  dims: DIMS, supersample: 1, world: TEST_WORLD,
 };
 
 test('generatePoses is the full cartesian product', () => {
   const poses = generatePoses({
     heights: [6, 10], tilts: [0, 20, 40], yaws: [0, 90],
-    offsets: [{ row: 1, col: 2 }], dims: DIMS,
+    offsets: [{ row: 1, col: 2 }], dims: DIMS, world: TEST_WORLD,
   });
   assert.equal(poses.length, 2 * 3 * 2 * 1);
   assert.equal(new Set(poses.map((p) => JSON.stringify(p))).size, poses.length, 'poses must be distinct');
@@ -98,7 +98,7 @@ test('a pipeline that recovers nothing is recorded, not dropped', async () => {
   }));
   assert.equal(rows[0]!.recovered, false);
   // And the summary has to SAY so rather than quietly averaging over one pose.
-  const text = summarize(rows);
+  const text = summarize(rows, TEST_WORLD);
   assert.match(text, /recovered\s+0\/1/);
   assert.match(text, /NO POSE/);
 });
@@ -108,7 +108,7 @@ test('the summary names which poses failed', async () => {
   // where things break down is the entire purpose of the sweep.
   const spec: SweepSpec = { ...ONE_POSE, tilts: [0, 30] };
   const rows = await runSweep(spec, fakeRunner({ dCol: 0, dRow: -1 }));
-  const text = summarize(rows, 'unit');
+  const text = summarize(rows, TEST_WORLD, 'unit');
   assert.match(text, /anchor exact\s+0\/2/);
   assert.match(text, /tilt=0/);
   assert.match(text, /tilt=30/);

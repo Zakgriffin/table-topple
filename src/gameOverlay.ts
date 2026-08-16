@@ -2,7 +2,7 @@ import * as THREE from 'three';
 import { camera, scene } from './game/scene.ts';
 import { step } from './game/sim.ts';
 import { BOARD_SIZE } from './game/constants.ts';
-import { C, R } from './sphereLab/floorPattern.ts';
+import { board } from './sphereLab/floorPattern.ts';
 import { GRID_STEP } from './sphereLab/constants.ts';
 
 // The board game, drawn over the live camera feed.
@@ -74,7 +74,7 @@ export function fitBoardToPattern() {
   // min, not the two axes separately: C and R are equal for every board the
   // crop can produce, but a non-square one would have to letterbox rather than
   // stretch -- a non-uniform scale would squash the denizens standing on it.
-  const cells = Math.min(C, R);
+  const cells = Math.min(board.C, board.R);
   scene.scale.setScalar((cells * GRID_STEP) / BOARD_SIZE);
 }
 fitBoardToPattern();

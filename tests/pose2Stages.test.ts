@@ -1,5 +1,6 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
+import * as THREE from 'three';
 import { readF32, readU32, withDevice } from './helpers/gpu.ts';
 import { createBuffers, planPool } from '../src/pose2/buffers.ts';
 import {
@@ -9,9 +10,17 @@ import {
 } from '../src/pose2/pose.ts';
 import type { Dims } from '../src/pose2/pipeline.ts';
 import { rayDirInto, renderPose, truthFor, vFovRadOf } from '../src/pose2/sim.ts';
-import { GRID_STEP, MATH_QUAT } from '../src/sphereLab/constants.ts';
-import { C, ORDER, R, debruijnLookup, torus } from '../src/sphereLab/floorPattern.ts';
 import { boardDims, buildBoard, hashU32, uploadBoard } from '../src/pose2/board.ts';
+import { TEST_BOARD, TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
+
+// Destructured once, at the top, and safe here in a way it would not be in app
+// code: TEST_BOARD is a const built at module load and never swapped.
+const { R, C, torus, lookup: debruijnLookup, order: ORDER } = TEST_BOARD;
+
+// The math frame is camera space -- every ray-casting call in the recovery
+// pipeline is expressed against the identity. The app spells this MATH_QUAT;
+// a library test has no business importing the app to say "identity".
+const MATH_QUAT = new THREE.Quaternion();
 
 // Where a lattice's zero-reference cell ENDS UP after rotating the whole grid by
 // `o` quarter-turns. Used once, by the decode anchor test.
@@ -674,8 +683,8 @@ test('votes: a centred vertical line votes for the X axis, at sin(subtended angl
 test('votes: on a rendered board, every normal is perpendicular to a true floor axis', async () => {
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const gray = renderPose(pose, FRAME_DIMS, 4);
-    const truth = truthFor(pose);
+    const gray = renderPose(TEST_WORLD, pose, FRAME_DIMS, 4);
+    const truth = truthFor(TEST_WORLD, pose);
 
     const bufs = await run(device, (ctx) => {
       device.queue.writeBuffer(ctx.bufs.gray!, 0, Float32Array.from(gray));
@@ -898,7 +907,7 @@ test('fit: votes built from two known floor axes recover exactly those axes', as
       { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 50, yawDeg: 35, rollDeg: 245 },
     ]) {
       const what = `tilt ${pose.tiltDeg} yaw ${pose.yawDeg} roll ${pose.rollDeg ?? 0}`;
-      const truth = truthFor(pose);
+      const truth = truthFor(TEST_WORLD, pose);
       const d1 = asV3(truth.DrowMath), d2 = asV3(truth.DcolMath);
       const t = await fitOnVotes(device, syntheticVotes([d1, d2], 6));
 
@@ -958,8 +967,8 @@ test('fit: on a rendered board, the recovered floor is the true floor', async ()
   // where being self-consistently wrong is not enough to pass.
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const gray = renderPose(pose, FRAME_DIMS, 4);
-    const truth = truthFor(pose);
+    const gray = renderPose(TEST_WORLD, pose, FRAME_DIMS, 4);
+    const truth = truthFor(TEST_WORLD, pose);
 
     const bufs = await run(device, (ctx) => {
       device.queue.writeBuffer(ctx.bufs.gray!, 0, Float32Array.from(gray));
@@ -1023,7 +1032,7 @@ test('fit: on a rendered board, the recovered floor is the true floor', async ()
 // destroys that structure without necessarily making any individual value look
 // unreasonable.
 
-const GPP = { cellPitch: GRID_STEP, minGrazingCos: 0.1 };
+const GPP = { cellPitch: TEST_CELL_PITCH, minGrazingCos: 0.1 };
 
 /**
  * Weighted circular resultant: fold values onto the unit circle at `period` and
@@ -1093,8 +1102,8 @@ async function gppOn(device: GPUDevice, gray: Float64Array, dims: Dims, dd: { w:
 test('gpp: the rectified values are a lattice, and it is the true one', async () => {
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const truth = truthFor(pose);
-    const g = await gppOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const truth = truthFor(TEST_WORLD, pose);
+    const g = await gppOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
 
     assert.ok(g.lineCount > 40, `only ${g.lineCount} lines -- the detector, not gpp, is the problem`);
     // Both families populated. A classify that collapsed the two grid
@@ -1178,8 +1187,8 @@ test('gpp: the rectified values are a lattice, and it is the true one', async ()
 test('gpp: classify splits the lines the way ground truth does, up to the swap', async () => {
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const truth = truthFor(pose);
-    const g = await gppOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const truth = truthFor(TEST_WORLD, pose);
+    const g = await gppOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
 
     // classify tests the recovered triad against itself. This tests it against
     // the axes that GENERATED the image, so a triad that is self-consistently
@@ -1211,7 +1220,7 @@ test('gpp: the extent is PER FAMILY, not the pooled range', async () => {
     // families' coordinate ranges differ. At nadir with the board centred they
     // very nearly coincide and this fixture could not tell the bug from the fix.
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 30, yawDeg: 25 };
-    const g = await gppOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const g = await gppOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
     assert.ok(g.rowCount > 5 && g.colCount > 5, `families ${g.rowCount}/${g.colCount}`);
 
     const span = (v: number[]) => Math.max(...v) - Math.min(...v);
@@ -1253,7 +1262,7 @@ test('gpp: the extent is PER FAMILY, not the pooled range', async () => {
  * carrying a scale.
  */
 function trueVisibleCells(pose: { height: number; tiltDeg: number; yawDeg: number; overRow: number; overCol: number }, dd: typeof FRAME_DIMS, minGrazingCos: number) {
-  const truth = truthFor(pose);
+  const truth = truthFor(TEST_WORLD, pose);
   const tanHalf = Math.tan(vFovRadOf(dd) / 2);
   const aspect = dd.w / dd.h;
   const Dn = truth.DnormalMath.clone();
@@ -1281,7 +1290,7 @@ function trueVisibleCells(pose: { height: number; tiltDeg: number; yawDeg: numbe
 test('gpp: the hull is the min/max of every classified ENDPOINT, in both axes', async () => {
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const g = await gppOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const g = await gppOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
     assert.ok(g.rowCount > 5 && g.colCount > 5, `families ${g.rowCount}/${g.colCount}`);
 
     // ── 1. THE REDUCTION, RE-DERIVED FROM ITS OWN INPUTS ──
@@ -1364,7 +1373,7 @@ test('gpp: the family array is TOTAL -- a frame cannot inherit the last one\'s f
     // and the blank frame gives zero, which under an indirect dispatch is zero
     // workgroups and therefore no writes at all.
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const busy = await gppOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const busy = await gppOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
     assert.ok(busy.lineCount > 64,
       `run 1 produced ${busy.lineCount} lines -- it must exceed one workgroup or this test is blind`);
 
@@ -1384,8 +1393,8 @@ test('gpp: the family array is TOTAL -- a frame cannot inherit the last one\'s f
 test('gpp: the recovered period and height are the true ones', async () => {
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const truth = truthFor(pose);
-    const g = await gppOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const truth = truthFor(TEST_WORLD, pose);
+    const g = await gppOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
 
     const periodErr = g.period / truth.period - 1;
     const heightErr = g.height / truth.height - 1;
@@ -1454,8 +1463,8 @@ test('gpp: the sub-multiples are present, score as well, and lose anyway', async
     // that merely checks the winner cannot tell "the tie was broken correctly"
     // from "there was no tie". So this asserts the TIE EXISTS first.
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const truth = truthFor(pose);
-    const g = await gppOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const truth = truthFor(TEST_WORLD, pose);
+    const g = await gppOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
     const shown = g.candidates.map((c) =>
       `P=${c.period.toFixed(4)} res=${c.score.toFixed(2)} d=${c.distinctness.toFixed(1)}`).join(' | ');
 
@@ -1502,7 +1511,7 @@ test('gpp: the sub-multiples are present, score as well, and lose anyway', async
 test('gpp: a frame with no lines reports no period, not the last frame\'s', async () => {
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const busy = await gppOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const busy = await gppOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
     assert.ok(busy.period > 0, 'the fixture frame did not recover a period to inherit');
 
     const quiet = await gppOn(device, new Float64Array(FRAME.w * FRAME.h), FRAME, FRAME_DIMS);
@@ -1528,7 +1537,7 @@ test('gpp: a frame with no lines reports no period, not the last frame\'s', asyn
 // the true geometry says it should" is checkable directly rather than against a
 // second implementation.
 
-const LAYOUT = { cellPitch: GRID_STEP, minGrazingCos: 0.1 };
+const LAYOUT = { cellPitch: TEST_CELL_PITCH, minGrazingCos: 0.1 };
 
 /**
  * The 128-byte layout block, read both ways because it is a mixed struct.
@@ -1598,8 +1607,8 @@ test('decode.layout: the lattice IS the true floor lattice, in pitch and in phas
     // 0.1 and 0.6 are generic fractions rather than the largest separator, and
     // the gate at 0.2 sits with ~1.6x headroom on each side of it.
     const pose = { height: 10, overRow: 40.1, overCol: 40.6, tiltDeg: 20, yawDeg: 15 };
-    const truth = truthFor(pose);
-    const L = await layoutOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const truth = truthFor(TEST_WORLD, pose);
+    const L = await layoutOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
 
     assert.equal(L.valid, 1, `layout reported invalid (status ${L.status})`);
     assert.equal(L.status & 256, 0, 'layoutInvalid is set');
@@ -1617,7 +1626,7 @@ test('decode.layout: the lattice IS the true floor lattice, in pitch and in phas
     //
     // Project a cell exactly as decode.build will, then cast that pixel back
     // through the TRUE camera and intersect the true floor. The result is in
-    // world units where a cell is GRID_STEP and centres sit at the half-integers,
+    // world units where a cell is one cellPitch and centres sit at the half-integers,
     // so both of this stage's own claims are readable off it directly.
     const tanHalf = Math.tan(vFovRadOf(FRAME_DIMS) / 2);
     const aspect = FRAME.w / FRAME.h;
@@ -1715,7 +1724,7 @@ test('decode.layout: the lattice IS the true floor lattice, in pitch and in phas
     assert.ok(onScreen > 100, `only ${onScreen} lattice cells project on screen`);
     // 2% is the same gate gpp's period test uses, and for the same reason: this
     // pitch IS that period, expressed in world units through the layout.
-    assert.ok(Math.abs(pitchJ - GRID_STEP) < 0.02 && Math.abs(pitchI - GRID_STEP) < 0.02,
+    assert.ok(Math.abs(pitchJ - TEST_CELL_PITCH) < 0.02 && Math.abs(pitchI - TEST_CELL_PITCH) < 0.02,
       `a lattice step is ${pitchJ.toFixed(4)} / ${pitchI.toFixed(4)} board cells, not one`);
     assert.ok(refOff < 0.2,
       `the reference cell sits ${refOff.toFixed(3)} cells from a true centre -- ` +
@@ -1740,7 +1749,7 @@ test('decode.layout: the indirect args cover the lattice, in every rotation', as
     //
     // Tilt 40 gives 23x37 -> (3, 5), where a swap is visible.
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 40, yawDeg: 15 };
-    const L = await layoutOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const L = await layoutOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
     assert.equal(L.valid, 1);
     assert.notEqual(Math.ceil(L.rows / 8), Math.ceil(L.cols / 8),
       `this lattice is ${L.rows}x${L.cols}, whose workgroup counts are equal -- ` +
@@ -1766,7 +1775,7 @@ test('decode.layout: the indirect args cover the lattice, in every rotation', as
 test('decode.layout: a frame with no period dispatches nothing, and says why', async () => {
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const busy = await layoutOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const busy = await layoutOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
     assert.equal(busy.valid, 1, 'the fixture frame produced no lattice to inherit');
     assert.ok(busy.rows > 4 && busy.cols > 4);
 
@@ -1787,7 +1796,7 @@ test('decode.layout: a frame with no period dispatches nothing, and says why', a
 test('decode.layout: the lattice bounds ARE the hull, converted', async () => {
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const gray = renderPose(pose, FRAME_DIMS, 4);
+    const gray = renderPose(TEST_WORLD, pose, FRAME_DIMS, 4);
     const L = await layoutOn(device, gray, FRAME, FRAME_DIMS);
     const extent = await readF32(device, L.bufs.extent!, 12);
 
@@ -1828,7 +1837,7 @@ test('decode.layout: a hull past one board period is CLAMPED and keeps decoding'
     // which would be testing the detector rather than this.
     const SMALL: Dims = { ...FRAME, torusR: 12, torusC: 12, maxCells: 12 * 12 };
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const gray = renderPose(pose, FRAME_DIMS, 4);
+    const gray = renderPose(TEST_WORLD, pose, FRAME_DIMS, 4);
     const big = await layoutOn(device, gray, FRAME, FRAME_DIMS);
     const L = await layoutOn(device, gray, SMALL, FRAME_DIMS);
 
@@ -1891,8 +1900,8 @@ test('decode.build: every sampled bit is the bit the true board has there', asyn
     // Nothing about this is an aggregate or a tolerance -- each cell is right or
     // it is wrong.
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const truth = truthFor(pose);
-    const B = await buildOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const truth = truthFor(TEST_WORLD, pose);
+    const B = await buildOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
     assert.equal(B.valid, 1, 'no lattice');
 
     const tanHalf = Math.tan(vFovRadOf(FRAME_DIMS) / 2);
@@ -1927,11 +1936,11 @@ test('decode.build: every sampled bit is the bit the true board has there', asyn
         // are counted separately rather than scored, because they measure the
         // upstream phase error and not this pass.
         const nearEdge = Math.min(
-          Math.abs(hx / GRID_STEP - Math.round(hx / GRID_STEP)),
-          Math.abs(hz / GRID_STEP - Math.round(hz / GRID_STEP)));
+          Math.abs(hx / TEST_CELL_PITCH - Math.round(hx / TEST_CELL_PITCH)),
+          Math.abs(hz / TEST_CELL_PITCH - Math.round(hz / TEST_CELL_PITCH)));
         if (nearEdge < 0.1) { boundary++; continue; }
-        const col = ((Math.floor(hx / GRID_STEP + C / 2) % C) + C) % C;
-        const row = ((Math.floor(hz / GRID_STEP + R / 2) % R) + R) % R;
+        const col = ((Math.floor(hx / TEST_CELL_PITCH + C / 2) % C) + C) % C;
+        const row = ((Math.floor(hz / TEST_CELL_PITCH + R / 2) % R) + R) % R;
         if (((p >> 1) & 1) === torus[row]![col]) agree++;
       }
     }
@@ -1972,12 +1981,12 @@ test('decode.build: every sampled bit is the bit the true board has there', asyn
 // property of the pose that rendered the frame, so `truthFor` states it exactly
 // and there is nothing to approximate.
 
-const BOARD = boardDims();
+const BOARD = boardDims(TEST_BOARD);
 
 /** The whole pipeline through decode.correctness, plus the result block. */
 async function decodeOn(device: GPUDevice, gray: Float64Array, dims: Dims, dd: typeof FRAME_DIMS) {
   const bufs = await run(device, (ctx) => {
-    uploadBoard(ctx.device, ctx.bufs, buildBoard(dims));
+    uploadBoard(ctx.device, ctx.bufs, buildBoard(TEST_BOARD, dims));
     device.queue.writeBuffer(ctx.bufs.gray!, 0, Float32Array.from(gray));
     encodeGradient(ctx);
     encodeGrow(ctx, { rhoLow: 0.132, toleranceDeg: 9.5 });
@@ -2005,8 +2014,8 @@ async function decodeOn(device: GPUDevice, gray: Float64Array, dims: Dims, dd: t
 test('decode: the winning anchor is the true one, and the grid agrees with the board', async () => {
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const truth = truthFor(pose);
-    const D = await decodeOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const truth = truthFor(TEST_WORLD, pose);
+    const D = await decodeOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
 
     console.log(`    ${D.rows}x${D.cols} lattice, orientation ${D.orientation}, ` +
       `anchor (${D.anchorRow}, ${D.anchorCol}), ${D.votes}/${D.totalWindows} windows voted for it, ` +
@@ -2059,7 +2068,7 @@ test('decode: the winning anchor is the true one, and the grid agrees with the b
 test('decode: an undecodable frame reports no anchor, and inherits nothing', async () => {
   await withDevice(async (device) => {
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const busy = await decodeOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const busy = await decodeOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
     assert.equal(busy.found, 1, 'the fixture frame decoded nothing to inherit');
 
     const quiet = await decodeOn(device, new Float64Array(FRAME.w * FRAME.h), FRAME, FRAME_DIMS);
@@ -2080,7 +2089,7 @@ test('decode: the hash table round-trips every window the board has', () => {
   // Every entry findable by its own probe, which is what an insertion bug
   // breaks: a wrong probe direction or an overwritten slot loses windows
   // silently, and a lost window is just a window that casts no vote.
-  const board = buildBoard(BOARD);
+  const board = buildBoard(TEST_BOARD, BOARD);
   const size = BOARD.hashSlots;
   let checked = 0;
   for (const [key, value] of debruijnLookup) {
@@ -2115,7 +2124,7 @@ async function poseOn(
 ) {
   const alias = opts.alias ?? false;
   const bufs = await run(device, (ctx) => {
-    uploadBoard(ctx.device, ctx.bufs, buildBoard(dims));
+    uploadBoard(ctx.device, ctx.bufs, buildBoard(TEST_BOARD, dims));
     device.queue.writeBuffer(ctx.bufs.gray!, 0, Float32Array.from(gray));
     encodeGradient(ctx);
     encodeGrow(ctx, { rhoLow: 0.132, toleranceDeg: 9.5 });
@@ -2167,12 +2176,12 @@ test('THE PIPELINE: an image goes in and the pose that made it comes out', async
     // DISAGREES -- with wrong = 0 the mutated denominator equals the correct one.
     let sawWrong = false;
     for (const pose of poses) {
-      const truth = truthFor(pose);
-      const P = await poseOn(device, renderPose(pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+      const truth = truthFor(TEST_WORLD, pose);
+      const P = await poseOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
       const dx = P.position.x - truth.camPos.x;
       const dy = P.position.y - truth.camPos.y;
       const dz = P.position.z - truth.camPos.z;
-      const err = Math.hypot(dx, dy, dz) / GRID_STEP;
+      const err = Math.hypot(dx, dy, dz) / TEST_CELL_PITCH;
       // A quaternion and its negation are the same rotation, so the comparison
       // is on |dot|, which is cos(half the angle between them).
       const qd = Math.abs(
@@ -2377,7 +2386,7 @@ test('§18: the POOLED buffer set produces a bit-identical pose', async () => {
       { height: 10, overRow: 40.1, overCol: 40.6, tiltDeg: 20, yawDeg: 15 },
       { height: 16, overRow: 20.5, overCol: 60.5, tiltDeg: 30, yawDeg: 285 },
     ]) {
-      const gray = renderPose(pose, FRAME_DIMS, 4);
+      const gray = renderPose(TEST_WORLD, pose, FRAME_DIMS, 4);
       const flat = await poseOn(device, gray, FRAME, FRAME_DIMS);
       const pooled = await poseOn(device, gray, FRAME, FRAME_DIMS, { alias: true });
 

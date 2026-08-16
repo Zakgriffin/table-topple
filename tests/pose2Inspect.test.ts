@@ -5,8 +5,7 @@ import { boardDims } from '../src/pose2/board.ts';
 import { createPose2Context, destroyPose2Context, runPose2 } from '../src/pose2/run.ts';
 import type { Dims } from '../src/pose2/pipeline.ts';
 import { renderPose, vFovRadOf } from '../src/pose2/sim.ts';
-import { GRID_STEP } from '../src/sphereLab/constants.ts';
-import { ORDER } from '../src/sphereLab/floorPattern.ts';
+import { TEST_BOARD, TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
 
 // ── The opt-in intermediate readback ──────────────────────────────────────
 //
@@ -22,7 +21,7 @@ import { ORDER } from '../src/sphereLab/floorPattern.ts';
 // something, this one proves the bytes that come back are right.
 
 const FRAME: Dims = {
-  w: 96, h: 128, maxRegions: 4096, maxLines: 4096, ...boardDims(),
+  w: 96, h: 128, maxRegions: 4096, maxLines: 4096, ...boardDims(TEST_BOARD),
 };
 const FRAME_DIMS = { w: FRAME.w, h: FRAME.h, horizFovDeg: 60 };
 const POSE = { height: 10, overRow: 40.1, overCol: 40.6, tiltDeg: 20, yawDeg: 15 };
@@ -45,16 +44,15 @@ const SETTINGS = {
   lsdFit: { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 },
   lines: { minLengthPx: 3 },
   votes: { vFovRad: vFovRadOf(FRAME_DIMS) },
-  gpp: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: GRID_STEP, minGrazingCos: 0.15 },
-  layout: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: GRID_STEP, minGrazingCos: 0.15 },
-  order: ORDER,
+  gpp: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: TEST_CELL_PITCH, minGrazingCos: 0.15 },
+  layout: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: TEST_CELL_PITCH, minGrazingCos: 0.15 },
 };
 
 async function frameWith(
   device: GPUDevice, gray: Float64Array,
   opts: { alias: boolean; inspect: readonly string[] },
 ) {
-  const ctx = createPose2Context(device, FRAME, { alias: opts.alias, inspect: opts.inspect });
+  const ctx = createPose2Context(device, FRAME, TEST_BOARD, { alias: opts.alias, inspect: opts.inspect });
   try {
     return await runPose2(ctx, Float32Array.from(gray), SETTINGS, opts.inspect);
   } finally {
@@ -64,7 +62,7 @@ async function frameWith(
 
 test('inspected bytes are identical with pooling on and off', async () => {
   await withDevice(async (device) => {
-    const gray = renderPose(POSE, FRAME_DIMS, 4);
+    const gray = renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4);
 
     // `alias: false` is the reference: every buffer holds its own slot, so what
     // comes back is unambiguously that buffer's own bytes. `alias: true` is the
@@ -110,7 +108,7 @@ test('inspected bytes are identical with pooling on and off', async () => {
 
 test('inspected bytes are the BUFFER\'s, not some other stage\'s', async () => {
   await withDevice(async (device) => {
-    const gray = renderPose(POSE, FRAME_DIMS, 4);
+    const gray = renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4);
     const got = await frameWith(device, gray, { alias: true, inspect: INSPECT });
 
     // Byte-identical is only worth something if the bytes mean what the name
@@ -163,7 +161,7 @@ test('inspected bytes are the BUFFER\'s, not some other stage\'s', async () => {
 // frame's, correctly offset, for it to hold.
 test('the region CSR slices members into disjoint, in-frame, above-floor runs', async () => {
   await withDevice(async (device) => {
-    const gray = renderPose(POSE, FRAME_DIMS, 4);
+    const gray = renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4);
     const got = await frameWith(device, gray, { alias: true, inspect: INSPECT });
 
     const counts = new Uint32Array(got.inspected['counts']!);
@@ -214,12 +212,12 @@ test('the region CSR slices members into disjoint, in-frame, above-floor runs', 
 
 test('a frame that asks for nothing is byte-for-byte the frame before inspection existed', async () => {
   await withDevice(async (device) => {
-    const gray = renderPose(POSE, FRAME_DIMS, 4);
+    const gray = renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4);
     // Not a performance claim -- a claim that the default path is unchanged.
     // The staging buffer is sized for the catalogue, but a frame requesting
     // nothing copies and maps only the 128-byte pose block.
     const declared = await frameWith(device, gray, { alias: false, inspect: INSPECT });
-    const ctx = createPose2Context(device, FRAME, { alias: false, inspect: INSPECT });
+    const ctx = createPose2Context(device, FRAME, TEST_BOARD, { alias: false, inspect: INSPECT });
     try {
       const quiet = await runPose2(ctx, Float32Array.from(gray), SETTINGS);
       assert.deepEqual(quiet.inspected, {});
@@ -232,8 +230,8 @@ test('a frame that asks for nothing is byte-for-byte the frame before inspection
 
 test('asking for something the context did not declare throws', async () => {
   await withDevice(async (device) => {
-    const gray = renderPose(POSE, FRAME_DIMS, 4);
-    const ctx = createPose2Context(device, FRAME, { alias: true, inspect: ['fx'] });
+    const gray = renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4);
+    const ctx = createPose2Context(device, FRAME, TEST_BOARD, { alias: true, inspect: ['fx'] });
     try {
       // The hazard this closes is silent: under `alias` an undeclared buffer's
       // slot may hold a later occupant, so the copy would succeed and return

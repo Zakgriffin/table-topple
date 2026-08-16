@@ -1,5 +1,5 @@
 import type { DecodeLattice } from '../camera/model.ts';
-import { C, R, torus } from '../floorPattern.ts';
+import { board } from '../floorPattern.ts';
 import type { Pose2Layout, Pose2Result } from '../../pose2/pose.ts';
 
 // ── The decode sample lattice, rebuilt on this side ───────────────────────
@@ -94,7 +94,7 @@ function correctnessOf(
       const p = packed[oi * cols + oj]!;
       if ((p & 1) === 0) continue; // unresolvable -- counted neither way, exactly as the shader does
       const bit = (p >> 1) & 1;
-      const expected = torus[(anchorRow + i) % R]![(anchorCol + j) % C]!;
+      const expected = board.torus[(anchorRow + i) % board.R]![(anchorCol + j) % board.C]!;
       const agrees = bit === expected;
       out[oi * cols + oj] = agrees ? 1 : 0;
       if (agrees) correct++; else wrong++;

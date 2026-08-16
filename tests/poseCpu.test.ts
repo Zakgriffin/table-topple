@@ -1,22 +1,22 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { readF32, readU32, withDevice } from './helpers/gpu.ts';
-import { createBuffers, planPool } from '../src/pose2/buffers.ts';
-import { cpuCollect, cpuGradient, cpuGrow, cpuLsdFit, logBinomialTail } from '../src/pose2/cpu.ts';
-import { encodeCollect, encodeGradient, encodeGrow, encodeLsdFit, makeCtx } from '../src/pose2/pose.ts';
-import { renderPose } from '../src/pose2/sim.ts';
+import { createBuffers, planPool } from '../src/pose/buffers.ts';
+import { cpuCollect, cpuGradient, cpuGrow, cpuLsdFit, logBinomialTail } from '../src/pose/cpu.ts';
+import { encodeCollect, encodeGradient, encodeGrow, encodeLsdFit, makeCtx } from '../src/pose/pose.ts';
+import { renderPose } from '../src/pose/sim.ts';
 import { TEST_WORLD } from './helpers/board.ts';
-import type { Dims } from '../src/pose2/pipeline.ts';
+import type { Dims } from '../src/pose/pipeline.ts';
 
 // ── GPU against the CPU twin ──────────────────────────────────────────────
 //
-// The stage tests in pose2Stages.test.ts check grow against hand-derived truth
+// The stage tests in poseStages.test.ts check grow against hand-derived truth
 // on inputs simple enough to reason about: straight stripes, one polarity flip.
 // Those catch a broken predicate. They cannot catch a wrong ANSWER on a real
 // image, because on a real image nobody can write down the expected partition.
 //
 // This is the other half. Same stage, inputs it will actually see, scored by an
-// independent formulation of the same definition. See src/pose2/cpu.ts for why
+// independent formulation of the same definition. See src/pose/cpu.ts for why
 // the twin is a BFS rather than a transcription of the shader.
 
 const GROW = { rhoLow: 0.05, toleranceDeg: 22.5 };
@@ -271,7 +271,7 @@ test('logBinomialTail: the twin\'s own tail, against an exact sum', async () => 
 //   centroid                   the midpoint of the extent, so the two agree
 //
 // The reverse also holds: the twin frame catches neither the unsigned-dot bug
-// nor the sub-rho gate, which is what pose2Stages' hand-built block is for.
+// nor the sub-rho gate, which is what poseStages' hand-built block is for.
 // Neither test is redundant, and neither alone is enough.
 test('lsdFit: GPU and the twin agree rectangle-for-rectangle on a rendered frame', async () => {
   await withDevice(async (device) => {

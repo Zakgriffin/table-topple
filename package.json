@@ -13,8 +13,7 @@
         "check:fixtures": "node scripts/check-fixtures.mjs",
         "fixture:save": "node scripts/dev-bridge/save-fixture.mjs",
         "fixture:restore": "node scripts/dev-bridge/restore-fixture.mjs",
-        "sweep": "node scripts/sweep.ts",
-        "hull": "node scripts/hull-measure.ts"
+        "sweep": "node scripts/sweep.ts"
     },
     "devDependencies": {
         "@types/node": "^26.0.1",

@@ -361,10 +361,10 @@ bindSlider('boardSize', config.global.boardSize, (v) => {
   rebuildFloorPattern(v); // re-crops the torus, rebuilds the decode lookup table, resizes the floor mesh/texture/reference lines
   rebuildGridLineKs(); // reads HALF_R/HALF_C, which rebuildFloorPattern just updated -- must run after it
   // The GPU decode-tally's hash table used to be cached here and invalidated on
-  // a board-size change. That cache died with src/pose. src/pose2 rebuilds its
+  // a board-size change. That cache died with the old pipeline. src/pose rebuilds its
   // board buffers per context (board.ts), so there is nothing to invalidate --
   // but a context built against the OLD board is now stale, and wiring that up
-  // is part of swapping the app onto pose2.
+  // is part of swapping the app onto pose.
   for (const cam of cameras.values()) markCaptureDirty(cam); // this IS the real rendered floor, so every camera's capture path needs to re-render/re-decode against the new board
   pushSettingsSyncToAllPhysical();
 }, (v) => v.toFixed(0));
@@ -390,10 +390,11 @@ bindCheckbox('forceCPU', config.global.forceCPU, (v) => {
 //
 // WHAT THIS TOGGLE DOES, because it is much narrower than it used to be: it
 // gates the DevTools MIRROR and nothing else. Spans themselves record
-// unconditionally -- they are where PoseResult.timing comes from -- and the
-// per-module WebGPU timestamp queries this switch once armed are DELETED (see
-// pose/gpu/gpuTimeline.ts; only the harness arms timestamps now, in a rep of
-// their own). The old comment here still described those queries and their
+// unconditionally, into the one profiler store, and the per-module WebGPU
+// timestamp queries this switch once armed are DELETED (they lived in the old
+// pipeline's gpu/gpuTimeline.ts; the pose library now times every pass
+// itself, unconditionally, and hands the raw nanoseconds back on the frame).
+// The old comment here still described those queries and their
 // 9.3ms-around-a-0.07ms-kernel failure, which had not been reachable from this
 // checkbox for some time.
 //

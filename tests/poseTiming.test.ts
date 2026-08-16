@@ -3,10 +3,10 @@ import { test } from 'node:test';
 import { getBareTestDevice, getTestDevice, withDevice } from './helpers/gpu.ts';
 import { countingDevice } from './helpers/countingDevice.ts';
 import { canTimestamp } from '../src/gpu/device.ts';
-import { boardDims } from '../src/pose2/board.ts';
-import { MAX_TIMED_PASSES, createPose2Context, destroyPose2Context, runPose2 } from '../src/pose2/run.ts';
-import type { Dims } from '../src/pose2/pipeline.ts';
-import { renderPose, vFovRadOf } from '../src/pose2/sim.ts';
+import { boardDims } from '../src/pose/board.ts';
+import { MAX_TIMED_PASSES, createPoseContext, destroyPoseContext, runPose } from '../src/pose/run.ts';
+import type { Dims } from '../src/pose/pipeline.ts';
+import { renderPose, vFovRadOf } from '../src/pose/sim.ts';
 import { TEST_BOARD, TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
 
 // ── GPU timing: the device feature, and the path where it is ABSENT ───────
@@ -44,11 +44,11 @@ const SETTINGS = {
 };
 
 async function frameOn(device: GPUDevice, gray: Float64Array) {
-  const ctx = createPose2Context(device, FRAME, TEST_BOARD, {});
+  const ctx = createPoseContext(device, FRAME, TEST_BOARD, {});
   try {
-    return await runPose2(ctx, Float32Array.from(gray), SETTINGS);
+    return await runPose(ctx, Float32Array.from(gray), SETTINGS);
   } finally {
-    destroyPose2Context(ctx);
+    destroyPoseContext(ctx);
   }
 }
 
@@ -221,13 +221,13 @@ test('grow repeats its stage ids, and the durations are real device time', async
 test('an early frame resolves individual passes, on the fine counter', async () => {
   await withDevice(async (device) => {
     const gray = renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4);
-    const ctx = createPose2Context(device, FRAME, TEST_BOARD, {});
+    const ctx = createPoseContext(device, FRAME, TEST_BOARD, {});
     try {
       // The FIRST frame this context runs. Other tests in this file have
       // already run frames on the shared device, so this is not necessarily
       // the process's first -- which is exactly why the assertion below is a
       // floor on information, not on the tick size.
-      const frame = await runPose2(ctx, Float32Array.from(gray), SETTINGS);
+      const frame = await runPose(ctx, Float32Array.from(gray), SETTINGS);
       assert.ok(frame.gpu);
       const distinct = new Set(frame.gpu.passes.map((t) => t.ns)).size;
       const zeros = frame.gpu.passes.filter((t) => t.ns === 0).length;
@@ -235,12 +235,12 @@ test('an early frame resolves individual passes, on the fine counter', async () 
       // A frame carrying only a handful of distinct values is the coarse
       // counter. Two is the floor for "this told me something per pass".
       assert.ok(distinct >= 2, `only ${distinct} distinct duration(s) -- the counter gave nothing`);
-    } finally { destroyPose2Context(ctx); }
+    } finally { destroyPoseContext(ctx); }
   });
 });
 
 // The instrument reading itself out. This is the first per-stage GPU breakdown
-// this project has ever had for src/pose2, and printing it is most of the point
+// this project has ever had for src/pose, and printing it is most of the point
 // of building it -- the numbers are small here (96x128, not the sweep's 480x640)
 // so treat the SHAPE as the finding and not the magnitudes.
 test('the frame fits the query set, and reports where its GPU time went', async () => {

@@ -40,8 +40,8 @@ import type { Fixture } from '../fixture.ts';
 // the pipeline's business.
 //
 // These are all real user-facing defaults in sphere-lab.config.json, and
-// src/pose2 takes the same numbers per stage -- it deliberately does not import
-// the config, so the values in the config file and the ones a pose2 stage is
+// src/pose takes the same numbers per stage -- it deliberately does not import
+// the config, so the values in the config file and the ones a pose stage is
 // handed have to keep matching by convention rather than by type.
 export interface PipelineSettings {
   lsdToleranceDeg: number;
@@ -101,7 +101,7 @@ export interface HarnessInput {
 // configHash covers what the pipeline READS: `settings` and `aspect`. That is
 // provably the whole of it, and it is provable only because step 5 drew the
 // boundary -- `PoseInput` is the entire surface computePoseFromCapture takes
-// besides the pixels and the backend, and nothing under src/pose reads an
+// besides the pixels and the backend, and nothing under the old pipeline reads an
 // ambient global any more. Hashing the whole config file (what fixture.ts
 // snapshots) would have been the safe answer BEFORE that boundary existed; now
 // it would just make the fingerprint churn on UI edits that cannot reach the

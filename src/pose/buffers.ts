@@ -9,7 +9,7 @@ const MAX_SPINE_PER_THREAD = 16;
 
 // ── Buffer allocation, planned from the pipeline declaration ──────────────
 //
-// Split in two on purpose, the same way src/pose/gpu/arena.ts split BumpPlanner
+// Split in two on purpose, the same way the old pipeline's gpu/arena.ts split BumpPlanner
 // out: everything worth asserting here is a property of the ARITHMETIC over
 // pipeline.ts, and none of it needs a GPUDevice -- so it runs under
 // `node --test` rather than only in a browser.

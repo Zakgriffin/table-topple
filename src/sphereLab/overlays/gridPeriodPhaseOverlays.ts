@@ -14,11 +14,11 @@ import { svgEl, svgText } from './svgUtil.ts';
 //
 // THE SAMPLE LATTICE IS BACK (see the bottom of this file). The PLOT is not, and
 // its data is the part that genuinely no longer exists: it all came from
-// `camera.pose.gridPeriodPhase`, which the deleted `src/pose` produced. pose2
+// `camera.pose.gridPeriodPhase`, which the deleted the old pipeline produced. pose
 // recovers the same period and phase on the DEVICE and without the search's
 // working set -- no rowLines/colLines, no coarse sample curve, no candidate list
 // on the host. Some of it is a readback away (`rowSamples`/`colSamples`,
-// `scores`); the gap histogram is not, because pose2 enumerates `spread / n`
+// `scores`); the gap histogram is not, because pose enumerates `spread / n`
 // directly and has no gap distribution to plot.
 //
 // So the plot is an EMPTY STATE rather than a deletion. The panel, its four
@@ -37,7 +37,7 @@ export function drawGridPeriodPhasePlot(_camera: Camera) {
   svg.appendChild(svgText(vbW! / 2, vbH! / 2 - 6, 'no period/phase data', {
     fill: 'rgba(255,255,255,0.5)', 'font-size': 11, 'text-anchor': 'middle',
   }));
-  svg.appendChild(svgText(vbW! / 2, vbH! / 2 + 10, 'awaiting pose2 intermediate readback', {
+  svg.appendChild(svgText(vbW! / 2, vbH! / 2 + 10, 'awaiting pose intermediate readback', {
     fill: 'rgba(255,255,255,0.32)', 'font-size': 9, 'text-anchor': 'middle',
   }));
 }

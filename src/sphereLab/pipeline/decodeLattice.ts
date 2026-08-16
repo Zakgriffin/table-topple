@@ -1,10 +1,10 @@
 import type { DecodeLattice } from '../camera/model.ts';
 import { board } from '../floorPattern.ts';
-import type { Pose2Layout, Pose2Result } from '../../pose2/pose.ts';
+import type { PoseLayout, PoseResult } from '../../pose/pose.ts';
 
 // ── The decode sample lattice, rebuilt on this side ───────────────────────
 //
-// `src/pose2` reduces the whole grid to two integers -- how many sampled cells
+// `src/pose` reduces the whole grid to two integers -- how many sampled cells
 // agree with the printed board and how many do not -- and reads back 128 bytes.
 // The Projected-Cam lattice wants the grid itself, so this reassembles it from
 // the two buffers that DO come back.
@@ -27,10 +27,10 @@ import type { Pose2Layout, Pose2Result } from '../../pose2/pose.ts';
 // do not, this returns a lattice with `correct: null` and the overlay draws the
 // dots without rings. The check costs a comparison and is the only reason this
 // duplication is acceptable. It also happens to cover the pattern itself: the
-// `torus` read here is the same module `src/pose2/board.ts` uploads from, so a
+// `torus` read here is the same module `src/pose/board.ts` uploads from, so a
 // disagreement means the mapping, never two different boards.
 export function buildDecodeLattice(
-  layout: Pose2Layout, packedBytes: ArrayBuffer, resultBytes: ArrayBuffer, pose: Pose2Result,
+  layout: PoseLayout, packedBytes: ArrayBuffer, resultBytes: ArrayBuffer, pose: PoseResult,
 ): DecodeLattice | null {
   if (layout.valid !== 1) return null;
   const { rows, cols, cellPitch } = layout;
@@ -69,7 +69,7 @@ export function buildDecodeLattice(
 // top of the origIndex copy below -- two duplications where a 32-byte readback
 // removes one of them outright.
 function correctnessOf(
-  layout: Pose2Layout, packed: Uint32Array, resultBytes: ArrayBuffer, pose: Pose2Result,
+  layout: PoseLayout, packed: Uint32Array, resultBytes: ArrayBuffer, pose: PoseResult,
 ): Int8Array | null {
   if (!pose.ok) return null;
   const result = new Uint32Array(resultBytes);

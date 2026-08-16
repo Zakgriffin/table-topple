@@ -38,7 +38,7 @@ export interface DecodeLattice {
   correct: Int8Array | null;
 }
 
-// The region CSR, exactly as `src/pose2` holds it: three buffers that are one
+// The region CSR, exactly as `src/pose` holds it: three buffers that are one
 // fact. Grouped rather than spread across three optional fields because two of
 // them are meaningless alone -- an offset into an absent `members` is not a
 // partial answer, it is a crash waiting for a caller who forgot to check the
@@ -98,7 +98,7 @@ export interface FrameMeta {
 //   - the RUN did not produce it (a degenerate fit has no triad; an undecodable
 //     frame has no anchor; a pose relayed from a phone has neither a detector
 //     report nor a status);
-//   - nobody ASKED for it. `src/pose2` keeps its intermediates on the device and
+//   - nobody ASKED for it. `src/pose` keeps its intermediates on the device and
 //     reads back 128 bytes; anything larger arrives only when a display toggle
 //     put it in that frame's request. See INSPECT (what may ever be read) and
 //     `inspectFor` (what this frame asked for) in pipeline/axesReconstruction.ts.
@@ -125,7 +125,7 @@ export interface FrameMeta {
 // also negates the vertical derivative and shifts the 2x2 stencil by a row, so
 // flipRows(computeField(g)) and computeField(flipRows(g)) are different arrays.
 export interface CameraPose {
-  /** `POSE2_STATUS` bits, verbatim (see src/pose2/pose.ts). Absent when no local
+  /** `POSE_STATUS` bits, verbatim (see src/pose/pose.ts). Absent when no local
    *  run produced them, i.e. a pose relayed from a phone. This is the ONLY
    *  honest source for why a frame came back empty -- `ordinary` outcomes, `cap`
    *  outcomes and `budget` outcomes all look identical from a null field. */
@@ -180,7 +180,7 @@ export interface CameraPose {
    * cx, cy, theta, length, width, nfaLog10, accepted, pad, n, k. Bounded by
    * `regionCount`, not by the array's length.
    *
-   * FLAT, and deliberately not unpacked into objects: `src/pose2` hands back
+   * FLAT, and deliberately not unpacked into objects: `src/pose` hands back
    * bytes and the one consumer walks them once per capture. A parallel array of
    * ten-field objects would be the deleted pipeline's LsdRectangle rebuilt on
    * this side, which is what this type exists to avoid.
@@ -204,7 +204,7 @@ export interface CompositeLine { x1: number; y1: number; x2: number; y2: number 
 // count and the number of windows that voted at all were carried on both paths
 // and displayed by neither. So were `correct`/`wrong`, added one commit earlier
 // on the belief that the sample lattice's self-check read them here -- it reads
-// them off the Pose2Result directly, at unpack time, and never needed a copy on
+// them off the PoseResult directly, at unpack time, and never needed a copy on
 // the display type.
 export interface PositionDecodeResult {
   row: number; col: number; consistency: number;
@@ -225,13 +225,9 @@ export interface PositionDecodeResult {
 // copy, so the tail can ask "is what I was handed still what is on screen?" by
 // identity before it publishes an enriched version over the top.
 //
-// `result` is the raw PoseResult, carried ONLY here and only until the tail
-// runs. It is what holds the arena slices, and the reason those do not travel
-// on CameraPose: this field has a stated expiry (the next reconstruction) and
-// the pose on screen does not.
-// `result` used to be the raw PoseResult, carried only until the tail ran,
-// holding the arena slices the tail read its intermediates from. There is no
-// PoseResult and no arena, so the payload is the pose alone.
+// `result` used to be the old pipeline's raw `PoseResult`, carried only until
+// the tail ran, holding the arena slices the tail read its intermediates from.
+// That type and that arena are both gone, so the payload is the pose alone.
 export interface PendingVisuals {
   pose: CameraPose;
 }

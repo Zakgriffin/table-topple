@@ -1,10 +1,10 @@
-import { ORDER5_CANDIDATE } from '../pose2/debruijn.ts';
-import { type Board, createBoard } from '../pose2/board.ts';
+import { ORDER5_CANDIDATE } from '../pose/debruijn.ts';
+import { type Board, createBoard } from '../pose/board.ts';
 import { GRID_STEP } from './constants.ts';
 
 // ── This app's board, and where it sits in the world ─────────────────────
 //
-// The De Bruijn pattern itself is the pose library's (see pose2/board.ts): it
+// The De Bruijn pattern itself is the pose library's (see pose/board.ts): it
 // owns the construction, because a second copy could disagree with the printed
 // floor and nothing downstream could detect that. What lives HERE is the two
 // things that are this app's own choices -- WHICH board it wants, and how big a
@@ -77,7 +77,7 @@ export let HALF_R = (board.R * GRID_STEP) / 2;
  * scene/floor.ts's rebuildFloorPattern calls this first, then does its own
  * THREE-side rebuild (texture/mesh/grid-line geometry) on top. Anything holding
  * a pose pipeline built against the old board has to rebuild that too: the
- * board's dimensions are baked into a Pose2Context's buffer sizes.
+ * board's dimensions are baked into a PoseContext's buffer sizes.
  */
 export function rebuildFloorPatternData(size: number) {
   if (ORDER !== 5) return;

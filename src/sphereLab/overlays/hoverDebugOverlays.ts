@@ -35,7 +35,7 @@ export function clearArrowOverlays() {
 // avoid, and a past version of this file had precisely that mismatch.
 //
 // (A second copy of this paragraph sat here, describing the same function twice
-// and citing files deleted with `src/pose`. Both copies also claimed the
+// and citing files deleted with the old pipeline. Both copies also claimed the
 // endpoints came from a ROW-FLIPPED gray, which the arithmetic below has never
 // matched -- see the next block.)
 //
@@ -45,7 +45,7 @@ export function clearArrowOverlays() {
 // row-flipped gray. They do not, and the arithmetic below never matched that
 // claim: `rasterY = fieldH - 1 - fy` followed by measuring UP from the rect's
 // bottom is the composition that maps a TOP-DOWN fy=0 to the TOP of the rect.
-// src/pose2's `lines` are in the pipeline's own top-down pixel space, which is
+// src/pose's `lines` are in the pipeline's own top-down pixel space, which is
 // the dominant convention everywhere except the preview textures, so this is
 // correct as written -- and it was correct-looking either way round, which is
 // why the stale comment survived. See overlays/pipelineField.ts.

@@ -86,7 +86,7 @@ export interface Ctx {
  *
  * ── THE LIBRARY TAKES NO POSITION ON WHAT THESE MEAN ──
  *
- * `src/pose2` gets no profiler, no spans and no timing module (the design's §5).
+ * `src/pose` gets no profiler, no spans and no timing module (the design's §5).
  * It owns `pass()`, which is the single `beginComputePass` in the pipeline, so
  * it is the only thing that can say WHICH pass inside the submit took the time.
  * Everything else -- upload, encode, the fence, the map -- is a host-clock
@@ -146,7 +146,7 @@ export interface GpuFrameTiming {
    * These are STAMPS, not a span -- the same role `mobileCapture`'s sentAt /
    * pulledAt play for the phone link. They exist because they are the one
    * host-clock pair a caller CANNOT take for itself: the submit and the map
-   * both happen inside `runPose2`, so an outside bracket measures upload and
+   * both happen inside `runPose`, so an outside bracket measures upload and
    * encode too and would anchor the GPU block earlier than it could have run.
    *
    * The library still takes no position on what they mean -- it does not build
@@ -783,7 +783,7 @@ export function encodeVotes(ctx: Ctx, s: VoteSettings): void {
  *
  * `ataPartials` and the second reduction pass are deliberately absent; the
  * reasoning is in FIT_ATA_WGSL's header and is the one place this stage departs
- * from both src/pose and the declaration it inherited.
+ * from both the old pipeline and the declaration it inherited.
  */
 export function encodeFit(ctx: Ctx): void {
   const p = programs(ctx.device);
@@ -1143,7 +1143,7 @@ export function encodeFinish(ctx: Ctx): void {
  * anyway. A caller that collapses these into "failed" makes a real capacity
  * problem look like an empty frame.
  */
-export const POSE2_STATUS = {
+export const POSE_STATUS = {
   /** budget -- grow did not converge inside the encoded round count. */
   growNotConverged: 1 << 0,
   /** cap -- more line-support regions than maxRegions. */
@@ -1184,7 +1184,7 @@ export const POSE2_STATUS = {
  * four bytes earlier than a reader written from the field order expects: not a
  * wrong value, a DIFFERENT FIELD, for every read from the first scalar on.
  */
-export interface Pose2Layout {
+export interface PoseLayout {
   Drow: { x: number; y: number; z: number };
   Dcol: { x: number; y: number; z: number };
   normal: { x: number; y: number; z: number };
@@ -1197,7 +1197,7 @@ export interface Pose2Layout {
   valid: number;
 }
 
-export function decodeLayout(bytes: ArrayBuffer): Pose2Layout {
+export function decodeLayout(bytes: ArrayBuffer): PoseLayout {
   const f = new Float32Array(bytes);
   const u = new Uint32Array(bytes);
   const i = new Int32Array(bytes);
@@ -1212,7 +1212,7 @@ export function decodeLayout(bytes: ArrayBuffer): Pose2Layout {
 }
 
 /** The 128 bytes, decoded. The one place a host reads anything off this pipeline. */
-export interface Pose2Result {
+export interface PoseResult {
   status: number;
   ok: boolean;
   position: { x: number; y: number; z: number };
@@ -1235,7 +1235,7 @@ export interface Pose2Result {
   height: number;
 }
 
-export function decodePose(bytes: ArrayBuffer): Pose2Result {
+export function decodePose(bytes: ArrayBuffer): PoseResult {
   const u = new Uint32Array(bytes);
   const f = new Float32Array(bytes);
   return {

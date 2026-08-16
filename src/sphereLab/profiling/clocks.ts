@@ -1,5 +1,5 @@
 import { type Span, spanIngest } from './profiler.ts';
-import type { GpuFrameTiming } from '../../pose2/pose.ts';
+import type { GpuFrameTiming } from '../../pose/pose.ts';
 
 // ── THE CLOCK BOUNDARY ────────────────────────────────────────────────────
 //
@@ -57,7 +57,7 @@ const GPU_PREFIX = 'gpu:';
  * The part of the submit window that no pass accounts for.
  *
  * Queue latency before the first pass, plus fence and map overhead after the
- * last. For pose2 -- one submit, one fence -- this IS the cost of crossing the
+ * last. For pose -- one submit, one fence -- this IS the cost of crossing the
  * bus, which makes it one of the more interesting rows rather than a rounding
  * error.
  *

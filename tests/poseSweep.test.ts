@@ -2,8 +2,8 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import * as THREE from 'three';
 import { TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
-import { type SimDims, type SimPose, camPosOf } from '../src/pose2/sim.ts';
-import { type PoseObservation, type SweepSpec, generatePoses, runSweep, summarize } from '../src/pose2/sweep.ts';
+import { type SimDims, type SimPose, camPosOf } from '../src/pose/sim.ts';
+import { type PoseObservation, type SweepSpec, generatePoses, runSweep, summarize } from '../src/pose/sweep.ts';
 
 // ── The sweep machinery, with a FAKE pipeline ─────────────────────────────
 //

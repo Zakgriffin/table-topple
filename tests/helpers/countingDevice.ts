@@ -1,12 +1,12 @@
 // ── An instrumented GPUDevice, for counting what a frame actually did ─────
 //
 // The pipeline's headline property is "one submit, one fence, one map", and the
-// only honest way to check it is from OUTSIDE: asking `runPose2` how many
+// only honest way to check it is from OUTSIDE: asking `runPose` how many
 // passes it encoded and believing the answer tests nothing, because the number
 // it would report is the same variable the feature under test maintains.
 //
 // So this counts the WebGPU calls themselves. Every count here comes from the
-// API surface, not from any bookkeeping inside src/pose2.
+// API surface, not from any bookkeeping inside src/pose.
 //
 // ── IT MUST NOT BE A PROXY, AND THAT COST A CRASH TO LEARN ──
 //

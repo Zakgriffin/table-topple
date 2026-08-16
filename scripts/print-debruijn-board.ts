@@ -22,7 +22,7 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { deflateSync } from 'node:zlib';
-import { bestCoprimeSplit, buildTorusFromCandidate } from '../src/pose2/debruijn.ts';
+import { bestCoprimeSplit, buildTorusFromCandidate } from '../src/pose/debruijn.ts';
 import { PNG } from 'pngjs';
 
 // ── Config schema + validation ───────────────────────────────────────────

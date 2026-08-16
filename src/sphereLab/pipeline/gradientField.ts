@@ -1,6 +1,6 @@
 import { type GradientField } from '../types.ts';
 
-// MOVED HERE when src/pose was deleted. These are pure IMAGE functions -- a
+// MOVED HERE when the old pipeline was deleted. These are pure IMAGE functions -- a
 // gradient is a property of a picture, not of a pose -- and the app computes
 // them from its own preview image (pipeline/projectedBins.ts) and its own
 // capture (pipeline/preview.ts), never from a pipeline intermediate. So they

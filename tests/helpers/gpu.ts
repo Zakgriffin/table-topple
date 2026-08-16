@@ -32,7 +32,7 @@ import { DAWN_NODE_FLAGS, requestDeviceWithOptionalTimestamps } from '../../src/
 // most of this pipeline, zero is a plausible answer.
 
 // The flag objects a browser puts on `window`. Installed once, globally,
-// because src/pose2 is written against the browser spelling and should not know
+// because src/pose is written against the browser spelling and should not know
 // it is under test.
 Object.assign(globalThis, globals);
 

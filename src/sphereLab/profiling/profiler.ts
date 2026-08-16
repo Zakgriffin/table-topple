@@ -359,7 +359,7 @@ function unionMs(kids: readonly TreeNode[]): number {
 // ── THE TABLE-LESS PATH, and why it is not a hole in "structure is declared" ──
 //
 // A stage table names the ids one subsystem knows about ahead of time. GPU pass
-// ids do not fit that: `src/pose2` owns them, there are ~40, they repeat, and
+// ids do not fit that: `src/pose` owns them, there are ~40, they repeat, and
 // mirroring its stage list in the app's table is precisely the drift this
 // project keeps finding as a defect. The library is the authority on what its
 // passes are called, and the app must not restate it.

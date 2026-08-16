@@ -1,6 +1,6 @@
-import { type Board, createBoard } from '../../src/pose2/board.ts';
-import { ORDER5_CANDIDATE } from '../../src/pose2/debruijn.ts';
-import type { SimWorld } from '../../src/pose2/sim.ts';
+import { type Board, createBoard } from '../../src/pose/board.ts';
+import { ORDER5_CANDIDATE } from '../../src/pose/debruijn.ts';
+import type { SimWorld } from '../../src/pose/sim.ts';
 
 // ── The board the library's own tests decode against ─────────────────────
 //
@@ -20,7 +20,7 @@ export const TEST_BOARD: Board = createBoard({ order: 5, cropSize: ORDER5_CANDID
 
 // 1 world unit per cell, which is GRID_STEP's value. Written as a literal
 // rather than imported because the pipeline is scale-invariant and a length is
-// an app concern -- see pose2/board.ts. Any positive value would do; this one
+// an app concern -- see pose/board.ts. Any positive value would do; this one
 // keeps world coordinates and cell coordinates numerically equal, which is what
 // makes the ground-truth arithmetic in these tests readable.
 export const TEST_CELL_PITCH = 1;

@@ -37,16 +37,16 @@ import type { PipelineSettings } from './sphereLab/harness/input.ts';
 //
 // This page ran the WHOLE pipeline locally (device-compute mode): gradient ->
 // LSD -> votes -> fit -> period/phase -> decode, via computePoseFromCapture, and
-// sent only the recovered pose over the wire. src/pose is deleted and this page
-// is not yet on src/pose2, so every capture now reports a FAILED DECODE.
+// sent only the recovered pose over the wire. the old pipeline is deleted and this page
+// is not yet on src/pose, so every capture now reports a FAILED DECODE.
 //
 // That is a real behaviour change and it is deliberate: a failed decode is a
 // state this page already handles everywhere (`ok: false`, no IMU anchor, the
 // overlay hides, intrinsics still publish), so the page runs end to end instead
 // of being half-deleted. What it does NOT do is recover a pose.
 //
-// Wiring pose2 in here is its own job: the phone needs a WebGPU device and a
-// per-resolution Pose2Context, which is a different lifecycle from the desktop's.
+// Wiring pose in here is its own job: the phone needs a WebGPU device and a
+// per-resolution PoseContext, which is a different lifecycle from the desktop's.
 type LocalPoseInput = { aspect: number; settings: PipelineSettings };
 type LocalPose = { recoveredAxes: RecoveredAxes | null; positionDecode: PositionDecodeResult | null };
 // Shared with the desktop rather than restated here, so the wire shape and
@@ -1534,7 +1534,7 @@ interface PoseRecord {
   // `votes` and `totalWindows` -- the winning anchor's vote count and how many
   // windows voted at all -- were here and are gone with the display type that
   // carried them (sphereLab/camera/model.ts's PositionDecodeResult). Nothing
-  // read them on either side. They are pose-BLOCK quantities in src/pose2, so
+  // read them on either side. They are pose-BLOCK quantities in src/pose, so
   // when this page is wired onto that pipeline they come back off the block
   // directly rather than through a display struct.
 }
@@ -2067,19 +2067,19 @@ async function captureComputeAndSendPose() {
     // The twelve-null-field state literal that used to be built here is gone:
     // the pipeline reads exactly these two fields and returns everything else.
     const poseInput = { aspect: cw / ch, settings: cameraSettings };
-    // ── TODO(phone-on-pose2): THE SPAN GOES HERE ─────────────────────────
+    // ── TODO(phone-on-pose): THE SPAN GOES HERE ─────────────────────────
     //
     // This is where a profiler span belongs. There is not one yet, and that is
     // deliberate: there is NOTHING HERE TO TIME. The pose
-    // computation went with `src/pose`, so what stood between the two
+    // computation went with the old pipeline, so what stood between the two
     // `performance.now()` calls that used to be here was `void grayTopDown;`
     // and an object literal -- the stopwatch reported ~0ms every frame, and a
     // span would have reported the same 0ms as a row on a flamechart, which is
     // a more confident way of saying something false.
     //
     // So the stopwatch is deleted rather than converted, and `computeMs` is
-    // gone from PoseRecord with it. **When this page is wired onto `src/pose2`,
-    // open a span around `runPose2` here** -- and note that pose2 also hands
+    // gone from PoseRecord with it. **When this page is wired onto `src/pose`,
+    // open a span around `runPose` here** -- and note that pose also hands
     // back `frame.gpu`, so the phone gets the same per-pass GPU breakdown the
     // desktop has, through `profiling/clocks.ts`'s `ingestGpuFrame`.
     void grayTopDown;
@@ -2192,7 +2192,7 @@ async function captureComputeAndSendPose() {
     // NO MILLISECONDS HERE, and that is the honest reading rather than a
     // regression. This used to print `pose <totalMs>ms (<fps>fps)` off the
     // stopwatch deleted above -- which, once the pose computation went with
-    // `src/pose`, was timing an empty statement and reporting ~0ms at an
+    // the old pipeline, was timing an empty statement and reporting ~0ms at an
     // implausible frame rate. A readout that says nothing beats one that says
     // the phone reconstructs instantly.
     //

@@ -43,9 +43,9 @@
 //
 // ── Directory layout ───────────────────────────────────────────────────────
 //
-// THE POSE LIBRARY THIS APP CONSUMED IS DELETED. src/pose is gone, replaced by
-// src/pose2 -- a flat, all-GPU rewrite whose entry point is src/pose2/run.ts
-// (createPose2Context once, runPose2 per frame, returning a plain struct).
+// THE POSE LIBRARY THIS APP CONSUMED IS DELETED. the old pipeline is gone, replaced by
+// src/pose -- a flat, all-GPU rewrite whose entry point is src/pose/run.ts
+// (createPoseContext once, runPose per frame, returning a plain struct).
 //
 // THIS APP IS NOT WIRED TO IT YET, and that is a deliberate intermediate state:
 // the pipeline was cut out before the app was re-plumbed, so nothing here would
@@ -53,11 +53,11 @@
 // path that read a pose intermediate now reads nothing -- see camera/model.ts's
 // Intermediates, overlays/lsdOverlay.ts, overlays/gridPeriodPhaseOverlays.ts and
 // pipeline/axesReconstruction.ts, each of which says what it used to draw and
-// what pose2 would have to hand back for it to draw again.
+// what pose would have to hand back for it to draw again.
 //
 // `tests/libraryBoundary.test.ts` checked that the library imported nothing from
 // sphereLab except the shared leaves below. It is deleted with the library whose
-// boundary it policed; pose2 has a stricter version of the same property, since
+// boundary it policed; pose has a stricter version of the same property, since
 // it reaches outside itself in exactly one place (board.ts).
 //
 // types.ts/state.ts/constants.ts   shared types + tiny bits of module state
@@ -66,7 +66,7 @@
 //                                   plus the join that gives them structure
 // profiling/stages.ts              this app's stage table (the library half is
 //                                   gone -- see that file's header)
-//    ^ the four above were the SHARED LEAVES both this app and src/pose depended
+//    ^ the four above were the SHARED LEAVES both this app and the old pipeline depended
 //      on. With the library deleted they are simply this app's, though the board
 //      game still depends on constants.ts.
 // camera/                          the Camera data model: settings, types,
@@ -152,7 +152,7 @@ import { pushPoseSync, pushSettingsSync, sendToDevBridge } from './devBridge/cli
 // globalThis, and the dev bridge reaches those exports BY BARE NAME. The failure
 // mode is a ReferenceError in a console eval at the far end of a websocket.
 //
-// src/pose is deleted, so the pattern is dropped rather than repointed -- and
+// the old pipeline is deleted, so the pattern is dropped rather than repointed -- and
 // the same silent-failure warning now applies to what went WITH it. Every bare
 // name the bridge could reach into the pose library (runLsdChain,
 // growRegionsCCL, computeLsdRectangles, verifyLsdChain and the rest of the

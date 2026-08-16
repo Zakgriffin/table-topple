@@ -6,8 +6,8 @@
 //
 // ── WHAT THIS FILE USED TO BE ──
 //
-// It lived at `src/pose/gpu/device.ts` and was 516 lines. It moved here when
-// `src/pose` was deleted, because it never was pose math: it is generic device
+// It lived at the old pipeline's `gpu/device.ts` and was 516 lines. It moved here when
+// the old pipeline was deleted, because it never was pose math: it is generic device
 // plumbing, and sphereLab's OWN projection overlay (pipeline/projectSamples.gpu.ts)
 // depends on it and always did.
 //
@@ -23,7 +23,7 @@
 //     the arena's read path;
 //   - the TIMESTAMP QUERY primitives, whose only consumer was gpuTimeline.ts.
 //
-// None of that is a loss to mourn here: `src/pose2` does its own timing, has no
+// None of that is a loss to mourn here: `src/pose` does its own timing, has no
 // arena, and crosses the bus exactly once per frame by construction, which is
 // the property that made the whole ledger unnecessary rather than merely unused.
 //

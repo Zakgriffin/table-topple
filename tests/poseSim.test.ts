@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
-import { type SimDims, type SimPose, camPosOf, camQuatOf, rayDirInto, renderPose, vFovRadOf } from '../src/pose2/sim.ts';
+import { type SimDims, type SimPose, camPosOf, camQuatOf, rayDirInto, renderPose, vFovRadOf } from '../src/pose/sim.ts';
 import { cornerDir } from '../src/sphereLab/math/geometry.ts';
 
 // ── Validating the SIMULATOR, not the pipeline ────────────────────────────
@@ -16,10 +16,10 @@ import { cornerDir } from '../src/sphereLab/math/geometry.ts';
 // implementation recovering the pose that generated an image says the renderer
 // and the truth derivation are both sound.
 //
-// THAT BOOTSTRAP IS OVER. The header used to say this dependency on src/pose was
-// temporary and "retires when src/pose does" -- which is exactly what happened.
+// THAT BOOTSTRAP IS OVER. The header used to say this dependency on the old pipeline was
+// temporary and "retires when the old pipeline does" -- which is exactly what happened.
 // See the note further down for what the three deleted tests checked, why they
-// were not re-pointed at src/pose2, and what the deletion costs.
+// were not re-pointed at src/pose, and what the deletion costs.
 
 const DIMS: SimDims = { w: 480, h: 640, horizFovDeg: 65 };
 
@@ -113,7 +113,7 @@ test('render: supersampling changes edge pixels but not cell interiors', () => {
 // ── A RETRACTED FINDING, kept because the retraction is the lesson ──
 //
 // An earlier version of this comment recorded a table of whole-cell anchor
-// errors at tilts 5-20 and called it a real accuracy result about src/pose.
+// errors at tilts 5-20 and called it a real accuracy result about the old pipeline.
 // It was not. It was THIS FILE under-sampling diagonal edges: at supersample 2
 // a diagonal renders as a staircase, the level-line directions quantize to the
 // staircase, and directed growth splits one line into many. Raising the default
@@ -126,21 +126,21 @@ test('render: supersampling changes edge pixels but not cell interiors', () => {
 
 // ── THE THREE SIMULATOR-VALIDATION TESTS THAT USED TO SIT HERE ARE DELETED ──
 //
-// They ran `runPoseOn(..., 'cpu')` -- src/pose -- over a rendered frame and
+// They ran `runPoseOn(..., 'cpu')` -- the old pipeline -- over a rendered frame and
 // checked that the mature pipeline recovered the generating pose, which is how
-// the renderer earned the right to judge anything (§19, Phase 1). src/pose is
+// the renderer earned the right to judge anything (§19, Phase 1). the old pipeline is
 // gone, so they went with it.
 //
-// They were NOT re-pointed at src/pose2, and that is the deliberate part. Their
+// They were NOT re-pointed at src/pose, and that is the deliberate part. Their
 // whole value was that the oracle was an INDEPENDENT implementation: renderPose
 // casts through the same `cornerDir` the pipeline projects with, so a shared
 // projection error is invisible to any check that uses only those two. Running
-// them against pose2 would have kept three green tests while quietly converting
+// them against pose would have kept three green tests while quietly converting
 // a cross-check into a circular one -- the worse outcome, because it reads as
 // coverage.
 //
 // WHAT THE DELETION COSTS, stated rather than hidden: nothing now re-derives
-// that the renderer's geometry is right from outside the pose2 + sim pair. What
+// that the renderer's geometry is right from outside the pose + sim pair. What
 // survives is the bit-for-bit `rayDirInto` vs `cornerDir` test below, the
 // closed-form checks in this file, and the 180-pose sweep -- all of which share
 // that projection. The measurements the deleted tests produced (0.038 cells at

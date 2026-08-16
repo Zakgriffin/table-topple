@@ -5,7 +5,7 @@ import type { Dims } from './pipeline.ts';
 import {
   type CollectSettings, type GppSettings, type GrowSettings, type LayoutSettings,
   type GpuFrameTiming, type LineSettings, type LsdFitSettings, type PassTimer,
-  type PassTiming, type Pose2Result, type VoteSettings,
+  type PassTiming, type PoseResult, type VoteSettings,
   decodePose, encodeCollect, encodeDecodeBuild, encodeDecodeLayout, encodeDecodeTally,
   encodeFinish, encodeFit, encodeGpp, encodeGradient, encodeGrow, encodeLines,
   encodeLsdFit, encodeVotes, makeCtx,
@@ -78,7 +78,7 @@ const TIMESTAMP_BYTES_PER_PASS = 16;
 // about where the NEXT region begins, not about the copy itself.
 const align8 = (n: number): number => (n + 7) & ~7;
 
-export interface Pose2Settings {
+export interface PoseSettings {
   grow: GrowSettings;
   collect: CollectSettings;
   lsdFit: LsdFitSettings;
@@ -96,15 +96,15 @@ export interface Pose2Settings {
  * for, and the reason the tests share one buffer set rather than taking a fresh
  * one each time.
  */
-export interface Pose2Context {
+export interface PoseContext {
   device: GPUDevice;
   dims: Dims;
   plan: PoolPlan;
   bufs: Buffers;
   /**
-   * The board this context decodes against. Kept because `runPose2` needs its
+   * The board this context decodes against. Kept because `runPose` needs its
    * `order` -- the De Bruijn window size is a property of the board, and having
-   * it ALSO in `Pose2Settings` made it a second declaration that could disagree
+   * it ALSO in `PoseSettings` made it a second declaration that could disagree
    * with the pattern actually uploaded.
    */
   board: Board;
@@ -119,7 +119,7 @@ export interface Pose2Context {
    * The timestamp machinery, or null on a device without `timestamp-query`.
    *
    * Null is a normal state, not a degraded one: the pipeline runs identically
-   * and `Pose2Frame.gpu` is simply absent. Nothing downstream may require it.
+   * and `PoseFrame.gpu` is simply absent. Nothing downstream may require it.
    */
   timing: {
     querySet: GPUQuerySet;
@@ -130,8 +130,8 @@ export interface Pose2Context {
 }
 
 /** One frame's output: the pose, and whatever was asked to ride back with it. */
-export interface Pose2Frame {
-  pose: Pose2Result;
+export interface PoseFrame {
+  pose: PoseResult;
   /**
    * Raw bytes per inspected buffer, by name. Empty unless this frame asked.
    *
@@ -155,7 +155,7 @@ export interface Pose2Frame {
   gpu?: GpuFrameTiming;
 }
 
-export interface Pose2Options {
+export interface PoseOptions {
   /**
    * Share one allocation between buffers whose live ranges do not overlap
    * (§18). Not a second code path -- the same interval colouring, over a
@@ -167,14 +167,14 @@ export interface Pose2Options {
    *
    * **Running BOTH and comparing the poses is a free self-check**, and it is the
    * only check on this that exists -- any aliasing or clear-scheduling bug shows
-   * up as a difference. `tests/pose2Stages.test.ts` does it on one frame; the
+   * up as a difference. `tests/poseStages.test.ts` does it on one frame; the
    * sweep does it across the pose range with `--alias`.
    */
   alias?: boolean;
   /**
    * Buffers this context may be asked to read back after a frame -- the whole
    * catalogue, not the per-frame selection. See PlanOptions.inspect for what it
-   * does to the pooling, and `runPose2` for the per-frame half.
+   * does to the pooling, and `runPose` for the per-frame half.
    *
    * A CATALOGUE rather than a per-frame list because it sizes the staging
    * buffer, and re-sizing that is an allocation. Sphere Lab declares every
@@ -185,9 +185,9 @@ export interface Pose2Options {
   inspect?: readonly string[];
 }
 
-export function createPose2Context(
-  device: GPUDevice, dims: Dims, board: Board, opts: Pose2Options = {},
-): Pose2Context {
+export function createPoseContext(
+  device: GPUDevice, dims: Dims, board: Board, opts: PoseOptions = {},
+): PoseContext {
   const inspect = opts.inspect ?? [];
   const plan = planPool(dims, { alias: opts.alias ?? false, inspect });
   const bufs = createBuffers(device, plan);
@@ -217,12 +217,12 @@ export function createPose2Context(
     timing: timed
       ? {
         querySet: device.createQuerySet({
-          type: 'timestamp', count: MAX_TIMED_PASSES * 2, label: 'pose2 pass timing',
+          type: 'timestamp', count: MAX_TIMED_PASSES * 2, label: 'pose pass timing',
         }),
         resolve: device.createBuffer({
           size: MAX_TIMED_PASSES * TIMESTAMP_BYTES_PER_PASS,
           usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC,
-          label: 'pose2 timestamp resolve',
+          label: 'pose timestamp resolve',
         }),
       }
       : null,
@@ -235,7 +235,7 @@ export function createPose2Context(
   };
 }
 
-export function destroyPose2Context(ctx: Pose2Context): void {
+export function destroyPoseContext(ctx: PoseContext): void {
   ctx.staging.destroy();
   ctx.timing?.querySet.destroy();
   ctx.timing?.resolve.destroy();
@@ -250,9 +250,9 @@ export function destroyPose2Context(ctx: Pose2Context): void {
  * part of the byte-proportional cost per reconstruction and there is no reason
  * to pay it (§4).
  */
-export async function runPose2(
-  ctx: Pose2Context, gray: Float32Array, s: Pose2Settings, inspect: readonly string[] = [],
-): Promise<Pose2Frame> {
+export async function runPose(
+  ctx: PoseContext, gray: Float32Array, s: PoseSettings, inspect: readonly string[] = [],
+): Promise<PoseFrame> {
   const { device, plan, bufs, dims } = ctx;
   if (gray.length !== dims.w * dims.h) {
     throw new Error(`gray is ${gray.length} samples, expected ${dims.w * dims.h}`);
@@ -268,7 +268,7 @@ export async function runPose2(
     const bytes = ctx.inspectable.get(name);
     if (bytes === undefined) {
       throw new Error(
-        `runPose2 was asked to inspect '${name}', which this context did not declare. ` +
+        `runPose was asked to inspect '${name}', which this context did not declare. ` +
         `Declared: [${[...ctx.inspectable.keys()].join(', ') || 'none'}]. The declaration is what ` +
         `sizes the staging buffer and (under alias) keeps the slot exclusive, so it cannot be widened per frame.`);
     }

@@ -1,8 +1,8 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { getTestDevice, readF32, readU32, withDevice } from './helpers/gpu.ts';
-import { createBuffers, planPool } from '../src/pose2/buffers.ts';
-import type { Dims } from '../src/pose2/pipeline.ts';
+import { createBuffers, planPool } from '../src/pose/buffers.ts';
+import type { Dims } from '../src/pose/pipeline.ts';
 
 // ── Does the headless GPU harness actually work? ──────────────────────────
 //

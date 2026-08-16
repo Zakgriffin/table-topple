@@ -2,15 +2,15 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import * as THREE from 'three';
 import { readF32, readU32, withDevice } from './helpers/gpu.ts';
-import { createBuffers, planPool } from '../src/pose2/buffers.ts';
+import { createBuffers, planPool } from '../src/pose/buffers.ts';
 import {
   type Ctx, encodeCollect, encodeFit, encodeGradient, encodeGrow, encodeLines,
   encodeGpp, encodeDecodeBuild, encodeDecodeLayout, encodeDecodeTally, encodeFinish,
   encodeLsdFit, encodeVotes, decodePose, makeCtx,
-} from '../src/pose2/pose.ts';
-import type { Dims } from '../src/pose2/pipeline.ts';
-import { rayDirInto, renderPose, truthFor, vFovRadOf } from '../src/pose2/sim.ts';
-import { boardDims, buildBoard, hashU32, uploadBoard } from '../src/pose2/board.ts';
+} from '../src/pose/pose.ts';
+import type { Dims } from '../src/pose/pipeline.ts';
+import { rayDirInto, renderPose, truthFor, vFovRadOf } from '../src/pose/sim.ts';
+import { boardDims, buildBoard, hashU32, uploadBoard } from '../src/pose/board.ts';
 import { TEST_BOARD, TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
 
 // Destructured once, at the top, and safe here in a way it would not be in app
@@ -25,9 +25,9 @@ const MATH_QUAT = new THREE.Quaternion();
 // Where a lattice's zero-reference cell ENDS UP after rotating the whole grid by
 // `o` quarter-turns. Used once, by the decode anchor test.
 //
-// This came from src/pose/stages/decode/decodeGrid.ts, which no longer exists.
+// This came from the old pipeline's stages/decode/decodeGrid.ts, which no longer exists.
 // It was RE-DERIVED rather than copied across, for the same reason cpu.ts is:
-// while src/pose was here, importing it made this an independent second source,
+// while the old pipeline was here, importing it made this an independent second source,
 // and after the deletion a copy would have been an unowned duplicate of nothing.
 //
 // The derivation is one rule applied o times. A single quarter-turn takes (i, j)
@@ -1252,8 +1252,8 @@ test('gpp: the extent is PER FAMILY, not the pooled range', async () => {
 //
 // gpp.extent's second job: bound the decode lattice by the detected LINES
 // instead of by the view quadrilateral. Measured and adopted 2026-08-14
-// (scripts/hull-measure.ts) against src/pose; this is the same quantity computed
-// inside src/pose2, so what needs testing here is the reduction, not the policy.
+// (scripts/hull-measure.ts) against the old pipeline; this is the same quantity computed
+// inside src/pose, so what needs testing here is the reduction, not the policy.
 
 /**
  * The gnomonic extent of the floor the camera can actually resolve, from GROUND
@@ -1801,7 +1801,7 @@ test('decode.layout: the lattice bounds ARE the hull, converted', async () => {
     const extent = await readF32(device, L.bufs.extent!, 12);
 
     // u = distance * xRow, v = distance * xCol -- one scalar, and it has NO SIGN
-    // here. src/pose's projectedUVScale returns +/-distance because gnomonic() is
+    // here. the old pipeline's projectedUVScale returns +/-distance because gnomonic() is
     // handed a raw eigenvector while projectedUVBounds flips it toward the floor;
     // §10 decided that sign once, at the point it was created, so the two frames
     // agree and the conversion is a bare multiply. A version that kept the flip
@@ -2229,7 +2229,7 @@ test('THE PIPELINE: an image goes in and the pose that made it comes out', async
       assert.ok(Math.abs(P.consistency - P.correct / denom) < 1e-6,
         `consistency ${P.consistency} is not correct/(correct+wrong) = ${P.correct}/${denom}`);
       if (P.wrong > 0) sawWrong = true;
-      // ~0.05 cells is the src/pose baseline's median sub-cell error at 480x640
+      // ~0.05 cells is the the old pipeline baseline's median sub-cell error at 480x640
       // (§19). This is a 96x128 frame, so the gate is looser -- what it is
       // actually excluding is a WHOLE-CELL error, which is what a wrong anchor
       // or a missing sign flip produces.

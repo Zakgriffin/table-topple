@@ -1,12 +1,12 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
-import { BUFFERS, SCAN_BLOCK, SCAN_THREADS, STAGES, type Dims, type Stage, scanBlocks } from '../src/pose2/pipeline.ts';
-import { assertBinds, computeLiveness, describePlan, planPool, validate } from '../src/pose2/buffers.ts';
+import { BUFFERS, SCAN_BLOCK, SCAN_THREADS, STAGES, type Dims, type Stage, scanBlocks } from '../src/pose/pipeline.ts';
+import { assertBinds, computeLiveness, describePlan, planPool, validate } from '../src/pose/buffers.ts';
 
 // ── The flat pipeline's buffer plan ───────────────────────────────────────
 //
 // buffers.ts's planner is the pure half of the allocation, split out for the
-// same reason src/pose/gpu/arena.ts split out BumpPlanner: every property worth
+// same reason the old pipeline's gpu/arena.ts split out BumpPlanner: every property worth
 // asserting is a property of the arithmetic over pipeline.ts, so it runs here
 // under `node --test` rather than only in a browser.
 //

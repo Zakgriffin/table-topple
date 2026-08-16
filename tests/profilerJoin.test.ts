@@ -6,7 +6,7 @@ import {
 } from '../src/sphereLab/profiling/profiler.ts';
 import { ALL_STAGES, appSpan, joinAll } from '../src/sphereLab/profiling/stages.ts';
 import { GPU_UNATTRIBUTED_ID, ingestGpuFrame, ingestLinkSpans } from '../src/sphereLab/profiling/clocks.ts';
-import type { GpuFrameTiming } from '../src/pose2/pose.ts';
+import type { GpuFrameTiming } from '../src/pose/pose.ts';
 
 // ── The join, and the clock boundary ──────────────────────────────────────
 //
@@ -325,7 +325,7 @@ test('repeats aggregate into one row, and anchored rows are marked', () => {
   for (const l of lines.filter((x) => x.includes('gpu:'))) {
     assert.match(l.trim(), /^~/, `an anchored row must be marked: ${l}`);
   }
-  const poseRow = lines.find((l) => l.includes('pose2 (submit'))!;
+  const poseRow = lines.find((l) => l.includes('pose (submit'))!;
   assert.doesNotMatch(poseRow.trim(), /^~/, 'a host-measured row must NOT be marked');
   // The unattributed row is host-measured at both ends, so it is unmarked even
   // though it sits among the GPU rows and its start is derived from them.

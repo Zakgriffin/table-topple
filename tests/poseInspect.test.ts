@@ -1,10 +1,10 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { withDevice } from './helpers/gpu.ts';
-import { boardDims } from '../src/pose2/board.ts';
-import { createPose2Context, destroyPose2Context, runPose2 } from '../src/pose2/run.ts';
-import type { Dims } from '../src/pose2/pipeline.ts';
-import { renderPose, vFovRadOf } from '../src/pose2/sim.ts';
+import { boardDims } from '../src/pose/board.ts';
+import { createPoseContext, destroyPoseContext, runPose } from '../src/pose/run.ts';
+import type { Dims } from '../src/pose/pipeline.ts';
+import { renderPose, vFovRadOf } from '../src/pose/sim.ts';
 import { TEST_BOARD, TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
 
 // ── The opt-in intermediate readback ──────────────────────────────────────
@@ -16,7 +16,7 @@ import { TEST_BOARD, TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
 //
 // What is tested here is `run.ts`'s half -- the staging layout and the frame.
 // The PLAN's half (that a declared buffer holds its slot, and that without the
-// declaration it demonstrably would not) is in pose2Buffers.test.ts, which
+// declaration it demonstrably would not) is in poseBuffers.test.ts, which
 // needs no device. The two compose: that file proves the mechanism does
 // something, this one proves the bytes that come back are right.
 
@@ -28,7 +28,7 @@ const POSE = { height: 10, overRow: 40.1, overCol: 40.6, tiltDeg: 20, yawDeg: 15
 
 // `lines` and `votes` are the two that matter: both are things an overlay draws
 // (composite lines, the vote circles) and both are measurably clobbered under
-// `alias` without the declaration -- see pose2Buffers.test.ts. `fx` and `layout`
+// `alias` without the declaration -- see poseBuffers.test.ts. `fx` and `layout`
 // come along as the two other shapes, a full-image array and a 128-byte struct.
 // The region CSR joins them: three buffers that are one fact, and the only
 // display request that is megabytes rather than kilobytes. `fy` comes along
@@ -52,11 +52,11 @@ async function frameWith(
   device: GPUDevice, gray: Float64Array,
   opts: { alias: boolean; inspect: readonly string[] },
 ) {
-  const ctx = createPose2Context(device, FRAME, TEST_BOARD, { alias: opts.alias, inspect: opts.inspect });
+  const ctx = createPoseContext(device, FRAME, TEST_BOARD, { alias: opts.alias, inspect: opts.inspect });
   try {
-    return await runPose2(ctx, Float32Array.from(gray), SETTINGS, opts.inspect);
+    return await runPose(ctx, Float32Array.from(gray), SETTINGS, opts.inspect);
   } finally {
-    destroyPose2Context(ctx);
+    destroyPoseContext(ctx);
   }
 }
 
@@ -217,13 +217,13 @@ test('a frame that asks for nothing is byte-for-byte the frame before inspection
     // The staging buffer is sized for the catalogue, but a frame requesting
     // nothing copies and maps only the 128-byte pose block.
     const declared = await frameWith(device, gray, { alias: false, inspect: INSPECT });
-    const ctx = createPose2Context(device, FRAME, TEST_BOARD, { alias: false, inspect: INSPECT });
+    const ctx = createPoseContext(device, FRAME, TEST_BOARD, { alias: false, inspect: INSPECT });
     try {
-      const quiet = await runPose2(ctx, Float32Array.from(gray), SETTINGS);
+      const quiet = await runPose(ctx, Float32Array.from(gray), SETTINGS);
       assert.deepEqual(quiet.inspected, {});
       assert.deepEqual(quiet.pose, declared.pose);
     } finally {
-      destroyPose2Context(ctx);
+      destroyPoseContext(ctx);
     }
   });
 });
@@ -231,17 +231,17 @@ test('a frame that asks for nothing is byte-for-byte the frame before inspection
 test('asking for something the context did not declare throws', async () => {
   await withDevice(async (device) => {
     const gray = renderPose(TEST_WORLD, POSE, FRAME_DIMS, 4);
-    const ctx = createPose2Context(device, FRAME, TEST_BOARD, { alias: true, inspect: ['fx'] });
+    const ctx = createPoseContext(device, FRAME, TEST_BOARD, { alias: true, inspect: ['fx'] });
     try {
       // The hazard this closes is silent: under `alias` an undeclared buffer's
       // slot may hold a later occupant, so the copy would succeed and return
       // some other stage's plausible-looking bytes.
       await assert.rejects(
-        () => runPose2(ctx, Float32Array.from(gray), SETTINGS, ['lines']),
+        () => runPose(ctx, Float32Array.from(gray), SETTINGS, ['lines']),
         /did not declare/,
       );
     } finally {
-      destroyPose2Context(ctx);
+      destroyPoseContext(ctx);
     }
   });
 });

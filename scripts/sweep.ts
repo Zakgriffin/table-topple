@@ -3,10 +3,10 @@ import * as THREE from 'three';
 import { create, globals } from 'webgpu';
 import { validateFixture } from '../src/sphereLab/fixture.ts';
 import { inputFromFixture } from '../src/sphereLab/harness/input.ts';
-import { type SimDims, type SimPose, type SimWorld, vFovRadOf } from '../src/pose2/sim.ts';
-import { type PoseObservation, type SweepSpec, runSweep, summarize } from '../src/pose2/sweep.ts';
-import { boardDims } from '../src/pose2/board.ts';
-import { type Pose2Context, createPose2Context, runPose2 } from '../src/pose2/run.ts';
+import { type SimDims, type SimPose, type SimWorld, vFovRadOf } from '../src/pose/sim.ts';
+import { type PoseObservation, type SweepSpec, runSweep, summarize } from '../src/pose/sweep.ts';
+import { boardDims } from '../src/pose/board.ts';
+import { type PoseContext, createPoseContext, runPose } from '../src/pose/run.ts';
 import { board } from '../src/sphereLab/floorPattern.ts';
 import { GRID_STEP } from '../src/sphereLab/constants.ts';
 import { DAWN_NODE_FLAGS, requestDeviceWithOptionalTimestamps } from '../src/gpu/device.ts';
@@ -20,9 +20,9 @@ import { ingestGpuFrame } from '../src/sphereLab/profiling/clocks.ts';
 // Renders a grid of known camera poses, runs a pipeline over each, and reports
 // accuracy and timing against ground truth.
 //
-//   --pipeline pose2  (the only one left)  src/pose2, all GPU, one readback
+//   --pipeline pose  (the only one left)  src/pose, all GPU, one readback
 //
-// THE `pose` AND `both` ARMS ARE GONE, with src/pose itself. They ran the old
+// THE `pose` AND `both` ARMS ARE GONE, with the old pipeline itself. They ran the old
 // pipeline over the same poses and the same renders, which is what produced the
 // two directly comparable columns in section 19 of full_system_breakdown.md --
 // identical accuracy to every printed digit, 27.9 -> 13.5 ms median. That
@@ -134,13 +134,13 @@ function gpuBreakdown(): string {
   lines.push(`   ${'SUM OF MEDIANS'.padEnd(24)} ${grand.toFixed(3).padStart(8)}  ms on device per pose`);
   return lines.join('\n');
 }
-// ── src/pose2: all GPU, one readback ──────────────────────────────────────
+// ── src/pose: all GPU, one readback ──────────────────────────────────────
 //
-// The settings come from the SAME fixture the baseline runner uses. src/pose2
+// The settings come from the SAME fixture the baseline runner uses. src/pose
 // deliberately does not import the config -- it takes a settings object per
 // stage -- so this is where the two pipelines are held to one set of thresholds.
 // Sweeping them under different tuning would measure the tuning.
-async function makePose2Runner() {
+async function makePoseRunner() {
   Object.assign(globalThis, globals);
   const adapter = await gpuInstance.requestAdapter();
   if (!adapter) throw new Error('no WebGPU adapter');
@@ -150,10 +150,10 @@ async function makePose2Runner() {
   // that would most quietly suffer from a device that cannot be timed.
   const device = await requestDeviceWithOptionalTimestamps(adapter);
   const st = base.settings;
-  let ctx: Pose2Context | null = null;
+  let ctx: PoseContext | null = null;
   const runner = async (gray: Float64Array, d: SimDims, p: SimPose): Promise<PoseObservation> => {
     if (!ctx) {
-      ctx = createPose2Context(device, {
+      ctx = createPoseContext(device, {
         w: d.w, h: d.h, maxRegions: 16384, maxLines: 16384, ...boardDims(board),
       }, board, { alias });
     }
@@ -163,7 +163,7 @@ async function makePose2Runner() {
     // recording into the one store is what earns it the per-pass GPU breakdown
     // below for free, off an instrument that already exists.
     const span = spanStart('sweep.pose');
-    const frame = await runPose2(ctx, Float32Array.from(gray), {
+    const frame = await runPose(ctx, Float32Array.from(gray), {
       grow: { rhoLow: st.lsdRhoNoiseThreshold, toleranceDeg: st.lsdToleranceDeg },
       collect: { rhoHigh: st.lsdRhoHighThreshold, minRegionSize: st.lsdMinRegionSize },
       lsdFit: {
@@ -198,7 +198,7 @@ async function makePose2Runner() {
 // ── THE GPU INSTANCE MUST BE RETAINED AT MODULE SCOPE ──
 //
 // `create()` returns the object that owns the adapter and device. Holding it in
-// a local inside makePose2Runner is NOT enough: the runner closure captures
+// a local inside makePoseRunner is NOT enough: the runner closure captures
 // `device` and never mentions the instance, so V8 collects it and the native
 // side is freed underneath a still-live device. The next mapAsync segfaults.
 //
@@ -210,7 +210,7 @@ async function makePose2Runner() {
 const gpuInstance = create(DAWN_NODE_FLAGS);
 
 /**
- * `--alias` runs src/pose2 over the POOLED buffer set (§18): buffers whose live
+ * `--alias` runs src/pose over the POOLED buffer set (§18): buffers whose live
  * ranges do not overlap share one allocation. Not a second code path -- the same
  * interval colouring over a real liveness table instead of a degenerate one.
  *
@@ -222,21 +222,21 @@ const alias = has('--alias');
 
 // `--pipeline` is still accepted so an old invocation says what happened rather
 // than silently sweeping something else. There is only one pipeline now.
-const which = val('--pipeline', 'pose2');
-if (which !== 'pose2') {
+const which = val('--pipeline', 'pose');
+if (which !== 'pose') {
   console.error(
-    `--pipeline ${which} is gone: src/pose was deleted, so only pose2 can be swept.\n` +
+    `--pipeline ${which} is gone: the old pipeline was deleted, so only pose can be swept.\n` +
     `The two-pipeline comparison it produced is recorded in full_system_breakdown.md §19.`,
   );
   process.exit(1);
 }
 
 done = 0;
-console.error(`rendering + running ${total} poses at ${dims.w}x${dims.h}, supersample ${supersample} through src/pose2...`);
-const runner = await makePose2Runner();
+console.error(`rendering + running ${total} poses at ${dims.w}x${dims.h}, supersample ${supersample} through src/pose...`);
+const runner = await makePoseRunner();
 const rows = await runSweep(spec, runner);
 console.error('');
-console.error(summarize(rows, world, `src/pose2${alias ? ' (gpu, POOLED)' : ' (gpu)'} @ ${dims.w}x${dims.h}`));
+console.error(summarize(rows, world, `src/pose${alias ? ' (gpu, POOLED)' : ' (gpu)'} @ ${dims.w}x${dims.h}`));
 console.error('');
 console.error(gpuBreakdown());
 console.error('');

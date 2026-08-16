@@ -10,7 +10,7 @@ import { type SimDims, type SimPose, type SimWorld, renderPose, truthFor } from 
 // ── Deliberately pipeline-agnostic ──
 //
 // A `Runner` takes a grayscale image and returns what it recovered. Nothing
-// here imports a pipeline, so the SAME sweep scores `src/pose` and `src/pose2`
+// here imports a pipeline, so the SAME sweep scores the old pipeline and `src/pose`
 // and the two sets of numbers are directly comparable -- which is the only way
 // "is the rewrite at least as accurate" gets an answer rather than an opinion.
 //

@@ -10,15 +10,15 @@ import {
 //
 // ── THE LIBRARY HALF OF THIS FILE IS GONE ──
 //
-// This used to spread in `POSE_STAGES` from `src/pose/timing/stages.ts` and then
+// This used to spread in `POSE_STAGES` from the old pipeline's `timing/stages.ts` and then
 // apply two COMPOSITION OVERRIDES: the library declared `pose.run` and
 // `pose.drain` as roots because within the library they were, and the app
 // restated them as living inside `app.reconstruct` and `app.tail`. That seam was
 // the interesting part -- the library hands back facts, the consumer says where
 // they go.
 //
-// src/pose is deleted, so both the table and the overrides went with it.
-// `src/pose2` does not declare profiler stages at all: it is one submit and one
+// the old pipeline is deleted, so both the table and the overrides went with it.
+// `src/pose` does not declare profiler stages at all: it is one submit and one
 // readback, timed as a whole on the host and by GPU timestamps on the device, so
 // there is no host-side span tree left for the app to compose with. If per-stage
 // pose timing comes back, it comes back through that mechanism, and this file is
@@ -32,7 +32,7 @@ import {
 // That answered "which dependent chain sets the floor" for a pipeline with a
 // dozen interleaved GPU readbacks, where two stages could be genuinely
 // concurrent and the wait between them was invisible inside either span. THAT
-// PIPELINE IS DELETED. `src/pose2` is one submit and one fence, so what is left
+// PIPELINE IS DELETED. `src/pose` is one submit and one fence, so what is left
 // at this level is capture -> pose -> project -> overlays, strictly serial,
 // plus the display tail as an independent root. A graph walker for three edges
 // is machinery with no question to answer.
@@ -53,11 +53,11 @@ const APP_STAGES = {
   // ── the capture path ──
   'app.reconstruct': { label: 'axesReconstruction', within: null },
   'app.capture': { label: 'capture+preprocess', within: 'app.reconstruct' },
-  // The whole pipeline as ONE span, which is all the host can see: pose2 is one
+  // The whole pipeline as ONE span, which is all the host can see: pose is one
   // submit and one fence, so this is upload -> submit -> the map resolving, with
   // no interior the host could time. Per-stage numbers, if they come back, are
   // GPU timestamps and do not land here.
-  'app.pose': { label: 'pose2 (submit + readback)', within: 'app.reconstruct' },
+  'app.pose': { label: 'pose (submit + readback)', within: 'app.reconstruct' },
   // A real stage, not a gap: it is opened when a physical camera finishes and
   // closed when the next frame arrives, so its duration is the shutter-to-
   // shutter idle the auto-capture interval is spending.

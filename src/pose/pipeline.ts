@@ -257,7 +257,7 @@ export const BUFFERS: Record<string, BufferSpec> = {
   extent: { kind: 'storage', bytes: () => 48 },
   // vec4 per candidate: (score, phiRow, phiCol, period). The two phases ride
   // along because the sweep already formed the complex sum they come out of --
-  // src/pose recomputes a circularFit per candidate to get them, and its own
+  // the old pipeline recomputes a circularFit per candidate to get them, and its own
   // comment calls that out as doubling the trig work of any sweep.
   //
   // A first draft sized this 256 entries, which is TOO SMALL: the hard candidate
@@ -359,7 +359,7 @@ export const STAGES: readonly Stage[] = [
 
   // ONE workgroup, dispatched DIRECTLY, reading the vote count off the device --
   // not one workgroup per 64 votes indirect off lineArgs, which is what this
-  // entry used to say and what src/pose does. Two reasons, in FIT_ATA_WGSL's
+  // entry used to say and what the old pipeline does. Two reasons, in FIT_ATA_WGSL's
   // header: the partial rows only ever existed for a host to sum, and the
   // indirect form is §9's iteration-domain defect again (a producer writing a
   // prefix, a consumer whose extent is fixed at encode time).

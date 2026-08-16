@@ -1,12 +1,12 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { withDevice } from './helpers/gpu.ts';
-import { boardDims } from '../src/pose2/board.ts';
-import { createPose2Context, destroyPose2Context, runPose2 } from '../src/pose2/run.ts';
-import { decodeLayout } from '../src/pose2/pose.ts';
-import type { Dims } from '../src/pose2/pipeline.ts';
-import { renderPose, vFovRadOf } from '../src/pose2/sim.ts';
-import type { SimWorld } from '../src/pose2/sim.ts';
+import { boardDims } from '../src/pose/board.ts';
+import { createPoseContext, destroyPoseContext, runPose } from '../src/pose/run.ts';
+import { decodeLayout } from '../src/pose/pose.ts';
+import type { Dims } from '../src/pose/pipeline.ts';
+import { renderPose, vFovRadOf } from '../src/pose/sim.ts';
+import type { SimWorld } from '../src/pose/sim.ts';
 import { GRID_STEP } from '../src/sphereLab/constants.ts';
 import { board } from '../src/sphereLab/floorPattern.ts';
 import { buildDecodeLattice } from '../src/sphereLab/pipeline/decodeLattice.ts';
@@ -52,13 +52,13 @@ const YAWS = [15, 105, 195, 285];
 
 test('the host lattice agrees with the device at every cardinal orientation', async () => {
   await withDevice(async (device) => {
-    const ctx = createPose2Context(device, FRAME, board, { inspect: INSPECT });
+    const ctx = createPoseContext(device, FRAME, board, { inspect: INSPECT });
     try {
       const orientations = new Set<number>();
       for (const yawDeg of YAWS) {
         const gray = renderPose(
           WORLD, { height: 10, overRow: 40.1, overCol: 40.6, tiltDeg: 20, yawDeg }, FRAME_DIMS, 4);
-        const { pose, inspected } = await runPose2(ctx, Float32Array.from(gray), SETTINGS, INSPECT);
+        const { pose, inspected } = await runPose(ctx, Float32Array.from(gray), SETTINGS, INSPECT);
         assert.equal(pose.ok, true, `yaw ${yawDeg} did not decode -- nothing here is meaningful`);
         orientations.add(pose.orientation);
 
@@ -90,7 +90,7 @@ test('the host lattice agrees with the device at every cardinal orientation', as
         `only reached orientations {${[...orientations].join(',')}} -- this fixture cannot ` +
         `see a wrong rotation mapping`);
     } finally {
-      destroyPose2Context(ctx);
+      destroyPoseContext(ctx);
     }
   });
 });

@@ -8,17 +8,17 @@
 // on two backends" -- instead of something that has to MUTATE a global between
 // two runs and restore it in a `finally`.
 //
-// ── WHAT THIS STILL SELECTS, now that src/pose is gone ──
+// ── WHAT THIS STILL SELECTS, now that the old pipeline is gone ──
 //
 // It used to choose the backend for every stage of the pose pipeline. It does
-// not any more: `src/pose2` is all-GPU with no CPU path and no backend flag, by
+// not any more: `src/pose` is all-GPU with no CPU path and no backend flag, by
 // design -- a CPU implementation inside the pipeline is exactly what that
 // rewrite deleted.
 //
 // What is left is the app's OWN work: `pipeline/projectedBins.ts` genuinely has
 // two implementations of sample projection (`projectSamplesCPU` and
 // `projectSamplesGPU`) and this is what picks between them. That is why the type
-// moved here from `src/pose/backend.ts` instead of dying with it -- the concept
+// moved here from the old pipeline's `backend.ts` instead of dying with it -- the concept
 // belongs to the app now, not to a pose library that no longer exists.
 //
 // The `forceCPU` checkbox in sphere-lab.config.json is still the app-side

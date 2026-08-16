@@ -27,7 +27,7 @@ import type { Board } from './board.ts';
 // and a 480x640 frame at 2x2 supersampling is 1.23M rays -- 180 such frames
 // exhausted the V8 heap. `rayDirInto` below is that function written out into
 // scalars, and it is held to the original BY TEST rather than by sharing:
-// tests/pose2Sim.test.ts asserts the two agree bit-for-bit across the NDC range
+// tests/poseSim.test.ts asserts the two agree bit-for-bit across the NDC range
 // and a spread of orientations. Verified equivalence, not assumed.
 //
 // Everything here is WORLD space: the floor is the y = 0 plane, and board cell
@@ -127,7 +127,7 @@ export function camQuatOf(p: SimPose): THREE.Quaternion {
  * rays, and 180 of those frames exhausted the V8 heap outright.
  *
  * Duplicating projection maths is exactly the drift this file's header warns
- * about -- so it is not trusted, it is TESTED. `tests/pose2Sim.test.ts` asserts
+ * about -- so it is not trusted, it is TESTED. `tests/poseSim.test.ts` asserts
  * this agrees with cornerDir to the last bit across the whole NDC range and a
  * range of orientations. The guarantee is preserved by verification rather than
  * by sharing the call.

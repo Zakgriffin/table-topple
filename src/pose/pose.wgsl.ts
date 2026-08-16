@@ -985,7 +985,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 //
 // ── ONE WORKGROUP, AND THE PARTIALS BUFFER IS DELETED ──
 //
-// src/pose splits this in two: one workgroup per 64 votes tree-reduces into its
+// the old pipeline splits this in two: one workgroup per 64 votes tree-reduces into its
 // own 21-float row, and the ~256 rows are summed BACK ON THE HOST. The
 // declaration inherited that split as `fit.ata` + `fit.reduce` over an
 // `ataPartials` buffer. Re-deriving it, neither the split nor the buffer
@@ -1121,7 +1121,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
 //
 // 3. THE ORIENTATION TEST IS A SIGN, NOT A RAY CAST. Which way the normal points
 //    is not determined by the fit -- an eigenvector's sign is arbitrary -- so it
-//    has to be chosen. src/pose chooses it TWICE, independently, from the same
+//    has to be chosen. the old pipeline chooses it TWICE, independently, from the same
 //    arbitrary vector: poseCompute casts cornerDir(0,0) to orient a local copy
 //    for the handedness test, and gridPeriodPhase casts the same ray again to
 //    orient its own. Deciding it once, here, at the only place the sign is
@@ -1141,7 +1141,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
 // construction and b1, b2 are orthonormal -- |b1 +/- b2|^2 is identically 2. It
 // is dead in exact arithmetic, so it is not ported.
 //
-// What IS reachable, and what src/pose does not catch, is a scatter matrix of
+// What IS reachable, and what the old pipeline does not catch, is a scatter matrix of
 // all zeros -- no lines, or every vote degenerate. Then every eigenvalue is 0,
 // the smallest eigenvector is whichever identity column comes first, and the
 // pipeline gets a confident triad built from nothing. That is the condition
@@ -1385,7 +1385,7 @@ fn main() {
 // recovering the height. Nothing later in this stage does anything but find the
 // period and phase of the points this pass emits.
 //
-// ── THERE IS NO QUATERNION HERE, AND src/pose's VERSION HAS TWO ──
+// ── THERE IS NO QUATERNION HERE, AND the old pipeline's VERSION HAS TWO ──
 //
 // `computeGridPeriodPhase` takes the camera quaternion, casts world-space rays
 // with it, and `makeCellCentreDistinctness` carries its inverse to get back to
@@ -1404,9 +1404,9 @@ fn main() {
 // sign at the point it was created, so triad[2] arrives already pointing at the
 // camera and re-orienting it would be a SECOND flip.
 //
-// One consequence to know before a number looks wrong: src/pose passes the RAW
+// One consequence to know before a number looks wrong: the old pipeline passes the RAW
 // normal to gnomonic() and uses the oriented one only for its grazing gate, so
-// `value` here may come out globally NEGATED relative to src/pose's. That is
+// `value` here may come out globally NEGATED relative to the old pipeline's. That is
 // self-consistent -- a period is a spacing, and phase and the decode lattice are
 // derived from these same coordinates -- but it means a value-for-value
 // comparison against the old implementation is the wrong check. Ground truth is.
@@ -1597,7 +1597,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 // guess, and what deletes the seed, the bracket width and the sample count that
 // a seeded search would need to be told.
 //
-// ── PER FAMILY, AND THIS IS A BUG src/pose ALREADY FIXED ONCE ──
+// ── PER FAMILY, AND THIS IS A BUG the old pipeline ALREADY FIXED ONCE ──
 //
 // A row line's value is its xCol; a column line's is its xRow. Two DIFFERENT
 // axes. Pooling them and taking a global min/max measures the extent of the
@@ -1938,7 +1938,7 @@ fn main(@builtin(workgroup_id) wid: vec3<u32>, @builtin(local_invocation_id) lid
 // is nothing, and a parallel argmax with a cross-block tie-break argument would
 // be more code than the whole pass.
 //
-// src/pose has a three-level fallback chain spread across two places: best
+// the old pipeline has a three-level fallback chain spread across two places: best
 // distinctness, else the largest-period significant peak, else the plain global
 // best. The last of those needs the SCORE array, which only this pass binds --
 // so it is done here, and gpp.polish is left with the two that need
@@ -2039,10 +2039,10 @@ fn main() {
 // with distance = cellPitch / period. That single scalar is the whole bridge
 // between this stage's coordinates and world units.
 //
-// src/pose carries a `flipped` sign through all of this, because it is handed a
+// the old pipeline carries a `flipped` sign through all of this, because it is handed a
 // normal whose direction is arbitrary. Here fit.eigen already oriented it, so
 // there is no flip -- and no inverse quaternion either, because the triad is
-// camera-space and P is therefore ALREADY in camera space. src/pose's
+// camera-space and P is therefore ALREADY in camera space. the old pipeline's
 // makeCellCentreDistinctness applies invQuat at this point; that whole round
 // trip is an artifact of its frame, not of the maths.
 //
@@ -2052,7 +2052,7 @@ fn main() {
 // previous row has to be alive. A 13x13 f32 patch is 676 bytes of per-thread
 // private storage; two rows is 104. Same answer.
 //
-// ── ONE GUARD src/pose DOES NOT HAVE ──
+// ── ONE GUARD the old pipeline DOES NOT HAVE ──
 //
 // A cell BEHIND the camera projects through a negated depth to a mirrored image
 // point that can land on-screen, and the grazing test cannot catch it: p is on
@@ -2060,7 +2060,7 @@ fn main() {
 // are, and the test is therefore blind to where the point is laterally. The
 // grazing cutoff does bound |p| (to distance/minGrazingCos, i.e. 10x at the
 // default), but a tilted camera reaches p.z >= 0 well inside that. Latent in
-// src/pose rather than hypothetical.
+// the old pipeline rather than hypothetical.
 export const GPP_DISTINCT_WGSL = GPP_U + /* wgsl */ `
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> gray: array<f32>;
@@ -2120,7 +2120,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
   let uPhase = (uB - round(uB / cp) * cp) + cp * 0.5;
   let vPhase = (vB - round(vB / cp) * cp) + cp * 0.5;
 
-  // The patch sits at the middle of what was actually detected. src/pose uses
+  // The patch sits at the middle of what was actually detected. the old pipeline uses
   // the per-family MEDIAN value; the extent midpoint is the same intent and is
   // already computed. A family's own coordinate is the other family's axis:
   // xRow is what the COLUMN family measures.
@@ -2190,7 +2190,7 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
 //
 // The winner's integer count is round(spread / P), so its neighbourhood is
 // [spread/(n+1), spread/(n-1)] and this pass never has to index back into the
-// candidate curve. src/pose declines to refine at all when the winner sits at
+// candidate curve. the old pipeline declines to refine at all when the winner sits at
 // either END of its sampled array; here the bracket is physical rather than an
 // array index, so the end cases refine like any other.
 export const GPP_POLISH_WGSL = GPP_U + /* wgsl */ `
@@ -2305,7 +2305,7 @@ fn main() {
 //
 // ── IT IS BOUNDED BY THE DETECTED LINES, NOT BY THE VIEW QUADRILATERAL ──
 //
-// src/pose casts a 49x49 grid of rays through the image, intersects each with
+// the old pipeline casts a 49x49 grid of rays through the image, intersects each with
 // the floor and takes the min/max of the results. That grid exists to work
 // around an all-or-nothing four-corner test, which returned nothing the moment
 // one corner pointed past the horizon and silently killed decode on any oblique
@@ -2316,7 +2316,7 @@ fn main() {
 // gpp.extent already reduces.
 //
 // Measured before being built (scripts/hull-measure.ts, 2026-08-14, 204 poses of
-// src/pose at 480x640): identical recovered position at every pose in the
+// the old pipeline at 480x640): identical recovered position at every pose in the
 // operating range, 0.02% of correct decode votes lost, consistency never worse.
 // At grazing it clips 35% of all complete windows for 0.18% of the correct
 // votes and RAISES consistency by up to 0.17 -- which is as direct a statement
@@ -2329,7 +2329,7 @@ fn main() {
 //
 //     u = distance * xRow        v = distance * xCol
 //
-// src/pose carries a SIGN on that scalar (projectedUVScale returns +/-distance)
+// the old pipeline carries a SIGN on that scalar (projectedUVScale returns +/-distance)
 // because gnomonic() is handed a raw eigenvector while projectedUVBounds flips
 // it toward the floor. Here fit.eigen oriented the normal once, at the point the
 // sign was created, so the two agree and the scalar is just `distance`. That is
@@ -2362,9 +2362,9 @@ struct U {
 `;
 
 // The 128-byte block every later decode pass reads instead of a uniform, because
-// nothing in it is known to the host any more. `invQuat` is NOT in it: src/pose
+// nothing in it is known to the host any more. `invQuat` is NOT in it: the old pipeline
 // carries the inverse camera quaternion here to get from its analysis frame back
-// to camera space, and in src/pose2 the triad is already camera-space, so the
+// to camera space, and in src/pose the triad is already camera-space, so the
 // rotation is the identity. Same deletion gpp.distinct made for the same reason.
 //
 // THE THREE AXES ARE vec4 AND ONLY xyz IS USED, which costs 12 bytes and buys
@@ -2508,7 +2508,7 @@ fn main() {
   // phiRow is the ROW family's phase and a row line's value is its xCol, so
   // phiRow lives in xCol and therefore in v. phiCol is the other way round. The
   // families are named for the lines and the coordinates for the axes; this
-  // crossover is the one thing to get right here, and src/pose has it too
+  // crossover is the one thing to get right here, and the old pipeline has it too
   // (uBoundaryRaw = uvScale * gpp.phiCol).
   let phiRow = gppResult.y;
   let phiCol = gppResult.z;
@@ -2647,7 +2647,7 @@ fn main() {
 // less: a line detected near the horizon has no grazing gate of its own, so the
 // hull can reach further out than the old view quadrilateral did.
 //
-// ── ONE GUARD src/pose DOES NOT HAVE ──
+// ── ONE GUARD the old pipeline DOES NOT HAVE ──
 //
 // `p.z >= 0` -- a cell BEHIND the camera. The grazing test cannot catch it,
 // because p is on the floor plane so dot(p, normal) is exactly -distance
@@ -2666,7 +2666,7 @@ fn main() {
 //
 // ── NO invQuat, AND NO `geom` ──
 //
-// src/pose rotates p by the inverse camera quaternion to reach camera space.
+// the old pipeline rotates p by the inverse camera quaternion to reach camera space.
 // Here the triad IS camera-space, so that rotation is the identity -- the third
 // quaternion round trip this rewrite has deleted by the frame being consistent.
 // And `geom` (u, v, px, py per cell, 4 MiB at MAX_CELLS) is gone: nothing on the
@@ -2735,7 +2735,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 //
 // The lookup is from a 25-bit key to a torus position, with ~20,736 real entries
 // in a 2^25 key space. Flattened into open addressing at load factor 0.5, built
-// once per device (src/pose2/board.ts). `hashU32` must stay byte-identical
+// once per device (src/pose/board.ts). `hashU32` must stay byte-identical
 // between there and here -- JS Math.imul and a WGSL u32 multiply both wrap mod
 // 2^32 -- or every lookup silently misses and the frame reports an ordinary
 // undecodable outcome.

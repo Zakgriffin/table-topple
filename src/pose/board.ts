@@ -41,9 +41,9 @@ import type { Dims } from './pipeline.ts';
 // is drawing a floor. The pipeline is deliberately scale-invariant and talks in
 // cells throughout.
 //
-// What is NOT here is `src/pose`'s hash-table builder, even though one existed
+// What is NOT here is the old pipeline's hash-table builder, even though one existed
 // and worked. That module was the thing this rewrite replaced, so importing it
-// would have made pose2 un-shippable without it. The table is re-derived below;
+// would have made pose un-shippable without it. The table is re-derived below;
 // the HASH FUNCTION is copied verbatim, which is the one thing here that is a
 // correctness constant rather than a structure.
 

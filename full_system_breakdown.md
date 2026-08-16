@@ -1,9 +1,17 @@
 # Full System Breakdown — the flat, all-GPU pose pipeline
 
-A from-scratch rewrite of `src/pose/` as a flat function that takes a grayscale
+A from-scratch rewrite of the old pipeline as a flat function that takes a grayscale
 image and returns a camera pose, doing all work on the GPU with one readback.
 This document is the single place to answer "what is this buffer for", "why is
 it that size", and "what was decided and why".
+
+> **"The old pipeline"** throughout this document means the predecessor that
+> lived at `src/pose/` and was deleted on 2026-08-14. **That path now holds the
+> library this document describes**, which is why the old name is never used to
+> refer to it: a reader following `src/pose/...` would land in live code and
+> read it as the thing being compared against. Where the old pipeline's files
+> are named (`arena.ts`, `decodeGrid.ts`, and so on) they are code spans rather
+> than links, because there is nothing left to link to.
 
 ---
 
@@ -29,7 +37,7 @@ tests, in that order so each stands on the previous. The tree is clean and
 That is a change of régime, not a footnote: everything below written in the
 past tense about "untracked" refers to how the work was DONE, and the mutation
 loop's copy-out-of-the-repo dance is no longer the only way to restore a file.
-`git checkout -- src/pose2/pose.wgsl.ts` now does it. The copy recipe is kept
+`git checkout -- src/pose/pose.wgsl.ts` now does it. The copy recipe is kept
 because it is still the safer habit when the working tree holds other changes.
 
 | built | stage entries |
@@ -46,9 +54,9 @@ because it is still the safer habit when the working tree holds other changes.
 | §14 finish | `finish` |
 | the shared scan | **all three uses are live** — collect's, lines' and gpp's |
 
-**The entry point is `src/pose2/run.ts`**:
-`createPose2Context(device, dims, { alias?, inspect? })` once, then
-`runPose2(ctx, gray, settings, inspect?)` per frame, returning
+**The entry point is `src/pose/run.ts`**:
+`createPoseContext(device, dims, { alias?, inspect? })` once, then
+`runPose(ctx, gray, settings, inspect?)` per frame, returning
 `{ pose, inspected }`. That file is deliberately the only place the upload, the
 submit and the readback appear, so the count rule 1 exists to protect is
 checkable by reading one screen — and `inspect` does not change that count, only
@@ -59,17 +67,17 @@ the bytes. See §18's "Reading a buffer back".
 1. **DO NOT RETIRE ANY STAGE TEST. Standing instruction from the user,
    2026-08-14.** §19's calibration note argues the sweep should now say which
    stage tests were worth having; that re-reading is ON HOLD and no
-   `tests/pose2*` test is to be deleted on its evidence or anyone else's. The
+   `tests/pose*` test is to be deleted on its evidence or anyone else's. The
    deliberation stays open — the hold is not its outcome.
-2. **Put the phone on pose2.** The other half of Phase 3, and independent of
+2. **Put the phone on pose.** The other half of Phase 3, and independent of
    everything below. `src/mobileCapture.ts` needs a WebGPU device and a
-   per-resolution `Pose2Context`; the desktop's lifecycle in
+   per-resolution `PoseContext`; the desktop's lifecycle in
    `axesReconstruction.ts` is a model, not a thing to share.
 3. **Re-point the Sphere Lab overlays** at the inspected buffers, one at a time.
    The full inventory — which overlay reads which buffer, which need an app-side
    re-derivation, and the two that this pipeline genuinely does not express —
    is NOT in this document, because §22 keeps the display path out of it. It is
-   in the session memory as `project_pose2_display_wiring`.
+   in the session memory as `project_pose_display_wiring`.
 
 ### What is NOT done
 
@@ -85,33 +93,33 @@ the bytes. See §18's "Reading a buffer back".
   recovered gizmo, the pole markers, the floor overlay and outline, Projected-Cam,
   the reconstructed-contamination overlay); everything that draws a pipeline
   INTERMEDIATE is waiting on step 3 above.
-- Two smaller ones: the hull was measured on `src/pose`'s detected lines and the
-  grazing band (tilts 45–55) has not been checked against pose2's own detector;
+- Two smaller ones: the hull was measured on the old pipeline's detected lines and the
+  grazing band (tilts 45–55) has not been checked against pose's own detector;
   and open decision 9's `worst < 0.05` gate still has only ~1.4x headroom.
 
 ### The files
 
 | file | lines | what it is |
 |---|---|---|
-| `src/pose2/pipeline.ts` | 456 | **The pipeline as DATA.** Every buffer, every stage. Liveness, the clear schedule and two validation rules are all *derived* from it |
-| `src/pose2/buffers.ts` | 364 | Pure planner (`planPool`) + `createBuffers`. Runs under `node --test` with no device |
-| `src/pose2/pose.ts` | 1041 | One encode function per stage. Never allocates, submits, awaits or reads back |
-| `src/pose2/pose.wgsl.ts` | 3187 | The shaders, in pipeline order |
-| `src/pose2/run.ts` | 117 | **The entry point.** The device lifecycle, THE upload, THE submit, THE readback — kept apart so the count is checkable |
-| `src/pose2/board.ts` | 124 | The printed board as device buffers. The only place `src/pose2` reaches outside itself (open decision 5b) |
-| `src/pose2/cpu.ts` | 467 | **The CPU twin** — an oracle, never imported by the pipeline |
-| `src/pose2/sim.ts` | 289 | The simulator: renders a known pose to a grayscale frame |
-| `src/pose2/sweep.ts` | 212 | The pose sweep. Deliberately pipeline-agnostic |
+| `src/pose/pipeline.ts` | 456 | **The pipeline as DATA.** Every buffer, every stage. Liveness, the clear schedule and two validation rules are all *derived* from it |
+| `src/pose/buffers.ts` | 364 | Pure planner (`planPool`) + `createBuffers`. Runs under `node --test` with no device |
+| `src/pose/pose.ts` | 1041 | One encode function per stage. Never allocates, submits, awaits or reads back |
+| `src/pose/pose.wgsl.ts` | 3187 | The shaders, in pipeline order |
+| `src/pose/run.ts` | 117 | **The entry point.** The device lifecycle, THE upload, THE submit, THE readback — kept apart so the count is checkable |
+| `src/pose/board.ts` | 124 | The printed board as device buffers. The only place `src/pose` reaches outside itself (open decision 5b) |
+| `src/pose/cpu.ts` | 467 | **The CPU twin** — an oracle, never imported by the pipeline |
+| `src/pose/sim.ts` | 289 | The simulator: renders a known pose to a grayscale frame |
+| `src/pose/sweep.ts` | 212 | The pose sweep. Deliberately pipeline-agnostic |
 
 And the tests, which are where each stage's oracle actually lives:
 
 | file | lines | what it covers |
 |---|---|---|
-| `tests/pose2Stages.test.ts` | 2135 | Every GPU stage, against hand-derived ground truth and rendered frames. **Where a new stage's tests go**, and it ends with the whole-pipeline test |
-| `tests/pose2Cpu.test.ts` | 424 | The CPU twin, and the GPU-vs-twin comparisons for grow/collect/lsdFit |
-| `tests/pose2Buffers.test.ts` | 296 | `planPool` arithmetic, with no device. §19 records this one as over-produced |
-| `tests/pose2Sim.test.ts` | 205 | The simulator, incl. the bit-for-bit `rayDirInto` vs `cornerDir` check |
-| `tests/pose2Sweep.test.ts` | 116 | The sweep harness itself, not a pipeline |
+| `tests/poseStages.test.ts` | 2135 | Every GPU stage, against hand-derived ground truth and rendered frames. **Where a new stage's tests go**, and it ends with the whole-pipeline test |
+| `tests/poseCpu.test.ts` | 424 | The CPU twin, and the GPU-vs-twin comparisons for grow/collect/lsdFit |
+| `tests/poseBuffers.test.ts` | 296 | `planPool` arithmetic, with no device. §19 records this one as over-produced |
+| `tests/poseSim.test.ts` | 205 | The simulator, incl. the bit-for-bit `rayDirInto` vs `cornerDir` check |
+| `tests/poseSweep.test.ts` | 116 | The sweep harness itself, not a pipeline |
 | `tests/helpers/gpu.ts` | 115 | `withDevice` (the error scope), `readF32/readU32`, the retained GPU instance |
 
 ### Running things
@@ -119,9 +127,9 @@ And the tests, which are where each stage's oracle actually lives:
 ```
 npm test                                         # everything, headless
 node --test --test-force-exit tests/X.test.ts    # ONE file
-node --test --test-force-exit --test-name-pattern '^gpp:' tests/pose2Stages.test.ts
+node --test --test-force-exit --test-name-pattern '^gpp:' tests/poseStages.test.ts
 npx tsc --noEmit
-npm run sweep [--quick] [--pipeline pose|pose2|both]   # §19's acceptance criterion
+npm run sweep [--quick] [--pipeline pose|pose|both]   # §19's acceptance criterion
 npm run hull [--quick|--grazing] [--inset N]     # the §12 line-hull measurement
 ```
 
@@ -130,17 +138,17 @@ segfaults at process teardown without it. A runner that omits it — `npx tsx
 --test`, for instance — HANGS with no output, which reads as a broken test rather
 than a missing flag.
 
-**The mutation loop, since every stage here ends with one.** `src/pose2/` is
+**The mutation loop, since every stage here ends with one.** `src/pose/` is
 committed as of 2026-08-14, so `git checkout --` restores a mutated file; the
 copy-out-of-the-repo form below is what the runs recorded here actually used,
 and it stays the safer habit when the tree holds unrelated changes:
 
 ```
-cp src/pose2/pose.wgsl.ts $SCRATCH/          # 1. copy OUT of the repo
+cp src/pose/pose.wgsl.ts $SCRATCH/          # 1. copy OUT of the repo
                                               # 2. edit in the deliberate bug
-node --test --test-force-exit tests/pose2Stages.test.ts
-cp $SCRATCH/pose.wgsl.ts src/pose2/          # 3. restore
-diff $SCRATCH/pose.wgsl.ts src/pose2/pose.wgsl.ts && echo CLEAN   # 4. PROVE it
+node --test --test-force-exit tests/poseStages.test.ts
+cp $SCRATCH/pose.wgsl.ts src/pose/          # 3. restore
+diff $SCRATCH/pose.wgsl.ts src/pose/pose.wgsl.ts && echo CLEAN   # 4. PROVE it
 ```
 
 Step 4 matters: a half-restored mutation is a silent wrong answer in every later
@@ -170,7 +178,7 @@ real user-facing default in **`sphere-lab.config.json`**, not a number invented
 here, and the tests use those values so a fixture cannot drift from the shipping
 configuration. As of 2026-08-12: `lsdToleranceDeg 9.5`, `lsdRhoNoiseThreshold
 0.132`, `lsdRhoHighThreshold 0`, `lsdNfaEpsilon 1`, `lsdNfaTestExponent 5`,
-`lsdMinRegionSize 2`, `lsdMinLengthPx 3`. `src/pose2` deliberately does not
+`lsdMinRegionSize 2`, `lsdMinLengthPx 3`. `src/pose` deliberately does not
 *import* the config — it takes a settings object per stage — but the values it is
 tested at should keep matching it.
 
@@ -247,7 +255,7 @@ tested at should keep matching it.
 **Re-derive each stage from what the math needs; consult the old implementation
 only for correctness constants** (tolerances, the NFA formula, tie-break rules),
 never for structure. The declaration in `pipeline.ts` was written by reading
-`src/pose`, so every stage still to be built has inherited decomposition in it
+the old pipeline, so every stage still to be built has inherited decomposition in it
 until someone checks. §7 is the worked example: six passes and two scans became
 five passes and one, and the re-derivation is what found a zero-init bug the
 declaration had.
@@ -369,7 +377,7 @@ These are constraints, not preferences. Each one deletes a category of code.
 
 ### What rule 4 buys, and what it costs
 
-Buys: [arena.ts](src/pose/gpu/arena.ts)'s 327 lines collapse to a
+Buys: `arena.ts`'s 327 lines collapse to a
 `makeBuffers(device, w, h)` function returning a struct of named buffers. It
 also **dissolves the WebGPU usage-scope question** entirely — the open worry
 about whether one contiguous buffer may legally back a uniform binding, a
@@ -396,7 +404,7 @@ and writes `ok = false`. No branching in the hot kernels, no status check at the
 top of every shader.
 
 This is not new. It is exactly what
-[growRegions.wgsl.ts](src/pose/stages/lsd/growRegions.wgsl.ts)'s `gate` pass
+`growRegions.wgsl.ts`'s `gate` pass
 already does for convergence, generalized to every failure point.
 
 ---
@@ -453,7 +461,7 @@ below, and below-right neighbours, and take the difference of the column sums
 `1/510` so that gradient magnitude tops out at 1.0 rather than 255.
 
 Existing implementation:
-[gradient2x2.wgsl.ts](src/pose/stages/gradient/gradient2x2.wgsl.ts).
+`gradient2x2.wgsl.ts`.
 
 | buffer | size | MiB | contents |
 |---|---|---|---|
@@ -502,7 +510,7 @@ directions, and an unsigned test would fuse them into one region. The directed
 test keeps them apart.
 
 Existing implementation:
-[growRegions.wgsl.ts](src/pose/stages/lsd/growRegions.wgsl.ts).
+`growRegions.wgsl.ts`.
 
 | buffer | size | MiB | contents |
 |---|---|---|---|
@@ -595,7 +603,7 @@ over labels visits them in ascending pixel-index order, which reproduces the CPU
 reference's region ordering exactly rather than merely equivalently.
 
 Existing implementation:
-[collectRegions.wgsl.ts](src/pose/stages/lsd/collectRegions.wgsl.ts) — described
+`collectRegions.wgsl.ts` — described
 in its own header as "the model implementation."
 
 ### REDESIGNED WHEN IT WAS BUILT, 2026-08-12
@@ -743,7 +751,7 @@ count. Accept if it is below `epsilon`. **No threshold tuning** — the acceptan
 criterion falls out of the statistics.
 
 Existing implementation:
-[lsdFit.wgsl.ts](src/pose/stages/lsd/lsdFit.wgsl.ts). One thread per region;
+`lsdFit.wgsl.ts`. One thread per region;
 regions are independent by construction.
 
 | buffer | size | MiB | contents |
@@ -897,7 +905,7 @@ noise. So the weight is exactly a confidence measure, and it is an explicit
 per-line quantity rather than something buried in a per-pixel step.
 
 Currently on the host:
-[votes.ts](src/pose/stages/votes/votes.ts) — `compositesFromLsdRectangles` and
+`votes.ts` — `compositesFromLsdRectangles` and
 `computeSegmentVotes`.
 
 | buffer | size | MiB | contents |
@@ -1094,8 +1102,8 @@ its eigendecomposition gives the two plane normals. Their cross product is the
 floor normal.
 
 Existing implementations:
-[fitPlanes.wgsl.ts](src/pose/stages/votes/fitPlanes.wgsl.ts) for the reduction,
-`planesFromScatter` in [votes.ts](src/pose/stages/votes/votes.ts) for the tail.
+`fitPlanes.wgsl.ts` for the reduction,
+`planesFromScatter` in `votes.ts` for the tail.
 
 | buffer | size | MiB | contents |
 |---|---|---|---|
@@ -1123,7 +1131,7 @@ and the host's one Jacobi serves two sizes; the answer is below.
 **`fit.reduce` and `ataPartials` are both gone.** The declaration inherited a
 split whose only justification expired with the host:
 
-- **The partials existed so a HOST could sum them.** src/pose tree-reduces 64
+- **The partials existed so a HOST could sum them.** the old pipeline tree-reduces 64
   votes per workgroup into that workgroup's own 21-float row and reads ~256 rows
   back. With no readback there is nothing to hand rows to, so the intermediate
   stops having a job — the same finding as §18's, that intermediates are a
@@ -1166,7 +1174,7 @@ differ rather than a preference:
 ### THE NORMAL'S SIGN IS DECIDED ONCE, HERE
 
 An eigenvector's sign is arbitrary, so which way the floor normal points is not
-determined by the fit and has to be chosen. **src/pose chooses it twice**, from
+determined by the fit and has to be chosen. **the old pipeline chooses it twice**, from
 the same arbitrary vector: `poseCompute` casts `cornerDir(0,0)` to orient a local
 copy for the handedness test, and `gridPeriodPhase` casts the same ray again to
 orient its own. Neither writes the choice down, so `triad` in this pipeline would
@@ -1181,7 +1189,7 @@ an image *corner*, which points above the horizon before the view axis does — 
 the corner test inverts the normal at grazing tilts where the centre test is
 still right. The centre ray is the last one to cross the horizon. (Reachable
 around tilt 55° at the fixture FOV; outside the measured operating range, and a
-latent bug in `src/pose` rather than a hypothetical.)
+latent bug in the old pipeline rather than a hypothetical.)
 
 It also makes gnomonic projection's valid hemisphere deterministic instead of
 arbitrary, which §11 inherits.
@@ -1194,7 +1202,7 @@ rotations into a matrix that starts as the identity, so `V` is orthogonal by
 construction, `b1` and `b2` are orthonormal, and `|b1 ± b2|² ≡ 2`. It is not
 ported.
 
-What is reachable, and what `src/pose` does not catch, is **an all-zero scatter
+What is reachable, and what the old pipeline does not catch, is **an all-zero scatter
 matrix** — no lines, or every vote degenerate. Every eigenvalue is then 0, the
 "smallest eigenvector" is whichever identity column comes first, and the pipeline
 receives a perfectly orthonormal triad computed from nothing. `fitDegenerate`
@@ -1206,7 +1214,7 @@ eigenvector. So this fit structurally cannot report its own misfit — the resid
 is invisible in the output. Known, consistent with the BoofCV comparison's
 "geometric versus algebraic cost" finding, and out of scope for a port.
 
-**Handedness** stays exactly as `src/pose` has it: negate `Dcol` if
+**Handedness** stays exactly as the old pipeline has it: negate `Dcol` if
 `Drow × Dcol · Dnormal > 0`, using the now-oriented normal. This matters much
 later, in Stage 13 — see the note there.
 
@@ -1304,15 +1312,15 @@ identical.)
 >
 > `computeGridPeriodPhase` opens by casting `cornerDir(0,0)` and negating a local
 > copy of `Dnormal` if the dot is positive, because it is handed the RAW
-> eigenvector whose sign the fit does not determine. In `src/pose2` the sign is
+> eigenvector whose sign the fit does not determine. In `src/pose` the sign is
 > decided once, in `fit.eigen`, so **`triad[2]` arrives already oriented toward
 > the camera (`z > 0`)** and re-orienting it here would be a second flip.
 >
 > Two consequences worth knowing before the first number looks wrong:
 >
-> - `src/pose` passes the **raw** normal to `gnomonic()` while using the oriented
+> - the old pipeline passes the **raw** normal to `gnomonic()` while using the oriented
 >   one only for its grazing gate. Here they are the same vector, so **gnomonic's
->   `value` coordinates may come out globally negated relative to `src/pose`'s.**
+>   `value` coordinates may come out globally negated relative to the old pipeline's.**
 >   That is self-consistent — period is a spacing, phase and the decode lattice
 >   are derived from the same coordinates — but it means a value-for-value
 >   comparison against the old implementation is not the right check. Ground
@@ -1348,8 +1356,8 @@ identical.)
 just `1/period`.
 
 Existing implementation:
-[gridPeriodPhase.ts](src/pose/stages/period/gridPeriodPhase.ts) (535 lines, host)
-and [periodSweep.wgsl.ts](src/pose/stages/period/periodSweep.wgsl.ts) (the sweep
+`gridPeriodPhase.ts` (535 lines, host)
+and `periodSweep.wgsl.ts` (the sweep
 only, already on device).
 
 | buffer | size | MiB | contents |
@@ -1463,12 +1471,12 @@ camera-space rays onto a camera-space triad never leaves camera space, and
 `gpp.distinct`'s reprojection is a bare pinhole. That is a consequence of the
 frame being consistent, not an optimization.
 
-**One guard `src/pose` does not have.** A cell BEHIND the camera projects through a
+**One guard the old pipeline does not have.** A cell BEHIND the camera projects through a
 negated depth to a mirrored image point that can land on-screen, and the grazing
 test cannot catch it — `p` is on the floor plane, so `dot(p, Dnormal)` is exactly
 −distance whatever the lateral offset, and the test is blind to it. The cutoff
 does bound |p| (10× distance at `minGrazingCos` 0.1) but a tilted camera reaches
-`p.z ≥ 0` well inside that. Latent in `src/pose` rather than hypothetical.
+`p.z ≥ 0` well inside that. Latent in the old pipeline rather than hypothetical.
 
 ### ACCURACY, AND WHERE THE ERROR ACTUALLY COMES FROM
 
@@ -1587,7 +1595,7 @@ grazing cutoff is both correct and strictly more permissive. For a non-grazing
 view every sample clears and it reduces to the same min/max the corners gave.
 
 Currently on the host: `projectedUVBounds` and `decodeGridLayout` in
-[decodeGrid.ts](src/pose/stages/decode/decodeGrid.ts).
+`decodeGrid.ts`.
 
 | buffer | size | MiB | contents |
 |---|---|---|---|
@@ -1628,7 +1636,7 @@ it is worth more than the conclusion. What was built, and where each piece went:
 - **Measured on the built version**, not only on the harness: at the §19 fixture
   pose the cross lanes widen the hull by 1.78 cells in xRow and 2.63 in xCol over
   the value box, and the hull covers 93% / 91% of the truly visible extent. Both
-  are in `tests/pose2Stages.test.ts`, and the first is a GATE rather than a
+  are in `tests/poseStages.test.ts`, and the first is a GATE rather than a
   containment check -- a version that forgot the cross lanes produces the value
   box, which contains nothing suspicious on inspection.
 
@@ -1637,11 +1645,11 @@ projected onto the floor**. The lattice only needs to cover where decodable
 pattern actually is, and that is inside the detected grid lines.
 
 **The quantity already exists, per endpoint.** `GridLineSample` in
-[gridPeriodPhase.ts](src/pose/stages/period/gridPeriodPhase.ts) carries `p1`/`p2`
+`gridPeriodPhase.ts` carries `p1`/`p2`
 -- each line's own two endpoints, gnomonically projected, *"in the SAME
 coordinate space `value`/period/phase are expressed in."* So the hull is an
 atomic min/max over data `gpp.classify` already holds in registers, not new
-maths. In `src/pose2` it becomes two more lanes on gpp's existing `extent`
+maths. In `src/pose` it becomes two more lanes on gpp's existing `extent`
 reduction.
 
 **The two coordinate systems differ by one scalar.** `gnomonic()` gives
@@ -1711,7 +1719,7 @@ Expected loss is near zero, because cells in that band are sub-pixel and sample
 to noise -- so clipping them should *improve* decode rather than cost it. That is
 a prediction, not a measurement.
 
-**It also breaks the circularity in open decision 2.** `src/pose` computes both
+**It also breaks the circularity in open decision 2.** the old pipeline computes both
 quantities already -- `projectedUVBounds` for the quad, gpp's `p1`/`p2` for the
 hull -- so the EXISTING sweep can report, per pose:
 
@@ -1719,12 +1727,12 @@ hull -- so the EXISTING sweep can report, per pose:
 2. hull-derived lattice dims (settles it for this one)
 3. **how many CORRECT decode votes come from cells outside the hull**
 
-(3) is the decisive number, needs nothing built in `src/pose2`, and can be had
+(3) is the decisive number, needs nothing built in `src/pose`, and can be had
 before §12 starts. **This is the next concrete action on decode.**
 
 #### MEASURED 2026-08-14 — THE PROPOSAL IS ADOPTED, WITH ONE CORRECTION
 
-`scripts/hull-measure.ts` (`--quick`, `--grazing`, `--inset N`) runs `src/pose`
+`scripts/hull-measure.ts` (`--quick`, `--grazing`, `--inset N`) runs the old pipeline
 over the §19 baseline's own 180 poses at 480x640, builds BOTH lattices from the
 same recovered axes, decodes both, and scores both against ground truth.
 
@@ -1799,7 +1807,7 @@ grazing test inside the build pass still invalidates those cells, so the cost is
 wasted lattice rather than wrong bits — which is exactly what the clip bounds.
 
 **Two things about the harness, because the numbers are only worth what it is
-worth.** It duplicates two functions `src/pose` only exposes bound to the quad
+worth.** It duplicates two functions the old pipeline only exposes bound to the quad
 lattice (building a grid from a supplied layout, and `finishPositionDecode`), so
 it `selfCheck`s both against the real ones on the unmodified layout — cell for
 cell, and `camPos` to 1e-9 — and throws on any disagreement. And **"0 correct
@@ -1854,7 +1862,7 @@ one finalize.
 ## 13. Stages 9–12 — Decode build, tally, argmax, correctness  *(BUILT 2026-08-14)*
 
 **This is Act III.** Four passes in sequence, currently already one encoder and
-one submit ([decodeGridBuild.gpu.ts](src/pose/stages/decode/decodeGridBuild.gpu.ts)).
+one submit (`decodeGridBuild.gpu.ts`).
 
 ### 9 — Build
 
@@ -1864,7 +1872,7 @@ to NDC, convert to a pixel, sample `gray`, threshold against `binThreshold`.
 Write two bits: *valid* and *the bit value*.
 
 Existing:
-[decodeGridBuild.wgsl.ts](src/pose/stages/decode/decodeGridBuild.wgsl.ts).
+`decodeGridBuild.wgsl.ts`.
 
 | buffer | size | MiB | contents |
 |---|---|---|---|
@@ -1905,7 +1913,7 @@ into an open-addressing table with load factor 0.5, cached per device. The
 `hashU32` finisher must stay byte-identical between JS (`Math.imul`) and WGSL
 (u32 multiply wraps mod 2³² by spec), or lookups silently miss.
 
-Existing: [decodeTally.wgsl.ts](src/pose/stages/decode/decodeTally.wgsl.ts).
+Existing: `decodeTally.wgsl.ts`.
 
 | buffer | size | MiB | contents |
 |---|---|---|---|
@@ -2061,7 +2069,7 @@ v = 39 and had an empty grazing band.
 **The argmax tie-break is unreachable on a decodable frame.** Counting entries
 holding the maximum vote across four poses: 1 every time, with the runner-up at
 0–6 against maxima of 115–501. A tie needs two anchors with EQUAL maximum votes,
-which is an ambiguous decode — and `src/pose`'s CPU reference breaks that case by
+which is an ambiguous decode — and the old pipeline's CPU reference breaks that case by
 Map insertion order anyway, so the two implementations are already known to
 diverge exactly there. Kept for the same reason §8's log-sum-exp rescale and §9's
 degenerate arc guard are, and nothing here proves it right.
@@ -2080,7 +2088,7 @@ camera-relative floor hit into world space and subtract it from the reference
 cell's known world position.
 
 Currently: `finishPositionDecode` and `solveRecoveredCamQuat` in
-[decodeGrid.ts](src/pose/stages/decode/decodeGrid.ts).
+`decodeGrid.ts`.
 
 | buffer | size | contents |
 |---|---|---|
@@ -2374,9 +2382,9 @@ way feeds it to the colouring above instead of adding a rule the colouring has t
 remember. A rule that only fires under `alias` is a rule that gets tested last and
 rots first.
 
-`planPool(dims, { inspect })` extends those intervals; `createPose2Context` takes
+`planPool(dims, { inspect })` extends those intervals; `createPoseContext` takes
 the same list as a CATALOGUE (it sizes one staging buffer, so no frame allocates)
-and `runPose2` takes a per-frame SUBSET of it. The copies go into that same
+and `runPose` takes a per-frame SUBSET of it. The copies go into that same
 staging buffer, in the same encoder, behind the same fence: **one submit, one
 fence, one map, more bytes.** A frame that asks for nothing maps exactly the
 128-byte pose block. Asking for something undeclared throws — under `alias` the
@@ -2397,7 +2405,7 @@ Storage buffers only: they are the only kind `createBuffers` gives `COPY_SRC`.
   same broken code twice and gets the same wrong answer. What catches it is
   asserting properties the ALIASING PARTNER lacks: line endpoints inside the
   frame, vote normals unit-length, `layout.distance` agreeing with the
-  independently-reported `pose.height`. See `tests/pose2Inspect.test.ts`.
+  independently-reported `pose.height`. See `tests/poseInspect.test.ts`.
 
 ### THE ONE TRAP: liveness is defined by BINDING, not by USE
 
@@ -2453,7 +2461,7 @@ and the rest are the small per-region and per-line arrays, where `meanDirs |
 lineFlag | family` and `lines | colSamples` are the notable pairs.
 
 **The self-check ran, both ways, and agrees exactly.** `npm run sweep --
---pipeline pose2 --alias` over the same 180 poses reports the SAME accuracy at
+--pipeline pose --alias` over the same 180 poses reports the SAME accuracy at
 every figure and every tilt as the unpooled run: 180/180 recovered, 180/180
 anchor exact, sub-cell median 0.051 / max 0.155, height and period median 0.12%.
 Time is unchanged within noise (13.9 ms median against 13.5).
@@ -2474,7 +2482,7 @@ it moves the recovered position.
 
 ## 19. Verification, and the trajectory to replacement
 
-**THE END GOAL IS REPLACEMENT.** This pipeline replaces `src/pose/` entirely.
+**THE END GOAL IS REPLACEMENT.** This pipeline replaces the old pipeline entirely.
 It is not a spike, not a parallel experiment, and not a proof of concept. That
 matters because it sets the bar: the new pipeline has to be shown at least as
 accurate as the old one across the operating range, not merely shown to run.
@@ -2581,7 +2589,7 @@ Two lessons, both general:
 Built early so every subsequent stage lands verified, rather than accumulating
 debt against a harness that does not exist yet.
 
-**Phase 1 -- BUILT 2026-08-12** (`src/pose2/sim.ts`, `tests/pose2Sim.test.ts`).
+**Phase 1 -- BUILT 2026-08-12** (`src/pose/sim.ts`, `tests/poseSim.test.ts`).
 `renderPose` casts one ray per pixel through `cornerDir` -- the SAME function
 the pipeline projects with, so the two agree by construction rather than by
 inspection -- intersects the y=0 floor, and looks the cell up in the tiling
@@ -2600,14 +2608,14 @@ recovers the generating pose to **0.038 cells** with **consistency 1.000** and
 The first sweep reported the existing pipeline making whole-cell anchor errors
 at tilts 5-20 -- dz moving in integer steps, correlated with consistency drops,
 while dx stayed under 0.09. It was written up here as a real accuracy result
-about `src/pose`.
+about the old pipeline.
 
 **It was not real.** It was the renderer under-sampling diagonal edges; see the
 near-miss below. At the corrected sampling rate the anchor is exact at every one
 of 180 poses. The original numbers are gone rather than preserved, because a
 wrong measurement kept "for reference" is worse than none.
 
-**THE BASELINE, measured 2026-08-12** -- `src/pose`, cpu backend, 480x640,
+**THE BASELINE, measured 2026-08-12** -- the old pipeline, cpu backend, 480x640,
 supersample 4, 180 poses (heights 6/10/16/24 x tilts 0/10/20/30/40 x yaws
 0/35/90 x 3 board neighbourhoods):
 
@@ -2628,7 +2636,7 @@ by tilt:   0   0.058 cells   0.01% height   cons 1.000    29.8 ms
           40   0.065         1.25%          cons 0.999    63.8
 ```
 
-**This is the number `src/pose2` has to match or beat**, and it is the first
+**This is the number `src/pose` has to match or beat**, and it is the first
 absolute-accuracy measurement this project has had -- the existing goldens say
 "unchanged", not "correct", and the true pose behind the fixture was never
 known. Degradation with tilt is visible and gentle: height error grows 100x from
@@ -2664,10 +2672,10 @@ sweep readable:** CONTINUOUS (period, height, sub-cell position -- a renderer
 bug lives here) versus DISCRETE (whole-cell anchor jumps -- a pipeline property).
 Score them separately.
 
-`src/pose2/sweep.ts` + `scripts/sweep.ts` (`npm run sweep [--quick]`) are the
+`src/pose/sweep.ts` + `scripts/sweep.ts` (`npm run sweep [--quick]`) are the
 generator and report. The sweep is deliberately PIPELINE-AGNOSTIC -- a `Runner`
 takes a grayscale image and returns what it recovered -- so the same harness
-scores `src/pose` and `src/pose2` and the two sets of numbers are directly
+scores the old pipeline and `src/pose` and the two sets of numbers are directly
 comparable. That is the only way "is the rewrite at least as accurate" gets an
 answer instead of an opinion.
 
@@ -2690,7 +2698,7 @@ against ground truth. **COMPLETE as of 2026-08-14.**
 over it. 480x640, supersample 4, the same fixture settings for both:
 
 ```
-                   src/pose (cpu)              src/pose2 (gpu)
+                   the old pipeline (cpu)              src/pose (gpu)
 recovered            180/180                     180/180
 anchor exact         180/180                     180/180
                  median   p90    max         median   p90    max
@@ -2719,7 +2727,7 @@ say it is not:
 So the f32-versus-f64 divergence is three to four orders of magnitude below the
 recovery error, and the summary rounds it away. The reason it is that small is
 not luck: the LSD front half is deterministic and both implementations find the
-SAME lines (which is what `pose2Cpu.test.ts` asserts region-for-region and
+SAME lines (which is what `poseCpu.test.ts` asserts region-for-region and
 rectangle-for-rectangle), so the votes agree to f32 rounding and everything
 downstream inherits that.
 
@@ -2728,7 +2736,7 @@ no lens model, no noise and no motion blur (open decision 6, and the BoofCV work
 list's item 1). Agreement here says the port is faithful, not that either
 pipeline is right about a real capture.
 
-**The twin exists -- `src/pose2/cpu.ts`, gradient + grow, 2026-08-12.** It is a
+**The twin exists -- `src/pose/cpu.ts`, gradient + grow, 2026-08-12.** It is a
 BFS from each unvisited seed, not a transcription of the shader's hook-and-
 compress. That is the point: a twin copied from the implementation shares its
 mistakes and tests the port rather than the algorithm. Because hook takes the
@@ -2812,22 +2820,22 @@ line** — which the twin has no access to and ground truth does. That belongs i
 the sweep, against `truthFor`, and it is the one place a rectangle that is
 self-consistently wrong would show up.
 
-One process note: every mutation run recorded above was done while `src/pose2/`
+One process note: every mutation run recorded above was done while `src/pose/`
 was UNTRACKED, so restoration was from a file copy verified with `diff` rather
 than from git. The work was committed 2026-08-14; see START HERE.
 
-**Phase 3 -- replace. HALF DONE 2026-08-14: `src/pose` IS DELETED, and the app
+**Phase 3 -- replace. HALF DONE 2026-08-14: the old pipeline IS DELETED, and the app
 is NOT yet wired to this pipeline.**
 
 That order was deliberate, on the user's call: cut cleanly and break things on
 purpose, rather than fit the new pipeline into the old one's shape while the old
 one is still standing. So the tree is in a stated intermediate state --
-`tsc --noEmit` clean, 90 tests green, `npm run sweep` scoring pose2, all four
+`tsc --noEmit` clean, 90 tests green, `npm run sweep` scoring pose, all four
 HTML entry points building -- with every display path that read a pose or an
 intermediate rendering an EMPTY STATE and saying so in its own file.
 
-**What is left of Phase 3** is the wiring: `createPose2Context` per camera plus
-`runPose2` per capture, mapped onto `CameraPose`. `pipeline/axesReconstruction.ts`'s
+**What is left of Phase 3** is the wiring: `createPoseContext` per camera plus
+`runPose` per capture, mapped onto `CameraPose`. `pipeline/axesReconstruction.ts`'s
 `recomputeStages` is where it goes and its header says so. The open questions are
 app-boundary ones -- where the context lives, what a resize does, how the phone's
 own path gets a device -- which is exactly why they were not answered inside a
@@ -2836,40 +2844,40 @@ deletion.
 **What the deletion cost, recorded because it is not recoverable:** the
 `--pipeline pose`/`both` sweep arms (so §19's two-pipeline table can be read but
 not re-run), `scripts/hull-measure.ts` (so §12's measurement is likewise final),
-and the three simulator-validation tests in `pose2Sim.test.ts` -- see that file,
-and note they were deliberately NOT re-pointed at pose2, since renderPose and the
+and the three simulator-validation tests in `poseSim.test.ts` -- see that file,
+and note they were deliberately NOT re-pointed at pose, since renderPose and the
 pipeline share `cornerDir` and the check would have gone circular.
 
 Four things that were known before it started, kept because three of them turned
 out to matter:
 
 - **A TEST THAT IS STAYING IMPORTS FROM THE DIRECTORY THAT IS GOING.**
-  `tests/pose2Stages.test.ts:15` imports `rotatedZeroIndex` from
-  `src/pose/stages/decode/decodeGrid.ts`, and uses it at one call site to check
-  decode's winning orientation. So deleting `src/pose` breaks a `pose2` stage
+  `tests/poseStages.test.ts:15` imports `rotatedZeroIndex` from
+  the old pipeline's `stages/decode/decodeGrid.ts`, and uses it at one call site to check
+  decode's winning orientation. So deleting the old pipeline breaks a `pose` stage
   test, which is the one thing the standing instruction above says must not
   happen. It is an eight-line index permutation over four rotation cases --
   RE-DERIVE it into the test from the definition rather than copying it across,
   which is the same rule the twin follows and matters more here, not less: once
-  `src/pose` is gone a copy stops being an independent second source and becomes
+  the old pipeline is gone a copy stops being an independent second source and becomes
   an unowned duplicate of nothing.
-- **Which tests die WITH `src/pose`**, so the deletion is not mistaken for
+- **Which tests die WITH the old pipeline**, so the deletion is not mistaken for
   test-retirement: `arena`, `cpuPipeline`, `intermediates`, `libraryBoundary`
-  and `profilerJoin` exercise `src/pose` and nothing else. `fixture` and
-  `provenance` touch neither pipeline and survive. Every `tests/pose2*` file and
+  and `profilerJoin` exercise the old pipeline and nothing else. `fixture` and
+  `provenance` touch neither pipeline and survive. Every `tests/pose*` file and
   `tests/gpuHarness.test.ts` stay.
-- The remaining two mentions of `src/pose` inside `pose2` are COMMENTS -- in
-  `src/pose2/buffers.ts` and `tests/pose2Buffers.test.ts`, both pointing at
+- The remaining two mentions of the old pipeline inside `pose` are COMMENTS -- in
+  `src/pose/buffers.ts` and `tests/poseBuffers.test.ts`, both pointing at
   `arena.ts`'s BumpPlanner split as prior art. They will dangle, which is
   cosmetic, but they are the kind of reference that reads as a live dependency
   to a grep.
 
-- The entry point is `src/pose2/run.ts`, which returns a `Pose2Result` -- a plain
+- The entry point is `src/pose/run.ts`, which returns a `PoseResult` -- a plain
   struct, no THREE types, no chain, no timing DAG. The app boundary (the payload
   mailbox, `camera.pose`) is §22's territory and is not covered here.
-- **`scripts/hull-measure.ts` imports `src/pose`** and would break. It is a
+- **`scripts/hull-measure.ts` imports the old pipeline** and would break. It is a
   measurement harness whose result is already recorded in §12, not a shipping
-  path, so deleting it with `src/pose` is a legitimate option -- but it is the
+  path, so deleting it with the old pipeline is a legitimate option -- but it is the
   only way to re-run that measurement.
 
 ### Calibration note
@@ -2882,7 +2890,7 @@ Left in place because they are written and green, recorded here because the
 density was wrong.
 
 **THE PRECONDITION IS NOW MET, AND THE ACTION IS ON HOLD ANYWAY.** That
-paragraph used to say the sweep could not score `src/pose2` at all until
+paragraph used to say the sweep could not score `src/pose` at all until
 `finish` (§14) landed. It has, so the priority inverts as promised: run the
 sweep first, and let it say which stage tests were worth having.
 
@@ -2923,7 +2931,7 @@ is a plausible answer.
 
 ## 20. Code size
 
-| | current `src/pose` | proposed | **built, complete** |
+| | current the old pipeline | proposed | **built, complete** |
 |---|---|---|---|
 | WGSL | 1,316 | ~1,700 | 3,187 |
 | CPU reference math | 2,255 | 0 in the pipeline | 467, test-only |
@@ -2977,8 +2985,8 @@ which is now measured, and on that list -- not on the line count.
    any of the 180 poses, which is evidence that 32 is enough for this pose range
    and not that it is enough.
 4. ~~**How much CPU reference to keep.**~~ **CLOSED 2026-08-12** —
-   `src/pose2/cpu.ts`, written fresh from the definition rather than copied from
-   `src/pose`, and each function an independent algorithm rather than a
+   `src/pose/cpu.ts`, written fresh from the definition rather than copied from
+   the old pipeline, and each function an independent algorithm rather than a
    transcription. It covers gradient, grow, collect and lsdFit, which is the
    whole of what a twin is the right oracle for (§19). Nothing in the pipeline
    imports it, and **nothing after lsdFit should be added to it** — from §9 on,
@@ -2987,8 +2995,8 @@ which is now measured, and on that list -- not on the line count.
 5. ~~**One file or two?**~~ **SETTLED** — `pose.ts` + `pose.wgsl.ts`, and the
    split is earning itself at 485 lines of WGSL.
 5b. ~~**Where the board pattern comes from.**~~ **CLOSED 2026-08-14 —
-   `sphereLab/floorPattern` IS a shared leaf**, imported by `src/pose2/board.ts`,
-   which is the only file in `src/pose2` that reaches outside itself. The
+   `sphereLab/floorPattern` IS a shared leaf**, imported by `src/pose/board.ts`,
+   which is the only file in `src/pose` that reaches outside itself. The
    argument is that the torus is DATA about the world, not an implementation:
    rule 2 deletes a second implementation of the ALGORITHM, and there is no
    CPU-versus-GPU version of a printed pattern to choose between. The decisive
@@ -2997,8 +3005,8 @@ which is now measured, and on that list -- not on the line count.
    would still read 1.000 while decode reported a confident, wrong position.
    That is strictly worse than the coupling it avoids.
 
-   What is NOT imported is `src/pose`'s hash-table builder, which exists and
-   works: that module is deleted in Phase 3, so importing it would make pose2
+   What is NOT imported is the old pipeline's hash-table builder, which exists and
+   works: that module is deleted in Phase 3, so importing it would make pose
    un-shippable without the thing it replaces. The table is re-derived; the HASH
    FUNCTION is copied verbatim, being a correctness constant rather than a
    structure. **A drift between it and the WGSL probe fails silently and totally**
@@ -3042,7 +3050,7 @@ which is now measured, and on that list -- not on the line count.
   because that leaf is the same one `board.ts` imports (open decision 5b).
 - The app boundary — the payload mailbox, `camera.pose`, the dev bridge. **The
   desktop half is now built**; the per-overlay inventory lives in the session
-  memory as `project_pose2_display_wiring`, deliberately not here.
+  memory as `project_pose_display_wiring`, deliberately not here.
 - IMU fusion.
 - The lens model. Every projection here assumes a pinhole camera with one
   parameter (vertical FOV). Radial distortion breaks the "straight lines

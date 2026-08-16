@@ -19,13 +19,13 @@ import { globalState } from '../state.ts';
 // (u,v) points individually (a general quad, not assumed to reduce to a
 // center + orientation the way an axis-aligned PlaneGeometry could) instead
 // of collapsing to a single center/size/orientation.
-// ── THE OUTLINE IS DARK, pending pose2 plumbing ──
+// ── THE OUTLINE IS DARK, pending pose plumbing ──
 //
 // Its four corners came from `projectImageCornersToPlane`, which died with
-// src/pose's decode stage: image corners cast through the pose onto the floor
+// the old pipeline's decode stage: image corners cast through the pose onto the floor
 // plane. That is a pure projection and it is genuinely re-derivable from what is
 // already on this camera (pose, FOV, aspect) -- but re-deriving it is part of
-// swapping the app onto pose2, not part of deleting the old pipeline, and doing
+// swapping the app onto pose, not part of deleting the old pipeline, and doing
 // it here would be guessing at the new seam before it exists.
 //
 // The overlay object itself stays on the camera, so the mode/visibility wiring

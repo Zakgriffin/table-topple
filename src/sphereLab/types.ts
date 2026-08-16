@@ -1,8 +1,8 @@
 // ── The app's shared types ────────────────────────────────────────────────
 //
 // This file's header used to say the pose pipeline's vocabulary was NOT here,
-// it was in src/pose/results.ts, and that keeping the two apart was what let the
-// library stay out of the app's import closure. src/pose is DELETED, so there is
+// it was in the old pipeline's results.ts, and that keeping the two apart was what let the
+// library stay out of the app's import closure. the old pipeline is DELETED, so there is
 // no library on the other side of that boundary any more and the split has
 // nothing left to protect.
 //
@@ -10,7 +10,7 @@
 // deleted pipeline's result vocabulary -- Vote, RecoveredAxes,
 // PositionDecodeResult, DecodeSampleGrid, LsdRectangle, GrownRegion -- did NOT
 // come with it. Those described a pose pipeline that no longer exists, and
-// src/pose2 hands back a plain struct instead, so re-homing them would have kept
+// src/pose hands back a plain struct instead, so re-homing them would have kept
 // the old shape alive under a new path.
 
 // Both of these are DERIVED from the config schemas rather than declared
@@ -24,7 +24,7 @@ export type { FieldView } from './camera/settings.ts';
 
 // ── The projection stage's shapes ─────────────────────────────────────────
 //
-// These stayed behind when the rest moved to src/pose/results.ts, because the
+// These stayed behind when the rest moved to the old pipeline's results.ts, because the
 // projection stage is DISPLAY: step 5a moved it out of the pipeline on the
 // grounds that every function in it takes a full Camera and reads render
 // resources. Produced by pipeline/projectedBins.ts and
@@ -53,7 +53,7 @@ export interface ProjectedSamplesDense {
 //
 // EITHER WIDTH, and that is not laziness. The app's own gradients
 // (pipeline/gradientField.ts, computed from a preview image) are f64; the pose
-// run's are f32, because src/pose2 works in f32 on the device and hands its
+// run's are f32, because src/pose works in f32 on the device and hands its
 // buffers back as raw bytes. Every consumer here only INDEXES these -- nothing
 // writes through the interface -- so widening the type is the whole change, and
 // the alternative is converting 307k values twice a frame to satisfy a

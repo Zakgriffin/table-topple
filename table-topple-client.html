@@ -21,19 +21,29 @@
     max-width: 100vw; max-height: 100vh;
   }
 
-  /* The AR overlay -- a transparent THREE.js canvas placed exactly over
-     #viewfinder, rendering the board game from a camera at the recovered pose
-     (the same FOV and aspect the pose pipeline itself used), so when the decode
-     is good the virtual board visually lands on the real printed pattern in the
-     live feed underneath it. Both boards are 144 cells across, so that landing
-     is 1:1, cell for cell.
+  /* The AR overlay -- a transparent THREE.js canvas rendering the board game
+     from a camera at the recovered pose, so when the decode is good the
+     virtual board visually lands on the real printed pattern in the live feed
+     underneath it. Both boards are 144 cells across, so that landing is 1:1,
+     cell for cell.
 
-     THE IDENTICAL LETTERBOX BELOW IS LOAD-BEARING, not tidiness. overlay.ts's
-     syncOverlayRendererSize keeps this canvas's INTRINSIC buffer dimensions
-     equal to #viewfinder's, and these rules then apply the same fit to both --
-     which is the whole mechanism registering the overlay with the picture. A
-     difference in either half shows up as a board that is subtly offset or
-     scaled, which reads as a pose error rather than a CSS one.
+     UNLIKE #viewfinder, this canvas does NOT letterbox to the camera feed's
+     own aspect ratio -- it always spans the phone's FULL VIEWPORT, on both
+     axes, deliberately bigger than the feed whichever way the feed is
+     letterboxed (bars left/right on a wide desktop webcam, bars top/bottom on
+     at least one real phone camera -- both were seen while building this).
+     overlay.ts's syncOverlayRendererSize sizes it explicitly to
+     (window.innerWidth, window.innerHeight) and sets its style directly,
+     which is why there is no width/height rule here at all -- only centering.
+
+     The frustum is extended by holding the camera's FOCAL LENGTH fixed rather
+     than its FOV, so the picture stays registered wherever it still overlaps
+     the real feed and only grows outward past that -- exactly what a
+     physically bigger sensor at the same focal length would produce. See
+     overlay.ts's applyExtendedFov for the math; naively pinning fov and only
+     widening aspect (an earlier version of this comment) only works when the
+     render height happens to equal the feed's own, which is not true on every
+     phone.
 
      No mirror transform anywhere, on either canvas, deliberately: the pixels
      drawn and the pixels analyzed are the same pixels, and a mirrored image
@@ -41,7 +51,6 @@
   canvas#arCanvas {
     position: fixed; top: 50%; left: 50%;
     transform: translate(-50%, -50%);
-    max-width: 100vw; max-height: 100vh;
     pointer-events: none;
   }
 

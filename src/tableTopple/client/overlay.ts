@@ -96,7 +96,7 @@ fitBoardToPattern();
  *  briefly a second (a pose synced down from a desktop), and it is gone with
  *  the decision that pose never leaves the client that computed it. */
 export interface ARCameraPose {
-  camPos: THREE.Vector3; recoveredCamQuat: THREE.Quaternion; aspect: number; fovDeg: number;
+  camPos: THREE.Vector3; recoveredCamQuat: THREE.Quaternion; fovDeg: number;
 }
 
 /** No fix means nothing is drawn at all, rather than the world being left at
@@ -104,30 +104,84 @@ export interface ARCameraPose {
  *  camera is; a blank one is the honest failure. */
 let hasPose = false;
 
+// ── Extending the frustum to the full viewport ────────────────────────────
+//
+// This canvas covers the phone's FULL viewport, on both axes -- deliberately
+// bigger than #viewfinder's own on-screen box, which stays letterboxed to the
+// camera feed's true aspect (see table-topple-client.html). A phone can be
+// pillarboxed (bars left/right, a desktop webcam's usual shape) OR letterboxed
+// (bars top/bottom -- what a phone's own portrait camera turned out to be, at
+// 480x640 against a 390x669 viewport). Both need the same fix, just on
+// different axes, so nothing here picks one.
+//
+// The naive version -- pin camera.fov to the pose's true vertical FOV and just
+// widen aspect -- only works when the render height still EQUALS the
+// viewfinder's own height (the pillarboxed case, extending width alone). Stretch
+// height too and a fixed fov changes the vertical pixels-per-degree scale,
+// which drifts the shared middle of the picture out of register with the real
+// feed underneath -- a subtler version of the same misalignment the old
+// "identical letterbox" comment warned about.
+//
+// The fix that stays correct on EITHER axis: hold the camera's FOCAL LENGTH
+// (pixels per radian) fixed, not its FOV in degrees, and let both fov and
+// aspect fall out of however large the render surface actually is. That is
+// exactly what a physically bigger sensor at the same focal length would
+// produce -- extending the frustum outward from the real feed's own footprint
+// rather than rescaling it.
+let trueVFovDeg = 0; // the pose's own vertical FOV, UNSCALED -- what the real camera actually sees
+let renderH = 0; // the renderer's current buffer height, set by syncOverlayRendererSize
+let extendScale = 1; // renderH / viewfinder's own on-screen height; >1 means this axis is being stretched
+
+function applyExtendedFov() {
+  if (trueVFovDeg <= 0) return;
+  const trueVFovRad = THREE.MathUtils.degToRad(trueVFovDeg);
+  const extendedVFovRad = 2 * Math.atan(Math.tan(trueVFovRad / 2) * extendScale);
+  camera.fov = THREE.MathUtils.radToDeg(extendedVFovRad);
+  camera.updateProjectionMatrix();
+}
+
 /** Only ever moves the CAMERA -- the board is bolted to the world origin,
- *  where the pose pipeline's own reconstruction puts it. */
+ *  where the pose pipeline's own reconstruction puts it.
+ *
+ *  Stores the pose's TRUE vertical FOV rather than applying it directly --
+ *  applyExtendedFov (called every render, see renderOverlay) is what actually
+ *  sets camera.fov, so a window resize between pose fixes still gets a correct
+ *  frustum without waiting on the next fix. */
 export function updateOverlayCamera(pose: ARCameraPose | null) {
   hasPose = !!pose;
   if (!pose) return;
   camera.position.copy(pose.camPos);
   camera.quaternion.copy(pose.recoveredCamQuat);
-  camera.fov = pose.fovDeg;
-  camera.aspect = pose.aspect;
-  camera.updateProjectionMatrix();
+  trueVFovDeg = pose.fovDeg;
 }
 
-// Mirrors the viewfinder's own INTRINSIC (cw,ch) directly, not its rendered CSS
-// box -- both canvases share the exact same CSS letterbox fit (see
-// table-topple-client.html), so matching intrinsic dimensions is what keeps this
-// canvas scaled/positioned identically to the viewfinder underneath. `false`
-// (skip three.js's own inline-style sizing) since the stylesheet already owns
-// display sizing for both canvases identically. Only touches the GL backing
-// store when (cw,ch) genuinely changed, since this is called every rAF tick.
-let sizedCw = 0, sizedCh = 0;
-export function syncOverlayRendererSize(cw: number, ch: number) {
-  if (cw === sizedCw && ch === sizedCh) return;
-  sizedCw = cw; sizedCh = ch;
-  if (cw > 0 && ch > 0) renderer.setSize(cw, ch, false);
+/**
+ * Sizes the renderer to the FULL VIEWPORT, in CSS pixels -- always
+ * (window.innerWidth, window.innerHeight), never the viewfinder's own
+ * letterboxed box. `true` (let three.js own the inline style too) because
+ * there is no longer a shared CSS letterbox to defer to.
+ *
+ * Only touches the GL backing store when (renderW, renderH) genuinely
+ * changed, since this is called every rAF tick.
+ */
+let sizedW = 0, sizedH = 0;
+export function syncOverlayRendererSize(renderW: number, renderCh: number) {
+  if (renderW === sizedW && renderCh === sizedH) return;
+  sizedW = renderW; sizedH = renderCh; renderH = renderCh;
+  if (renderW > 0 && renderCh > 0) {
+    renderer.setSize(renderW, renderCh, true);
+    camera.aspect = renderW / renderCh;
+  }
+}
+
+/**
+ * The viewfinder's own on-screen height (camera.ts's viewfinderBoxHeight),
+ * called every rAF tick alongside syncOverlayRendererSize -- this is what
+ * extendScale is measured against, and it can change (a resize, a camera
+ * dimension change) independently of whether the render buffer itself did.
+ */
+export function setViewfinderBoxHeight(boxH: number) {
+  extendScale = boxH > 0 && renderH > 0 ? renderH / boxH : 1;
 }
 
 /**
@@ -186,5 +240,9 @@ export function renderOverlay(dt: number) {
   renderWorld(dt);
   updateAttackVisuals(dt);
   if (!hasPose) { renderer.clear(); return; }
+  // Every frame, not just on a pose fix or a resize -- either one alone can
+  // leave the frustum stale for the OTHER's next change (see applyExtendedFov's
+  // own comment above).
+  applyExtendedFov();
   renderer.render(scene, camera);
 }

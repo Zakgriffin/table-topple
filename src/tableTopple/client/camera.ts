@@ -114,11 +114,26 @@ function previewLongEdgeCap(): number {
 }
 
 /**
+ * The viewfinder canvas's actual on-screen height, in CSS pixels -- a replica
+ * of the max-width/max-height "contain" fit the stylesheet applies to it from
+ * its intrinsic (cw,ch). The AR overlay needs this: it no longer shares
+ * #viewfinder's own CSS box (see table-topple-client.html), and now spans the
+ * full viewport on BOTH axes regardless of which way #viewfinder is
+ * letterboxed -- this is the number overlay.ts's extendScale measures against
+ * to keep the extended frustum registered with the real feed (see
+ * overlay.ts's setViewfinderBoxHeight and applyExtendedFov).
+ */
+export function viewfinderBoxHeight(cw: number, ch: number): number {
+  if (!cw || !ch) return 0;
+  return ch * Math.min(window.innerWidth / cw, window.innerHeight / ch);
+}
+
+/**
  * Draws the live feed into the visible canvas, downscaled to the screen.
  *
- * Returns the canvas's intrinsic size, which the AR renderer matches exactly --
- * both canvases carry the same CSS letterbox, so identical intrinsic dimensions
- * are what keep the overlay registered with the picture underneath it.
+ * Returns the canvas's intrinsic size. #viewfinder's own CSS box is still fit
+ * to this by the stylesheet; the AR overlay now uses it only indirectly, via
+ * viewfinderBoxHeight above.
  */
 export function drawViewfinder(): { cw: number; ch: number } {
   const { w: vw, h: vh } = frameDims();

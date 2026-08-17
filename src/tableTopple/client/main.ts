@@ -52,9 +52,9 @@
 
 import * as THREE from 'three';
 import type { PoseResult } from '../../pose/pose.ts';
-import { drawViewfinder, frameDims, grabGray, hasLiveFrame, startCamera } from './camera.ts';
+import { drawViewfinder, frameDims, grabGray, hasLiveFrame, startCamera, viewfinderBoxHeight } from './camera.ts';
 import { chromeToggleBtn, statusEl } from './dom.ts';
-import { fitBoardToPattern, receiveDenizenState, renderOverlay, syncOverlayRendererSize, updateOverlayCamera } from './overlay.ts';
+import { fitBoardToPattern, receiveDenizenState, renderOverlay, setViewfinderBoxHeight, syncOverlayRendererSize, updateOverlayCamera } from './overlay.ts';
 import { initPose, isPoseReady, recoverPose, toCameraPose } from './pose.ts';
 import { spawnArrowFx, spawnBlastFx } from '../shared/combat.ts';
 import { writeRoadSnapshot } from '../shared/roads.ts';
@@ -120,7 +120,13 @@ const clock = new THREE.Clock();
 function displayLoop() {
   requestAnimationFrame(displayLoop);
   const { cw, ch } = drawViewfinder();
-  syncOverlayRendererSize(cw, ch);
+  const boxH = viewfinderBoxHeight(cw, ch);
+  // Always the FULL viewport, on both axes -- see overlay.ts's own comment on
+  // why extending only one axis (as an earlier version of this did) isn't
+  // enough: a phone's own camera can be letterboxed on EITHER axis depending
+  // on how its aspect compares to the screen's.
+  syncOverlayRendererSize(window.innerWidth, window.innerHeight);
+  setViewfinderBoxHeight(boxH);
   // Capped: a backgrounded tab stops rAF, and the first frame after refocusing
   // would otherwise carry the entire away-time as one step and teleport
   // everybody. The same cap the standalone page applies, for the same reason.

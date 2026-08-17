@@ -157,7 +157,6 @@ export function toCameraPose(pose: PoseResult, aspect: number): ARCameraPose | n
     recoveredCamQuat: new THREE.Quaternion(
       pose.quaternion.x, pose.quaternion.y, pose.quaternion.z, pose.quaternion.w,
     ),
-    aspect,
     // THREE's camera.fov is VERTICAL degrees, which is why this converts rather
     // than passing horizFovDeg straight through. Handing it the horizontal
     // number would render a too-wide frustum and the board would sit visibly

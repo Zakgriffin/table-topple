@@ -28,8 +28,11 @@ export interface Ribbon {
 /**
  * @param maxPoints buffer capacity; update() ignores points past it.
  * @param y height above the ground plane to float the ribbon at.
+ * @param opacity defaults to path mode's own 0.9 -- roads.ts passes something
+ *   lower for a blueprint that reads as a translucent preview rather than
+ *   paint already committed to the floor.
  */
-export function createRibbon(maxPoints: number, color: number, y: number, halfWidth: number): Ribbon {
+export function createRibbon(maxPoints: number, color: number, y: number, halfWidth: number, opacity = 0.9): Ribbon {
   // One vertex pair per point, plus one spare pair: closing the loop writes a
   // duplicate of the first pair at the end, which lets the closing quad use
   // the same index pattern as every other quad (see update()).
@@ -58,7 +61,7 @@ export function createRibbon(maxPoints: number, color: number, y: number, halfWi
     // all drawings would be invisible from above.
     side: THREE.DoubleSide,
     transparent: true,
-    opacity: 0.9,
+    opacity,
     // Basic, not Standard: this is a graphic overlay, not a lit surface. It
     // should read the same regardless of where the sun is.
   }));

@@ -23,9 +23,13 @@
 //   denizens.ts   the four courts: figures with a rank, position, and facing
 //   castle.ts     each court's castle, from a tower/wall plan
 //   animation.ts  the walk cycle + turn easing, driven by distance walked
-//   mode.ts       who owns the mouse: camera / path / fight, + weapon choice
+//   mode.ts       who owns the mouse: camera / path / road / fight, +
+//                 weapon choice
 //   regionDraw.ts path-mode drawing: trace a region, walk to its center
+//   groundRay.ts  one screen point -> one point on the floor plane
 //   ribbon.ts     a polyline with real world-space width, flat on the ground
+//   roadMesh.ts   a confirmed road's paved-slab geometry
+//   roads.ts      road-mode drawing: blueprints, snapping, confirming
 //   weapons.ts    the weapon registry + models; equipping into a hand
 //   combat.ts     what attacks do: blade hitbox, arrows, the staff's cone
 //   health.ts     hit points, the floating bar, dying
@@ -34,7 +38,7 @@
 //   motion.ts     velocity integration: accelerate, coast, arrive
 //   ai.ts         fighter behaviour: pick a target, close, attack
 //   input.ts      held-key state -> strafe/forward axes, + the camera's yaw
-//   protocol.ts   the two game messages: denizenState, attackFx
+//   protocol.ts   the game messages: denizenState, attackFx, roadState
 //   net.ts        the websocket both hosts share, and the send/receive gate
 //   main.ts       this page's boot: claim the input, then loop
 //
@@ -52,6 +56,7 @@ import { snapshotDenizens, step } from '../shared/sim.ts';
 import { wireKeys } from '../shared/input.ts';
 import { wireModeUI } from '../shared/mode.ts';
 import { wireRegionDraw } from '../shared/regionDraw.ts';
+import { snapshotRoads, wireRoadBuild } from '../shared/roads.ts';
 import { updateCrosshair, wireAim } from '../shared/aim.ts';
 import { wireBattleButton } from '../shared/ai.ts';
 import { chargeLevel } from '../shared/combat.ts';
@@ -76,6 +81,7 @@ wireKeys();
 wireModeUI();
 wireAim(canvas);
 wireRegionDraw(canvas);
+wireRoadBuild(canvas);
 wireBattleButton();
 
 function animate() {
@@ -88,6 +94,10 @@ function animate() {
   // websocket, and a smarter send rate is a real optimization to make once
   // there's a reason to (a slow phone, a real network), not before.
   send({ type: 'denizenState', denizens: snapshotDenizens() });
+  // Roads change rarely, but this rides the same every-tick broadcast for the
+  // reason protocol.ts's own comment gives: it's what makes a late-joining
+  // phone catch up on every already-built road with no separate mechanism.
+  send({ type: 'roadState', roads: snapshotRoads() });
   controls.update(); // required: damping is on
   updateCrosshair(chargeLevel());
   renderer.render(scene, camera);

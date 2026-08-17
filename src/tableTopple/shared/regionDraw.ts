@@ -1,10 +1,11 @@
 import * as THREE from 'three';
-import { camera, scene } from './scene.ts';
+import { scene } from './scene.ts';
 import { mode } from './mode.ts';
 import { BOARD_SIZE, COLOR_TEAM_RED } from './constants.ts';
 import { CHARACTER_HALF_WIDTH } from './character.ts';
 import { polygonCentroid } from './polygon.ts';
 import { createRibbon } from './ribbon.ts';
+import { pointerToGround } from './groundRay.ts';
 import { you } from './denizens.ts';
 
 // Draw a closed region on the floor with the mouse; your denizen walks to its
@@ -25,23 +26,6 @@ const DRAW_Y = 0.02;
  *  0.035 makes a stripe 7% of a board cell wide -- reads as drawn-on paint
  *  rather than a hairline, and holds up when the camera pulls back. */
 const REGION_HALF_WIDTH = 0.035;
-
-const raycaster = new THREE.Raycaster();
-const pointer = new THREE.Vector2();
-const groundPlane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
-const hit = new THREE.Vector3();
-
-// The floor is raycast as an infinite mathematical plane rather than against
-// the floor Mesh: a drag that strays past the board's edge still yields a
-// point instead of a gap in the path, and it costs no triangle tests.
-function pointerToGround(e: PointerEvent, out: THREE.Vector2): boolean {
-  pointer.x = (e.clientX / innerWidth) * 2 - 1;
-  pointer.y = -(e.clientY / innerHeight) * 2 + 1;
-  raycaster.setFromCamera(pointer, camera);
-  if (!raycaster.ray.intersectPlane(groundPlane, hit)) return false; // ray parallel to the floor
-  out.set(hit.x, hit.z);
-  return true;
-}
 
 // ── The region's visual ────────────────────────────────────────────────────
 

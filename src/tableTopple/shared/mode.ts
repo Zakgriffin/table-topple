@@ -6,19 +6,22 @@ import { WEAPONS, WEAPON_ORDER, type WeaponKey } from './weapons.ts';
 //
 //   camera  orbit/pan the view          (Escape)
 //   path    draw a region on the floor  (P)
+//   road    drag out road blueprints,   (R)
+//           confirmed separately -- see roads.ts
 //   fight   aim and use the weapon      (E, or any of 1/2/3)
 //
 // Which weapon is in hand is a SEPARATE axis from the mode: 1/2/3 pick it, and
-// picking one also draws it. That keeps the mode bar to three stable entries
+// picking one also draws it. That keeps the mode bar to one entry per MODE
 // instead of growing one per weapon, and means swapping mid-fight doesn't pass
 // through any other state.
-export type InputMode = 'camera' | 'path' | 'fight';
+export type InputMode = 'camera' | 'path' | 'road' | 'fight';
 
-export const MODES: InputMode[] = ['camera', 'path', 'fight'];
+export const MODES: InputMode[] = ['camera', 'path', 'road', 'fight'];
 
 const LABELS: Record<InputMode, string> = {
   camera: 'camera',
   path: 'path',
+  road: 'road',
   fight: 'fight',
 };
 
@@ -27,6 +30,7 @@ const LABELS: Record<InputMode, string> = {
 const KEY_HINTS: Record<InputMode, string> = {
   camera: 'esc',
   path: 'p',
+  road: 'r',
   fight: 'e',
 };
 
@@ -100,6 +104,7 @@ export function wireModeUI() {
     // the lock being released -- which lands in the same place, camera mode.
     if (e.code === 'Escape') setMode('camera');
     else if (e.code === 'KeyP') setMode('path');
+    else if (e.code === 'KeyR') setMode('road');
     else if (e.code === 'KeyE') setMode('fight');
     else {
       const weapon = WEAPON_ORDER.find((w) => WEAPONS[w].key === e.key);
@@ -125,7 +130,7 @@ export function setMode(next: InputMode) {
   for (const [m, el] of buttons) el.classList.toggle('active', m === next);
   // Crosshair while drawing. Fight mode hides the cursor outright via pointer
   // lock (aim.ts) and draws its own reticle, so it needs nothing here.
-  document.body.style.cursor = next === 'path' ? 'crosshair' : '';
+  document.body.style.cursor = next === 'path' || next === 'road' ? 'crosshair' : '';
 
   for (const fn of listeners) fn(next, prev);
 }

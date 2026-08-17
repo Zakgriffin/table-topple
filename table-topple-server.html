@@ -75,6 +75,22 @@
     background: rgba(230,70,70,0.6); border-color: #e64646; color: #fff;
   }
 
+  /* Confirms every road blueprint at once (roads.ts) -- opposite corner from
+     battleToggle, same reasoning: a one-shot action on the world, not a mode.
+     No .active state, unlike battleToggle -- it doesn't toggle, it fires.
+     Hidden outside road mode; roads.ts sets style.display directly, same
+     idiom aim.ts uses for #crosshair. */
+  #confirmRoadBtn {
+    position: fixed; bottom: 16px; left: 16px; z-index: 10;
+    display: none;
+    padding: 10px 16px; border-radius: 10px;
+    border: 1px solid rgba(255,255,255,0.2);
+    background: rgba(20,20,20,0.85); backdrop-filter: blur(6px);
+    color: #999; font-family: monospace; font-size: 12px; cursor: pointer;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+  }
+  #confirmRoadBtn:hover { background: rgba(255,255,255,0.08); color: #ccc; }
+
   /* The reticle. Not the OS cursor -- pointer lock takes that away, and this
      is drawn at a position the game owns (see aim.ts). A ring plus a center
      dot stays readable over both the dark floor and a lit castle wall. */
@@ -106,6 +122,7 @@
 <div id="modeToggle">
   <button data-mode="camera" type="button"></button>
   <button data-mode="path" type="button"></button>
+  <button data-mode="road" type="button"></button>
   <button data-mode="fight" type="button"></button>
 </div>
 <div id="weaponToggle">
@@ -115,6 +132,7 @@
 </div>
 <div id="crosshair"><div id="charge"></div></div>
 <button id="battleToggle" type="button">battle: off</button>
+<button id="confirmRoadBtn" type="button">confirm road</button>
 <a id="home" href="/index.html">&larr; home</a>
 <script type="module" src="/src/tableTopple/server/main.ts"></script>
 </body>

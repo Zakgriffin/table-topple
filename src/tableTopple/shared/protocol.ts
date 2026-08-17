@@ -3,14 +3,17 @@ import type { Static } from '@sinclair/typebox';
 
 // ── Table Topple's wire protocol: what a "game message" is ──────────────────
 //
-// Exactly two message types, matching the two kinds of thing that actually
-// need to leave the desktop: CONTINUOUS state (every denizen's pose, sent as
-// a periodic snapshot, fine to drop or coalesce -- a stale one is superseded
-// by the next) and ONE-SHOT events (an arrow loosed, a staff blast fired,
-// which do not exist as a field on any Denizen and so cannot be recovered
-// from a snapshot -- see combat.ts's arrows/blasts arrays). That split, not
-// the two names, is the actual boundary of what belongs in this union: a
-// third message type only ever earns its place by being one or the other.
+// Three message types, matching the shapes of state that actually need to
+// leave the desktop: CONTINUOUS, frequently-changing state sent as a
+// periodic snapshot, fine to drop or coalesce because a stale one is
+// superseded by the next (denizenState; also roadState, even though a road
+// changes rarely -- see its own comment on why it still gets this shape
+// rather than attackFx's); and ONE-SHOT events for something that happened
+// and does not exist as a field anywhere a snapshot could recover it from
+// (attackFx -- an arrow loosed, a staff blast fired, see combat.ts's
+// arrows/blasts arrays). That split, not the names, is the actual boundary
+// of what belongs in this union: a new message type only ever earns its
+// place by being one or the other.
 //
 // Deliberately NOT here: connecting, declaring a role, reconnecting. Those are
 // transport, not the game, and net.ts never turns them into a GameMessage --
@@ -82,11 +85,44 @@ const AttackFxMessageSchema = Type.Union([
   }, strict),
 ]);
 
-export const GameMessageSchema = Type.Union([DenizenStateMessageSchema, AttackFxMessageSchema]);
+// ── roadState ────────────────────────────────────────────────────────────
+//
+// CONFIRMED roads only -- a blueprint is desktop-local planning state, same
+// as `path` mode's in-progress stroke never leaving the desktop either (see
+// roads.ts's own header). Modelled as a periodic full snapshot rather than a
+// one-shot "road built" event, even though roads only ever get ADDED and
+// never change once confirmed: a one-shot-only design would mean a phone
+// that connects mid-game silently never learns about anything built before
+// it joined. Sent every tick alongside denizenState, same "lean for now"
+// reasoning already used there -- at any board's realistic road count this
+// is a non-issue, and it's what makes a late joiner catch up for free with
+// no separate resync mechanism to design.
+const RoadConnectionSchema = Type.Object({
+  roadId: Type.Number(),
+  joinPoint: Vec2Schema,
+}, strict);
+
+export const RoadStateEntrySchema = Type.Object({
+  id: Type.Number(),
+  start: Vec2Schema,
+  end: Vec2Schema,
+  connections: Type.Array(RoadConnectionSchema),
+}, strict);
+
+export const RoadStateMessageSchema = Type.Object({
+  type: Type.Literal('roadState'),
+  roads: Type.Array(RoadStateEntrySchema),
+}, strict);
+
+export const GameMessageSchema = Type.Union([DenizenStateMessageSchema, AttackFxMessageSchema, RoadStateMessageSchema]);
 export type GameMessage = Static<typeof GameMessageSchema>;
 export type DenizenStateMessage = Static<typeof DenizenStateMessageSchema>;
 export type AttackFxMessage = Static<typeof AttackFxMessageSchema>;
+export type RoadStateMessage = Static<typeof RoadStateMessageSchema>;
 /** One denizen's wire-safe presentation fields -- everything renderDenizen
  *  needs, nothing more. Defined here, off the schema, so sim.ts's
  *  DenizenStateEntry and the validated wire shape can never drift apart. */
 export type DenizenStateEntry = Static<typeof DenizenStateEntrySchema>;
+/** One road's wire-safe shape -- everything roadMesh.ts's buildRoadMesh and
+ *  roads.ts's connection bookkeeping need, nothing more. */
+export type RoadStateEntry = Static<typeof RoadStateEntrySchema>;

@@ -57,15 +57,19 @@ import { chromeToggleBtn, statusEl } from './dom.ts';
 import { fitBoardToPattern, receiveDenizenState, renderOverlay, syncOverlayRendererSize, updateOverlayCamera } from './overlay.ts';
 import { initPose, isPoseReady, recoverPose, toCameraPose } from './pose.ts';
 import { spawnArrowFx, spawnBlastFx } from '../shared/combat.ts';
+import { writeRoadSnapshot } from '../shared/roads.ts';
 import { attachNetHost, connect } from '../shared/net.ts';
 
 // This page never sends a game message (see the header above) -- only
-// receives. denizenState is handed to overlay.ts's mailbox; attackFx is a
-// one-shot, so it is applied the instant it arrives rather than held.
+// receives. denizenState/roadState are handed to their own mailboxes;
+// attackFx is a one-shot, so it is applied the instant it arrives rather
+// than held.
 attachNetHost({
   onMessage(msg) {
     if (msg.type === 'denizenState') {
       receiveDenizenState(msg.denizens);
+    } else if (msg.type === 'roadState') {
+      writeRoadSnapshot(msg.roads);
     } else if (msg.kind === 'arrow') {
       spawnArrowFx(msg.origin.x, msg.origin.y, msg.origin.z, msg.target.x, msg.target.y, msg.target.z, msg.speed, msg.team);
     } else {

@@ -72,6 +72,20 @@ export const sceneryMaterial = new THREE.MeshStandardMaterial({
   roughness: 0.94, metalness: 0, vertexColors: true, flatShading: true,
 });
 
+/**
+ * The same look, brightened with a flat emissive boost -- what roads.ts swaps
+ * a specific mesh's OWN `.material` to while it's the current snap target.
+ *
+ * Reassigning `.material`, not mutating sceneryMaterial's own properties: this
+ * one material instance is shared by every piece of scenery in the game (every
+ * road, every landmark), so changing it in place would highlight all of them
+ * at once instead of the one thing actually being pointed at.
+ */
+export const sceneryHighlightMaterial = new THREE.MeshStandardMaterial({
+  roughness: 0.94, metalness: 0, vertexColors: true, flatShading: true,
+  emissive: 0xffffff, emissiveIntensity: 0.35,
+});
+
 export const pick = (rng: () => number, palette: number[]) => palette[Math.floor(rng() * palette.length)];
 
 /** Uniform in [lo, hi). */

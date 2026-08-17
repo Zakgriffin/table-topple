@@ -4,6 +4,8 @@ import { mode, onModeChange } from './mode.ts';
 import { createRibbon, type Ribbon } from './ribbon.ts';
 import { pointerToGround } from './groundRay.ts';
 import { buildJunctionPatch, buildRoadMesh, ROAD_HALF_WIDTH } from './roadMesh.ts';
+import { sceneryHighlightMaterial, sceneryMaterial } from './blocks.ts';
+import { placedLandmarks } from './landmarks.ts';
 import type { RoadStateEntry } from './protocol.ts';
 
 // ── Roads: drawn as blueprints, confirmed into permanent structures ────────
@@ -34,6 +36,27 @@ import type { RoadStateEntry } from './protocol.ts';
 // deliberate groundwork for later, when a phone drives its own confirms
 // instead of only ever receiving them (see protocol.ts's own comment on why
 // roadState is a full periodic snapshot rather than a one-shot event).
+//
+// ── SNAPPING ONTO A LANDMARK, NOT JUST ANOTHER ROAD ──
+//
+// landmarks.ts's PlacedLandmark is the other thing a road can snap onto: a
+// circle (center + world-space radius) rather than a segment, so its "closest
+// point" (closestOnLandmark below) is always somewhere on its OWN boundary in
+// the direction of the approach, never inside it. Unlike a road-to-road
+// connection this is one-directional and never symmetric -- landmarks are
+// static, deterministically-seeded scenery already identical on every host,
+// so nothing ever needs to look up "which roads touch landmark 3" FROM the
+// landmark's own side the way removeConnectionsTo does for roads.
+//
+// ── HIGHLIGHTING THE CURRENT SNAP TARGET ──
+//
+// A blueprint's ribbon has its own private material (ribbon.ts builds one per
+// call), so highlighting one is just brightening that instance directly. A
+// BUILT road or a landmark is different: both share ONE sceneryMaterial
+// instance (blocks.ts) across every piece of scenery in the game, so
+// highlighting one has to mean swapping THAT SPECIFIC mesh's own `.material`
+// to sceneryHighlightMaterial (also blocks.ts) and back -- mutating the
+// shared material itself would brighten every road and landmark at once.
 
 export interface RoadConnection {
   roadId: number;
@@ -44,11 +67,19 @@ export interface RoadConnection {
   joinPoint: { x: number; y: number };
 }
 
+export interface LandmarkLink {
+  landmarkId: number;
+  /** Where this road touches the landmark's boundary, in world (x, z) -- see
+   *  closestOnLandmark. Never inside the landmark's footprint. */
+  joinPoint: { x: number; y: number };
+}
+
 export interface Road {
   id: number;
   start: THREE.Vector2;
   end: THREE.Vector2;
   connections: RoadConnection[];
+  landmarkLinks: LandmarkLink[];
   confirmed: boolean;
 }
 
@@ -94,6 +125,14 @@ let nextId = 0;
 const blueprints: Road[] = [];
 const built: Road[] = [];
 const ribbons = new Map<number, Ribbon>();
+/** A confirmed road's own mesh, kept around solely so the highlight system
+ *  can find and swap it -- confirmRoads/writeRoadSnapshot both populate this
+ *  the instant they build one; nothing else needs to look a built road's
+ *  mesh back up. */
+const roadMeshes = new Map<number, THREE.Mesh>();
+/** Landmarks by id, for the highlight system -- placedLandmarks itself stays
+ *  the array form everywhere else (iteration order, findSnap's loop). */
+const landmarksById = new Map(placedLandmarks.map((l) => [l.id, l]));
 
 function findRoad(id: number): Road | undefined {
   return blueprints.find((r) => r.id === id) ?? built.find((r) => r.id === id);
@@ -101,7 +140,7 @@ function findRoad(id: number): Road | undefined {
 
 // ── Hit-testing ──────────────────────────────────────────────────────────
 
-interface SnapCandidate { roadId: number; point: THREE.Vector2 }
+interface SnapCandidate { kind: 'road' | 'landmark'; id: number; point: THREE.Vector2 }
 
 const closest = new THREE.Vector2();
 
@@ -121,11 +160,31 @@ function closestOnSegment(road: Road, pt: THREE.Vector2): { dist: number; t: num
   return { dist: pt.distanceTo(closest), t, length };
 }
 
+/** Closest point on a landmark's own BOUNDARY to `pt` (never inside it),
+ *  plus how far `pt` is from that boundary -- 0 once `pt` is already inside
+ *  the footprint, same as a road segment reading 0 once you're right on top
+ *  of its centerline. */
+function closestOnLandmark(landmark: { x: number; z: number; radius: number }, pt: THREE.Vector2): { dist: number; point: THREE.Vector2 } {
+  const dx = pt.x - landmark.x, dz = pt.y - landmark.z;
+  const centerDist = Math.hypot(dx, dz);
+  if (centerDist < 1e-6) {
+    // Degenerate: pt sits exactly on the landmark's own center. Any boundary
+    // point is as good as another.
+    return { dist: 0, point: new THREE.Vector2(landmark.x, landmark.z + landmark.radius) };
+  }
+  const ux = dx / centerDist, uz = dz / centerDist;
+  return {
+    dist: Math.max(0, centerDist - landmark.radius),
+    point: new THREE.Vector2(landmark.x + ux * landmark.radius, landmark.z + uz * landmark.radius),
+  };
+}
+
 /**
- * The best road to connect to from `pt`, or null if nothing is close enough.
- * Checked against BOTH blueprints and already-built roads -- extending a
- * paved network has to work exactly like extending a fresh blueprint, or the
- * network can never grow after a confirm.
+ * The best thing to connect to from `pt` -- a road (blueprint or already
+ * built) or a landmark -- or null if nothing is close enough. Checked against
+ * ALL of them together, picking whichever is closest regardless of kind:
+ * extending a paved network, or snapping onto a mine's mouth, have to feel
+ * like the same gesture.
  */
 function findSnap(pt: THREE.Vector2, excludeId?: number): SnapCandidate | null {
   let best: SnapCandidate | null = null;
@@ -141,7 +200,13 @@ function findSnap(pt: THREE.Vector2, excludeId?: number): SnapCandidate | null {
     const point = t <= ENDPOINT_CAPTURE_LENGTH ? road.start.clone()
       : t >= length - ENDPOINT_CAPTURE_LENGTH ? road.end.clone()
       : closest.clone();
-    best = { roadId: road.id, point };
+    best = { kind: 'road', id: road.id, point };
+  }
+  for (const landmark of placedLandmarks) {
+    const { dist, point } = closestOnLandmark(landmark, pt);
+    if (dist >= bestDist) continue;
+    bestDist = dist;
+    best = { kind: 'landmark', id: landmark.id, point };
   }
   return best;
 }
@@ -176,18 +241,41 @@ function removeRoad(road: Road) {
 
 // ── Creating and dragging ────────────────────────────────────────────────
 
-function createRoad(start: THREE.Vector2, connectedTo: SnapCandidate | null): Road {
-  const road: Road = { id: nextId++, start: start.clone(), end: start.clone(), connections: [], confirmed: false };
-  if (connectedTo) {
-    const other = findRoad(connectedTo.roadId)!;
+/**
+ * Records a connection from `road` to whatever `target` was hit -- either end
+ * of a drag can call this (createRoad for the start, commitDrag for the far
+ * end), since a road doesn't know or care which of its two points is which
+ * once it's built. `target.point` is used as the joinPoint on BOTH sides
+ * rather than reading it back off `road`'s own start/end: the caller has
+ * already snapped that point onto `target.point` before calling this (see
+ * both call sites), so the two are numerically identical anyway, and reading
+ * straight off `target` is what lets this function not need to know which
+ * end it was.
+ */
+function attachConnection(road: Road, target: SnapCandidate) {
+  const joinPoint = { x: target.point.x, y: target.point.y };
+  if (target.kind === 'road') {
+    const other = findRoad(target.id)!;
     // Written symmetrically, both sides, the instant the connection is made --
     // not just on this new road. The network is undirected: either road has
     // to be walkable from the other, and a later long-press delete needs
     // both sides to already agree who is connected to whom (removeRoad above
     // just scrubs whichever side references the deleted id).
-    road.connections.push({ roadId: other.id, joinPoint: { x: road.start.x, y: road.start.y } });
-    other.connections.push({ roadId: road.id, joinPoint: { x: connectedTo.point.x, y: connectedTo.point.y } });
+    road.connections.push({ roadId: other.id, joinPoint });
+    other.connections.push({ roadId: road.id, joinPoint });
+  } else {
+    // One-directional -- see this file's header on why a landmark never
+    // needs a back-reference the way another road does.
+    road.landmarkLinks.push({ landmarkId: target.id, joinPoint });
   }
+}
+
+function createRoad(start: THREE.Vector2, connectedTo: SnapCandidate | null): Road {
+  const road: Road = {
+    id: nextId++, start: start.clone(), end: start.clone(),
+    connections: [], landmarkLinks: [], confirmed: false,
+  };
+  if (connectedTo) attachConnection(road, connectedTo);
   blueprints.push(road);
   const ribbon = createRibbon(2, BLUEPRINT_COLOR, DRAW_Y, ROAD_HALF_WIDTH, BLUEPRINT_OPACITY);
   ribbon.mesh.visible = mode === 'road';
@@ -225,6 +313,16 @@ function commitDrag() {
   const road = dragRoad!;
   dragRoad = null;
   if (road.start.distanceTo(road.end) < MIN_ROAD_LENGTH) { removeRoad(road); return; }
+
+  // The far end can ALSO land on something, not just wherever the drag
+  // started -- excluded from matching itself (`road` is already sitting in
+  // `blueprints` by this point), so dragging back near your own start can't
+  // read as "connected to itself".
+  const hit = findSnap(road.end, road.id);
+  if (hit) {
+    road.end.copy(hit.point);
+    attachConnection(road, hit);
+  }
   updateRibbon(road);
 }
 
@@ -242,12 +340,52 @@ scene.add(hoverIndicator);
 
 function updateHover(pt: THREE.Vector2) {
   const hit = findSnap(pt);
+  setHighlight(hit);
   if (!hit) { hoverIndicator.visible = false; return; }
   // Base at the floor, not centered on it -- CylinderGeometry is centered on
   // its own origin, so this is what plants its foot at y=0 and lets its
   // height carry the top up past a built road's surface.
   hoverIndicator.position.set(hit.point.x, HOVER_MARKER_HEIGHT / 2, hit.point.y);
   hoverIndicator.visible = true;
+}
+
+// ── Highlighting the current snap target ────────────────────────────────
+// See this file's header for why a built road/landmark needs a material
+// SWAP rather than an in-place edit, and a blueprint doesn't.
+
+let highlighted: { kind: 'road' | 'landmark'; id: number } | null = null;
+
+function paintTarget(kind: 'road' | 'landmark', id: number, on: boolean) {
+  if (kind === 'landmark') {
+    const landmark = landmarksById.get(id);
+    if (landmark) landmark.mesh.material = on ? sceneryHighlightMaterial : sceneryMaterial;
+    return;
+  }
+  const ribbon = ribbons.get(id);
+  if (ribbon) {
+    // A private material per ribbon (ribbon.ts), so brightening this one
+    // can't bleed into any other blueprint the way sceneryMaterial would.
+    (ribbon.mesh.material as THREE.MeshBasicMaterial).opacity = on ? Math.min(1, BLUEPRINT_OPACITY * 2.4) : BLUEPRINT_OPACITY;
+    return;
+  }
+  const mesh = roadMeshes.get(id);
+  if (mesh) mesh.material = on ? sceneryHighlightMaterial : sceneryMaterial;
+}
+
+/** Moves the highlight to whatever findSnap just returned, un-highlighting
+ *  whatever it was on before. Called on every hover update, AND once when a
+ *  drag starts (see wireRoadBuild's pointerdown) -- a drag doesn't call
+ *  updateHover again until it ends, so without that second call site the
+ *  target you're actively connected to would go dark the instant you started
+ *  dragging away from it. */
+function setHighlight(next: SnapCandidate | null) {
+  if (highlighted && (!next || next.kind !== highlighted.kind || next.id !== highlighted.id)) {
+    paintTarget(highlighted.kind, highlighted.id, false);
+  }
+  if (next && (!highlighted || next.kind !== highlighted.kind || next.id !== highlighted.id)) {
+    paintTarget(next.kind, next.id, true);
+  }
+  highlighted = next ? { kind: next.kind, id: next.id } : null;
 }
 
 // ── Confirming ────────────────────────────────────────────────────────────
@@ -296,7 +434,9 @@ function confirmRoads() {
       (ribbon.mesh.material as THREE.Material).dispose();
       ribbons.delete(road.id);
     }
-    scene.add(buildRoadMesh(road.start, road.end, road.id));
+    const mesh = buildRoadMesh(road.start, road.end, road.id);
+    scene.add(mesh);
+    roadMeshes.set(road.id, mesh);
     patchJunctionsFor(road);
     built.push(road);
   }
@@ -323,11 +463,11 @@ export function wireRoadBuild(canvas: HTMLElement) {
     if (!pointerToGround(e, scratch)) return;
 
     const hit = findSnap(scratch);
-    // A press ON an existing BLUEPRINT (never a built road -- those can't be
-    // deleted at all) starts a long-press timer instead of committing to a
-    // drag; movement past PRESS_JITTER before it fires cancels the timer and
-    // falls through to an ordinary connected drag.
-    const pressed = hit && blueprints.some((r) => r.id === hit.roadId) ? findRoad(hit.roadId)! : null;
+    // A press ON an existing BLUEPRINT (never a built road, and never a
+    // landmark -- neither can be deleted) starts a long-press timer instead
+    // of committing to a drag; movement past PRESS_JITTER before it fires
+    // cancels the timer and falls through to an ordinary connected drag.
+    const pressed = hit?.kind === 'road' && blueprints.some((r) => r.id === hit.id) ? findRoad(hit.id)! : null;
     if (pressed) {
       pressStart.copy(scratch);
       pressTimer = window.setTimeout(() => {
@@ -340,6 +480,9 @@ export function wireRoadBuild(canvas: HTMLElement) {
       }, LONG_PRESS_MS);
     }
 
+    // Kept lit for the whole drag -- see setHighlight's own comment on why
+    // this can't just wait for the next hover update.
+    setHighlight(hit);
     dragRoad = createRoad(hit ? hit.point : scratch, hit);
     canvas.setPointerCapture(e.pointerId);
   });
@@ -353,6 +496,13 @@ export function wireRoadBuild(canvas: HTMLElement) {
       if (mode !== 'road') { abandonDrag(); return; }
       dragRoad.end.copy(scratch);
       updateRibbon(dragRoad);
+      // Live preview of where the far end would land if released right now --
+      // the circle only, not the highlight. The highlight stays reserved for
+      // the drag's fixed start anchor (set once in pointerdown) so the two
+      // ends aren't fighting over the one "currently highlighted" slot.
+      const endHit = findSnap(scratch, dragRoad.id);
+      if (endHit) hoverIndicator.position.set(endHit.point.x, HOVER_MARKER_HEIGHT / 2, endHit.point.y);
+      hoverIndicator.visible = !!endHit;
       return;
     }
 
@@ -373,7 +523,7 @@ export function wireRoadBuild(canvas: HTMLElement) {
   onModeChange((next, prev) => {
     const show = next === 'road';
     for (const ribbon of ribbons.values()) ribbon.mesh.visible = show;
-    if (!show) hoverIndicator.visible = false;
+    if (!show) { hoverIndicator.visible = false; setHighlight(null); }
     if (prev === 'road') abandonDrag(); // an in-progress drag doesn't survive leaving the mode
     if (confirmBtn) confirmBtn.style.display = show ? 'block' : 'none';
   });
@@ -392,6 +542,7 @@ export function snapshotRoads(): RoadStateEntry[] {
     start: { x: r.start.x, y: r.start.y },
     end: { x: r.end.x, y: r.end.y },
     connections: r.connections.map((c) => ({ roadId: c.roadId, joinPoint: c.joinPoint })),
+    landmarkLinks: r.landmarkLinks.map((l) => ({ landmarkId: l.landmarkId, joinPoint: l.joinPoint })),
   }));
 }
 
@@ -414,9 +565,12 @@ export function writeRoadSnapshot(entries: readonly RoadStateEntry[]) {
     const road: Road = {
       id: e.id, start, end, confirmed: true,
       connections: e.connections.map((c) => ({ roadId: c.roadId, joinPoint: c.joinPoint })),
+      landmarkLinks: e.landmarkLinks.map((l) => ({ landmarkId: l.landmarkId, joinPoint: l.joinPoint })),
     };
     built.push(road);
-    scene.add(buildRoadMesh(start, end, e.id));
+    const mesh = buildRoadMesh(start, end, e.id);
+    scene.add(mesh);
+    roadMeshes.set(e.id, mesh);
     patchJunctionsFor(road);
   }
 }

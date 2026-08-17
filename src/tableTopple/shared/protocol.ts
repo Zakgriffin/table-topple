@@ -102,11 +102,22 @@ const RoadConnectionSchema = Type.Object({
   joinPoint: Vec2Schema,
 }, strict);
 
+// A road can also snap onto a landmark (shared/landmarks.ts's PlacedLandmark)
+// rather than another road -- these never need a symmetric back-reference the
+// way RoadConnection does, since landmarks are static, deterministically
+// seeded scenery that already exists identically on every host: nothing ever
+// has to look "which roads touch landmark 3" up FROM the landmark's own side.
+const LandmarkLinkSchema = Type.Object({
+  landmarkId: Type.Number(),
+  joinPoint: Vec2Schema,
+}, strict);
+
 export const RoadStateEntrySchema = Type.Object({
   id: Type.Number(),
   start: Vec2Schema,
   end: Vec2Schema,
   connections: Type.Array(RoadConnectionSchema),
+  landmarkLinks: Type.Array(LandmarkLinkSchema),
 }, strict);
 
 export const RoadStateMessageSchema = Type.Object({

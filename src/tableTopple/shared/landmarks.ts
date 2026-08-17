@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { SOLDIER_HEIGHT } from './constants.ts';
-import { type Patch, type Terrain, patches } from './terrain.ts';
+import { type Terrain, patches } from './terrain.ts';
 import { makeRng } from './noise.ts';
 import { Blocks, between, pick, sceneryMaterial } from './blocks.ts';
 
@@ -312,11 +312,34 @@ const OFFSET_FRACTION = 0.15;
  *  here -- see the note at the top about staying free of scene.ts. */
 export const landmarks = new THREE.Group();
 
-/** The structures actually placed, alongside the patch each belongs to. */
-export const placed: { patch: Patch; mesh: THREE.Mesh }[] = [];
+/**
+ * One structure, pulled out of the Group it also lives in -- the model
+ * roads.ts's snap/highlight code actually reasons about, rather than reaching
+ * into a THREE.Mesh's own transform for a position it has to recompute
+ * itself every time. A stable id, same reasoning as Denizen's/Road's own: a
+ * road's landmarkLinks (roads.ts) references one by id, and that has to keep
+ * meaning the same structure for the life of the page.
+ */
+export interface PlacedLandmark {
+  id: number;
+  terrain: Terrain;
+  x: number;
+  z: number;
+  /** World-space footprint radius, AFTER the fit-to-patch scale below -- what
+   *  roads.ts treats as "this structure's edge" for both hit-testing a snap
+   *  and drawing a road's join point on its boundary rather than inside it.
+   *  Read back from the same reach*fit the placement loop already computes,
+   *  not a second hand-maintained number that could drift from it. */
+  radius: number;
+  mesh: THREE.Mesh;
+}
+
+/** Every structure actually placed. */
+export const placedLandmarks: PlacedLandmark[] = [];
 
 {
   const rng = makeRng(LANDMARK_SEED);
+  let nextId = 0;
 
   for (const patch of patches) {
     const build = BUILDERS[patch.terrain];
@@ -339,13 +362,14 @@ export const placed: { patch: Patch; mesh: THREE.Mesh }[] = [];
 
     const angle = rng() * Math.PI * 2;
     const dist = rng() * patch.radius * OFFSET_FRACTION;
-    mesh.position.set(patch.x + Math.sin(angle) * dist, 0, patch.z + Math.cos(angle) * dist);
+    const x = patch.x + Math.sin(angle) * dist, z = patch.z + Math.cos(angle) * dist;
+    mesh.position.set(x, 0, z);
     // Free rotation: none of these has a front that needs to face anything, and
     // four mines all square to the board's axes would look placed by a level
     // editor.
     mesh.rotation.y = rng() * Math.PI * 2;
 
     landmarks.add(mesh);
-    placed.push({ patch, mesh });
+    placedLandmarks.push({ id: nextId++, terrain: patch.terrain, x, z, radius: reach * fit, mesh });
   }
 }

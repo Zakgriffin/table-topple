@@ -1,10 +1,11 @@
-// ── The camera: one stream, one resolution, and the frames it hands on ───
+// ── The camera: one stream, no resolution request, and the frames it hands
+// on ─────────────────────────────────────────────────────────────────────
 //
 // Everything hard-won about NEGOTIATING a stream is src/capture/stream.ts --
 // the platform layer both clients share. This is the page's half, and it is
-// far smaller than Pose Viewer's because this page has no resolution UI:
-// config.capture names one resolution, boot asks for it once, and whatever the
-// camera actually delivers is what the pose context is built for.
+// far smaller than Pose Viewer's because this page has no resolution UI: boot
+// asks for `facing` only, same as Pose Viewer's own startCamera, and whatever
+// the camera actually delivers is what the pose context is built for.
 //
 // ── NOTHING IS EVER MIRRORED, AND THAT IS THE ONE RULE HERE ──
 //
@@ -21,7 +22,7 @@
 // plumbing without pointing anything at a board, but a `user` capture will
 // decode a mirrored board and should not be trusted for a pose.
 
-import { requestPlainStream, requestStreamAt } from '../../capture/stream.ts';
+import { applyZoom, readZoomRange, requestPlainStream } from '../../capture/stream.ts';
 import { toGrayscaleF32 } from '../../pose/grayscale.ts';
 import { config } from '../shared/config.ts';
 import { video, viewfinder, viewfinderCtx } from './dom.ts';
@@ -65,26 +66,26 @@ async function adoptStream(stream: MediaStream) {
   currentStream = stream;
   video.srcObject = stream;
   await video.play();
+  // No zoom UI on this page -- see the config schema's own comment on why --
+  // but a camera can still start on a non-1x default, e.g. some phones hand
+  // back a stream already at a slight zoom-in on the rear lens they picked.
+  // Pinning to the range's minimum on boot is what Pose Viewer's zoom slider
+  // does by default, and this page never gives a way to change it afterward.
+  const range = readZoomRange(currentStream);
+  if (range) applyZoom(currentStream, range.min);
 }
 
 /**
- * Opens the camera at the configured resolution, falling back to an
- * unconstrained stream if the device refuses.
- *
- * A refusal is NORMAL, not an error: `requestStreamAt` returns null rather than
- * throwing precisely because a camera declining an exact resolution is an
- * everyday answer. Falling back keeps the page usable -- the pose context is
- * built from what arrives, so an off-spec resolution costs comparability with
- * the sweep's numbers, not correctness.
+ * Opens the camera on the configured facing direction, unconstrained on
+ * resolution -- same shape as Pose Viewer's own startCamera. Whatever the
+ * browser negotiates is what the pose context is built for; see frameDims().
  *
  * Resolves once the video element actually reports dimensions, so a caller can
  * read frameDims() immediately afterward and get real numbers.
  */
 export async function startCamera(): Promise<void> {
-  const { width, height, facing } = config.capture;
-  const exact = await requestStreamAt(undefined, width, height);
-  if (exact) await adoptStream(exact);
-  else await adoptStream(await requestPlainStream(undefined, facing));
+  const { facing } = config.capture;
+  await adoptStream(await requestPlainStream(undefined, facing));
   await waitForDimensions();
 }
 

@@ -1,7 +1,5 @@
 {
   "capture": {
-    "width": 480,
-    "height": 640,
     "facing": "environment"
   },
   "pose": {

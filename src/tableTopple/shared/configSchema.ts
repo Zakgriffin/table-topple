@@ -34,20 +34,16 @@ const strict = { additionalProperties: false } as const;
 
 // ── Capture ──────────────────────────────────────────────────────────────
 //
-// One fixed resolution, requested once at boot, and one PoseContext built for
-// it that lives as long as the page. There is deliberately no dropdown and no
-// probe sweep: pose cost is strongly resolution-dependent, so pinning this to
-// the same 480x640 the sweep measures means this phone's numbers are directly
-// comparable to every measurement already taken, rather than being a fresh
-// unknown. Changing it is a config edit and a reload.
-//
-// A camera may legitimately refuse the request or hand back something else --
-// see capture/stream.ts on why that is normal rather than an error, and
-// client/camera.ts for what this page does about it (it believes the video
-// element, not the request).
+// No resolution constraint, same as Pose Viewer: whatever the browser
+// negotiates on its own is what the PoseContext gets built for. There is
+// deliberately no dropdown and no probe sweep, but also no pinned width/height
+// to request -- the old exact-resolution request (client/camera.ts's former
+// requestStreamAt call) never named a facing direction at all, so it opened
+// whichever camera the browser defaults to, not `facing` below. `facing` was
+// only ever honoured on the fallback path that request's own `ideal`
+// constraints made nearly unreachable. A single facingMode-only request, like
+// Pose Viewer's, is what actually gets `facing` applied.
 export const CaptureSettingsSchema = Type.Object({
-  width: Type.Number(),
-  height: Type.Number(),
   facing: Type.Union([Type.Literal('environment'), Type.Literal('user')]),
 }, strict);
 export type CaptureSettings = Static<typeof CaptureSettingsSchema>;

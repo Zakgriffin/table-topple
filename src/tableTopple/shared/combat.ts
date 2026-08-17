@@ -11,6 +11,7 @@ import { CHARACTER_HALF_WIDTH } from './character.ts';
 import { SOLDIER_HEIGHT } from './constants.ts';
 import { yawFromDirection } from './frame.ts';
 import { groundWedgeGeometry } from './wedge.ts';
+import { send } from './net.ts';
 
 // What attacks actually do. Three styles, one per weapon shape:
 //
@@ -21,6 +22,28 @@ import { groundWedgeGeometry } from './wedge.ts';
 // All three funnel into the same damage() call, and all three read their
 // direction from the same reticle (aim.ts), so they can't disagree about where
 // the human is pointing.
+//
+// ── WHY THIS FILE TALKS TO net.ts DIRECTLY ──
+//
+// loose()/blast() are the only two places an "attack" actually happens --
+// meaning the only two places an `attackFx` message (protocol.ts) has
+// anything to say. They only ever run on the authoritative host: this module
+// is imported by both hosts (via sim.ts), but a receiving client never calls
+// step()/updateCombat/chargeAndFire, so these functions are simply never
+// invoked there (see sim.ts's header). send() is a no-op with nothing
+// connected, so importing it here costs nothing on a host that never calls
+// it. The alternative -- routing every attack through a callback into
+// server/main.ts -- would be more indirection for a boundary this narrow.
+//
+// ── VISUAL vs DAMAGING, THE SAME SPLIT sim.ts USES ──
+//
+// A receiving client needs an arrow to fly and a blast to bloom -- exactly
+// the pixels loose()/blast() already produce -- but must NEVER decide a hit
+// itself (see spawnArrowFx/spawnBlastFx below): only the authoritative host's
+// own damage() calls, driven by its own denizens, are real. An Arrow's
+// `damages` flag is what lets one `arrows` array and one updateArrows() serve
+// both a real shot and a client's replica of one without two copies of the
+// flight physics.
 
 /** Only other courts can be hurt -- a court never damages its own. */
 function isEnemy(attacker: Denizen, other: Denizen): boolean {
@@ -113,6 +136,10 @@ interface Arrow {
   life: number;
   team: number;
   damage: number;
+  /** False for a client's visual-only replica (spawnArrowFx): flight and
+   *  lifetime still run, but it can never call damage() -- only the
+   *  authoritative host's own real arrows (loose()) may. */
+  damages: boolean;
 }
 
 const arrows: Arrow[] = [];
@@ -125,34 +152,62 @@ const arrowHeadMat = new THREE.MeshStandardMaterial({ color: 0x9aa3b2, roughness
 const shotFrom = new THREE.Vector3();
 const shotTo = new THREE.Vector3();
 
-/** Looses an arrow from `archer` at a world point. The target is passed in
- *  rather than read from the reticle, so a brain can shoot with the same call
- *  the human uses. */
-export function loose(archer: Denizen, def: WeaponDef, power: number, at: THREE.Vector3) {
-  handPosition(archer, shotFrom);
-  shotTo.copy(at);
-
+/** Builds the mesh + straight-line velocity both a real shot and a visual
+ *  replica need, and pushes it into the one shared `arrows` array. Straight
+ *  line, no drop: an arrow that arcs would need its launch angle solved to
+ *  still land on the target point, and "it goes where it was aimed" is the
+ *  promise that matters more here than ballistics. */
+function spawnArrow(from: THREE.Vector3, to: THREE.Vector3, speed: number, team: number, dmg: number, damages: boolean) {
   const mesh = new THREE.Mesh(arrowGeo, arrowMat);
   const head = new THREE.Mesh(arrowHeadGeo, arrowHeadMat);
   head.position.z = 0.33;
   mesh.add(head);
-  mesh.position.copy(shotFrom);
+  mesh.position.copy(from);
   // Point it down its own flight path: the shaft is modelled along +Z, and
   // lookAt orients +Z at the target.
-  mesh.lookAt(shotTo);
+  mesh.lookAt(to);
   scene.add(mesh);
 
-  // Straight line, no drop. An arrow that arcs would need its launch angle
-  // solved to still land on the reticle, and "it goes where I pointed" is the
-  // promise that matters more here than ballistics.
-  const velocity = shotTo.clone().sub(shotFrom).normalize()
-    .multiplyScalar((def.arrowSpeed ?? 30) * (0.45 + 0.55 * power));
+  const velocity = to.clone().sub(from).normalize().multiplyScalar(speed);
+  arrows.push({ mesh, velocity, life: ARROW_LIFE, team, damage: dmg, damages });
+}
 
-  arrows.push({ mesh, velocity, life: ARROW_LIFE, team: archer.team, damage: Math.round(def.damage * (0.4 + 0.6 * power)) });
+/** Looses a REAL arrow from `archer` at a world point, and tells every other
+ *  connected host it happened. The target is passed in rather than read from
+ *  the reticle, so a brain can shoot with the same call the human uses. */
+export function loose(archer: Denizen, def: WeaponDef, power: number, at: THREE.Vector3) {
+  handPosition(archer, shotFrom);
+  shotTo.copy(at);
+  const speed = (def.arrowSpeed ?? 30) * (0.45 + 0.55 * power);
+  spawnArrow(shotFrom, shotTo, speed, archer.team, Math.round(def.damage * (0.4 + 0.6 * power)), true);
+
+  send({
+    type: 'attackFx', kind: 'arrow', attackerId: archer.id, team: archer.team,
+    origin: { x: shotFrom.x, y: shotFrom.y, z: shotFrom.z },
+    target: { x: shotTo.x, y: shotTo.y, z: shotTo.z },
+    speed,
+  });
+}
+
+/** A receiving client's counterpart to loose(): the same flight, none of the
+ *  damage -- see this file's own header on why that split is load-bearing,
+ *  not a shortcut. Called from a client's attackFx handler (client/main.ts),
+ *  never from step(). */
+export function spawnArrowFx(originX: number, originY: number, originZ: number, targetX: number, targetY: number, targetZ: number, speed: number, team: number) {
+  spawnArrow(
+    new THREE.Vector3(originX, originY, originZ),
+    new THREE.Vector3(targetX, targetY, targetZ),
+    speed, team, 0, false,
+  );
 }
 
 const step = new THREE.Vector3();
 
+/** Advances every arrow's flight and lifetime -- both the authoritative
+ *  host's real ones AND a receiving client's visual replicas run through
+ *  this same loop. Only a `damages: true` arrow ever reaches the damage()
+ *  call; a replica still stops and disappears on "hit" (it just never hurts
+ *  anyone), so the two look the same without a client ever touching health. */
 function updateArrows(dt: number) {
   for (let i = arrows.length - 1; i >= 0; i--) {
     const a = arrows[i];
@@ -166,7 +221,7 @@ function updateArrows(dt: number) {
     // Swept test against the segment travelled this frame, not just the end
     // point. At 34 units a second an arrow covers half a metre per frame and
     // would tunnel straight through a soldier otherwise.
-    if (!done) {
+    if (!done && a.damages) {
       for (const victim of denizens) {
         if (victim.team === a.team || !isTargetable(victim)) continue;
         if (a.mesh.position.y > bodyTop(victim) + 0.2) continue;
@@ -226,8 +281,26 @@ const humanTarget = new THREE.Vector3();
  *  RELEASE, by which time aimTarget has already been cleared. */
 const lastHumanTarget = new THREE.Vector3();
 
-/** Opens a cone from `caster` toward a world point. Same reasoning as loose():
- *  the direction is an argument, not a global. */
+/** The wedge mesh itself, a sector already lying flat and centered on +Z (see
+ *  wedge.ts), so aiming it is one rotation.y in the shared yaw convention.
+ *  Split out of blast() so a receiving client can draw the same shape without
+ *  ever running the damage loop above it (see this file's own header). */
+function spawnBlastVisual(originX: number, originZ: number, ux: number, uz: number, range: number, halfAngle: number) {
+  const geo = groundWedgeGeometry(range, halfAngle);
+  const mat = new THREE.MeshBasicMaterial({
+    color: 0x8fd8ff, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false,
+  });
+  const mesh = new THREE.Mesh(geo, mat);
+  mesh.rotation.y = yawFromDirection(ux, uz);
+  mesh.position.set(originX, 0.03, originZ);
+  mesh.renderOrder = 2;
+  scene.add(mesh);
+  blasts.push({ mesh, age: 0 });
+}
+
+/** Opens a REAL cone from `caster` toward a world point, and tells every
+ *  other connected host it happened. Same reasoning as loose(): the
+ *  direction is an argument, not a global. */
 export function blast(caster: Denizen, def: WeaponDef, power: number, at: THREE.Vector3) {
   const range = (def.coneRange ?? 4) * (0.5 + 0.5 * power);
   const halfAngle = def.coneHalfAngle ?? 0.6;
@@ -252,18 +325,24 @@ export function blast(caster: Denizen, def: WeaponDef, power: number, at: THREE.
     damage(victim, Math.max(1, Math.round(def.damage * (0.4 + 0.6 * power))));
   }
 
-  // The wedge itself: a sector already lying flat and centered on +Z (see
-  // wedge.ts), so aiming it is one rotation.y in the shared yaw convention.
-  const geo = groundWedgeGeometry(range, halfAngle);
-  const mat = new THREE.MeshBasicMaterial({
-    color: 0x8fd8ff, transparent: true, opacity: 0.5, side: THREE.DoubleSide, depthWrite: false,
+  spawnBlastVisual(caster.pos.x, caster.pos.y, ux, uz, range, halfAngle);
+
+  send({
+    type: 'attackFx', kind: 'blast', attackerId: caster.id, team: caster.team,
+    origin: { x: caster.pos.x, y: caster.pos.y },
+    target: { x: blastAim.x, y: blastAim.z },
+    range, halfAngle,
   });
-  const mesh = new THREE.Mesh(geo, mat);
-  mesh.rotation.y = yawFromDirection(ux, uz);
-  mesh.position.set(caster.pos.x, 0.03, caster.pos.y);
-  mesh.renderOrder = 2;
-  scene.add(mesh);
-  blasts.push({ mesh, age: 0 });
+}
+
+/** A receiving client's counterpart to blast(): the same wedge, none of the
+ *  damage. Recomputes the aim direction from origin/target exactly as
+ *  blast() does, rather than sending ux/uz over the wire, so the wire shape
+ *  stays "what happened" (a world point) rather than a derived value. */
+export function spawnBlastFx(originX: number, originZ: number, targetX: number, targetZ: number, range: number, halfAngle: number) {
+  const dirX = targetX - originX, dirZ = targetZ - originZ;
+  const len = Math.hypot(dirX, dirZ) || 1;
+  spawnBlastVisual(originX, originZ, dirX / len, dirZ / len, range, halfAngle);
 }
 
 function updateBlasts(dt: number) {
@@ -282,6 +361,21 @@ function updateBlasts(dt: number) {
     // Swells slightly as it fades, which reads as a shockwave leaving.
     b.mesh.scale.setScalar(1 + 0.12 * t);
   }
+}
+
+/**
+ * Advances every arrow and blast -- flight, fade, lifetime, removal -- for
+ * BOTH a real attack and a receiving client's spawnArrowFx/spawnBlastFx
+ * replica of one. Every host that can hold an arrow or a blast has to call
+ * this every frame, not just the one that spawned it: a wedge left in the
+ * `blasts` array with nothing ever advancing its age stays at full opacity
+ * forever, which is exactly the "blue cone never clears on the client" bug
+ * this function exists to make impossible to reintroduce -- see updateCombat
+ * (desktop, via step()) and client/overlay.ts's renderOverlay (phone).
+ */
+export function updateAttackVisuals(dt: number) {
+  updateArrows(dt);
+  updateBlasts(dt);
 }
 
 /** Brightens and swells the staff's crystal with the charge. */
@@ -304,8 +398,7 @@ let elapsed = 0;
  */
 export function updateCombat(dt: number) {
   elapsed += dt;
-  updateArrows(dt);
-  updateBlasts(dt);
+  updateAttackVisuals(dt);
 
   const weapon = you.weapon;
   if (!weapon || mode !== 'fight') {

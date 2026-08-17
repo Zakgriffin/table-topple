@@ -34,6 +34,8 @@
 //   motion.ts     velocity integration: accelerate, coast, arrive
 //   ai.ts         fighter behaviour: pick a target, close, attack
 //   input.ts      held-key state -> strafe/forward axes, + the camera's yaw
+//   protocol.ts   the two game messages: denizenState, attackFx
+//   net.ts        the websocket both hosts share, and the send/receive gate
 //   main.ts       this page's boot: claim the input, then loop
 //
 // This file is the STANDALONE page's entry point specifically. Everything it
@@ -46,15 +48,24 @@
 import * as THREE from 'three';
 import { camera, scene } from '../shared/scene.ts';
 import { canvas, controls, renderer, resize } from './view.ts';
-import { step } from '../shared/sim.ts';
+import { snapshotDenizens, step } from '../shared/sim.ts';
 import { wireKeys } from '../shared/input.ts';
 import { wireModeUI } from '../shared/mode.ts';
 import { wireRegionDraw } from '../shared/regionDraw.ts';
 import { updateCrosshair, wireAim } from '../shared/aim.ts';
 import { wireBattleButton } from '../shared/ai.ts';
 import { chargeLevel } from '../shared/combat.ts';
+import { attachNetHost, connect, send } from '../shared/net.ts';
 
 const clock = new THREE.Clock();
+
+// This page is the ONE authoritative host (see shared/sim.ts's own header on
+// the simulate/render split) -- it never receives a game message, only sends
+// them, so its NetHost is a no-op except for logging the unexpected.
+attachNetHost({
+  onMessage(msg) { console.warn('table-topple-server: unexpected inbound game message', msg); },
+});
+connect('desktop');
 
 // Every input this page owns, claimed in one place. Previously each of these
 // modules attached its own listeners the moment it was imported, which made
@@ -72,6 +83,11 @@ function animate() {
   // Capped: a backgrounded tab stops rAF, and the first frame after refocusing
   // would otherwise carry the entire away-time as one step and teleport you.
   step(Math.min(clock.getDelta(), 0.1));
+  // Broadcast every tick, not throttled -- see shared/net.ts's own header on
+  // why that's the lean choice for now: it's one small JSON array over a LAN
+  // websocket, and a smarter send rate is a real optimization to make once
+  // there's a reason to (a slow phone, a real network), not before.
+  send({ type: 'denizenState', denizens: snapshotDenizens() });
   controls.update(); // required: damping is on
   updateCrosshair(chargeLevel());
   renderer.render(scene, camera);

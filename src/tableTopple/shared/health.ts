@@ -122,16 +122,30 @@ export function damage(d: Denizen, amount: number): boolean {
 const barPos = new THREE.Vector3();
 
 /**
- * Per-frame health work for one denizen: the floating bar, the death stagger,
- * and the fade. Returns true once the denizen is finished dying and should be
- * taken off the board.
+ * Advances the bar and death TIMERS by dt and decides whether this denizen is
+ * finished dying. Pure bookkeeping -- SIMULATION, not painting -- so only the
+ * authoritative host calls this (sim.ts's step()). Returns true once the
+ * denizen should be taken off the board.
  */
-export function updateVitals(d: Denizen, dt: number): boolean {
+export function advanceVitals(d: Denizen, dt: number): boolean {
+  if (d.barTimer > 0) d.barTimer -= dt;
+  if (d.dyingFor === null) return false;
+  d.dyingFor += dt;
+  return d.dyingFor - DEATH_SHAKE_TIME >= DEATH_FADE_TIME;
+}
+
+/**
+ * Paints the floating bar and the death shake/fade from a denizen's CURRENT
+ * hp/barTimer/dyingFor -- no dt, no decisions, purely a function of those
+ * fields as they stand right now. Shared by the authoritative step() loop
+ * (right after advanceVitals updates those fields) and a receiving client
+ * applying network state, same split as aim.ts's applyAimPose.
+ */
+export function renderVitals(d: Denizen): void {
   const height = SOLDIER_HEIGHT * d.scale;
 
   // ── The bar ───────────────────────────────────────────────────────────
   if (d.barTimer > 0) {
-    d.barTimer -= dt;
     const bar = d.bar;
     barPos.set(d.pos.x, height + BAR_CLEARANCE * d.scale, d.pos.y);
     bar.group.position.copy(barPos);
@@ -152,8 +166,7 @@ export function updateVitals(d: Denizen, dt: number): boolean {
   }
 
   // ── Dying ─────────────────────────────────────────────────────────────
-  if (d.dyingFor === null) return false;
-  d.dyingFor += dt;
+  if (d.dyingFor === null) return;
   const t = d.dyingFor;
 
   if (t < DEATH_SHAKE_TIME) {
@@ -164,21 +177,18 @@ export function updateVitals(d: Denizen, dt: number): boolean {
     const amp = 0.05 * d.scale * decay;
     d.character.group.position.x = d.pos.x + Math.sin(t * 70) * amp;
     d.character.group.position.z = d.pos.y + Math.sin(t * 53 + 1.7) * amp * 0.6;
-    return false;
+    return;
   }
 
   // Settle back onto the exact spot, then fade out from there.
   d.character.group.position.x = d.pos.x;
   d.character.group.position.z = d.pos.y;
 
-  const fadeT = (t - DEATH_SHAKE_TIME) / DEATH_FADE_TIME;
-  if (fadeT >= 1) return true;
-
+  const fadeT = Math.min(1, (t - DEATH_SHAKE_TIME) / DEATH_FADE_TIME);
   setOpacity(d.character.group, 1 - fadeT);
   // Sink very slightly as it goes, so it reads as collapsing rather than as a
   // texture dissolving in place.
   d.character.group.position.y = -0.1 * fadeT * d.scale;
-  return false;
 }
 
 const applied = new Set<THREE.Material>();

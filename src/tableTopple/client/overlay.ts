@@ -1,6 +1,8 @@
 import * as THREE from 'three';
 import { camera, scene } from '../shared/scene.ts';
-import { step } from '../shared/sim.ts';
+import { renderWorld, writeDenizenSnapshot } from '../shared/sim.ts';
+import { updateAttackVisuals } from '../shared/combat.ts';
+import type { DenizenStateEntry } from '../shared/protocol.ts';
 import { BOARD_SIZE } from '../shared/constants.ts';
 import { CELL_PITCH, board } from '../shared/floorPattern.ts';
 import { arCanvas } from './dom.ts';
@@ -129,17 +131,50 @@ export function syncOverlayRendererSize(cw: number, ch: number) {
 }
 
 /**
- * One frame: advance the world, then draw it.
+ * The latest `denizenState` message, held as a mailbox rather than applied
+ * the instant it arrives -- see receiveDenizenState's own comment.
+ */
+let pendingSnapshot: readonly DenizenStateEntry[] | null = null;
+
+/**
+ * Hands this page a fresh `denizenState` snapshot -- client/main.ts's NetHost
+ * calls this the instant a message arrives. Only STORES it; writing it into
+ * `denizens` happens in renderOverlay below, on the display loop's own clock.
+ * The alternative -- writing straight in here -- would mean a health bar's
+ * camera-facing billboard only refreshing on a network tick instead of every
+ * rAF frame the AR camera itself moves (see renderOverlay).
+ */
+export function receiveDenizenState(entries: readonly DenizenStateEntry[]) {
+  pendingSnapshot = entries;
+}
+
+/**
+ * One frame: apply whatever's arrived from the authoritative host, render
+ * every denizen off it, then draw the scene.
  *
- * Advancing the world happens even with no fix, and only the DRAW is skipped.
- * That is deliberate: the simulation is the shared world, and pausing it
- * whenever the camera loses the board would make the game's state a function of
- * how steady someone's hand is. A lost decode should cost you the picture, not
- * the match.
+ * This page never simulates -- there is no step() here, deliberately (see
+ * shared/sim.ts's own header on the split). Pending state is written in
+ * unconditionally, but the actual paint (renderWorld) happens even on a
+ * frame with nothing new, off whatever `denizens` already holds: the render
+ * clock and the network clock are different rates, and a lost/late message
+ * should cost staleness, not a frozen scene.
  *
- * This page is CPU/GPU bound by continuous pose recovery, so the cost matters --
- * but `step` is the cheap half, and the renderer.clear() path below skips the
- * expensive one.
+ * updateAttackVisuals is called here for the same reason renderWorld is:
+ * an arrow or a blast wedge spawned by this page's own spawnArrowFx/
+ * spawnBlastFx (client/main.ts's attackFx handler) lives in combat.ts's
+ * arrows/blasts arrays, and NOTHING else on this page ever advances or
+ * removes them -- step()'s updateCombat, which does that on the desktop, is
+ * never called here. Skipping this call is exactly how a blast's wedge
+ * used to sit at full opacity forever on a phone while fading correctly on
+ * the desktop.
+ *
+ * Only the DRAW is skipped with no pose fix, not the render pass above it --
+ * the world's presentation state has to stay current even while the camera
+ * doesn't know where it is, or the picture jumps the instant the fix returns.
+ *
+ * This page is CPU/GPU bound by continuous pose recovery, so the cost matters
+ * -- but rendering the roster is the cheap half, and the renderer.clear()
+ * path below skips the expensive one.
  *
  * `dt` comes from the caller rather than a clock of this module's own, because
  * the caller is the one that knows how long the frame took and already caps it
@@ -147,7 +182,9 @@ export function syncOverlayRendererSize(cw: number, ch: number) {
  * carry the whole away-time in one step and teleport everybody).
  */
 export function renderOverlay(dt: number) {
-  step(dt);
+  if (pendingSnapshot) { writeDenizenSnapshot(pendingSnapshot); pendingSnapshot = null; }
+  renderWorld(dt);
+  updateAttackVisuals(dt);
   if (!hasPose) { renderer.clear(); return; }
   renderer.render(scene, camera);
 }

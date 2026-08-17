@@ -37,18 +37,43 @@
 // no IMU on this page yet, deliberately, because the A/B that judges it needs a
 // working vision-only baseline to be judged against, and this is that baseline.
 //
-// ── NO NETWORK, AND NOT BY OVERSIGHT ─────────────────────────────────────
+// ── NETWORKED, BUT ONE-DIRECTIONAL ────────────────────────────────────────
 //
-// No websocket, no relay, no game-state sync. Pose never leaves the device that
-// computed it (a settled decision), and multiplayer state is a subsystem that
-// does not exist yet. One phone, one board, one local world.
+// This page is a PURE RECEIVER of table-topple-server.html's game state --
+// see shared/sim.ts's own header on the simulate/render split this depends
+// on. It never runs step(), never touches AI or physics, and has no opinion
+// about who's winning; it only paints whatever the last `denizenState`/
+// `attackFx` message said (see overlay.ts's receiveDenizenState and this
+// file's onMessage below).
+//
+// POSE still never leaves this device -- that half of the original "no
+// network" decision stands. What changed is game state, which now flows the
+// other way: down from the desktop, never up from here.
 
 import * as THREE from 'three';
 import type { PoseResult } from '../../pose/pose.ts';
 import { drawViewfinder, frameDims, grabGray, hasLiveFrame, startCamera } from './camera.ts';
 import { chromeToggleBtn, statusEl } from './dom.ts';
-import { fitBoardToPattern, renderOverlay, syncOverlayRendererSize, updateOverlayCamera } from './overlay.ts';
+import { fitBoardToPattern, receiveDenizenState, renderOverlay, syncOverlayRendererSize, updateOverlayCamera } from './overlay.ts';
 import { initPose, isPoseReady, recoverPose, toCameraPose } from './pose.ts';
+import { spawnArrowFx, spawnBlastFx } from '../shared/combat.ts';
+import { attachNetHost, connect } from '../shared/net.ts';
+
+// This page never sends a game message (see the header above) -- only
+// receives. denizenState is handed to overlay.ts's mailbox; attackFx is a
+// one-shot, so it is applied the instant it arrives rather than held.
+attachNetHost({
+  onMessage(msg) {
+    if (msg.type === 'denizenState') {
+      receiveDenizenState(msg.denizens);
+    } else if (msg.kind === 'arrow') {
+      spawnArrowFx(msg.origin.x, msg.origin.y, msg.origin.z, msg.target.x, msg.target.y, msg.target.z, msg.speed, msg.team);
+    } else {
+      spawnBlastFx(msg.origin.x, msg.origin.y, msg.target.x, msg.target.y, msg.range, msg.halfAngle);
+    }
+  },
+});
+connect('phone');
 
 // ── The status line ──────────────────────────────────────────────────────
 //

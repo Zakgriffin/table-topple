@@ -209,7 +209,6 @@ const hand = new THREE.Vector3();
 export function updateAim(d: Denizen, dt: number) {
   if (!d.weapon) return;
   const def = WEAPONS[d.weapon];
-  const arm = holdingArm(d);
 
   // Driven entirely by aimTarget, which the human sets from the reticle and a
   // brain sets from whoever it's fighting. There is deliberately no `d === you`
@@ -247,7 +246,20 @@ export function updateAim(d: Denizen, dt: number) {
     d.aim.pitch = THREE.MathUtils.damp(d.aim.pitch, def.readyAim[0], RECOVER_RATE, dt);
     d.aim.yaw = THREE.MathUtils.damp(d.aim.yaw, def.readyAim[1], RECOVER_RATE, dt);
   }
+}
 
+/**
+ * Paints the weapon arm from a denizen's CURRENT aim/swing fields -- no
+ * damping, no target, no decisions, just numbers going onto a transform.
+ * Split out of updateAim so it is the ONE place that turns aim.pitch/yaw and
+ * swingFor into a rotation, called both by the authoritative host (right
+ * after updateAim computes those numbers, see sim.ts's renderDenizen) and by
+ * a receiving client applying network state -- the two can't visually drift
+ * apart from having separate implementations of "what a pose means".
+ */
+export function applyAimPose(d: Denizen) {
+  if (!d.weapon) return;
+  const arm = holdingArm(d);
   arm.rotation.x = d.aim.pitch;
   arm.rotation.z = d.aim.yaw;
 

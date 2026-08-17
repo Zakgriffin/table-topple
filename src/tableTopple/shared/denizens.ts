@@ -20,6 +20,11 @@ import {
 // turn, and hold weapons through exactly the same code. Rank only sets how big
 // it is, how deep its color runs, and whether it wears a crown (ranks.ts).
 export interface Denizen {
+  /** Stable across this denizen's whole life, unlike its index in `denizens`:
+   *  that array is spliced on death (see sim.ts's retire step), so an index
+   *  would silently start naming someone else mid-battle. This is what a
+   *  network message names a denizen by. */
+  id: number;
   character: Character;
   rank: Rank;
   /** Which court it belongs to. Team color, before the rank's shading. */
@@ -77,6 +82,11 @@ export interface Denizen {
  *  inline so health.ts stays the only file that knows what they mean. */
 export interface Denizen extends Vitals {}
 
+/** Assigned in build order and never reused, so an id always names the same
+ *  denizen for the life of the page even once others have died and been
+ *  spliced out of `denizens`. */
+let nextId = 0;
+
 function makeDenizen(team: number, rank: Rank, x: number, z: number, facing: number): Denizen {
   const def = RANKS[rank];
   // Rank deepens the team color rather than replacing it: same hue, richer.
@@ -89,6 +99,7 @@ function makeDenizen(team: number, rank: Rank, x: number, z: number, facing: num
   if (def.crown) addCrown(character);
 
   const denizen: Denizen = {
+    id: nextId++,
     character, rank, team, scale: def.scale,
     pos: new THREE.Vector2(x, z), facing,
     walkPhase: 0, walkBlend: 0, velocity: new THREE.Vector2(), moveTarget: null,

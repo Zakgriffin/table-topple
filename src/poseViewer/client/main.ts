@@ -3,8 +3,11 @@
 // with a shutter button that sends the current frame to any open Pose Viewer
 // Server tab over the dev bridge relay -- see scripts/dev-bridge/server.js's
 // 'realCapture' handling and server/pipeline/capture.ts's ingestRealCapture.
-// Doesn't run any of the actual analysis pipeline itself; this page's only
-// job is getting a real photo off the phone and onto the laptop.
+//
+// It runs the analysis pipeline itself too, when asked: "compute pose on this
+// device" reconstructs locally through `src/pose` and sends only the recovered
+// pose, and the AR overlay draws that pose back over the viewfinder. Which of
+// the two paths a frame takes is the computeOnDevice switch, and nothing else.
 //
 // Two capture modes: single (tap the shutter each time, as before) and
 // video (streams frames automatically). Pose Viewer's own reconstruction
@@ -16,11 +19,13 @@
 //
 // ── WHAT IS LEFT IN THIS FILE ────────────────────────────────────────────
 //
-// The page's own subjects, and the boot sequence that starts them. Six
+// The page's own subjects, and the boot sequence that starts them. Eight
 // modules carry the rest, each importable without this one:
 //
 //   dom.ts          every element, resolved once. the LEAF -- imports nothing
 //   camera.ts       the stream, its controls, and the two capture canvases
+//   pose.ts         the WebGPU device, the PoseContext, and one reconstruction
+//   overlay.ts      the cubes, drawn over the feed from a recovered pose
 //   imu.ts          recording, judging and correcting with the IMU
 //   relay.ts        one websocket, and everything that gates a send on it
 //   poseRecords.ts  the pose ring, and whether a recording is even valid
@@ -41,31 +46,28 @@
 // REGISTERS it, at the END of this file, where every binding those closures
 // read is already initialized. Keep that direction.
 
-import { toGrayscale } from '../../pose/grayscale.ts';
+import { toGrayscaleF32 } from '../../pose/grayscale.ts';
+import type { PoseResult } from '../../pose/pose.ts';
 import { config, fetchConfigFile } from '../shared/config.ts';
 import { globalState } from '../shared/state.ts';
-// Only the data-side rebuild is needed here: this page draws the viewfinder and
-// nothing at board scale. THE AR OVERLAY LEFT -- it is Table Topple's, and it
-// now lives in src/tableTopple/client/. See this file's header.
+// Both halves are needed again. The data-side rebuild keeps the decode board in
+// step with the desktop's size slider; the AR overlay is back and draws at board
+// scale, so it has to be rebuilt alongside -- see rebuildCubes.
 import { rebuildFloorPatternData } from '../shared/floorPattern.ts';
-import type { PositionDecodeResult, RecoveredAxes } from '../shared/camera/model.ts';
 import type { PipelineSettings } from '../shared/harness/input.ts';
 
-// ── THE ON-DEVICE POSE PATH IS DARK ──────────────────────────────────────
+// ── THE ON-DEVICE POSE PATH IS LIVE AGAIN ────────────────────────────────
 //
-// This page ran the WHOLE pipeline locally (device-compute mode): gradient ->
-// LSD -> votes -> fit -> period/phase -> decode, via computePoseFromCapture, and
-// sent only the recovered pose over the wire. the old pipeline is deleted and this page
-// is not yet on src/pose, so every capture now reports a FAILED DECODE.
+// This page ran the whole reconstruction locally, lost it when the old pipeline
+// was deleted, and spent a phase reporting a failed decode on every capture. It
+// is now on `src/pose`, through client/pose.ts -- which owns the WebGPU device
+// and the per-resolution PoseContext, because that lifecycle is genuinely
+// different from the desktop's (the resolution here moves, and the settings
+// arrive over the wire).
 //
-// That is a real behaviour change and it is deliberate: a failed decode is a
-// state this page already handles everywhere (`ok: false`, no IMU anchor, the
-// overlay hides, intrinsics still publish), so the page runs end to end instead
-// of being half-deleted. What it does NOT do is recover a pose.
-//
-// Wiring pose in here is its own job: the phone needs a WebGPU device and a
-// per-resolution PoseContext, which is a different lifecycle from the desktop's.
-type LocalPose = { recoveredAxes: RecoveredAxes | null; positionDecode: PositionDecodeResult | null };
+// What that unlocks, in order: a real `poseResult` for the desktop's
+// ingestRemotePose, a real IMU anchor (the A/B has had nothing to anchor to),
+// and the AR overlay below.
 
 import {
   currentFacing, drawCurrentFrameToCanvas, drawFullResFrameToSendCanvas, hasLiveFrame,
@@ -76,6 +78,13 @@ import {
   refreshImuFrameContext, rotationVectorBetween, setUpCamera, useImuCorrection,
 } from './imu.ts';
 import { evalInScope } from './inspect.ts';
+import {
+  isOverlayEnabled, rebuildCubes, renderOverlay, setOverlayEnabled,
+  syncOverlayRendererSize, updateOverlayCamera,
+} from './overlay.ts';
+import {
+  type LocalPose, ensurePoseContext, poseContextDims, recoverPose, toOverlayCamera,
+} from './pose.ts';
 import { noteSettingsSync, recordPose, settingsSyncedAt, syncedBoardSize } from './poseRecords.ts';
 import {
   attachRelayHost, connectRelay, isRelayOpen, sendBinary, sendGateStatus, sendJson, setRelayStatus,
@@ -83,13 +92,13 @@ import {
 import { packPoseResultWithImage } from '../shared/devBridge/poseResultWire.ts';
 import { nowMs } from '../../clock.ts';
 import {
-  camStatus, chromeToggleBtn, computeOnDeviceCheckbox, imuCheckbox, imuCorrectionCheckbox,
-  modeSingleBtn, modeVideoBtn, poseReadoutEl, reloadConfigBtn, reloadConfigStatus,
-  sendCapturedImageCheckbox, sendDebugInfoCheckbox, shutterBtn,
+  arOverlayCheckbox, camStatus, captureCanvas, computeOnDeviceCheckbox, imuCheckbox,
+  imuCorrectionCheckbox, modeSingleBtn, modeVideoBtn, panel, panelToggleBtn, poseReadoutEl,
+  reloadConfigBtn, reloadConfigStatus, sendCapturedImageCheckbox, sendDebugInfoCheckbox, shutterBtn,
 } from './dom.ts';
 
 // pose-viewer-client.html carries no `checked` attributes -- config.phone owns
-// these five defaults, the same way config.camera owns every desktop control
+// these six defaults, the same way config.camera owns every desktop control
 // (see poseViewer/config.ts).
 //
 // Applying is a DISPATCH, not a plain assignment, so each box's own change
@@ -102,6 +111,7 @@ import {
 function applyPhoneConfig(phone: typeof config.phone, silent: boolean): void {
   for (const [box, value] of [
     [computeOnDeviceCheckbox, phone.computeOnDevice],
+    [arOverlayCheckbox, phone.arOverlay],
     [sendDebugInfoCheckbox, phone.sendDebugInfo],
     [sendCapturedImageCheckbox, phone.sendCapturedImage],
     [imuCheckbox, phone.imuEnabled],
@@ -111,6 +121,12 @@ function applyPhoneConfig(phone: typeof config.phone, silent: boolean): void {
     box.checked = value;
     if (changed && !silent) box.dispatchEvent(new Event('change'));
   }
+  // Not a checkbox, so it sits outside the dispatch loop rather than in it.
+  // Safe to call from here despite being declared further down this file:
+  // setPanelCollapsed is a hoisted FUNCTION DECLARATION and touches only
+  // imported DOM handles, never a `let` of this file's -- which is the exact
+  // distinction the temporal-dead-zone rule in this file's header turns on.
+  setPanelCollapsed(phone.panelCollapsed);
 }
 applyPhoneConfig(config.phone, true);
 
@@ -118,7 +134,7 @@ applyPhoneConfig(config.phone, true);
 // the desktop's load button this does NOT reload: a reload here drops the
 // camera stream and the websocket, and the desktop sees the reconnect as an
 // entirely new phone (a fresh captureId means a fresh camera tab). The surface
-// is five booleans that all already have working change handlers, so applying
+// is six booleans that all already have working change handlers, so applying
 // in place is both possible and honest here in a way it is not over there.
 //
 // Nothing to discard first, either: this page never writes the localStorage
@@ -136,26 +152,34 @@ reloadConfigBtn.addEventListener('click', async () => {
   }
 });
 
-// ── Hiding the page's own UI ─────────────────────────────────────────────
+// ── Collapsing the page's own UI ─────────────────────────────────────────
 //
-// One switch that takes every control off the screen, leaving the viewfinder
-// and nothing else -- see pose-viewer-client.html's
-// `body.chromeHidden` rule, which is where the list of what counts as chrome
-// lives. Kept there rather than as a set of element handles here so the list
-// sits next to the elements it names and cannot drift out of step with them.
+// One panel that slides off to the left, exactly the way the desktop's does
+// (server/ui/mode.ts's setPanelCollapsed -- same class, same adjacent toggle
+// riding along, same chevron flip). It replaces a `body.chromeHidden` rule that
+// hid seven separately-positioned pills by naming every id in a stylesheet: two
+// lists in two files that had to be kept in step, and a set of hand-computed
+// `bottom` offsets that had to be re-derived every time a row was added.
 //
-// Purely presentational: nothing downstream reads this state, so hiding the
-// controls does not pause capture, pose recovery, or the relay. Note that it
-// takes the SHUTTER with it -- which is the intent (in video mode capture is
-// continuous, so a clean view is exactly what you want), but it does mean a
-// single-photo capture needs the controls brought back first.
-chromeToggleBtn.addEventListener('click', () => {
-  const hidden = document.body.classList.toggle('chromeHidden');
-  chromeToggleBtn.classList.toggle('active', hidden);
-  chromeToggleBtn.setAttribute('aria-pressed', String(hidden));
+// THE SHUTTER IS NOT IN THE PANEL, and that is the actual behaviour change. The
+// old switch took the shutter with it, so an unobstructed view and taking a
+// single photo were mutually exclusive -- you had to bring every control back to
+// tap one button. Now collapsing leaves the viewfinder, the AR overlay and the
+// shutter, which is the state this page is for.
+//
+// Purely presentational: nothing downstream reads it, so collapsing does not
+// pause capture, pose recovery, or the relay.
+function setPanelCollapsed(collapsed: boolean): void {
+  panel.classList.toggle('collapsed', collapsed);
+  panelToggleBtn.classList.toggle('collapsed', collapsed);
+  panelToggleBtn.textContent = collapsed ? '›' : '‹';
+  panelToggleBtn.setAttribute('aria-pressed', String(collapsed));
+}
+panelToggleBtn.addEventListener('click', () => {
+  setPanelCollapsed(!panel.classList.contains('collapsed'));
   // A focused button stays outlined over an otherwise-clean picture, and also
   // treats the next Enter/Space as another click.
-  chromeToggleBtn.blur();
+  panelToggleBtn.blur();
 });
 
 // ── On-device compute: settings mirror ──────────────────────────────────
@@ -206,6 +230,11 @@ function applySettingsSync(msg: any) {
         // is exactly how the far worse bug in poseRecords.ts stayed hidden.
         globalState.boardSize = incoming;
         rebuildFloorPatternData(incoming);
+        // The overlay's lattice is sized from the board's half-extents, so it
+        // has to follow. ensurePoseContext picks the board change up on its own
+        // (it keys on board identity as well as on the frame size) and rebuilds
+        // the PoseContext, whose buffers are sized from the board too.
+        rebuildCubes();
       }
     }
   }
@@ -274,15 +303,19 @@ modeSingleBtn.addEventListener('click', () => setCaptureMode('single'));
 modeVideoBtn.addEventListener('click', () => setCaptureMode('video'));
 
 // ── Compute pose on this device -- orthogonal to the single/video axis
-// above (see this session's on-device-pose-recovery plan): when on, the
-// phone runs the same pose-recovery math locally (pose/poseCompute.ts's
-// computePoseFromCapture) and sends only the recovered pose, no image
+// above: when on, the phone runs the reconstruction locally (client/pose.ts's
+// recoverPose, over `src/pose`) and sends only the recovered pose, no image
 // bytes. Still respects captureMode: single taps one compute+send cycle,
 // video runs devicePoseLoop continuously.
 let computeOnDevice = config.phone.computeOnDevice;
 function setComputeMode(onDevice: boolean) {
   computeOnDevice = onDevice;
   poseReadoutEl.classList.toggle('visible', onDevice);
+  // Nothing is drawable without a local pose, so turning compute OFF blanks the
+  // overlay immediately rather than leaving the last fix's cubes sitting over a
+  // feed that is no longer being reconstructed -- the same "a frozen overlay
+  // lies" rule overlay.ts applies to a failed decode, one level up.
+  if (!onDevice) updateOverlayCamera(null);
   // Switching modes doesn't clear the currently-shown pose -- it stays on
   // screen until the next update, exactly like switching captureMode doesn't
   // blank the video feed.
@@ -290,6 +323,21 @@ function setComputeMode(onDevice: boolean) {
   if (onDevice && captureMode === 'video') devicePoseLoop();
 }
 computeOnDeviceCheckbox.addEventListener('change', () => setComputeMode(computeOnDeviceCheckbox.checked));
+
+// ── The AR overlay ───────────────────────────────────────────────────────
+//
+// Its own switch, deliberately not folded into computeOnDevice even though it
+// can only draw when that is on. Two reasons, both practical: the overlay is
+// the expensive thing to look at and the cheap thing to switch off, and the
+// pose readout is worth keeping while the picture is unobstructed. The status
+// line says when one is on without the other, so "nothing is drawn" is never
+// unexplained -- see reportPoseStatus.
+arOverlayCheckbox.addEventListener('change', () => setOverlayEnabled(arOverlayCheckbox.checked));
+// Seeded from the config the same way computeOnDevice above is. applyPhoneConfig
+// ran with `silent` at boot -- deliberately, since these listeners did not exist
+// yet -- so the initial state has to be pushed here rather than relying on a
+// change event that was never dispatched.
+setOverlayEnabled(config.phone.arOverlay);
 
 // Debug-only extras riding on top of a device-compute poseResult message --
 // both OFF by default and independently toggleable (see this session's chat:
@@ -430,6 +478,52 @@ function captureAndSendFrame() {
 // visible captureCanvas, which is now downscaled to screen resolution for
 // the live preview -- pose recovery needs the actual full-resolution
 // capture, same as the desktop-compute send path.
+// Reused across reconstructions rather than allocated per frame: at 480x640 a
+// fresh Float32Array is 1.2 MB, and in video mode this runs continuously. Only
+// reallocated when the resolution actually changes -- toGrayscaleF32 throws on a
+// wrong-sized buffer rather than silently converting part of an image, so a
+// missed resize fails loudly instead of looking like a decode problem.
+let grayBuf: Float32Array | null = null;
+function grayScratch(w: number, h: number): Float32Array {
+  if (!grayBuf || grayBuf.length !== w * h) grayBuf = new Float32Array(w * h);
+  return grayBuf;
+}
+
+// Intrinsics from the most recent fix, held so the IMU can drive the overlay
+// camera between reconstructions without them. Only position and orientation are
+// predicted; aspect and FOV are properties of the lens, not of motion.
+let lastArIntrinsics: { aspect: number; fovDeg: number } | null = null;
+
+// ── The local readout ────────────────────────────────────────────────────
+//
+// Local-only, never sent over the network: the whole point of the compute
+// toggle is seeing this phone's own behaviour, and timing is deliberately
+// excluded from the wire payload.
+//
+// STILL NO MILLISECONDS HERE, and now for a better reason than "there is
+// nothing to time". There is exactly one way to record a duration in this
+// project and it is the span client/pose.ts opens around `runPose` -- a second
+// stopwatch printing its own number here would be a parallel instrument
+// disagreeing with the profiler about the same quantity. What this line reports
+// is what the profiler cannot: whether THIS frame found the board, and how
+// confidently.
+//
+// It also names the two states that otherwise look identical on a phone with no
+// console -- a pose the overlay is not drawing because the overlay is off, and a
+// pose that does not exist.
+function reportPoseStatus(result: PoseResult | null, pd: LocalPose['positionDecode']): void {
+  const { w, h } = poseContextDims();
+  const where = `${w}x${h}`;
+  if (!result) { poseReadoutEl.textContent = `${where} — pipeline did not run`; return; }
+  if (!pd) {
+    poseReadoutEl.textContent = `${where} — no board in view  [status 0x${result.status.toString(16)}]`;
+    return;
+  }
+  const overlay = isOverlayEnabled() ? '' : '  (overlay off)';
+  poseReadoutEl.textContent =
+    `${where} — fix at cell (${pd.row}, ${pd.col})  consistency ${(pd.consistency * 100).toFixed(0)}%${overlay}`;
+}
+
 let devicePoseComputing = false;
 async function captureComputeAndSendPose() {
   if (!hasLiveFrame()) return;
@@ -464,34 +558,38 @@ async function captureComputeAndSendPose() {
     // on-device Drow/Dcol axis swap and positionDecode failures relative to
     // the same image replayed through the desktop pipeline.
     const topDown = sendCtx.getImageData(0, 0, cw, ch).data;
-    const grayTopDown = toGrayscale(topDown, cw, ch);
+    // Straight to f32, into a buffer this page owns. The f64 `toGrayscale` plus
+    // a `Float32Array.from` narrowing would cost an extra full-image pass and an
+    // extra full-image allocation EVERY frame, on a phone, competing with the
+    // very pipeline the span below is measuring -- see grayscale.ts's own note,
+    // which exists for exactly this caller.
+    const grayTopDown = toGrayscaleF32(topDown, cw, ch, grayScratch(cw, ch));
 
-    // The twelve-null-field state literal that used to be built here is gone:
-    // the pipeline reads exactly these two fields and returns everything else.
-    const poseInput = { aspect: cw / ch, settings: cameraSettings };
-    // ── TODO(phone-on-pose): THE SPAN GOES HERE ─────────────────────────
-    //
-    // This is where a profiler span belongs. There is not one yet, and that is
-    // deliberate: there is NOTHING HERE TO TIME. The pose
-    // computation went with the old pipeline, so what stood between the two
-    // `performance.now()` calls that used to be here was `void grayTopDown;`
-    // and an object literal -- the stopwatch reported ~0ms every frame, and a
-    // span would have reported the same 0ms as a row on a flamechart, which is
-    // a more confident way of saying something false.
-    //
-    // So the stopwatch is deleted rather than converted, and `computeMs` is
-    // gone from PoseRecord with it. **When this page is wired onto `src/pose`,
-    // open a span around `runPose` here** -- and note that pose also hands
-    // back `frame.gpu`, so the phone gets the same per-pass GPU breakdown the
-    // desktop has, through `profiling/clocks.ts`'s `ingestGpuFrame`.
-    // Both inputs the wiring needs are assembled and then discarded, the same
-    // way `grayTopDown` has been since the pose path went dark. `poseInput` lost
-    // its last reader when the AR overlay left for Table Topple -- it fed the
-    // overlay's intrinsics -- but it is the shape `runPose` takes, so it is kept
-    // built rather than deleted and re-derived by whoever wires this page.
-    void grayTopDown; void poseInput;
-    const pose: LocalPose = { recoveredAxes: null, positionDecode: null };
+    // Sized from (cw,ch), and this page's resolution genuinely moves -- so this
+    // is checked every capture rather than once at boot. A no-op unless the
+    // camera settled somewhere new or the board was rebuilt under us.
+    if (!await ensurePoseContext(cw, ch)) {
+      poseReadoutEl.textContent = 'no WebGPU on this browser — cannot compute pose on device';
+      updateOverlayCamera(null);
+      return;
+    }
+    // TOP-DOWN, with NO flip -- getImageData is natively top-down and that is
+    // what the pipeline validates against. The single flip that used to sit here
+    // was confirmed live to be the root cause of an on-device Drow/Dcol axis
+    // swap; see the comment above this capture and client/pose.ts's own.
+    const recovered = await recoverPose(grayTopDown, cw, ch, cameraSettings);
+    const pose: LocalPose = recovered?.local ?? { recoveredAxes: null, positionDecode: null };
     const pd = pose.positionDecode;
+
+    // The overlay's camera, once per reconstruction. Between fixes the render
+    // loop re-derives it from the IMU when correction is on -- which is where
+    // that A/B is actually visible, and it is why the intrinsics are held: only
+    // position and orientation are predicted, aspect and FOV are properties of
+    // the lens rather than of motion.
+    const arPose = toOverlayCamera(pose, cw / ch, cameraSettings);
+    if (arPose) lastArIntrinsics = { aspect: arPose.aspect, fovDeg: arPose.fovDeg };
+    updateOverlayCamera(arPose);
+    reportPoseStatus(recovered?.result ?? null, pd);
     // `synced` and `boardSize` are filled in by recordPose itself -- see
     // poseRecords.ts on why a record cannot be allowed to disagree with the
     // module that tracks them.
@@ -586,19 +684,6 @@ async function captureComputeAndSendPose() {
       }
     }
 
-    // Local-only -- never sent over the network (the whole point of this
-    // toggle is seeing the phone's TRUE compute speed, and timing is
-    // deliberately excluded from the wire payload for now, see this
-    // session's on-device-pose-recovery plan).
-    // NO MILLISECONDS HERE, and that is the honest reading rather than a
-    // regression. This used to print `pose <totalMs>ms (<fps>fps)` off the
-    // stopwatch deleted above -- which, once the pose computation went with
-    // the old pipeline, was timing an empty statement and reporting ~0ms at an
-    // implausible frame rate. A readout that says nothing beats one that says
-    // the phone reconstructs instantly.
-    //
-    // The number comes back with the pipeline: see the TODO at the capture site.
-    poseReadoutEl.textContent = pd ? 'pose recovered' : 'no pose pipeline on device yet  [no fix]';
   } finally {
     devicePoseComputing = false;
   }
@@ -657,6 +742,52 @@ function videoLoop() {
   sendsAttempted++;
   captureAndSendFrame();
 }
+
+// ── The AR render loop ───────────────────────────────────────────────────
+//
+// SEPARATE from videoLoop on purpose, and not merely for tidiness: the two are
+// bound by different things. videoLoop paces sends and redraws the viewfinder;
+// this one draws the overlay, and its whole reason to run at screen rate rather
+// than at reconstruction rate is IMU prediction.
+//
+// ── WHY THE POSE IS RE-DERIVED HERE, EVERY FRAME ─────────────────────────
+//
+// updateOverlayCamera is otherwise called once per reconstruction -- so the
+// cubes sit frozen for a whole fix interval and then jump. Predicting at RENDER
+// rate is the entire visible point of IMU correction: 60fps of motion between
+// fixes instead of a handful of steps per second. Without this the toggle would
+// change almost nothing a person could see, even with the prediction working
+// perfectly. This is the A/B, and it is the thing that has had nothing to
+// measure since the phone went poseless.
+//
+// predictAt returning null means the coast limit was passed -- the overlay is
+// HIDDEN rather than frozen at a stale pose, because a frozen overlay silently
+// claims to still know where the camera is. Disappearing is the honest failure,
+// and it is the same rule overlay.ts applies to a failed decode.
+function arRenderLoop() {
+  requestAnimationFrame(arRenderLoop);
+  // Cheap early-out while the overlay is off: this page is already CPU/GPU
+  // constrained by continuous reconstruction, and there is no reason to pay for
+  // a prediction or a draw call nobody can see. renderOverlay checks the same
+  // flag itself -- belt and braces, since the prediction above it is the
+  // expensive half.
+  if (!isOverlayEnabled()) return;
+  // Mirrors the viewfinder's own intrinsic size, which is what keeps the two
+  // canvases stacked exactly. Read from the visible capture canvas rather than
+  // from the send canvas: this is about what is on SCREEN.
+  syncOverlayRendererSize(captureCanvas.width, captureCanvas.height);
+  if (useImuCorrection && lastArIntrinsics) {
+    const c = imuTracker.predictAt(nowMs());
+    updateOverlayCamera(c ? { camPos: c.camPos, camQuat: c.camQuat, ...lastArIntrinsics } : null);
+  }
+  renderOverlay();
+}
+// SCHEDULED, not called directly -- this loop reads `useImuCorrection` and
+// `imuTracker`, which are imported bindings, but also `lastArIntrinsics`, which
+// is declared above. Deferring to the first frame keeps this file's one
+// structural rule intact (nothing runs before the bindings it reads are
+// initialized) and costs one frame nobody can see: the overlay is off at load.
+requestAnimationFrame(arRenderLoop);
 
 // ── Boot, and handing each module what it cannot know ────────────────────
 //

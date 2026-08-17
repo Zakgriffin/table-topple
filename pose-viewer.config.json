@@ -75,7 +75,9 @@
     }
   },
   "phone": {
+    "panelCollapsed": false,
     "computeOnDevice": false,
+    "arOverlay": false,
     "sendDebugInfo": false,
     "sendCapturedImage": false,
     "imuEnabled": false,

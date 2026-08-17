@@ -12,6 +12,10 @@
 export const video = document.getElementById('v') as HTMLVideoElement;
 export const captureCanvas = document.getElementById('captureCanvas') as HTMLCanvasElement;
 export const captureCtx = captureCanvas.getContext('2d')!;
+// The AR overlay's own transparent canvas, stacked directly over captureCanvas
+// and carrying the identical letterbox fit -- see client/overlay.ts, which owns
+// the THREE renderer that draws into it.
+export const arCanvas = document.getElementById('arCanvas') as HTMLCanvasElement;
 export const camStatus = document.getElementById('camStatus')!;
 export const relayStatus = document.getElementById('relayStatus')!;
 
@@ -31,6 +35,7 @@ export const modeSingleBtn = document.getElementById('modeSingleBtn') as HTMLBut
 export const modeVideoBtn = document.getElementById('modeVideoBtn') as HTMLButtonElement;
 
 export const computeOnDeviceCheckbox = document.getElementById('computeOnDevice') as HTMLInputElement;
+export const arOverlayCheckbox = document.getElementById('arOverlayEnabled') as HTMLInputElement;
 export const sendDebugInfoCheckbox = document.getElementById('sendDebugInfo') as HTMLInputElement;
 export const sendCapturedImageCheckbox = document.getElementById('sendCapturedImage') as HTMLInputElement;
 export const poseReadoutEl = document.getElementById('poseReadout')!;
@@ -45,4 +50,10 @@ export const imuReadoutEl = document.getElementById('imuReadout')!;
 export const reloadConfigBtn = document.getElementById('reloadConfigBtn') as HTMLButtonElement;
 export const reloadConfigStatus = document.getElementById('reloadConfigStatus') as HTMLDivElement;
 
-export const chromeToggleBtn = document.getElementById('chromeToggle') as HTMLButtonElement;
+// The one collapsible panel and the toggle that parks beside it -- the same
+// mechanism and the same class name (`collapsed`) pose-viewer-server.html's own
+// #panel uses, so the two pages' UI reads as one project. Replaces the
+// `chromeToggle` button and the `body.chromeHidden` rule that used to hide seven
+// separately-positioned pills by listing every id by hand.
+export const panel = document.getElementById('panel') as HTMLDivElement;
+export const panelToggleBtn = document.getElementById('panelToggle') as HTMLButtonElement;

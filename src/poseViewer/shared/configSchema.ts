@@ -81,7 +81,16 @@ export const GlobalSettingsSchema = Type.Object({
 // -- these are the switches that only mean anything on the device: whether it
 // computes its own pose, what it ships back, and the IMU.
 export const PhoneSettingsSchema = Type.Object({
+  // The PHONE's own control panel, not the desktop's. `global.panelCollapsed`
+  // already exists and is pose-viewer-server.html's; sharing it would mean
+  // collapsing a panel on the laptop collapsed the one on the phone, which is
+  // the kind of cross-talk the two pages have no reason to have.
+  panelCollapsed: Type.Boolean(),
   computeOnDevice: Type.Boolean(),
+  // Whether the cube overlay is drawn over the viewfinder. Independent of
+  // computeOnDevice even though it needs a local pose to draw anything -- see
+  // pose-viewer-client.html's #arToggle on why the two are separate switches.
+  arOverlay: Type.Boolean(),
   sendDebugInfo: Type.Boolean(),
   sendCapturedImage: Type.Boolean(),
   imuEnabled: Type.Boolean(),

@@ -59,6 +59,9 @@
 //   scripts/dev-bridge/feval.sh --phone "imu.imuStats"
 //   scripts/dev-bridge/feval.sh --phone "poses.dumpRecording()"
 //   scripts/dev-bridge/feval.sh --phone "relay.sendGateStatus()"
+//   scripts/dev-bridge/feval.sh --phone "posePipeline.isPoseReady()"
+//   scripts/dev-bridge/feval.sh --phone "posePipeline.poseContextDims()"
+//   scripts/dev-bridge/feval.sh --phone "overlay.isOverlayEnabled()"
 //   scripts/dev-bridge/feval.sh --phone "Object.keys(inspectScope)"
 //
 // The qualified form is the point: `camera.currentStream` cannot quietly start
@@ -84,6 +87,14 @@
 
 import * as camera from './camera.ts';
 import * as imu from './imu.ts';
+import * as overlay from './overlay.ts';
+// `posePipeline`, NOT `pose` -- `poses` (poseRecords.ts) is already on this
+// scope, and two namespaces differing by one trailing letter is a mistake
+// waiting to be typed into a terminal at the far end of a websocket, where it
+// comes back as a confusing result rather than an error. The recipes below spell
+// `poses.` and have been written down elsewhere, so the NEW name is the one that
+// moves out of the way.
+import * as posePipeline from './pose.ts';
 import * as poses from './poseRecords.ts';
 import * as relay from './relay.ts';
 
@@ -93,7 +104,7 @@ import * as relay from './relay.ts';
  * `Object.keys(inspectScope)` is a live answer to "what can I ask this page",
  * rather than a list in a comment that can rot.
  */
-export const inspectScope = { camera, imu, poses, relay };
+export const inspectScope = { camera, imu, overlay, posePipeline, poses, relay };
 
 /**
  * Runs one dev-bridge expression. Deliberately synchronous and deliberately

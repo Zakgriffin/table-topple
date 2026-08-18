@@ -79,7 +79,17 @@ export interface Character {
   rightArm: THREE.Mesh;
   leftLeg: THREE.Mesh;
   rightLeg: THREE.Mesh;
+  /** Both eyes, for idle.ts's own blink -- a scale.y pinch reads as a closed
+   *  lid without a second geometry, since eyeGeo is small and flat-fronted
+   *  already. */
+  eyes: [THREE.Mesh, THREE.Mesh];
 }
+
+/** Each mesh's own original colour, keyed by the mesh itself -- populated at
+ *  the end of buildCharacter, read back by setSpent below so graying a
+ *  character out is reversible without recomputing a colour it never has to
+ *  remember on its own. */
+const baseColor = new WeakMap<THREE.Mesh, THREE.Color>();
 
 /**
  * Builds a character in the given color. It faces +Z, matching the convention
@@ -109,11 +119,13 @@ export function buildCharacter(color: number): Character {
   // Eyes: the only thing that says which way the character is facing. Sunk a
   // hair into the head's +Z face (0.5U deep box, placed at half the head plus
   // a sliver) rather than sitting proud of it, so they can't z-fight.
-  for (const sx of [-1, 1]) {
+  const buildEye = (sx: number) => {
     const eye = new THREE.Mesh(eyeGeo, eyeMat);
     eye.position.set(sx * 2 * U, 1 * U, HEAD / 2 - 0.1 * U);
     head.add(eye);
-  }
+    return eye;
+  };
+  const eyes: [THREE.Mesh, THREE.Mesh] = [buildEye(-1), buildEye(1)];
 
   const body = new THREE.Mesh(bodyGeo, bodyMat);
   body.position.y = BODY_Y;
@@ -138,7 +150,48 @@ export function buildCharacter(color: number): Character {
   const leftLeg = leg(1), rightLeg = leg(-1);
 
   group.add(head, body, leftArm, rightArm, leftLeg, rightLeg);
-  return { group, head, body, leftArm, rightArm, leftLeg, rightLeg };
+
+  // Remembered so setSpent (below) can gray a character out and restore its
+  // exact original shade later, rather than needing to reverse a lerp.
+  baseColor.set(head, headMat.color.clone());
+  baseColor.set(body, bodyMat.color.clone());
+  baseColor.set(leftArm, limbMat.color.clone());
+
+  return { group, head, body, leftArm, rightArm, leftLeg, rightLeg, eyes };
+}
+
+/** Same emissive-boost look blocks.ts's sceneryHighlightMaterial gives
+ *  scenery, but applied IN PLACE rather than swapped: every material
+ *  buildCharacter() makes is unique to this one character (bodyMat/headMat
+ *  are never shared, and limbMat is shared only across this character's own
+ *  four limbs), so mutating it can't bleed into anyone else the way editing
+ *  the scenery's single shared material would. Touching head/body/leftArm
+ *  covers all six meshes: leftArm's material IS rightArm's/leftLeg's/
+ *  rightLeg's, the same instance, from buildCharacter's own limbMat closure. */
+const HIGHLIGHT_EMISSIVE = 0xffffff;
+const HIGHLIGHT_INTENSITY = 0.35;
+export function setHighlighted(c: Character, on: boolean) {
+  for (const mesh of [c.head, c.body, c.leftArm]) {
+    const mat = mesh.material as THREE.MeshStandardMaterial;
+    mat.emissive.setHex(on ? HIGHLIGHT_EMISSIVE : 0x000000);
+    mat.emissiveIntensity = on ? HIGHLIGHT_INTENSITY : 0;
+  }
+}
+
+/** Marks a character as having spent its one act this turn (turns.ts) --
+ *  desaturated toward grey rather than boosted like setHighlighted, so the
+ *  two read as opposite states and can never be confused for one another.
+ *  Reversible exactly, via baseColor above, rather than by lerping back
+ *  toward a guess. Touches the same three meshes setHighlighted does, for the
+ *  same reason: leftArm's material already covers all four limbs. */
+const SPENT_GRAY = new THREE.Color(0x7a7a7a);
+const SPENT_MIX = 0.6;
+export function setSpent(c: Character, on: boolean) {
+  for (const mesh of [c.head, c.body, c.leftArm]) {
+    const mat = mesh.material as THREE.MeshStandardMaterial;
+    const base = baseColor.get(mesh)!;
+    mat.color.copy(on ? base.clone().lerp(SPENT_GRAY, SPENT_MIX) : base);
+  }
 }
 
 /**

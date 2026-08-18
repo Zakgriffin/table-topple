@@ -5,6 +5,11 @@
 <title>Table Topple Server</title>
 <style>
   * { margin: 0; padding: 0; box-sizing: border-box; }
+  /* The current turn's team colour, "r, g, b" so rgba(var(--team-rgb), a) can
+     still pick its own opacity per rule -- set from turns.ts, read by
+     #modeToggle button.active and #turnToggle. Defaults to red, matching the
+     board's own opening turn. */
+  :root { --team-rgb: 255, 85, 85; }
   body { background: #0a0a0f; overflow: hidden; font-family: monospace; }
   canvas#gl { display: block; }
 
@@ -30,9 +35,10 @@
     transition: background 0.15s, color 0.15s;
   }
   #modeToggle button:hover { background: rgba(255,255,255,0.07); color: #ccc; }
-  /* Active segment takes the player's own red. */
+  /* Active segment takes the CURRENT TURN's colour, not always red -- see
+     turns.ts's own paintTeamColor. */
   #modeToggle button.active {
-    background: rgba(255,85,85,0.55); border-color: #ff5555; color: #fff;
+    background: rgba(var(--team-rgb), 0.55); border-color: rgb(var(--team-rgb)); color: #fff;
   }
   #modeToggle button .key {
     display: block; font-size: 9px; opacity: 0.6; margin-top: 2px;
@@ -75,13 +81,83 @@
     background: rgba(230,70,70,0.6); border-color: #e64646; color: #fff;
   }
 
-  /* Confirms every road blueprint at once (roads.ts) -- opposite corner from
-     battleToggle, same reasoning: a one-shot action on the world, not a mode.
-     No .active state, unlike battleToggle -- it doesn't toggle, it fires.
-     Hidden outside road mode; roads.ts sets style.display directly, same
-     idiom aim.ts uses for #crosshair. */
-  #confirmRoadBtn {
+  /* Opens the current turn's stockpile (inventory.ts) -- stacked above
+     battleToggle, same side. Wears the current turn's colour like
+     #turnToggle: it's THAT court's items on show. */
+  #inventoryToggle {
+    position: fixed; bottom: 76px; right: 16px; z-index: 10;
+    padding: 10px 16px; border-radius: 10px;
+    border: 1px solid rgba(var(--team-rgb), 0.5);
+    background: rgba(var(--team-rgb), 0.22); backdrop-filter: blur(6px);
+    color: #fff; font-family: monospace; font-size: 12px; cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #inventoryToggle:hover { background: rgba(var(--team-rgb), 0.32); }
+  #inventoryToggle.active { background: rgba(var(--team-rgb), 0.45); }
+
+  /* Dims the board behind the panel, and closes it on a click -- the usual
+     modal convention. Hidden by default; inventory.ts's wireInventoryPanel
+     toggles style.display on both this and the panel together. */
+  #inventoryOverlay {
+    position: fixed; inset: 0; z-index: 19;
+    display: none;
+    background: rgba(0,0,0,0.55);
+  }
+  /* Centered, portrait: a column of four resource cards rather than a
+     corner strip, since this is something you stop and look at rather than
+     a control you glance at mid-play. */
+  #inventoryPanel {
+    position: fixed; top: 50%; left: 50%; transform: translate(-50%, -50%);
+    z-index: 20; display: none;
+    width: 250px;
+    padding: 18px; border-radius: 18px;
+    border: 1px solid rgba(var(--team-rgb), 0.5);
+    background: rgba(20,20,20,0.94); backdrop-filter: blur(10px);
+    color: #eee; font-family: monospace;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+  }
+  .inv-title {
+    text-align: center; font-size: 13px; margin-bottom: 14px;
+    color: rgb(var(--team-rgb));
+  }
+  .inv-grid { display: flex; flex-direction: column; gap: 10px; }
+  /* One rounded-square card per resource: the 3D icon alongside its count. */
+  .inv-card {
+    display: flex; align-items: center; gap: 14px;
+    padding: 10px; border-radius: 14px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.09);
+  }
+  .inv-icon {
+    flex: none; width: 56px; height: 56px; border-radius: 12px;
+    background: rgba(0,0,0,0.25);
+  }
+  .inv-text { display: flex; flex-direction: column; }
+  .inv-label { font-size: 10px; color: #999; letter-spacing: 0.04em; }
+  .inv-count { font-size: 22px; font-weight: bold; }
+
+  /* Advances to the next court, counter-clockwise (turns.ts) -- bottom-left,
+     opposite the mode bar, and stacked BELOW confirmRoadBtn so the two never
+     overlap on the rare occasion both are visible (mid-road-drag on a turn
+     that's about to end). Wears the current turn's own colour, same
+     --team-rgb #modeToggle's active segment reads. */
+  #turnToggle {
     position: fixed; bottom: 16px; left: 16px; z-index: 10;
+    padding: 10px 16px; border-radius: 10px;
+    border: 1px solid rgba(var(--team-rgb), 0.5);
+    background: rgba(var(--team-rgb), 0.22); backdrop-filter: blur(6px);
+    color: #fff; font-family: monospace; font-size: 12px; cursor: pointer;
+    transition: background 0.15s, border-color 0.15s;
+  }
+  #turnToggle:hover { background: rgba(var(--team-rgb), 0.32); }
+
+  /* Confirms every road blueprint at once (roads.ts) -- stacked above
+     #turnToggle rather than sharing its spot. No .active state, unlike
+     battleToggle -- it doesn't toggle, it fires. Hidden outside road mode;
+     roads.ts sets style.display directly, same idiom aim.ts uses for
+     #crosshair. */
+  #confirmRoadBtn {
+    position: fixed; bottom: 76px; left: 16px; z-index: 10;
     display: none;
     padding: 10px 16px; border-radius: 10px;
     border: 1px solid rgba(255,255,255,0.2);
@@ -124,6 +200,7 @@
   <button data-mode="path" type="button"></button>
   <button data-mode="road" type="button"></button>
   <button data-mode="fight" type="button"></button>
+  <button data-mode="act" type="button"></button>
 </div>
 <div id="weaponToggle">
   <button data-weapon="sword" type="button"></button>
@@ -132,6 +209,30 @@
 </div>
 <div id="crosshair"><div id="charge"></div></div>
 <button id="battleToggle" type="button">battle: off</button>
+<button id="inventoryToggle" type="button">inventory</button>
+<div id="inventoryOverlay"></div>
+<div id="inventoryPanel">
+  <div class="inv-title">red's inventory</div>
+  <div class="inv-grid">
+    <div class="inv-card">
+      <canvas class="inv-icon" data-icon="wood"></canvas>
+      <div class="inv-text"><span class="inv-label">wood</span><span class="inv-count" data-resource="wood">0</span></div>
+    </div>
+    <div class="inv-card">
+      <canvas class="inv-icon" data-icon="metal"></canvas>
+      <div class="inv-text"><span class="inv-label">metal</span><span class="inv-count" data-resource="metal">0</span></div>
+    </div>
+    <div class="inv-card">
+      <canvas class="inv-icon" data-icon="string"></canvas>
+      <div class="inv-text"><span class="inv-label">string</span><span class="inv-count" data-resource="string">0</span></div>
+    </div>
+    <div class="inv-card">
+      <canvas class="inv-icon" data-icon="aether"></canvas>
+      <div class="inv-text"><span class="inv-label">aether</span><span class="inv-count" data-resource="aether">0</span></div>
+    </div>
+  </div>
+</div>
+<button id="turnToggle" type="button">red's turn</button>
 <button id="confirmRoadBtn" type="button">confirm road</button>
 <a id="home" href="/index.html">&larr; home</a>
 <script type="module" src="/src/tableTopple/server/main.ts"></script>

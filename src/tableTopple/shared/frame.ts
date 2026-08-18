@@ -32,25 +32,6 @@ export function yawFromDirection(x: number, z: number): number {
   return Math.atan2(x, z);
 }
 
-/**
- * Resolves strafe/forward input axes into a world ground direction, relative
- * to a basis yaw.
- *
- * @param axes x = strafe (+ right), y = forward (+ ahead), as moveAxes()
- *   produces.
- *
- * One formula serves every basis. Unarmed movement passes the camera's yaw, so
- * W goes away from the camera; an armed character passes its own facing, so W
- * advances and A/D sidestep while the body keeps its heading. The choice of
- * basis is the entire difference between the two movement styles.
- */
-export function basisToWorld(axes: THREE.Vector2, yaw: number, out: THREE.Vector2): THREE.Vector2 {
-  const s = Math.sin(yaw), c = Math.cos(yaw);
-  // forward * axes.y + right * axes.x, inlined to avoid two scratch vectors on
-  // a path that runs every frame.
-  return out.set(s * axes.y - c * axes.x, c * axes.y + s * axes.x);
-}
-
 /** Component of a movement along a yaw's forward direction. Negative means it
  *  travelled backwards relative to that heading. */
 export function signedAlongYaw(dx: number, dz: number, yaw: number): number {

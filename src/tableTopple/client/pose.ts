@@ -143,12 +143,15 @@ export async function recoverPose(gray: Float32Array, aspect: number): Promise<P
  * -- see overlay.ts on why a stale pose is the dishonest failure.
  *
  * The position and quaternion pass through UNCHANGED. That is worth stating
- * because it looks too easy: the pipeline reports in cells, this project's
- * CELL_PITCH is 1, and shared/floorPattern.ts crops the De Bruijn board to
- * BOARD_CELLS so one printed cell IS one board-game cell. The overlay's own
- * fitBoardToPattern then scales the scene by a ratio that is 1 in the ordinary
- * case. Nothing here is a coincidence -- it is the same choice made in three
- * places on purpose -- but if any of the three moves, this is a conversion.
+ * because it looks too easy: the pipeline reports in cells of the PRINTED
+ * pattern (shared/floorPattern.ts crops the De Bruijn board to
+ * PRINTED_PATTERN_CELLS, constants.ts), and this project's CELL_PITCH is 1,
+ * so a pipeline cell IS one world unit with nothing to convert here -- that
+ * holds regardless of how many cells the GAME's own board (BOARD_CELLS) is
+ * divided into, since the two are independent numbers on purpose (see
+ * constants.ts). The overlay's own fitBoardToPattern is where that
+ * difference actually gets reconciled, by scaling the scene so the game
+ * board fills the printed one exactly.
  */
 export function toCameraPose(pose: PoseResult, aspect: number): ARCameraPose | null {
   if (!pose.ok) return null;

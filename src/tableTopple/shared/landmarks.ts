@@ -2,7 +2,9 @@ import * as THREE from 'three';
 import { SOLDIER_HEIGHT } from './constants.ts';
 import { type Terrain, patches } from './terrain.ts';
 import { makeRng } from './noise.ts';
-import { Blocks, between, pick, sceneryMaterial } from './blocks.ts';
+import { Blocks, between, pick, sceneryHighlightMaterial, sceneryMaterial } from './blocks.ts';
+import type { Interactable } from './interactable.ts';
+import type { Resource } from './inventory.ts';
 
 // One structure per terrain patch, so a patch is somewhere you go rather than
 // just a stain on the floor: a clump of bushes on a field, a mine mouth on a
@@ -79,7 +81,7 @@ function buildShrubbery(rng: () => number): THREE.BufferGeometry {
   // Spread wide enough to hold its own next to the mine and the church, which
   // are both about seven units across. A botanically sensible little thicket
   // of three looked like litter dropped in the middle of a patch seventeen
-  // units wide -- these have to read from across a 144-unit board.
+  // units wide -- these have to read from across a 140-unit board.
   const count = 7 + Math.floor(rng() * 4);
   for (let i = 0; i < count; i++) {
     const angle = (i / count) * Math.PI * 2 + between(rng, -0.4, 0.4);
@@ -299,6 +301,21 @@ const BUILDERS: Partial<Record<Terrain, (rng: () => number) => THREE.BufferGeome
   hallowed: buildRuins,
 };
 
+/** What acting on a structure pays out -- one per terrain that grows one, the
+ *  same pairing BUILDERS uses. */
+const RESOURCE_FOR_TERRAIN: Partial<Record<Terrain, Resource>> = {
+  field: 'string',
+  cave: 'metal',
+  hallowed: 'aether',
+};
+
+/** A structure's stock is set once, at placement, to a random count in this
+ *  range -- unlike a tree, acting on one doesn't remove it, just spends one
+ *  unit of what it holds, so it needs a starting amount rather than a single
+ *  yes/no. */
+const STOCK_MIN = 1;
+const STOCK_MAX = 5;
+
 /** Fraction of a patch's radius a structure is allowed to span. The patch edge
  *  is lobed and pulls in to 0.8 of the radius in places, so staying well
  *  inside that is what keeps a ruin from poking out onto the forest. */
@@ -331,6 +348,14 @@ export interface PlacedLandmark {
    *  Read back from the same reach*fit the placement loop already computes,
    *  not a second hand-maintained number that could drift from it. */
   radius: number;
+  /** What acting on this structure pays out. Fixed at placement -- every
+   *  structure on one terrain always gives the same thing. */
+  resource: Resource;
+  /** Units of `resource` left to give. Mutable: harvestLandmark (below) is
+   *  the only thing that changes it, once per successful act -- unlike a
+   *  tree, a depleted structure is never removed, just no longer offers
+   *  anything (see landmarkInteractables' own filter). */
+  stock: number;
   mesh: THREE.Mesh;
 }
 
@@ -370,6 +395,53 @@ export const placedLandmarks: PlacedLandmark[] = [];
     mesh.rotation.y = rng() * Math.PI * 2;
 
     landmarks.add(mesh);
-    placedLandmarks.push({ id: nextId++, terrain: patch.terrain, x, z, radius: reach * fit, mesh });
+    const stock = STOCK_MIN + Math.floor(rng() * (STOCK_MAX - STOCK_MIN + 1));
+    placedLandmarks.push({
+      id: nextId++, terrain: patch.terrain, x, z, radius: reach * fit,
+      resource: RESOURCE_FOR_TERRAIN[patch.terrain]!, stock, mesh,
+    });
   }
+}
+
+/**
+ * Spends one unit of a structure's stock, if it has any left. Returns false
+ * (and changes nothing) once it's out -- actions.ts uses that the same way it
+ * uses hideTree's own false, to guard against two denizens racing to the same
+ * structure both getting paid for the last unit. The structure itself is
+ * never touched: it stays on the board, empty, forever -- see
+ * landmarkInteractables for what "empty" changes.
+ */
+export function harvestLandmark(id: number): boolean {
+  const l = placedLandmarks.find((p) => p.id === id);
+  if (!l || l.stock <= 0) return false;
+  l.stock -= 1;
+  return true;
+}
+
+/** Every placed structure, wrapped for act.ts's generic pick query -- see
+ *  interactable.ts. `distanceTo` is distance to the structure's own
+ *  BOUNDARY, 0 once a point is already inside its footprint (same convention
+ *  roads.ts's own closestOnLandmark uses for the identical shape, kept as a
+ *  separate small copy here rather than exported from roads.ts: that
+ *  function also returns WHERE on the boundary a road should join, which
+ *  this has no use for, and reaching into road-building code for a distance
+ *  formula would be an odd direction of dependency for scenery). Highlight
+ *  reuses the exact swap roads.ts's own paintTarget does, since a landmark's
+ *  mesh is the same shared-sceneryMaterial setup either way.
+ *
+ *  Structures with nothing left in stock are left OUT entirely -- a
+ *  structure never disappears from the board, but an empty one has nothing
+ *  act.ts could send a denizen to collect, so it's the same as not being a
+ *  target at all. */
+export function landmarkInteractables(): Interactable[] {
+  const p = new THREE.Vector2();
+  return placedLandmarks.filter((l) => l.stock > 0).map((l): Interactable => ({
+    kind: 'landmark',
+    id: l.id,
+    resource: l.resource,
+    pos: new THREE.Vector2(l.x, l.z),
+    radius: l.radius,
+    distanceTo: (pt) => Math.max(0, pt.distanceTo(p.set(l.x, l.z)) - l.radius),
+    setHighlighted: (on) => { l.mesh.material = on ? sceneryHighlightMaterial : sceneryMaterial; },
+  }));
 }

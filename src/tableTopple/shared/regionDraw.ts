@@ -7,6 +7,7 @@ import { polygonCentroid } from './polygon.ts';
 import { createRibbon } from './ribbon.ts';
 import { pointerToGround } from './groundRay.ts';
 import { you } from './denizens.ts';
+import { cancelPendingAction } from './actions.ts';
 
 // Draw a closed region on the floor with the mouse; your denizen walks to its
 // center, and the region stays painted on the floor until he arrives. Only
@@ -88,6 +89,10 @@ function commit() {
   const l = limit();
   target.x = THREE.MathUtils.clamp(target.x, -l, l);
   target.y = THREE.MathUtils.clamp(target.y, -l, l);
+  // A fresh path-mode walk overrides ANY act-mode command still in flight --
+  // see cancelPendingAction's own comment for why this can't just be
+  // `pendingAction = null`.
+  cancelPendingAction(you);
   you.moveTarget = target;
 }
 

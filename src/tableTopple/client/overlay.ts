@@ -31,7 +31,7 @@ import { arCanvas } from './dom.ts';
 // canvas of its own, orbits nothing, and is told where the camera is.
 //
 // So: no keyboard, no pointer, no orbit controls, no pointer lock. shared/ only
-// wires those when a host asks it to (wireKeys, wireAim, ...), and this host
+// wires those when a host asks it to (wireAim, wireAct, ...), and this host
 // never asks -- there is no mouse on a phone held over a table, and the page's
 // own taps stay the page's.
 //
@@ -64,15 +64,17 @@ camera.near = 0.05;
 // XZ plane with +Y up -- the two coordinate conventions agree, so this is a
 // pure scale with nothing to rotate or offset.
 //
-// The DEFAULT is 1:1 and deliberately so: shared/floorPattern.ts crops the De
-// Bruijn board to BOARD_CELLS, so one printed pattern cell IS one board-game
-// cell and a soldier is exactly one cell tall.
+// shared/floorPattern.ts crops the De Bruijn board to PRINTED_PATTERN_CELLS,
+// a DIFFERENT number from the game's own BOARD_CELLS on purpose (see
+// constants.ts's own comment on both) -- so this is not a 1:1 identity scale
+// even in the ordinary case. It scales the whole game world so the game's
+// own board, whatever size it's chosen to be, fills the physical printed
+// board exactly.
 //
 // This USED TO READ POSE VIEWER'S BOARD, which meant a slider in the other
-// project silently rescaled this world. It now reads Table Topple's own, so the
-// scale is 1 unless THIS project changes its own numbers -- the ratio is kept
-// rather than hard-coded because the two constants are independently editable
-// and a mismatch should letterbox, not lie.
+// project silently rescaled this world. It now reads Table Topple's own two
+// numbers -- the ratio is kept rather than hard-coded because both are
+// independently editable and a mismatch should letterbox, not lie.
 //
 // Scaling the Scene itself rather than parenting the world under a Group: the
 // game adds to `scene` at runtime (arrows in combat.ts, health bars, retiring

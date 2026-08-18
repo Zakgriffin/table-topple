@@ -6,13 +6,15 @@ import { advance, arrivalSpeed } from './motion.ts';
 import { CHARACTER_HALF_WIDTH } from './character.ts';
 import { denizens, syncMesh, you, type Denizen } from './denizens.ts';
 import { turnToward, updateWalk } from './animation.ts';
-import { cameraYaw, moveAxes } from './input.ts';
-import { basisToWorld, signedAlongYaw, yawFromDirection } from './frame.ts';
+import { signedAlongYaw, yawFromDirection } from './frame.ts';
 import { clearRegion } from './regionDraw.ts';
 import { applyAimPose, isEngaged, updateAim } from './aim.ts';
 import { advanceVitals, renderVitals, retire } from './health.ts';
 import { equipWeapon } from './weapons.ts';
 import { updateAI } from './ai.ts';
+import { updateActions } from './actions.ts';
+import { updateFallingTrees } from './forest.ts';
+import { updateIdle } from './idle.ts';
 import { updateCombat } from './combat.ts';
 import type { DenizenStateEntry } from './protocol.ts';
 import './board.ts'; // side effect: adds the floor to the scene
@@ -41,7 +43,6 @@ import './board.ts'; // side effect: adds the floor to the scene
 // client/main.ts and shared/net.ts). Same render code either way, so the two
 // hosts can't paint the same state two different ways.
 
-const axes = new THREE.Vector2();
 const dir = new THREE.Vector2();
 /** Velocity the character is currently trying to have. The gap between this
  *  and its actual velocity is what acceleration and coasting live in. */
@@ -57,44 +58,56 @@ const limit = () => BOARD_SIZE / 2 - CHARACTER_HALF_WIDTH * you.scale;
  *  isn't visible -- it just stops the target being chased forever. */
 const ARRIVE_EPSILON = 0.03;
 
-export function step(dt: number) {
-  moveAxes(axes);
+/**
+ * Walks `d` toward its own moveTarget with the same arrival taper `you`'s own
+ * walk-to gets below -- factored out so a denizen act.ts sends walking to a
+ * clicked structure or tree gets identical feel without duplicating it.
+ * Unlike `you`'s branch there's no region to clear (act.ts's own radius
+ * indicator isn't tied to arrival the way regionDraw.ts's painted path is)
+ * and no stance to respect (only `you` can be mid-swing while walking, via
+ * path mode -- see `you`'s own header comment, denizens.ts). An active AI
+ * brain can still preempt this, simply by running its own advance() call
+ * right after this one; see the call site in step().
+ */
+function pursueMoveTarget(d: Denizen, dt: number) {
+  if (!d.moveTarget) return;
+  const dx = d.moveTarget.x - d.pos.x, dz = d.moveTarget.y - d.pos.y;
+  const remaining = Math.hypot(dx, dz);
+  if (remaining <= ARRIVE_EPSILON) {
+    d.pos.copy(d.moveTarget);
+    d.velocity.set(0, 0);
+    d.moveTarget = null;
+    return;
+  }
+  dir.set(dx / remaining, dz / remaining);
+  desired.copy(dir).multiplyScalar(arrivalSpeed(remaining, WALK_SPEED, WALK_DECEL_RATE));
+  turnToward(d, yawFromDirection(dir.x, dir.y), dt);
+  advance(d.pos, d.velocity, desired, WALK_ACCEL_RATE, dt, BOARD_SIZE / 2 - CHARACTER_HALF_WIDTH * d.scale);
+}
 
+export function step(dt: number) {
   // Snapshot every position up front. The walk cycle is driven by distance
-  // actually covered, and there are now two things that move denizens -- the
-  // human's input below and the brains in ai.ts -- so measuring it centrally
-  // beats making each mover report its own displacement.
+  // actually covered, and there are now two things that move denizens -- a
+  // walk-to target (`you`'s from path mode, anyone else's from act.ts) and
+  // the brains in ai.ts -- so measuring it centrally beats making each mover
+  // report its own displacement.
   for (const p of denizens) p.lastPos.copy(p.pos);
 
-  // Holding the button with the sword out is what puts the character in a
-  // fighting stance: the body stops steering and holds its heading so the
-  // blade stays trained downrange, and WASD becomes footwork in the
-  // character's own frame (W/S advance and back up, A/D sidestep). Let go and
-  // it's an ordinary walk again -- camera-relative, turning to follow. Sword
-  // merely DRAWN is not enough; it takes a held button.
+  // Holding the button with the sword out puts the character in a fighting
+  // stance: the body stops steering and holds its heading so the blade stays
+  // trained downrange. There's no WASD any more to make footwork out of (see
+  // denizens.ts's own comment on `you`) -- this only still matters below for
+  // a path-mode walk-to that's still resolving when a fight starts, so it
+  // doesn't get spun to face the destination instead of the target.
   const stance = you.weapon !== null && isEngaged();
 
   // Nothing here writes position directly any more; it all goes through a
-  // desired velocity, and advance() below does the integrating. That's what
-  // makes releasing the keys coast to a halt rather than cutting out.
+  // desired velocity, and advance() below does the integrating.
   desired.set(0, 0);
-  // No input means coasting, which is the slow rate. Anything driving the
-  // character uses the brisk one.
+  // No walk-to means coasting, which is the slow rate.
   let rate = WALK_DECEL_RATE;
 
-  if (axes.lengthSq() > 0) {
-    // The whole difference between the two movement styles: which yaw the
-    // input axes are read against.
-    basisToWorld(axes, stance ? you.facing : cameraYaw(), dir);
-
-    // Grabbing the keys cancels a walk-to. Manual input should always win
-    // outright -- fighting the auto-walk for control would feel broken. The
-    // region goes with it: he's no longer heading there.
-    if (you.moveTarget) { you.moveTarget = null; clearRegion(); }
-    desired.copy(dir).multiplyScalar(WALK_SPEED);
-    rate = WALK_ACCEL_RATE;
-    if (!stance) turnToward(you, yawFromDirection(dir.x, dir.y), dt);
-  } else if (you.moveTarget) {
+  if (you.moveTarget) {
     const dx = you.moveTarget.x - you.pos.x, dz = you.moveTarget.y - you.pos.y;
     const remaining = Math.hypot(dx, dz);
     if (remaining <= ARRIVE_EPSILON) {
@@ -114,6 +127,15 @@ export function step(dt: number) {
   }
 
   advance(you.pos, you.velocity, desired, rate, dt, limit());
+
+  // Anyone act.ts has sent walking to a clicked target, pursued here --
+  // before the brains run, so a denizen already fighting (battle on, an
+  // assigned brain) has its own combat positioning win the frame, the same
+  // way manual WASD always wins over `you`'s own moveTarget above.
+  for (const d of denizens) {
+    if (d === you) continue;
+    pursueMoveTarget(d, dt);
+  }
 
   // The brains move everyone else, through the same motion and animation
   // helpers the human goes through.
@@ -144,6 +166,21 @@ export function step(dt: number) {
     }
     renderDenizen(p, dt);
   }
+
+  // After the render loop, deliberately: a chop in progress (actions.ts)
+  // poses the axe arm directly, and that has to be the LAST write to it this
+  // frame or renderDenizen's own updateWalk call (just above, for the same
+  // denizen) would overwrite it with the idle pose right back.
+  updateActions(dt);
+
+  // A tree chopped just above starts its own shake/fall/fade sequence right
+  // here -- see forest.ts's own header on why that's a standalone object and
+  // not something the per-denizen loop above could have driven.
+  updateFallingTrees(dt);
+
+  // Order doesn't matter here the way it does for updateActions above --
+  // nothing else this frame touches a head's rotation or an eye's scale.
+  updateIdle(dt);
 
   // After the poses, so the blade's hitbox is tested where it is actually
   // being drawn this frame rather than where it was last frame.

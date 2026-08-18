@@ -12,7 +12,7 @@
 // is the same every reload and a headless check sees what the page sees. Change
 // TERRAIN_SEED to get a different board.
 
-import { BOARD_CELLS, BOARD_SIZE, START_RADIUS } from './constants.ts';
+import { BOARD_CELLS, BOARD_SIZE, START_RADIUS, TILE_CELLS } from './constants.ts';
 import { makeRng } from './noise.ts';
 
 export type Terrain = 'forest' | 'field' | 'cave' | 'hallowed';
@@ -57,6 +57,41 @@ const PATCH_LOBES = 3;
  *  been cropped rather than as terrain. */
 const PLAYFIELD_HALF = BOARD_SIZE / 2 - 8.5;
 
+// ── Snapping to the game-tile grid ──────────────────────────────────────────
+// board.ts draws a coarse reference grid over the board, one line every
+// TILE_CELLS cells -- the same grid gameTile.ts's "game tiles" are built
+// from. A patch centers on the point where four of those tiles meet, rather
+// than landing at an arbitrary offset -- which also means the landmark
+// structure each patch gets (landmarks.ts) sits dead center in that 2x2
+// block instead of at a random spot within it.
+//
+// This does NOT import gameTile.ts: that module is built ON TOP of this
+// one's own worldToCell/cellCenter (below) and pulls in THREE for its
+// geometry builder, which would make this file no longer node-runnable on
+// its own (this file's own header, above) -- and would close an import
+// cycle regardless. tileLine/gridNodesInRange below are this file's own
+// minimal, THREE-free piece of the same grid math.
+
+/** World coordinate of the Nth tile line, N from 0 (the board's own edge) to
+ *  BOARD_CELLS / TILE_CELLS (the opposite edge). Equivalent to gameTile.ts's
+ *  own tileOrigin(n), kept as a separate one-line formula here rather than
+ *  imported -- see this section's header on why. */
+function tileLine(n: number): number {
+  return n * TILE_CELLS - BOARD_SIZE / 2;
+}
+
+/** Every point within `span` of center where four tiles meet -- excludes the
+ *  board's own rim (n = 0 or the far edge), where only two tiles meet. */
+function gridNodesInRange(span: number): number[] {
+  const tilesPerSide = BOARD_CELLS / TILE_CELLS;
+  const nodes: number[] = [];
+  for (let n = 1; n < tilesPerSide; n++) {
+    const w = tileLine(n);
+    if (Math.abs(w) <= span) nodes.push(w);
+  }
+  return nodes;
+}
+
 /** Boxes no patch may touch: each court's own ground, from a little in front
  *  of its line back to the board edge behind its castle. Now that patches
  *  reach out this far, this is what keeps one from appearing inside a castle
@@ -64,9 +99,12 @@ const PLAYFIELD_HALF = BOARD_SIZE / 2 - 8.5;
  *  into is just a colour mistake. */
 interface KeepOut { minX: number; maxX: number; minZ: number; maxZ: number }
 
-/** Half the width of a court's ground: its line is 8.8 either side of center
- *  (FORMATION spans 8 gaps of RANK_SPACING), plus room for the figures
- *  themselves. */
+/** Half the width of a court's own ground box. Wider than the starting
+ *  formation itself needs now (denizens.ts's court() keeps everyone within
+ *  one game tile, COURT_FORMATION_OFFSET's own comment in constants.ts) --
+ *  kept generous rather than shrunk to match, since this box is also what
+ *  keeps a terrain patch off the castle behind the formation, and the castle
+ *  itself hasn't changed size. */
 const COURT_HALF_WIDTH = 11;
 /** Open ground left in FRONT of a line before terrain may start. */
 const COURT_FRONT_CLEARANCE = 6;
@@ -138,11 +176,15 @@ function layOutPatches() {
     // Kept a full radius inside the playfield so no patch is clipped by its
     // boundary -- a patch cut off in a straight line looks like a mistake.
     const span = PLAYFIELD_HALF - radius;
+    const nodes = gridNodesInRange(span);
+    if (nodes.length === 0) {
+      throw new Error(`terrain: no tile-grid node fits a ${terrain} patch of radius ${radius}`);
+    }
 
     let placed = false;
     for (let attempt = 0; attempt < MAX_PLACEMENT_ATTEMPTS && !placed; attempt++) {
-      const x = (rng() * 2 - 1) * span;
-      const z = (rng() * 2 - 1) * span;
+      const x = nodes[Math.floor(rng() * nodes.length)];
+      const z = nodes[Math.floor(rng() * nodes.length)];
       const clear =
         !courtKeepOuts.some((box) => reaches(x, z, radius + COURT_GAP, box)) &&
         patches.every((p) => {

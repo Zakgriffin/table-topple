@@ -23,7 +23,7 @@ renderer.setPixelRatio(Math.min(devicePixelRatio, 2));
 scene.background = new THREE.Color(COLOR_BG);
 
 // The opening view is over the red king's shoulder, NOT a framing of the
-// whole board. The board is 144 units across while a character is 1 unit tall,
+// whole board. The board is 140 units across while a character is 1 unit tall,
 // so a full-board framing renders everyone as a speck -- the size of the arena
 // is something to discover by walking it, not by being shown all of it at
 // once. Red starts at -Z looking toward the middle (denizens.ts), so the camera

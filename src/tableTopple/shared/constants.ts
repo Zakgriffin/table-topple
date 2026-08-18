@@ -2,10 +2,33 @@
 // piece's integer (col, row) doubles as its world (x, z) -- worth keeping
 // true as pieces/movement land, since it makes every board<->world
 // conversion a floor() instead of a scale factor nobody remembers.
-import type { Rank } from './ranks.ts';
 
-export const BOARD_CELLS = 144;
+/** The GAME's own board -- terrain, landmarks, the playing field
+ *  (board.ts/terrain.ts). Deliberately independent of PRINTED_PATTERN_CELLS
+ *  below: 140 keeps TILE_CELLS dividing it evenly into 35 game tiles across,
+ *  a rounder number than the printed pattern's own 144/TILE_CELLS = 36.
+ *  floorPattern.ts crops the De Bruijn pattern to PRINTED_PATTERN_CELLS, not
+ *  this -- client/overlay.ts's fitBoardToPattern is what reconciles the two
+ *  sizes on the AR page, scaling the game world so it still fills the
+ *  physical printed board exactly regardless of how this number compares to
+ *  that one. */
+export const BOARD_CELLS = 140;
 export const BOARD_SIZE = BOARD_CELLS;
+
+/** The PRINTED pattern's own cell count -- what floorPattern.ts crops the De
+ *  Bruijn board to, and what the physical board is actually printed at. Kept
+ *  at the pose library's own default (see floorPattern.ts's own comment on
+ *  ORDER5_CANDIDATE) rather than following BOARD_CELLS: the printed surface
+ *  is a fixed physical object, unrelated to how many cells the GAME chooses
+ *  to divide its own playing field into. */
+export const PRINTED_PATTERN_CELLS = 144;
+
+/** Spacing, in cells, of the board's "game tiles" -- the grid squares that
+ *  drive terrain patch placement (terrain.ts), the floor's checkerboard
+ *  (board.ts), a denizen's act-mode reach (act.ts), and a road's max span
+ *  (roads.ts). One number so all of them draw the same lines; gameTile.ts is
+ *  where the shared conversions built on it live. */
+export const TILE_CELLS = 4;
 
 // Starting layout: one court per edge, each with their castle behind them.
 // Here rather than in denizens.ts so the whole board layout can be checked
@@ -30,18 +53,15 @@ export const START_RADIUS = BOARD_SIZE / 2 - COURT_EDGE_MARGIN;
 /** Gap between the line's back and their castle's front wall. */
 export const CASTLE_GAP = 1.5;
 
-/** The line each court forms up in, read left to right. Symmetric about the
- *  king, with rank descending outward from him -- so the formation itself
- *  shows the hierarchy, and the tallest figure stands dead center. */
-export const FORMATION: Rank[] = [
-  'soldier', 'soldier', 'captain', 'constable',
-  'king',
-  'constable', 'captain', 'soldier', 'soldier',
-];
-
-/** Spacing between neighbours in the line. Comfortably wider than a king's
- *  shoulders (the widest figure) so nobody overlaps. */
-export const RANK_SPACING = 2.2;
+/** Each court is a king in the center of a single game tile (gameTile.ts,
+ *  TILE_CELLS wide) with three soldiers around him, on the three sides that
+ *  aren't the castle's -- see denizens.ts's own court() for the shape. This
+ *  is how far each soldier stands from the king's own tile-center, along
+ *  the forward/left/right directions. Comfortably inside TILE_CELLS / 2 (2)
+ *  even once a soldier's own footprint (CHARACTER_HALF_WIDTH, character.ts)
+ *  is added, so nobody stands with a foot past the tile's own edge, and
+ *  clear of the king's own (twice as wide) footprint too. */
+export const COURT_FORMATION_OFFSET = 1.3;
 
 // Palette lifted from Pose Viewer (scene/renderer.ts's 0x0a0a0f clear color,
 // floor.ts's red/blue row/column line families) so the two pages read as one

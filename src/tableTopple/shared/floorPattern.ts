@@ -1,5 +1,5 @@
 import { type Board, createBoard } from '../../pose/board.ts';
-import { BOARD_CELLS } from './constants.ts';
+import { PRINTED_PATTERN_CELLS } from './constants.ts';
 
 // ── Table Topple's printed board ─────────────────────────────────────────
 //
@@ -13,18 +13,22 @@ import { BOARD_CELLS } from './constants.ts';
 // (terrain, landmarks, the playing field). This is the printed pattern the
 // camera decodes. They are the same physical surface and two different things.
 //
-// ── ONE CELL IS ONE GAME CELL, AND THAT IS THE WHOLE CHOICE ──
+// ── THE PRINTED CELL COUNT IS ITS OWN NUMBER, NOT THE GAME BOARD'S ──
 //
-// `cropSize` is `BOARD_CELLS`, so one De Bruijn cell IS one board-game cell and
-// a soldier is exactly one cell tall. The AR overlay then lands on the physical
-// board 1:1 rather than at some scale factor, and `overlay.ts`'s fit is the
-// identity in the ordinary case.
+// `cropSize` is `PRINTED_PATTERN_CELLS` (constants.ts), not `BOARD_CELLS` --
+// the physical printed surface and the game's own playing-field grid are
+// deliberately allowed to disagree (constants.ts's own comment on
+// BOARD_CELLS explains why: 140 divides evenly into 35 game tiles, a rounder
+// number than the printed pattern's 144 would give). `overlay.ts`'s
+// fitBoardToPattern is what reconciles the two on the AR page, scaling the
+// whole game world so it fills the physical board exactly regardless of
+// whether the two counts happen to match.
 //
 // The searched crop's own default is also 144 (see `debruijn.ts`'s
 // ORDER5_CANDIDATE), so this agrees with the library's default rather than
 // fighting it -- but it is written out because it is a Table Topple decision,
 // not something to inherit silently.
-export const board: Board = createBoard({ order: 5, cropSize: BOARD_CELLS });
+export const board: Board = createBoard({ order: 5, cropSize: PRINTED_PATTERN_CELLS });
 
 // World units per pattern cell. The pose pipeline is scale-invariant and talks
 // in cells, so this is purely a property of how this project draws its world --

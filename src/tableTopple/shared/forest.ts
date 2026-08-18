@@ -1,8 +1,10 @@
 import * as THREE from 'three';
-import { BOARD_SIZE, SOLDIER_HEIGHT } from './constants.ts';
+import { BOARD_SIZE, DEATH_FADE_TIME, DEATH_SHAKE_TIME, SOLDIER_HEIGHT } from './constants.ts';
 import { onCourtGround, terrainAt } from './terrain.ts';
 import { fbm, makeRng } from './noise.ts';
 import { Blocks, between, pick, sceneryMaterial } from './blocks.ts';
+import type { Interactable } from './interactable.ts';
+import { deathShakeOffset, setOpacity } from './health.ts';
 
 // Trees scattered over the forest terrain, which is most of the board.
 //
@@ -133,8 +135,13 @@ const DENSITY_MAX = 0.9;
 
 /** Kept clear around each court, beyond the keep-out the patches already
  *  respect: the courts need open ground to form up and fight in, and the
- *  opening camera looks straight down the red court's line. */
-const COURT_TREE_MARGIN = 5;
+ *  opening camera looks straight down the red court's line. Cut from 5 --
+ *  this only pushes trees back from the box's edge nearest the battlefield
+ *  (the box itself, all the way to the rim, is already off-limits and
+ *  covers the castle regardless of this number), so shrinking it brings
+ *  trees nearer the court without ever letting one grow inside a castle's
+ *  own footprint. */
+const COURT_TREE_MARGIN = 1;
 /** Kept clear of the board's rim, so no tree is half over the edge. */
 const EDGE_MARGIN = 2.5;
 
@@ -187,6 +194,27 @@ export const forest = new THREE.Group();
  *  number to look at when tuning the density constants above. */
 export let treeCount = 0;
 
+/** One entry per placed tree -- unlike landmarks.ts's structures, trees were
+ *  never individually tracked before act.ts needed to pick one out: they're
+ *  drawn as InstancedMesh purely for draw-call count, and an instance has no
+ *  identity of its own to a raycaster. This is the identity, built alongside
+ *  the instancing loop below from the same Placement data. */
+export interface PlacedTree {
+  id: number;
+  x: number;
+  z: number;
+  /** World-space canopy reach, same "read back off the geometry's own
+   *  bounds" reasoning landmarks.ts gives for its own radius. */
+  radius: number;
+}
+export const placedTrees: PlacedTree[] = [];
+
+/** Where each tree's own instance actually lives -- its InstancedMesh and its
+ *  index within it -- kept apart from PlacedTree (above) since nothing that
+ *  reads placedTrees (act.ts, interactable.ts) needs to know this, only
+ *  hideTree (below) does. */
+const treeInstance = new Map<number, { mesh: THREE.InstancedMesh; index: number }>();
+
 {
   const rng = makeRng(FOREST_SEED);
 
@@ -209,10 +237,17 @@ export let treeCount = 0;
   const up = new THREE.Vector3(0, 1, 0);
   const position = new THREE.Vector3();
   const scale = new THREE.Vector3();
+  let nextTreeId = 0;
 
   variants.forEach((geometry, i) => {
     const group = byShape[i];
     if (group.length === 0) return;
+
+    // Same "read the reach back off the geometry's own bounds" idiom
+    // landmarks.ts uses, per-variant rather than per-structure since every
+    // tree of this shape shares one geometry.
+    const box = geometry.boundingBox!;
+    const reach = Math.max(-box.min.x, box.max.x, -box.min.z, box.max.z);
 
     const mesh = new THREE.InstancedMesh(geometry, sceneryMaterial, group.length);
     group.forEach((p, j) => {
@@ -220,6 +255,9 @@ export let treeCount = 0;
       position.set(p.x, 0, p.z);
       scale.setScalar(p.scale);
       mesh.setMatrixAt(j, matrix.compose(position, quaternion, scale));
+      const id = nextTreeId++;
+      placedTrees.push({ id, x: p.x, z: p.z, radius: reach * p.scale });
+      treeInstance.set(id, { mesh, index: j });
     });
     mesh.instanceMatrix.needsUpdate = true;
     // Required: an InstancedMesh's bounds are null until asked for, and without
@@ -230,4 +268,175 @@ export let treeCount = 0;
     mesh.computeBoundingSphere();
     forest.add(mesh);
   });
+}
+
+/** Every placed tree, wrapped for act.ts's generic pick query -- see
+ *  interactable.ts. `distanceTo` is distance to the trunk's own canopy
+ *  boundary, same convention landmarks.ts's own wrapper uses. `setHighlighted`
+ *  is a deliberate no-op: every tree of one shape shares ONE material on its
+ *  InstancedMesh, so brightening it would brighten that whole variant across
+ *  the board, not just this trunk. A real per-tree highlight would need
+ *  per-instance colour (InstancedMesh.setColorAt) and isn't built -- nothing
+ *  needs it yet, since act.ts doesn't hover-highlight targets, only the
+ *  denizen being commanded. */
+export function treeInteractables(): Interactable[] {
+  const p = new THREE.Vector2();
+  return placedTrees.map((t): Interactable => ({
+    kind: 'tree',
+    id: t.id,
+    resource: 'wood',
+    pos: new THREE.Vector2(t.x, t.z),
+    radius: t.radius,
+    distanceTo: (pt) => Math.max(0, pt.distanceTo(p.set(t.x, t.z)) - t.radius),
+    setHighlighted: () => {},
+  }));
+}
+
+const ZERO_SCALE = new THREE.Matrix4().makeScale(0, 0, 0);
+
+// ── Falling ────────────────────────────────────────────────────────────────
+// A chopped tree doesn't just vanish: it shakes, falls, and fades, in that
+// order -- the same three beats a denizen's own death goes through
+// (health.ts's renderVitals), plus a fourth act a denizen never needed (the
+// fall itself). The shake and the fade are literally the SAME code
+// (deathShakeOffset/setOpacity, imported above), so "something got
+// destroyed" reads as one consistent effect across both, not two similar
+// ones.
+//
+// An InstancedMesh instance can't be animated on its own -- one shared
+// matrix buffer, one shared material, no such thing as "this one instance is
+// mid-fade". So the moment a tree starts falling, its instance is zeroed
+// (same trick the old instant-despawn used) and a genuine standalone Mesh
+// takes its place for the length of the sequence, sharing the variant's
+// geometry (never disposed here -- other live trees of that shape still use
+// it) but with its OWN cloned material, since only this one tree's opacity
+// should move.
+
+const SHAKE_TIME = DEATH_SHAKE_TIME;
+/** How long the topple itself takes, once the shake is done. */
+const FALL_TIME = 0.5;
+const FADE_TIME = DEATH_FADE_TIME;
+/** Straight down to horizontal -- a felled tree ends up lying flat. */
+const FALL_ANGLE = Math.PI / 2;
+/** Ease-in: the exponent on the fall's own time fraction, so the topple
+ *  starts slow and is moving fastest right as it reaches FALL_ANGLE. There's
+ *  no ease-OUT to match -- the timer simply stops advancing the angle past
+ *  that point, which is the "sudden stop" the ground would actually give a
+ *  falling trunk, rather than a smooth deceleration into one. */
+const FALL_EASE_POWER = 3;
+
+interface FallingTree {
+  mesh: THREE.Mesh;
+  /** Where it was planted -- the shake phase jitters around this, the fall
+   *  and fade phases sit exactly on it. */
+  basePosition: THREE.Vector3;
+  baseQuaternion: THREE.Quaternion;
+  /** A random horizontal direction to topple in, chosen once at the start of
+   *  the fall -- see beginFall. */
+  fallAxis: THREE.Vector3;
+  /** The tree's own placement scale, read back off its instance transform so
+   *  the shake amplitude scales with the tree's actual size instead of
+   *  assuming every tree is the same one. */
+  scale: number;
+  timer: number;
+}
+const fallingTrees: FallingTree[] = [];
+
+const decomposedPos = new THREE.Vector3();
+const decomposedQuat = new THREE.Quaternion();
+const decomposedScale = new THREE.Vector3();
+
+/** Spawns the standalone falling copy of a tree at exactly the transform its
+ *  instance had the moment it was chopped -- the swap between the two has to
+ *  be frame-perfect, or the tree visibly jumps the instant it starts to
+ *  fall. */
+function beginFall(geometry: THREE.BufferGeometry, instanceMatrix: THREE.Matrix4) {
+  instanceMatrix.decompose(decomposedPos, decomposedQuat, decomposedScale);
+
+  const mesh = new THREE.Mesh(geometry, sceneryMaterial.clone());
+  mesh.position.copy(decomposedPos);
+  mesh.quaternion.copy(decomposedQuat);
+  mesh.scale.copy(decomposedScale);
+  forest.add(mesh);
+
+  // Cosmetic and one-off -- same reasoning denizens.ts's own blinkTimer
+  // stagger gives for using Math.random() rather than the board's seeded rng:
+  // this happens on demand, from a player's click, not at deterministic
+  // board-build time.
+  const azimuth = Math.random() * Math.PI * 2;
+
+  fallingTrees.push({
+    mesh,
+    basePosition: decomposedPos.clone(),
+    baseQuaternion: decomposedQuat.clone(),
+    fallAxis: new THREE.Vector3(Math.cos(azimuth), 0, Math.sin(azimuth)),
+    scale: decomposedScale.x,
+    timer: 0,
+  });
+}
+
+/**
+ * Advances every tree mid-fall by dt. Called once a frame from sim.ts's
+ * step(), same as updateActions/updateIdle -- order doesn't matter relative
+ * to either, since a falling tree is its own standalone object touching
+ * nothing a denizen's frame also writes.
+ */
+export function updateFallingTrees(dt: number) {
+  for (let i = fallingTrees.length - 1; i >= 0; i--) {
+    const f = fallingTrees[i];
+    f.timer += dt;
+    const t = f.timer;
+
+    if (t < SHAKE_TIME) {
+      const shake = deathShakeOffset(t, SHAKE_TIME, f.scale);
+      f.mesh.position.x = f.basePosition.x + shake.x;
+      f.mesh.position.z = f.basePosition.z + shake.z;
+    } else {
+      f.mesh.position.copy(f.basePosition);
+      const fallT = Math.min(1, (t - SHAKE_TIME) / FALL_TIME);
+      const angle = FALL_ANGLE * fallT ** FALL_EASE_POWER;
+      f.mesh.quaternion.copy(f.baseQuaternion);
+      f.mesh.rotateOnWorldAxis(f.fallAxis, angle);
+    }
+
+    const fadeStart = SHAKE_TIME + FALL_TIME;
+    if (t < fadeStart) continue;
+
+    const fadeT = Math.min(1, (t - fadeStart) / FADE_TIME);
+    setOpacity(f.mesh, 1 - fadeT);
+    if (fadeT >= 1) {
+      forest.remove(f.mesh);
+      (f.mesh.material as THREE.Material).dispose();
+      fallingTrees.splice(i, 1);
+    }
+  }
+}
+
+/**
+ * Chops a tree down: its instance collapses to zero scale (an InstancedMesh
+ * has no per-instance visibility flag, so a degenerate transform is how one
+ * instance disappears without rebuilding the buffer or touching its
+ * neighbours) while a standalone copy takes over for the shake/fall/fade
+ * sequence (beginFall, above), and it's dropped from placedTrees so it can
+ * never be picked as a target again. Returns false if `id` was already gone
+ * -- actions.ts uses that to guard against two denizens racing to the same
+ * tree both getting paid.
+ */
+export function hideTree(id: number): boolean {
+  const i = placedTrees.findIndex((t) => t.id === id);
+  if (i === -1) return false;
+  placedTrees.splice(i, 1);
+
+  const instance = treeInstance.get(id);
+  if (instance) {
+    // Read the instance's own transform BEFORE zeroing it -- beginFall needs
+    // it to start the standalone copy from the exact same spot.
+    const matrix = new THREE.Matrix4();
+    instance.mesh.getMatrixAt(instance.index, matrix);
+    beginFall(instance.mesh.geometry, matrix);
+
+    instance.mesh.setMatrixAt(instance.index, ZERO_SCALE);
+    instance.mesh.instanceMatrix.needsUpdate = true;
+  }
+  return true;
 }

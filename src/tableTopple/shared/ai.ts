@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { denizens, you, type Denizen } from './denizens.ts';
+import { denizens, type Denizen } from './denizens.ts';
 import { isTargetable } from './health.ts';
 import { equipWeapon, weaponDef, type WeaponKey } from './weapons.ts';
 import { chargeAndFire, meleeSweep } from './combat.ts';
@@ -83,23 +83,23 @@ function nearestEnemy(d: Denizen): Denizen | null {
   let bestDist = Infinity;
   for (const other of denizens) {
     if (other.team === d.team || !isTargetable(other)) continue;
-    // The human is left out of the AI's target list on purpose. Everything
-    // else about death works, but there's no handling yet for the denizen the
-    // camera is following dying -- you'd be left steering a removed body. Take
-    // this line out the moment there's a respawn or a hand-off to another
-    // figure.
-    if (other === you) continue;
+    // The red king used to be left out of the AI's target list on purpose,
+    // back when he was the one denizen under manual WASD control and dying
+    // would have stranded that control on a removed body. WASD is gone
+    // (sim.ts), so there's nothing left to strand -- he's targetable like
+    // anyone else now.
     const dist = d.pos.distanceToSquared(other.pos);
     if (dist < bestDist) { bestDist = dist; best = other; }
   }
   return best;
 }
 
-/** Arms or disarms every brain. Toggling off puts the board back to rest. */
+/** Arms or disarms every brain, `you` included -- he's an ordinary denizen
+ *  now, not a human keeping a hand-picked weapon (see denizens.ts's own
+ *  comment on `you`). Toggling off puts the board back to rest. */
 export function setBattle(on: boolean) {
   battleOn = on;
   for (const d of denizens) {
-    if (d === you) continue; // the human keeps whatever they chose themselves
     if (on) {
       equipWeapon(d, RANK_WEAPON[d.rank]);
       brains.set(d, { target: null, cooldown: Math.random() * 0.8, retargetIn: 0 });
@@ -117,8 +117,6 @@ export function setBattle(on: boolean) {
 
 export function updateAI(dt: number) {
   for (const d of denizens) {
-    if (d === you) continue;
-
     // A swing runs to completion whatever else is happening, and the blade
     // cuts for its whole travel -- that's what makes an AI strike use the same
     // hitbox the human's does rather than a special "deal damage now" call.

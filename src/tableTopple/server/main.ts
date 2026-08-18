@@ -14,7 +14,11 @@
 //   sim.ts        one frame of the world, with nothing about drawing it
 //   board.ts      the playing surface: one plane, coloured cell by cell
 //   terrain.ts    what each cell is made of: forest, and patches in it
-//   landmarks.ts  one structure per patch: shrubbery, mine, ruined church
+//   gameTile.ts   the board's "game tiles" -- a coarser grid terrain patches
+//                 snap to, the floor checkerboards, act-mode reach and a
+//                 road's max span are measured in
+//   landmarks.ts  one structure per patch: shrubbery, mine, ruined church --
+//                 each with a stock of string/metal/aether to harvest
 //   forest.ts     trees scattered over the forest terrain, instanced
 //   blocks.ts     the shared box-assembly kit scenery is built from
 //   noise.ts      deterministic value noise + the seeded RNG the world uses
@@ -23,21 +27,35 @@
 //   denizens.ts   the four courts: figures with a rank, position, and facing
 //   castle.ts     each court's castle, from a tower/wall plan
 //   animation.ts  the walk cycle + turn easing, driven by distance walked
-//   mode.ts       who owns the mouse: camera / path / road / fight, +
+//   idle.ts       a standing denizen's own life: head wander, eye blinks
+//   mode.ts       who owns the mouse: camera / path / road / fight / act, +
 //                 weapon choice
 //   regionDraw.ts path-mode drawing: trace a region, walk to its center
 //   groundRay.ts  one screen point -> one point on the floor plane
 //   ribbon.ts     a polyline with real world-space width, flat on the ground
 //   roadMesh.ts   a confirmed road's paved-slab geometry
 //   roads.ts      road-mode drawing: blueprints, snapping, confirming
+//   interactable.ts  the shared "pick and highlight" shape denizens/
+//                 landmarks/trees answer, act.ts's query runs on
+//   act.ts        act-mode picking: select a denizen, send it walking to a
+//                 nearby structure or tree -- one per denizen per turn.ts,
+//                 with a "+1 <resource>" popup on hover
+//   actions.ts    what happens on arrival: a plain walk just marks the mover
+//                 spent, a tree or structure gets harvested first with a tool
+//                 matched to its resource (temporary axe/pickaxe/scythe/wand)
+//   inventory.ts  each court's own wood/metal/string/aether, and the panel
+//                 that shows the current turn's
+//   turns.ts      whose turn it is, counter-clockwise; gates act.ts's pick
+//                 and repaints the UI that used to be permanently red
 //   weapons.ts    the weapon registry + models; equipping into a hand
 //   combat.ts     what attacks do: blade hitbox, arrows, the staff's cone
 //   health.ts     hit points, the floating bar, dying
-//   aim.ts        the reticle: where you point, and the pose that follows
+//   aim.ts        the reticle: where you point, and the pose that follows.
+//                 Still only ever the red king (see denizens.ts's own `you`)
 //   frame.ts      the shared yaw/forward/right convention, in one place
 //   motion.ts     velocity integration: accelerate, coast, arrive
-//   ai.ts         fighter behaviour: pick a target, close, attack
-//   input.ts      held-key state -> strafe/forward axes, + the camera's yaw
+//   ai.ts         fighter behaviour: pick a target, close, attack -- `you`
+//                 included, since he's an ordinary denizen now
 //   protocol.ts   the game messages: denizenState, attackFx, roadState
 //   net.ts        the websocket both hosts share, and the send/receive gate
 //   main.ts       this page's boot: claim the input, then loop
@@ -53,10 +71,12 @@ import * as THREE from 'three';
 import { camera, scene } from '../shared/scene.ts';
 import { canvas, controls, renderer, resize } from './view.ts';
 import { snapshotDenizens, step } from '../shared/sim.ts';
-import { wireKeys } from '../shared/input.ts';
 import { wireModeUI } from '../shared/mode.ts';
 import { wireRegionDraw } from '../shared/regionDraw.ts';
 import { snapshotRoads, wireRoadBuild } from '../shared/roads.ts';
+import { updateActIndicator, wireAct } from '../shared/act.ts';
+import { wireTurnButton } from '../shared/turns.ts';
+import { updateInventoryIcons, wireInventoryPanel } from '../shared/inventory.ts';
 import { updateCrosshair, wireAim } from '../shared/aim.ts';
 import { wireBattleButton } from '../shared/ai.ts';
 import { chargeLevel } from '../shared/combat.ts';
@@ -77,18 +97,21 @@ connect('desktop');
 // "run the simulation" and "take over the keyboard and pointer" the same
 // indivisible act -- fine for the only page that existed then, fatal for a
 // host that wants the first without the second.
-wireKeys();
 wireModeUI();
 wireAim(canvas);
 wireRegionDraw(canvas);
 wireRoadBuild(canvas);
+wireAct(canvas);
 wireBattleButton();
+wireTurnButton();
+wireInventoryPanel();
 
 function animate() {
   requestAnimationFrame(animate);
   // Capped: a backgrounded tab stops rAF, and the first frame after refocusing
   // would otherwise carry the entire away-time as one step and teleport you.
-  step(Math.min(clock.getDelta(), 0.1));
+  const dt = Math.min(clock.getDelta(), 0.1);
+  step(dt);
   // Broadcast every tick, not throttled -- see shared/net.ts's own header on
   // why that's the lean choice for now: it's one small JSON array over a LAN
   // websocket, and a smarter send rate is a real optimization to make once
@@ -100,6 +123,8 @@ function animate() {
   send({ type: 'roadState', roads: snapshotRoads() });
   controls.update(); // required: damping is on
   updateCrosshair(chargeLevel());
+  updateActIndicator();
+  updateInventoryIcons(dt);
   renderer.render(scene, camera);
 }
 

@@ -1,11 +1,16 @@
 import * as THREE from 'three';
 import { scene } from './scene.ts';
 import { mode, onModeChange } from './mode.ts';
-import { createRibbon, type Ribbon } from './ribbon.ts';
 import { pointerToGround } from './groundRay.ts';
-import { buildJunctionPatch, buildRoadMesh, ROAD_HALF_WIDTH } from './roadMesh.ts';
+import {
+  buildJunctionPatch, buildRoadGhostMesh, buildRoadMesh, ROAD_HALF_WIDTH,
+  roadGhostHighlightMaterial, roadGhostMaterial,
+} from './roadMesh.ts';
 import { sceneryHighlightMaterial, sceneryMaterial } from './blocks.ts';
 import { placedLandmarks } from './landmarks.ts';
+import {
+  buildTileHighlightGeometry, clampToTileWalk, tileAt, tilesWithinReach, tileWalk, type GameTile,
+} from './gameTile.ts';
 import type { RoadStateEntry } from './protocol.ts';
 
 // ── Roads: drawn as blueprints, confirmed into permanent structures ────────
@@ -17,13 +22,15 @@ import type { RoadStateEntry } from './protocol.ts';
 // by drawing one continuous shape.
 //
 // Two representations share one `Road` type, distinguished by `confirmed`:
-// unconfirmed is a translucent BLUEPRINT (a small ribbon, one per road, like
-// path's own outline but far more of them alive at once) that can still be
-// dragged onto, T-junctioned, or long-press deleted; confirmed is the
-// permanent paved slab (roadMesh.ts) that a "confirm road" press turns EVERY
-// current blueprint into, all at once -- there is no partial confirm. Ids are
-// stable across that transition, since a connection references a roadId and
-// confirming must never renumber anything one points at.
+// unconfirmed is a translucent GHOST (roadMesh.ts's buildRoadGhostMesh, one
+// per road) built from the SAME dirt-bed-and-cobblestones look a confirmed
+// road gets, just see-through and rebuilt live while it's still being
+// dragged -- can still be dragged onto, T-junctioned, or long-press deleted;
+// confirmed is the permanent, opaque paved slab (buildRoadMesh) that a
+// "confirm road" press turns EVERY current ghost into, all at once -- there
+// is no partial confirm. Ids are stable across that transition, since a
+// connection references a roadId and confirming must never renumber
+// anything one points at.
 //
 // ── DESKTOP-ONLY CONTROLS, NETWORKED STATE ──
 //
@@ -48,15 +55,33 @@ import type { RoadStateEntry } from './protocol.ts';
 // so nothing ever needs to look up "which roads touch landmark 3" FROM the
 // landmark's own side the way removeConnectionsTo does for roads.
 //
+// ── GAME TILES: A ROAD'S MAX SPAN ──
+//
+// gameTile.ts's grid (act.ts's own reach and board.ts's checkerboard are
+// built on it too) also caps how far one road can run: MAX_ROAD_TILES,
+// clamped LIVE while dragging (see the pointermove handler's dragRoad
+// branch) rather than only checked once the drag is released -- a road
+// hitting this wall should feel like a reach limit, not a rejected commit.
+// The cap is walked on the GRID (gameTile.ts's tileWalk: ORTHOGONAL steps
+// only, true Manhattan distance, never a corner-touching diagonal jump)
+// rather than measured by distance along the raw drag segment -- a
+// straight-line distance clamp let a shallow, patient drag sneak a 7th tile
+// in past the limit, since a segment can graze a tile's corner without
+// "using up" a full tile-width of distance the way a straight crossing does.
+// tileHighlight shows exactly the walked path (clampToTileWalk's own
+// `tiles`), so the highlight and the clamp can never disagree about which
+// tiles are actually in reach.
+//
 // ── HIGHLIGHTING THE CURRENT SNAP TARGET ──
 //
-// A blueprint's ribbon has its own private material (ribbon.ts builds one per
-// call), so highlighting one is just brightening that instance directly. A
-// BUILT road or a landmark is different: both share ONE sceneryMaterial
-// instance (blocks.ts) across every piece of scenery in the game, so
-// highlighting one has to mean swapping THAT SPECIFIC mesh's own `.material`
-// to sceneryHighlightMaterial (also blocks.ts) and back -- mutating the
-// shared material itself would brighten every road and landmark at once.
+// A ghost, a BUILT road, and a landmark all highlight the same way: swapping
+// that specific mesh's own `.material` between a shared pair (a plain one
+// and a brightened one) and back, never mutating either material in place --
+// roadGhostMaterial/roadGhostHighlightMaterial (roadMesh.ts) for a ghost,
+// sceneryMaterial/sceneryHighlightMaterial (blocks.ts) for a built road or a
+// landmark. Each pair is shared by every mesh of its own kind, so mutating
+// one directly would brighten all of them at once instead of just whatever
+// is actually the current snap target.
 
 export interface RoadConnection {
   roadId: number;
@@ -104,11 +129,16 @@ const LONG_PRESS_MS = 500;
  *  of a drag instead of a hold. */
 const PRESS_JITTER = 0.08;
 
-/** Height above the floor the blueprint ribbons float at -- distinct from
- *  regionDraw.ts's own DRAW_Y (0.02) so a path region and a road blueprint
- *  crossing the same point can't z-fight; both can legitimately be on screen
- *  at once (path doesn't clear itself on a mode switch, only on arrival). */
-const DRAW_Y = 0.025;
+/** How many distinct game tiles (gameTile.ts) one road may span -- see this
+ *  file's own header on why it's clamped live rather than checked on
+ *  release. */
+const MAX_ROAD_TILES = 6;
+/** Clear of board.ts's own tileGrid lines (0.006) below, and low enough to
+ *  sit INSIDE a ghost road's own translucent volume without fighting it --
+ *  unlike a built road's opaque bed/cobbles (HOVER_MARKER_HEIGHT's own
+ *  comment below), a ghost is see-through, so a flat decal buried inside it
+ *  still reads, just blended rather than occluded. */
+const TILE_HIGHLIGHT_Y = 0.02;
 /** Tall enough to clear the tallest thing roadMesh.ts ever builds (a junction
  *  plaza, its own two layers included) with room to spare -- a flat disc at a
  *  fixed height was invisible whenever it landed under a BUILT road's opaque
@@ -116,15 +146,15 @@ const DRAW_Y = 0.025;
  *  fully occluded. Real vertical extent instead of a fixed Y is what makes it
  *  poke out and stay visible regardless of what it's hovering over. */
 const HOVER_MARKER_HEIGHT = 0.24;
-/** Translucent -- "a ghost of what would be built here", not paint already
- *  committed the way path's ribbon (opacity 0.9, ribbon.ts's default) is. */
-const BLUEPRINT_OPACITY = 0.35;
-const BLUEPRINT_COLOR = 0xc9b98a;
 
 let nextId = 0;
 const blueprints: Road[] = [];
 const built: Road[] = [];
-const ribbons = new Map<number, Ribbon>();
+/** A blueprint's own ghost mesh (roadMesh.ts's buildRoadGhostMesh), kept
+ *  around so a drag can rebuild it in place and the highlight system can
+ *  find and swap it -- createRoad populates this the instant a blueprint
+ *  exists, mirroring roadMeshes below for a confirmed one. */
+const ghosts = new Map<number, THREE.Mesh>();
 /** A confirmed road's own mesh, kept around solely so the highlight system
  *  can find and swap it -- confirmRoads/writeRoadSnapshot both populate this
  *  the instant they build one; nothing else needs to look a built road's
@@ -211,6 +241,19 @@ function findSnap(pt: THREE.Vector2, excludeId?: number): SnapCandidate | null {
   return best;
 }
 
+/** findSnap, but discarding a hit that would pull the road's own far end
+ *  past MAX_ROAD_TILES on the guided walk from `startTile` -- a snap target
+ *  sitting just outside the last reachable tile (AXIS_SNAP_RADIUS reaches a
+ *  little past a tile's own edge) shouldn't be able to drag the endpoint
+ *  along with it. Shared by the pointermove preview and commitDrag so the
+ *  hover circle never promises a connection the release won't actually
+ *  make. */
+function findReachableSnap(pt: THREE.Vector2, excludeId: number, startTile: GameTile): SnapCandidate | null {
+  const hit = findSnap(pt, excludeId);
+  if (!hit) return null;
+  return tileWalk(startTile, tileAt(hit.point.x, hit.point.y)).length <= MAX_ROAD_TILES ? hit : null;
+}
+
 // ── Removing a road (long-press delete, or an abandoned in-progress drag) ──
 
 function removeConnectionsTo(deletedId: number) {
@@ -221,21 +264,23 @@ function removeConnectionsTo(deletedId: number) {
 }
 
 /** Removes a road entirely: itself, any OTHER road's connection entry
- *  pointing at it, and its blueprint ribbon. Only ever called on an
- *  unconfirmed road -- see this file's header on why a built one can't be
- *  deleted at all, and there is deliberately no cascade: whatever was
- *  connected to the deleted road keeps its own geometry, just minus that one
- *  connection entry. */
+ *  pointing at it, and its ghost mesh. Only ever called on an unconfirmed
+ *  road -- see this file's header on why a built one can't be deleted at
+ *  all, and there is deliberately no cascade: whatever was connected to the
+ *  deleted road keeps its own geometry, just minus that one connection
+ *  entry. */
 function removeRoad(road: Road) {
   const i = blueprints.indexOf(road);
   if (i !== -1) blueprints.splice(i, 1);
   removeConnectionsTo(road.id);
-  const ribbon = ribbons.get(road.id);
-  if (ribbon) {
-    scene.remove(ribbon.mesh);
-    ribbon.mesh.geometry.dispose();
-    (ribbon.mesh.material as THREE.Material).dispose();
-    ribbons.delete(road.id);
+  const ghost = ghosts.get(road.id);
+  if (ghost) {
+    // No material to dispose -- roadGhostMaterial/roadGhostHighlightMaterial
+    // are shared across every ghost, same as sceneryMaterial is for built
+    // scenery, not a private instance the way ribbon.ts's own material was.
+    scene.remove(ghost);
+    ghost.geometry.dispose();
+    ghosts.delete(road.id);
   }
 }
 
@@ -277,16 +322,26 @@ function createRoad(start: THREE.Vector2, connectedTo: SnapCandidate | null): Ro
   };
   if (connectedTo) attachConnection(road, connectedTo);
   blueprints.push(road);
-  const ribbon = createRibbon(2, BLUEPRINT_COLOR, DRAW_Y, ROAD_HALF_WIDTH, BLUEPRINT_OPACITY);
-  ribbon.mesh.visible = mode === 'road';
-  scene.add(ribbon.mesh);
-  ribbons.set(road.id, ribbon);
-  updateRibbon(road);
+  // start === end at this point (a fresh drag hasn't moved yet), so this is
+  // a degenerate sliver -- immediately resized by the pointermove handler's
+  // own updateGhost call as soon as the drag actually moves.
+  const ghost = buildRoadGhostMesh(road.start, road.end, road.id);
+  ghost.visible = mode === 'road';
+  scene.add(ghost);
+  ghosts.set(road.id, ghost);
   return road;
 }
 
-function updateRibbon(road: Road) {
-  ribbons.get(road.id)?.update([road.start, road.end], false);
+/** Rebuilds a blueprint's ghost mesh in place for its CURRENT start/end --
+ *  called on every pointermove of an active drag (roadMesh.ts's own header
+ *  on buildRoadGhostMesh explains why it's safe to rebuild that often
+ *  without the result visibly jittering). */
+function updateGhost(road: Road) {
+  const ghost = ghosts.get(road.id);
+  if (!ghost) return;
+  const rebuilt = buildRoadGhostMesh(road.start, road.end, road.id);
+  ghost.geometry.dispose();
+  ghost.geometry = rebuilt.geometry;
 }
 
 let dragRoad: Road | null = null;
@@ -307,23 +362,103 @@ function abandonDrag() {
   if (!dragRoad) return;
   removeRoad(dragRoad);
   dragRoad = null;
+  tileHighlight.visible = false;
+  reachIndicator.visible = false;
 }
 
 function commitDrag() {
   const road = dragRoad!;
   dragRoad = null;
+  tileHighlight.visible = false;
+  reachIndicator.visible = false;
   if (road.start.distanceTo(road.end) < MIN_ROAD_LENGTH) { removeRoad(road); return; }
 
   // The far end can ALSO land on something, not just wherever the drag
   // started -- excluded from matching itself (`road` is already sitting in
   // `blueprints` by this point), so dragging back near your own start can't
-  // read as "connected to itself".
-  const hit = findSnap(road.end, road.id);
+  // read as "connected to itself". findReachableSnap (not findSnap) so a
+  // target just past the span limit can't pull the endpoint past it either.
+  const hit = findReachableSnap(road.end, road.id, tileAt(road.start.x, road.start.y));
   if (hit) {
     road.end.copy(hit.point);
     attachConnection(road, hit);
   }
-  updateRibbon(road);
+  updateGhost(road);
+}
+
+// ── Tile highlight: every tile the current drag's guided walk crosses ────
+// Geometry rebuilt straight in WORLD space (gameTile.ts's own
+// buildTileHighlightGeometry bakes absolute tile coordinates in), so the
+// mesh itself sits at a fixed origin and only its geometry ever changes --
+// same idiom act.ts's own occupancy highlight uses for a hovered tree or
+// structure. Rebuilt on every pointermove of an active drag rather than only
+// when the tile set changes: unlike a hover staying still over one target,
+// a drag's end moves on nearly every one of those events anyway.
+//
+// Coloured to match that same act.ts hover (occupancyHighlight's 0xbfe8ff at
+// 0.22 opacity), a deliberate blue rather than any of the ghost road's own
+// earth tones underneath -- the ghost already reads as "the road"; this is
+// the separate "you're pointing at these tiles" feedback, and act mode
+// already established what that looks like.
+const TILE_HIGHLIGHT_COLOR = 0xbfe8ff;
+
+const tileHighlight = new THREE.Mesh(
+  new THREE.BufferGeometry(),
+  new THREE.MeshBasicMaterial({
+    color: TILE_HIGHLIGHT_COLOR, transparent: true, opacity: 0.22, depthWrite: false, side: THREE.DoubleSide,
+  }),
+);
+tileHighlight.rotation.x = -Math.PI / 2;
+tileHighlight.position.y = TILE_HIGHLIGHT_Y;
+tileHighlight.renderOrder = 1;
+tileHighlight.visible = false;
+scene.add(tileHighlight);
+
+/** Rebuilds tileHighlight for the exact tiles a guided walk (gameTile.ts's
+ *  tileWalk, already computed by clampToTileWalk) passed through, and shows
+ *  it -- called from the pointermove handler's dragRoad branch, once per
+ *  move. Takes the tiles directly rather than re-deriving them from the
+ *  road's start/end, so the highlight can never disagree with the clamp
+ *  that just ran against those same tiles. */
+function updateTileHighlight(tiles: readonly GameTile[]) {
+  tileHighlight.geometry.dispose();
+  tileHighlight.geometry = buildTileHighlightGeometry(tiles);
+  tileHighlight.visible = true;
+}
+
+// ── Reach indicator: every tile the drag's START could possibly reach ────
+// The same question act.ts's own radiusIndicator answers for a selected
+// denizen -- tilesWithinReach, a Manhattan diamond (see that function's own
+// header) -- reused here for a road's own MAX_ROAD_TILES instead of a
+// denizen's ACT_REACH_SECTORS, and reach - 1 rather than reach: tileWalk
+// already counts the START tile as the walk's own first tile, so a road
+// with MAX_ROAD_TILES=6 can travel 5 tiles OUT from it, the same "5 away,
+// 6 total" the rest of this file already carries.
+//
+// A plain white floor UNDER tileHighlight (ROAD_REACH_Y sits below
+// TILE_HIGHLIGHT_Y) -- tileHighlight is "exactly these tiles, right now",
+// this is "anywhere in here, eventually", so it has to read as the
+// background the other one sits on top of rather than compete with its
+// blue. Built once per drag, at its start (wireRoadBuild's own pointerdown),
+// not every pointermove -- unlike tileHighlight, this depends only on the
+// drag's fixed start tile, which never changes for the life of one drag.
+const ROAD_REACH_Y = 0.014;
+const reachIndicator = new THREE.Mesh(
+  new THREE.BufferGeometry(),
+  new THREE.MeshBasicMaterial({
+    color: 0xffffff, transparent: true, opacity: 0.14, depthWrite: false, side: THREE.DoubleSide,
+  }),
+);
+reachIndicator.rotation.x = -Math.PI / 2;
+reachIndicator.position.y = ROAD_REACH_Y;
+reachIndicator.renderOrder = 1;
+reachIndicator.visible = false;
+scene.add(reachIndicator);
+
+function updateReachIndicator(startTile: GameTile) {
+  reachIndicator.geometry.dispose();
+  reachIndicator.geometry = buildTileHighlightGeometry(tilesWithinReach(startTile, MAX_ROAD_TILES - 1));
+  reachIndicator.visible = true;
 }
 
 // ── Hover indicator: the snap-point circle ──────────────────────────────
@@ -361,11 +496,9 @@ function paintTarget(kind: 'road' | 'landmark', id: number, on: boolean) {
     if (landmark) landmark.mesh.material = on ? sceneryHighlightMaterial : sceneryMaterial;
     return;
   }
-  const ribbon = ribbons.get(id);
-  if (ribbon) {
-    // A private material per ribbon (ribbon.ts), so brightening this one
-    // can't bleed into any other blueprint the way sceneryMaterial would.
-    (ribbon.mesh.material as THREE.MeshBasicMaterial).opacity = on ? Math.min(1, BLUEPRINT_OPACITY * 2.4) : BLUEPRINT_OPACITY;
+  const ghost = ghosts.get(id);
+  if (ghost) {
+    ghost.material = on ? roadGhostHighlightMaterial : roadGhostMaterial;
     return;
   }
   const mesh = roadMeshes.get(id);
@@ -421,18 +554,17 @@ function patchJunctionsFor(road: Road) {
 
 /** Turns EVERY current blueprint into a permanent paved road, connected or
  *  not -- one press, no partial confirm (see this file's header). Ids and
- *  connections carry straight across; only the visual changes, from a ribbon
- *  to roadMesh.ts's slab. */
+ *  connections carry straight across; only the visual changes, from a
+ *  translucent ghost to roadMesh.ts's own opaque slab. */
 function confirmRoads() {
   if (blueprints.length === 0) return;
   for (const road of blueprints) {
     road.confirmed = true;
-    const ribbon = ribbons.get(road.id);
-    if (ribbon) {
-      scene.remove(ribbon.mesh);
-      ribbon.mesh.geometry.dispose();
-      (ribbon.mesh.material as THREE.Material).dispose();
-      ribbons.delete(road.id);
+    const ghost = ghosts.get(road.id);
+    if (ghost) {
+      scene.remove(ghost);
+      ghost.geometry.dispose();
+      ghosts.delete(road.id);
     }
     const mesh = buildRoadMesh(road.start, road.end, road.id);
     scene.add(mesh);
@@ -484,6 +616,7 @@ export function wireRoadBuild(canvas: HTMLElement) {
     // this can't just wait for the next hover update.
     setHighlight(hit);
     dragRoad = createRoad(hit ? hit.point : scratch, hit);
+    updateReachIndicator(tileAt(dragRoad.start.x, dragRoad.start.y));
     canvas.setPointerCapture(e.pointerId);
   });
 
@@ -494,13 +627,22 @@ export function wireRoadBuild(canvas: HTMLElement) {
 
     if (dragRoad) {
       if (mode !== 'road') { abandonDrag(); return; }
-      dragRoad.end.copy(scratch);
-      updateRibbon(dragRoad);
+      // Clamped to a guided walk of MAX_ROAD_TILES tiles from the start tile
+      // (gameTile.ts's tileWalk, orthogonal steps only) BEFORE anything
+      // downstream sees it -- findReachableSnap below has to test against
+      // the point the road would actually end at, not wherever the cursor
+      // currently is, or a snap target just past the span limit would light
+      // up as reachable when it isn't.
+      const startTile = tileAt(dragRoad.start.x, dragRoad.start.y);
+      const { point: clampedEnd, tiles } = clampToTileWalk(dragRoad.start, scratch, MAX_ROAD_TILES);
+      dragRoad.end.copy(clampedEnd);
+      updateGhost(dragRoad);
+      updateTileHighlight(tiles);
       // Live preview of where the far end would land if released right now --
       // the circle only, not the highlight. The highlight stays reserved for
       // the drag's fixed start anchor (set once in pointerdown) so the two
       // ends aren't fighting over the one "currently highlighted" slot.
-      const endHit = findSnap(scratch, dragRoad.id);
+      const endHit = findReachableSnap(clampedEnd, dragRoad.id, startTile);
       if (endHit) hoverIndicator.position.set(endHit.point.x, HOVER_MARKER_HEIGHT / 2, endHit.point.y);
       hoverIndicator.visible = !!endHit;
       return;
@@ -522,8 +664,11 @@ export function wireRoadBuild(canvas: HTMLElement) {
 
   onModeChange((next, prev) => {
     const show = next === 'road';
-    for (const ribbon of ribbons.values()) ribbon.mesh.visible = show;
-    if (!show) { hoverIndicator.visible = false; setHighlight(null); }
+    for (const ghost of ghosts.values()) ghost.visible = show;
+    if (!show) {
+      hoverIndicator.visible = false; tileHighlight.visible = false; reachIndicator.visible = false;
+      setHighlight(null);
+    }
     if (prev === 'road') abandonDrag(); // an in-progress drag doesn't survive leaving the mode
     if (confirmBtn) confirmBtn.style.display = show ? 'block' : 'none';
   });

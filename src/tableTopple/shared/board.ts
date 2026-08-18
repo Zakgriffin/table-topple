@@ -2,8 +2,10 @@ import * as THREE from 'three';
 import { scene } from './scene.ts';
 import {
   BOARD_CELLS, BOARD_SIZE, COLOR_CAVE, COLOR_FIELD, COLOR_FOREST, COLOR_HALLOWED,
+  // TILE_CELLS -- only used by the commented-out tileGrid below; uncomment together.
 } from './constants.ts';
 import { type Terrain, cellCenter, terrainAtCell, worldToCell } from './terrain.ts';
+import { tileIndexFromCell } from './gameTile.ts';
 import { fbm, noise2 } from './noise.ts';
 import { landmarks } from './landmarks.ts';
 import { forest } from './forest.ts';
@@ -91,7 +93,7 @@ const GRAIN_SEED = 0x1d0b;
 // vertex between the four cells meeting there, which forces one colour for all
 // four and smears every cell into its neighbours. Split, each triangle owns its
 // vertices, so a cell can be flat and its edges land exactly on the grid lines.
-// The cost is ~124k vertices for a 144x144 board, built once at load.
+// The cost is ~118k vertices for a 140x140 board, built once at load.
 const geometry = new THREE.PlaneGeometry(BOARD_SIZE, BOARD_SIZE, BOARD_CELLS, BOARD_CELLS).toNonIndexed();
 const position = geometry.getAttribute('position');
 const colors = new THREE.BufferAttribute(new Float32Array(position.count * 3), 3);
@@ -123,6 +125,44 @@ const linear = new Map<Terrain, [number, number, number]>();
     c.setHex(hex);
     linear.set(terrain, [c.r, c.g, c.b]);
   }
+}
+
+// Pulled halfway toward forest, in linear space, so a patch keeps its own
+// hue up close but no longer competes with the forest surrounding it from
+// across the board -- the constants above (a field's, a cave's, hallowed
+// ground's own colour) are untouched; only what actually gets painted is
+// softened. Forest itself is left alone -- there's nothing to blend it
+// toward.
+const FOREST_BLEND = 0.5;
+{
+  const [fr, fg, fb] = linear.get('forest')!;
+  for (const terrain of Object.keys(TERRAIN_COLOR) as Terrain[]) {
+    if (terrain === 'forest') continue;
+    const [r, g, b] = linear.get(terrain)!;
+    linear.set(terrain, [
+      r + (fr - r) * FOREST_BLEND,
+      g + (fg - g) * FOREST_BLEND,
+      b + (fb - b) * FOREST_BLEND,
+    ]);
+  }
+}
+
+// ── Game-tile checkerboard ──────────────────────────────────────────────────
+// A darker shade on alternating game tiles (gameTile.ts) -- the same grid the
+// (visually faint) tileGrid lines below mark out, so the checker's own edges
+// double as a second, colour-based way to read "N tiles that way" without
+// leaning on the lines at all. Applied last and per-cell, with no blend
+// kernel of its own: the patch-edge blending above exists to soften a
+// TERRAIN change, but a tile boundary isn't one -- it should read as a crisp
+// square, landing exactly on the grid line, not a smeared gradient.
+/** How much darker the alternate tiles are. Multiplicative, so it darkens
+ *  whatever colour is already there -- a patch's own hue included -- rather
+ *  than mixing in a second one. */
+const TILE_DARK_FACTOR = 0.72;
+function tileShade(col: number, row: number): number {
+  const tileCol = tileIndexFromCell(col);
+  const tileRow = tileIndexFromCell(row);
+  return (tileCol + tileRow) % 2 === 0 ? 1 : TILE_DARK_FACTOR;
 }
 
 /** One flat colour per cell, row-major like the terrain grid. */
@@ -160,7 +200,7 @@ function computeCellColors() {
       // colour. Floored: the swings are large enough now that three dark peaks
       // stacking could otherwise drive a cell to black, which would read as a
       // hole in the board rather than as shadow.
-      const scale = Math.max(0.35, 1 + broad + smooth + grain) / weight;
+      const scale = (Math.max(0.35, 1 + broad + smooth + grain) / weight) * tileShade(col, row);
 
       const i = (row * BOARD_CELLS + col) * 3;
       cellColor[i] = r * scale;
@@ -206,6 +246,29 @@ export function paintFloor() {
 }
 
 paintFloor();
+
+// ── Game-tile grid ───────────────────────────────────────────────────────────
+// A much coarser grid than the one this file's own header above explains
+// away: one line every TILE_CELLS cells (35 divisions across the full
+// 140-cell board), not one per cell. At that spacing it reads as a reference
+// grid laid over the mosaic -- somewhere to say "N tiles that way" -- rather
+// than as a wireframe standing in for terrain colour, which is the per-cell
+// case the header is about and doesn't apply here. terrain.ts snaps patches
+// to this same grid's line intersections, and gameTile.ts's whole "game tile"
+// concept is built on it, so it's the shared constant from constants.ts
+// rather than a number local to this file. Kept faint now that the
+// checkerboard above marks the same squares by colour -- the lines are a
+// secondary cue, not the primary way the grid reads.
+// Commented out rather than deleted -- not wanted on screen for now, but the
+// checkerboard above still marks the same squares by colour, and this is the
+// quickest way back if the lines turn out to be missed.
+// const tileGrid = new THREE.GridHelper(BOARD_SIZE, BOARD_CELLS / TILE_CELLS, 0xffffff, 0xffffff);
+// tileGrid.position.y = 0.006; // clear of the floor itself; well under the mode overlays' own 0.02+
+// const tileGridMaterial = tileGrid.material as THREE.LineBasicMaterial;
+// tileGridMaterial.transparent = true;
+// tileGridMaterial.opacity = 0.08;
+// tileGridMaterial.depthWrite = false;
+// scene.add(tileGrid);
 
 // Scenery. Both modules build and hand back a Group without touching the
 // scene, the way castle.ts does; this is where they enter the world.

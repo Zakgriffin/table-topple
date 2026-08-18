@@ -9,20 +9,24 @@ import { WEAPONS, WEAPON_ORDER, type WeaponKey } from './weapons.ts';
 //   road    drag out road blueprints,   (R)
 //           confirmed separately -- see roads.ts
 //   fight   aim and use the weapon      (E, or any of 1/2/3)
+//   act     pick a denizen, then send   (A)
+//           it walking to a nearby
+//           structure or tree -- see act.ts
 //
 // Which weapon is in hand is a SEPARATE axis from the mode: 1/2/3 pick it, and
 // picking one also draws it. That keeps the mode bar to one entry per MODE
 // instead of growing one per weapon, and means swapping mid-fight doesn't pass
 // through any other state.
-export type InputMode = 'camera' | 'path' | 'road' | 'fight';
+export type InputMode = 'camera' | 'path' | 'road' | 'fight' | 'act';
 
-export const MODES: InputMode[] = ['camera', 'path', 'road', 'fight'];
+export const MODES: InputMode[] = ['camera', 'path', 'road', 'fight', 'act'];
 
 const LABELS: Record<InputMode, string> = {
   camera: 'camera',
   path: 'path',
   road: 'road',
   fight: 'fight',
+  act: 'act',
 };
 
 /** Shown under each label, so the hotkey and the button that does the same
@@ -32,6 +36,7 @@ const KEY_HINTS: Record<InputMode, string> = {
   path: 'p',
   road: 'r',
   fight: 'e',
+  act: 'a',
 };
 
 export let mode: InputMode = 'camera';
@@ -106,6 +111,7 @@ export function wireModeUI() {
     else if (e.code === 'KeyP') setMode('path');
     else if (e.code === 'KeyR') setMode('road');
     else if (e.code === 'KeyE') setMode('fight');
+    else if (e.code === 'KeyA') setMode('act');
     else {
       const weapon = WEAPON_ORDER.find((w) => WEAPONS[w].key === e.key);
       if (!weapon) return;
@@ -128,9 +134,10 @@ export function setMode(next: InputMode) {
   // What the camera controls do about this is view.ts's business, subscribed
   // through onModeChange below -- this module has no renderer to reach into.
   for (const [m, el] of buttons) el.classList.toggle('active', m === next);
-  // Crosshair while drawing. Fight mode hides the cursor outright via pointer
-  // lock (aim.ts) and draws its own reticle, so it needs nothing here.
-  document.body.style.cursor = next === 'path' || next === 'road' ? 'crosshair' : '';
+  // Crosshair while drawing, or picking. Fight mode hides the cursor outright
+  // via pointer lock (aim.ts) and draws its own reticle, so it needs nothing
+  // here.
+  document.body.style.cursor = next === 'path' || next === 'road' || next === 'act' ? 'crosshair' : '';
 
   for (const fn of listeners) fn(next, prev);
 }

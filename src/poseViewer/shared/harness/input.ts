@@ -145,6 +145,19 @@ function canonical(v: unknown): string {
   return `{${Object.keys(o).sort().map((k) => `${JSON.stringify(k)}:${canonical(o[k])}`).join(',')}}`;
 }
 
+/**
+ * The same content hash `provenance` uses, over any plain value.
+ *
+ * Exported so a second caller identifies a configuration THE SAME WAY rather
+ * than growing its own hash: the sweep tags every report with one of these over
+ * the render settings it ran with, so changing pose-viewer.config.json visibly
+ * changes the tag instead of silently changing the numbers underneath it.
+ * Key-order-independent, per `canonical`.
+ */
+export function configHashOf(value: unknown): string {
+  return hex(fnv1a(new TextEncoder().encode(canonical(value))));
+}
+
 export function provenance(input: HarnessInput): InputProvenance {
   return {
     input: input.label,

@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
-import { type SimDims, type SimPose, camPosOf, camQuatOf, rayDirInto, renderPose, vFovRadOf } from './harness/sim.ts';
+import { BACKGROUND, DARK_LEVEL, LIGHT_LEVEL, type SimDims, type SimPose, camPosOf, camQuatOf, rayDirInto, renderPose, vFovRadOf } from './harness/sim.ts';
 import { cornerDir } from '../src/poseViewer/shared/math/geometry.ts';
 
 // ── Validating the SIMULATOR, not the pipeline ────────────────────────────
@@ -66,11 +66,18 @@ test('render: produces a real image, not a constant', () => {
   assert.equal(gray.length, DIMS.w * DIMS.h);
   let min = Infinity, max = -Infinity, sum = 0;
   for (const g of gray) { if (g < min) min = g; if (g > max) max = g; sum += g; }
-  assert.ok(min < 20, `expected dark cells, min was ${min}`);
-  assert.ok(max > 235, `expected light cells, max was ${max}`);
-  // A De Bruijn pattern is roughly balanced, so the mean should sit near
-  // mid-grey. Far from it means most of the frame is sky or one bit value.
-  assert.ok(sum / gray.length > 80 && sum / gray.length < 175, `mean ${sum / gray.length}`);
+  // Against the renderer's own constants rather than literals, so the levels
+  // and the test cannot drift apart. This pose is low enough that the board
+  // fills the frame, so BACKGROUND should not appear at all and the extremes
+  // are exactly the two cell levels.
+  assert.ok(min <= DARK_LEVEL, `expected dark cells, min was ${min}`);
+  assert.ok(max >= LIGHT_LEVEL, `expected light cells, max was ${max}`);
+  assert.ok(min >= BACKGROUND, `nothing may be darker than the background, min was ${min}`);
+  // A De Bruijn pattern is roughly balanced, so the mean should sit near the
+  // midpoint of the two cell levels. Far from it means most of the frame is
+  // background or one bit value.
+  const mid = (DARK_LEVEL + LIGHT_LEVEL) / 2;
+  assert.ok(sum / gray.length > mid - 30 && sum / gray.length < mid + 30, `mean ${sum / gray.length}, mid ${mid}`);
 });
 
 test('render: a nadir view is centred on the cell under the camera', () => {

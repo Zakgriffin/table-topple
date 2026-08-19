@@ -43,6 +43,17 @@ export interface SweepSpec {
   offsets: readonly { row: number; col: number }[];
   dims: SimDims;
   supersample?: number;
+  /**
+   * How a pose becomes an image. Defaults to the bare geometric render.
+   *
+   * Injectable because the SWEEP DRIVER, not this file, is what can reach the
+   * app's distortion chain -- antialias, lens blur, downsample, sensor noise.
+   * Those live in poseViewer, and a harness that imported them would tie every
+   * consumer of this file to one of the two apps. A function parameter keeps
+   * the default honest (geometry only, no app) while letting the driver hand in
+   * an image that matches what the app actually feeds the pipeline.
+   */
+  render?: (world: SimWorld, pose: SimPose, dims: SimDims) => Float64Array;
   /** The board being rendered and its cell pitch. Must be the same two the
    *  runner's pipeline is configured with -- see SimWorld. */
   world: SimWorld;
@@ -213,7 +224,9 @@ export async function runSweep(spec: SweepSpec, runner: Runner): Promise<SweepRo
   const rows: SweepRow[] = [];
   for (const pose of poses) {
     const truth = truthFor(spec.world, pose);
-    const gray = renderPose(spec.world, pose, spec.dims, spec.supersample ?? 4);
+    const gray = spec.render
+      ? spec.render(spec.world, pose, spec.dims)
+      : renderPose(spec.world, pose, spec.dims, spec.supersample ?? 4);
     const obs = await runner(gray, spec.dims, pose);
 
     const scale = scaleOf(pose, spec.dims, spec.world);

@@ -2,12 +2,20 @@ import { readFileSync } from 'node:fs';
 import * as THREE from 'three';
 import { create, globals } from 'webgpu';
 import { validateFixture } from '../src/poseViewer/shared/fixture.ts';
-import { inputFromFixture } from '../src/poseViewer/shared/harness/input.ts';
-import { type SimDims, type SimPose, type SimWorld, vFovRadOf } from '../tests/harness/sim.ts';
+import { configHashOf, inputFromFixture } from '../src/poseViewer/shared/harness/input.ts';
+import {
+  BACKGROUND, DARK_LEVEL, LIGHT_LEVEL,
+  type SimDims, type SimPose, type SimWorld, renderPoseHiRes, vFovRadOf,
+} from '../tests/harness/sim.ts';
+import {
+  addGaussianNoise, applyAntialiasFilter, downsampleBoxAverage, separableBoxBlur,
+} from '../src/poseViewer/server/pipeline/distortion.ts';
+import { PoseViewerConfigSchema } from '../src/poseViewer/shared/configSchema.ts';
+import { Value } from '@sinclair/typebox/value';
 import { type PoseObservation, type SweepSpec, runSweep, summarize } from '../tests/harness/sweep.ts';
 import { boardDims } from '../src/pose/board.ts';
 import { type PoseContext, createPoseContext, runPose } from '../src/pose/run.ts';
-import { board } from '../src/poseViewer/shared/floorPattern.ts';
+import { board, rebuildFloorPatternData } from '../src/poseViewer/shared/floorPattern.ts';
 import { GRID_STEP } from '../src/poseViewer/shared/constants.ts';
 import { DAWN_NODE_FLAGS, requestDeviceWithOptionalTimestamps } from '../src/gpu/device.ts';
 import { getRecords, profilerReset, spanEnd, spanStart } from '../src/profiling/profiler.ts';
@@ -39,10 +47,54 @@ const val = (f: string, d: string) => {
   return i >= 0 && argv[i + 1] ? argv[i + 1]! : d;
 };
 
-const [wStr, hStr] = val('--res', '480x640').split('x');
-const dims: SimDims = { w: Number(wStr), h: Number(hStr), horizFovDeg: 65 };
-const supersample = Number(val('--ss', '4'));
+// ── THE RENDER SETTINGS COME FROM THE APP'S CONFIG ───────────────────────
+//
+// Not from literals here. The sweep and pose-viewer-server.html have to be
+// looking at the SAME simulated world or a sweep number is about the sweep's
+// renderer -- which is exactly what happened: this file hardcoded a 65-degree
+// fov and supersample 4 with no noise and no blur, against an app running
+// supersample 2 with simNoise 2, and rendered the De Bruijn pattern infinitely
+// tiled where the app renders one finite board.
+//
+// Validated against the same schema the page boots from, so a malformed config
+// fails here rather than producing a plausible-looking sweep.
+const CONFIG_PATH = 'pose-viewer.config.json';
+const rawConfig = JSON.parse(readFileSync(CONFIG_PATH, 'utf8'));
+const configErrors = [...Value.Errors(PoseViewerConfigSchema, rawConfig)];
+if (configErrors.length > 0) {
+  console.error(`${CONFIG_PATH} is invalid -- run \`npm run check:config\``);
+  for (const e of configErrors) console.error(`    ${e.path || '/'}: ${e.message}`);
+  process.exit(1);
+}
+const cfg = rawConfig as {
+  global: { boardSize: number };
+  camera: { common: { horizFovDeg: number }; simulated: { simNoise: number; simBlur: number; captureSupersample: number } };
+};
+
+const [wStr, hStr] = val('--res', '480x648').split('x');
+const dims: SimDims = {
+  w: Number(wStr), h: Number(hStr),
+  horizFovDeg: Number(val('--fov', String(cfg.camera.common.horizFovDeg))),
+};
+// Every one of these is a CLI override of a config value, never a default in
+// its own right -- so `npm run sweep` with no flags is the app's own setup.
+const supersample = Number(val('--ss', String(cfg.camera.simulated.captureSupersample)));
+const simNoise = Number(val('--noise', String(cfg.camera.simulated.simNoise)));
+const simBlur = Number(val('--blur', String(cfg.camera.simulated.simBlur)));
 const quick = has('--quick');
+
+// captureDistortedGrayscale's chain, in ITS order, over the same hi-res image
+// it works on: blur belongs to the lens and acts on a near-continuous image,
+// so only the final box-downsample introduces the pixel grid. Doing this after
+// downsampling would be a different image, not a rounding difference.
+const renderLikeTheApp = (world: SimWorld, pose: SimPose, d: SimDims): Float64Array => {
+  const { gray: hi, w: cw, h: ch } = renderPoseHiRes(world, pose, d, supersample);
+  const antialiased = applyAntialiasFilter(hi, cw, ch, supersample);
+  const blurred = separableBoxBlur(antialiased, cw, ch, Math.round(simBlur * supersample));
+  const out = downsampleBoxAverage(blurred, cw, ch, supersample, d.w, d.h);
+  addGaussianNoise(out, simNoise);
+  return out;
+};
 
 // ── The join's three knobs, on the command line while it is being measured ──
 //
@@ -78,6 +130,14 @@ const customHeights = heightsArg ? heightsArg.split(',').map(Number) : null;
 // against the same floor the app runs on rather than one invented here. Both go
 // into the renders AND into the pipeline settings below -- they have to be the
 // same two values on each side or the sweep is comparing two worlds.
+//
+// REBUILT AT THE CONFIGURED SIZE FIRST. floorPattern starts the board at
+// ORDER5_CANDIDATE's own cropSize because config is fetched, not imported, on
+// the page; here it is readable up front, so the board is put at
+// global.boardSize before `world` captures it. They happen to agree today --
+// both 144 -- and that is exactly the kind of agreement that stops being true
+// silently.
+rebuildFloorPatternData(cfg.global.boardSize);
 const world: SimWorld = { board, cellPitch: GRID_STEP };
 
 // The fixture supplies detector tuning that is known to work on a real capture.
@@ -89,6 +149,7 @@ const base = inputFromFixture(
 const spec: SweepSpec = quick
   ? {
     heights: [10], tilts: [0, 20], yaws: [0], dims, supersample, world,
+    render: renderLikeTheApp,
     offsets: [{ row: 70.5, col: 70.5 }],
   }
   : {
@@ -120,7 +181,7 @@ const spec: SweepSpec = quick
     // Three neighbourhoods of the torus, because the pattern is only LOCALLY
     // unique -- sweeping one spot tests one decode neighbourhood.
     offsets: [{ row: 70.5, col: 70.5 }, { row: 20.5, col: 110.5 }, { row: 100.5, col: 30.5 }],
-    dims, supersample, world,
+    dims, supersample, world, render: renderLikeTheApp,
   };
 
 const total = spec.heights.length * spec.tilts.length * spec.yaws.length * spec.offsets.length;
@@ -307,7 +368,31 @@ console.error(`rendering + running ${total} poses at ${dims.w}x${dims.h}, supers
 const runner = await makePoseRunner();
 const rows = await runSweep(spec, runner);
 console.error('');
+// ── The provenance tag ───────────────────────────────────────────────────
+//
+// Everything that decides what image the pipeline saw, hashed the same way the
+// harness hashes a settings object. The POINT is comparability across time: a
+// later edit to pose-viewer.config.json changes this hash, so two reports that
+// disagree can be told apart from two reports of the same thing -- rather than
+// the numbers appearing to move on their own.
+const renderProvenance = {
+  board: `${world.board.R}x${world.board.C}`,
+  order: world.board.order,
+  cellPitch: GRID_STEP,
+  res: `${dims.w}x${dims.h}`,
+  horizFovDeg: dims.horizFovDeg,
+  supersample, simNoise, simBlur,
+  levels: { dark: DARK_LEVEL, light: LIGHT_LEVEL, background: BACKGROUND },
+  fixture: 'fixtures/default.json',
+  join: { kSigma: joinK, endpointNoisePx: joinNoisePx, maxAngleDeg: joinMaxDeg,
+    maxOverlapFrac: joinOverlap, maxResidualPx: joinResidualPx, polarityAbs: joinPolarityAbs },
+};
 console.error(summarize(rows, world, `src/pose${alias ? ' (gpu, POOLED)' : ' (gpu)'} @ ${dims.w}x${dims.h}`));
+console.error('');
+console.error(`   render provenance  ${configHashOf(renderProvenance)}   (${CONFIG_PATH})`);
+console.error(`     board ${renderProvenance.board} order ${renderProvenance.order}, ${renderProvenance.res} @ ${dims.horizFovDeg}deg`);
+console.error(`     supersample ${supersample}, noise ${simNoise}, blur ${simBlur}, levels ${DARK_LEVEL}/${LIGHT_LEVEL} bg ${BACKGROUND}`);
+console.error(`     join ${joinK === 0 ? 'OFF' : `kSigma ${joinK} maxAngle ${joinMaxDeg} overlap ${joinOverlap} residual ${joinResidualPx}`}`);
 console.error('');
 console.error(gpuBreakdown());
 console.error('');

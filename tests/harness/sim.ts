@@ -78,10 +78,45 @@ export interface SimDims {
   horizFovDeg: number;
 }
 
-/** Rays that miss the floor entirely (above the horizon). Mid-grey so the
- *  image mean -- which is decode's binarization threshold -- is not dragged
- *  toward either bit value by sky. */
-export const SKY = 127.5;
+// ── The three levels this renderer paints, MEASURED off the app ──────────
+//
+// These were read out of pose-viewer-server.html rather than chosen, because
+// the app's floor is a lit MeshStandardMaterial behind THREE's tone mapping and
+// sRGB encode, and reproducing that analytically in a CPU ray caster would be
+// guesswork. The recipe, on the dev bridge, is short enough to repeat whenever
+// the scene's lighting or the floor texture changes:
+//
+//   updateGizmo(cam); renderCamRT(cam);
+//   renderer.readRenderTargetPixels(cam.camRT, ...) -> luma -> histogram
+//
+// at a nadir pose low enough for the board to fill the frame (dark/light), and
+// again high enough to see past its edge (background).
+//
+// WHAT THE OLD VALUES COST. This renderer used to paint 0 and 255 with a
+// neutral 127.5 sky, so it fed the detector 52% MORE CONTRAST than the app ever
+// produces -- straight into lsdRhoNoiseThreshold, which is a gradient magnitude
+// -- and a background that could not drag decode's binarization mean, which the
+// app's very dark one does. Two sweeps' worth of conclusions were drawn across
+// that gap before it was noticed.
+//
+// The floor texture's own values are 20 and 235 (scene/floor.ts). 20 survives
+// lighting unchanged and 235 comes back as 188, which is the tone curve
+// compressing the highlight -- so these are NOT a linear rescale of the texture
+// and cannot be derived from it.
+/** A dark cell (torus bit 1) as the app renders it. */
+export const DARK_LEVEL = 20;
+/** A light cell (torus bit 0) as the app renders it. */
+export const LIGHT_LEVEL = 188;
+/**
+ * Everything that is not board: above the horizon, and the floor plane beyond
+ * the board's own edge.
+ *
+ * The app's scene background is 0x0a0a0f, which is DARKER THAN ANY BOARD CELL.
+ * That is load-bearing for decode, whose binarization threshold is the image
+ * mean: a frame with much background off the board's edge binarizes at a
+ * different point than one filled by board.
+ */
+export const BACKGROUND = 10.6;
 
 export function vFovRadOf(d: SimDims): number {
   const aspect = d.w / d.h;
@@ -192,6 +227,49 @@ export function rayDirInto(
  * anchor arithmetic is mod R/C, so a lattice spanning more than one period is
  * an ordinary case rather than an edge case.
  */
+/**
+ * The geometric render, at FULL supersampled resolution and undistorted.
+ *
+ * Split out from `renderPose` so a caller can run the app's own distortion
+ * chain -- antialias, lens blur, box downsample, sensor noise -- over the same
+ * hi-res image the app blurs, rather than over an already-downsampled one. The
+ * app blurs BEFORE discretizing on purpose (physical lens blur acts on a
+ * near-continuous image; only the sensor introduces the pixel grid), so doing
+ * it in the other order is a different image, not a rounding difference.
+ */
+export function renderPoseHiRes(
+  world: SimWorld, p: SimPose, dims: SimDims, supersample = 4,
+): { gray: Float64Array; w: number; h: number } {
+  const { board: { R, C, torus }, cellPitch } = world;
+  const { w, h } = dims;
+  const s = Math.max(1, Math.floor(supersample));
+  const hw = w * s, hh = h * s;
+  const gray = new Float64Array(hw * hh);
+  const aspect = w / h;
+  const tanHalf = Math.tan(vFovRadOf(dims) / 2);
+  const quat = camQuatOf(p);
+  const cam = camPosOf(world, p);
+  const dir = { x: 0, y: 0, z: 0 };
+
+  for (let Y = 0; Y < hh; Y++) {
+    for (let X = 0; X < hw; X++) {
+      // The same sample points renderPose's subsample loop visits: hi-res pixel
+      // X maps to full-res px (X + 0.5) / s, which for X = x*s + sx is exactly
+      // x + (sx + 0.5) / s.
+      const ndcU = ((X + 0.5) / hw) * 2 - 1;
+      const ndcV = 1 - ((Y + 0.5) / hh) * 2;
+      rayDirInto(dir, ndcU, ndcV, quat, tanHalf, aspect);
+      if (dir.y >= -1e-12) { gray[Y * hw + X] = BACKGROUND; continue; }
+      const t = -cam.y / dir.y;
+      const col = Math.floor((cam.x + t * dir.x) / cellPitch + C / 2);
+      const row = Math.floor((cam.z + t * dir.z) / cellPitch + R / 2);
+      if (row < 0 || row >= R || col < 0 || col >= C) { gray[Y * hw + X] = BACKGROUND; continue; }
+      gray[Y * hw + X] = torus[row]![col]! === 1 ? DARK_LEVEL : LIGHT_LEVEL;
+    }
+  }
+  return { gray, w: hw, h: hh };
+}
+
 export function renderPose(world: SimWorld, p: SimPose, dims: SimDims, supersample = 4): Float64Array {
   const { board: { R, C, torus }, cellPitch } = world;
   const { w, h } = dims;
@@ -219,18 +297,32 @@ export function renderPose(world: SimWorld, p: SimPose, dims: SimDims, supersamp
           rayDirInto(dir, ndcU, ndcV, quat, tanHalf, aspect);
           // The floor is y = 0 and the camera is above it, so a ray reaches the
           // floor only while descending.
-          if (dir.y >= -1e-12) { acc += SKY; continue; }
+          if (dir.y >= -1e-12) { acc += BACKGROUND; continue; }
           const t = -cam.y / dir.y;
           const hx = cam.x + t * dir.x;
           const hz = cam.z + t * dir.z;
-          // World -> board cell. Wrapped, because the pattern tiles.
           const col = Math.floor(hx / cellPitch + C / 2);
           const row = Math.floor(hz / cellPitch + R / 2);
-          const rr = ((row % R) + R) % R;
-          const cc = ((col % C) + C) % C;
+          // ── ONE FINITE BOARD, NOT AN INFINITE TILING ──
+          //
+          // This used to wrap (`row % R`), painting the pattern repeated
+          // forever, on the reasoning that the pattern IS a torus so tiling it
+          // is seamless. Seamless it is; PHYSICAL it is not. The app renders a
+          // single PlaneGeometry(C, R) with the texture at repeat(1,1), and a
+          // printed board has an edge.
+          //
+          // The difference is not cosmetic and it invalidated real conclusions.
+          // A view spanning more than one board period saw the SAME pattern
+          // twice, so decode could lock onto either copy and be right both
+          // times -- while the sweep scored position against an UNWRAPPED
+          // truth and called it an error. That is where "anchor off (144, 1)"
+          // came from: 144 is exactly R. Those poses were then read as a
+          // regression in the line-join work, which live A/B against the app
+          // could not reproduce at any of them.
+          if (row < 0 || row >= R || col < 0 || col >= C) { acc += BACKGROUND; continue; }
           // torus 1 is a DARK cell: decodeGridBuild reads a bit as
           // `gray < binThreshold`, so a set bit has to be the dark one.
-          acc += torus[rr]![cc] === 1 ? 0 : 255;
+          acc += torus[row]![col]! === 1 ? DARK_LEVEL : LIGHT_LEVEL;
         }
       }
       gray[y * w + x] = acc * inv;

@@ -4,9 +4,18 @@ import { HALF_C, HALF_R, ORDER, board, rebuildFloorPatternData } from '../../sha
 import { globalState } from '../../shared/state.ts';
 import { scene } from './renderer.ts';
 
-// -- Floor: the actual De Bruijn torus, tiled seamlessly (it IS a torus, so
-// repeat-wrapping the texture reproduces the true infinite pattern with no
-// seam — the same fact the real tracker relies on to work from any crop).
+// -- Floor: ONE finite instance of the De Bruijn board, not a tiling. The
+// texture is repeat-wrapped only so sampling at the edge behaves, and
+// repeat is (1,1) on a plane exactly board.C x board.R in size -- a printed
+// board has an edge, and past it the camera sees scene.background.
+//
+// This header used to say the opposite ("tiled seamlessly... the true infinite
+// pattern"), describing a floor the code has not drawn. It was not harmless:
+// the headless sweep's own renderer DID tile, so a view spanning more than one
+// board period saw the pattern twice, decode could lock onto either copy and
+// be right both times, and the sweep scored that against an unwrapped truth as
+// a large position error. Real conclusions were drawn from those poses before
+// the two renderers were compared.
 // The pure DATA half (the `board` itself, ORDER, HALF_C/HALF_R,
 // rebuildFloorPatternData) lives in ../floorPattern.ts (no THREE/DOM imports
 // there) so it can be imported on a page with no #gl canvas. This file owns

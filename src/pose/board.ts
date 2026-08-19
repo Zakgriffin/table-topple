@@ -84,14 +84,29 @@ const MIN_BOARD_SIZE = 8;
  *
  * Order 5's full R x C torus (~33.5M cells) has no known efficient construction
  * free of D4 rotation/reflection collisions, so it is not used directly --
- * ORDER5_CANDIDATE is a searched 256x256 sub-region with a low (1.027%)
- * residual collision rate, and `cropSize` re-crops it. Only order 5 has a size
- * at all; every other order is the one full torus for that order, so `cropSize`
- * is ignored there.
+ * ORDER5_CANDIDATE is a searched crop of it (taps/r0/c0, natural size 144) and
+ * `cropSize` re-crops that. Only order 5 has a size at all; every other order
+ * is the one full torus for that order, so `cropSize` is ignored there.
  *
- * The taps/r0/c0 search that found this particular low-collision crop was NOT
- * re-verified at every size, so the collision rate away from 256 is unmeasured
- * (not expected to be dramatically worse, just untested).
+ * ── THE COLLISION RATE, MEASURED ──
+ *
+ * A collision is two cells sharing an order x order window key.
+ * buildLookupTableSparse inserts with `set`, so the later one WINS and the
+ * earlier cell becomes undecodable or decodes elsewhere -- `R*C - lookup.size`
+ * counts them exactly. Measured over this candidate:
+ *
+ *     size    cells   collisions    rate
+ *       64     4096            0   0.000%
+ *      100    10000            1   0.010%
+ *      144    20736            3   0.014%     <- global.boardSize today
+ *      180    32400            9   0.028%
+ *      200    40000           17   0.042%
+ *      256    65536           55   0.084%
+ *
+ * So the configured board has 3 ambiguous cells in 20,736, and the rate grows
+ * with size rather than being flat. This paragraph previously described a
+ * 256x256 candidate with a 1.027% rate and called everything away from 256
+ * unmeasured; all three claims were wrong.
  */
 export function createBoard({ order, cropSize }: BoardParams): Board {
   const debruijn = order === 5

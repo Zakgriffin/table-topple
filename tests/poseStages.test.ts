@@ -1066,7 +1066,10 @@ function circularFit(values: number[], weights: number[], period: number): { res
 }
 
 /** The whole chain from an image to the two compacted families. */
-async function gppOn(device: GPUDevice, gray: Float64Array, dims: Dims, dd: { w: number; h: number; horizFovDeg: number }) {
+async function gppOn(
+  device: GPUDevice, gray: Float64Array, dims: Dims, dd: { w: number; h: number; horizFovDeg: number },
+  joinOverride: Partial<typeof JOIN> = {},
+) {
   const bufs = await run(device, (ctx) => {
     device.queue.writeBuffer(ctx.bufs.gray!, 0, Float32Array.from(gray));
     encodeGradient(ctx);
@@ -1075,7 +1078,7 @@ async function gppOn(device: GPUDevice, gray: Float64Array, dims: Dims, dd: { w:
     encodeLsdFit(ctx, { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 });
     encodeLines(ctx, { minLengthPx: 3 });
     encodeVotes(ctx, { vFovRad: vFovRadOf(dd) });
-    encodeJoin(ctx, { ...JOIN, vFovRad: vFovRadOf(dd) });
+    encodeJoin(ctx, { ...JOIN, vFovRad: vFovRadOf(dd), ...joinOverride });
     encodeFit(ctx);
     encodeGpp(ctx, { ...GPP, vFovRad: vFovRadOf(dd) });
   }, dims);
@@ -1390,12 +1393,24 @@ test('gpp: the family array is TOTAL -- a frame cannot inherit the last one\'s f
     // was never touched by either. A rendered board gives well over 64 lines,
     // and the blank frame gives zero, which under an indirect dispatch is zero
     // workgroups and therefore no writes at all.
+    //
+    // WITH THE JOIN OFF, so run 1 iterates raw segments rather than composites.
+    // That is not dodging the join -- it makes this test strictly MORE
+    // sensitive, since the whole point is for run 1 to write slots run 2's
+    // shorter dispatch cannot reach, and there are ~3x as many raw segments as
+    // composites. It also stops a tuning change to the join from silently
+    // disarming a test about `family`.
+    //
+    // The margin is thin at this frame size and was thinner than it looked:
+    // with the renderer painting the app's real 20/188 contrast instead of
+    // 0/255, this pose fell to EXACTLY 64 composites -- one workgroup, the
+    // blind case the header warns about, reached from the other side.
     const pose = { height: 10, overRow: 40.5, overCol: 40.5, tiltDeg: 20, yawDeg: 15 };
-    const busy = await gppOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS);
+    const busy = await gppOn(device, renderPose(TEST_WORLD, pose, FRAME_DIMS, 4), FRAME, FRAME_DIMS, { kSigma: 0 });
     assert.ok(busy.lineCount > 64,
       `run 1 produced ${busy.lineCount} lines -- it must exceed one workgroup or this test is blind`);
 
-    const quiet = await gppOn(device, new Float64Array(FRAME.w * FRAME.h), FRAME, FRAME_DIMS);
+    const quiet = await gppOn(device, new Float64Array(FRAME.w * FRAME.h), FRAME, FRAME_DIMS, { kSigma: 0 });
     assert.equal(quiet.lineCount, 0, 'the blank frame produced lines');
     assert.equal(quiet.rowCount, 0, `${quiet.rowCount} row lines inherited from the previous frame`);
     assert.equal(quiet.colCount, 0, `${quiet.colCount} column lines inherited from the previous frame`);

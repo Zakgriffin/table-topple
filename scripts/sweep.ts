@@ -62,11 +62,30 @@ const spec: SweepSpec = quick
     offsets: [{ row: 70.5, col: 70.5 }],
   }
   : {
-    // Heights span "close enough to resolve cells" to "high enough that cells
-    // approach the sampling limit". Tilts run from nadir to strongly oblique,
-    // which is where the grazing cutoff and line dropout start to bite.
-    heights: [6, 10, 16, 24],
-    tilts: [0, 10, 20, 30, 40],
+    // ── THE SCALE LADDER, derived rather than picked ──
+    //
+    // GRID_STEP is 1, so a height IS a distance in cells, and the image's
+    // narrow axis spans 2*h*tan(hFov/2) = 1.274*h cells at nadir. That turns
+    // the two ends of the range into arithmetic instead of taste:
+    //
+    //     h=4    5.1 cells across,  94 px/cell -- barely wider than ORDER=5,
+    //            which is the smallest window the De Bruijn decode can use at
+    //            all. Below this there is nothing to decode, by construction.
+    //     h=113  144 cells across, 3.3 px/cell -- the WHOLE 144x144 board in
+    //            frame, and a cell thinner than the 3px line floor.
+    //
+    // The interior is roughly geometric, because what matters is the ratio: the
+    // detector's failure is "how many pixels does a cell get", which halves
+    // with every doubling of height, not with every fixed step of it.
+    //
+    // Both ends are EXPECTED to be hard, and that is why they are in: a sweep
+    // whose poses all succeed measures the poses, not the pipeline.
+    heights: [4, 6, 10, 16, 24, 40, 64, 90, 113],
+    // Out to 55, past the old 40 ceiling. Tilt is where the grazing cutoff and
+    // line dropout bite, and the arc^2 weighting measurement showed the fit's
+    // behaviour still CHANGING at 40 -- so 40 was the edge of the instrument,
+    // not the edge of the phenomenon.
+    tilts: [0, 15, 30, 45, 55],
     yaws: [0, 35, 90],
     // Three neighbourhoods of the torus, because the pattern is only LOCALLY
     // unique -- sweeping one spot tests one decode neighbourhood.
@@ -186,6 +205,11 @@ async function makePoseRunner() {
     const ms = span.end - span.start;
     return {
       camPos: out.ok ? new THREE.Vector3(out.position.x, out.position.y, out.position.z) : null,
+      // The SAME 128-byte block the position comes out of -- scoring orientation
+      // costs no extra readback, no extra inspect slot and no extra pass.
+      camQuat: out.ok
+        ? new THREE.Quaternion(out.quaternion.x, out.quaternion.y, out.quaternion.z, out.quaternion.w)
+        : null,
       height: out.height > 0 ? out.height : null,
       period: out.period > 0 ? out.period : null,
       consistency: out.ok ? out.consistency : null,

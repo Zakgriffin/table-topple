@@ -1046,10 +1046,17 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
 
   for (var i = li; i < count; i = i + LANES) {
     let v = votes[i];
-    let w = v.w * inv;
+    let arc = v.w * inv;
     // A degenerate vote is written with weight 0 rather than dropped (see
     // VOTES_WGSL). Gating here is what makes that equivalent to dropping it.
-    if (w <= 0.0) { continue; }
+    if (arc <= 0.0) { continue; }
+    // ARC SQUARED, not arc. The normal a vote carries has angular error
+    // ~ endpointNoise / arc, so its INVERSE VARIANCE -- the weight weighted
+    // least squares actually asks for -- goes like arc^2. Weighting by arc^1
+    // under-trusts exactly the long segments that carry the orientation
+    // information. Squaring after the maxWeight normalization keeps every
+    // summand in [0, 1], so the f32 accumulation argument below is unchanged.
+    let w = arc * arc;
     var row: array<f32, 6>;
     row[0] = v.x * v.x; row[1] = v.y * v.y; row[2] = v.z * v.z;
     row[3] = v.x * v.y; row[4] = v.x * v.z; row[5] = v.y * v.z;

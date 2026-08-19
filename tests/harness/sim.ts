@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import type { Board } from './board.ts';
+import type { Board } from '../../src/pose/board.ts';
 
 // ── The simulator: render what a camera at a known pose would see ─────────
 //

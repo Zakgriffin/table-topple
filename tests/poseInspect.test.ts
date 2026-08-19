@@ -4,7 +4,7 @@ import { withDevice } from './helpers/gpu.ts';
 import { boardDims } from '../src/pose/board.ts';
 import { createPoseContext, destroyPoseContext, runPose } from '../src/pose/run.ts';
 import type { Dims } from '../src/pose/pipeline.ts';
-import { renderPose, vFovRadOf } from '../src/pose/sim.ts';
+import { renderPose, vFovRadOf } from './harness/sim.ts';
 import { TEST_BOARD, TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
 
 // ── The opt-in intermediate readback ──────────────────────────────────────

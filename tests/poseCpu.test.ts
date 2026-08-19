@@ -2,9 +2,9 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { readF32, readU32, withDevice } from './helpers/gpu.ts';
 import { createBuffers, planPool } from '../src/pose/buffers.ts';
-import { cpuCollect, cpuGradient, cpuGrow, cpuLsdFit, logBinomialTail } from '../src/pose/cpu.ts';
+import { cpuCollect, cpuGradient, cpuGrow, cpuLsdFit, logBinomialTail } from './harness/cpu.ts';
 import { encodeCollect, encodeGradient, encodeGrow, encodeLsdFit, makeCtx } from '../src/pose/pose.ts';
-import { renderPose } from '../src/pose/sim.ts';
+import { renderPose } from './harness/sim.ts';
 import { TEST_WORLD } from './helpers/board.ts';
 import type { Dims } from '../src/pose/pipeline.ts';
 
@@ -16,7 +16,7 @@ import type { Dims } from '../src/pose/pipeline.ts';
 // image, because on a real image nobody can write down the expected partition.
 //
 // This is the other half. Same stage, inputs it will actually see, scored by an
-// independent formulation of the same definition. See src/pose/cpu.ts for why
+// independent formulation of the same definition. See tests/harness/cpu.ts for why
 // the twin is a BFS rather than a transcription of the shader.
 
 const GROW = { rhoLow: 0.05, toleranceDeg: 22.5 };

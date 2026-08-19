@@ -9,7 +9,7 @@ import {
   encodeLsdFit, encodeVotes, encodeJoin, decodePose, makeCtx,
 } from '../src/pose/pose.ts';
 import type { Dims } from '../src/pose/pipeline.ts';
-import { rayDirInto, renderPose, truthFor, vFovRadOf } from '../src/pose/sim.ts';
+import { rayDirInto, renderPose, truthFor, vFovRadOf } from './harness/sim.ts';
 import { boardDims, buildBoard, hashU32, uploadBoard } from '../src/pose/board.ts';
 import { TEST_BOARD, TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
 

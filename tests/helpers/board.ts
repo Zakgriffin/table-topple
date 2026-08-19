@@ -1,6 +1,6 @@
 import { type Board, createBoard } from '../../src/pose/board.ts';
 import { ORDER5_CANDIDATE } from '../../src/pose/debruijn.ts';
-import type { SimWorld } from '../../src/pose/sim.ts';
+import type { SimWorld } from '../harness/sim.ts';
 
 // ── The board the library's own tests decode against ─────────────────────
 //

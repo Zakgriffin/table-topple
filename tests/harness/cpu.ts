@@ -1,4 +1,4 @@
-import type { CollectSettings, GrowSettings, LsdFitSettings } from './pose.ts';
+import type { CollectSettings, GrowSettings, LsdFitSettings } from '../../src/pose/pose.ts';
 
 // ── The CPU twin ──────────────────────────────────────────────────────────
 //

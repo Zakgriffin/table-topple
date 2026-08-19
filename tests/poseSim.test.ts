@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 import { TEST_CELL_PITCH, TEST_WORLD } from './helpers/board.ts';
-import { type SimDims, type SimPose, camPosOf, camQuatOf, rayDirInto, renderPose, vFovRadOf } from '../src/pose/sim.ts';
+import { type SimDims, type SimPose, camPosOf, camQuatOf, rayDirInto, renderPose, vFovRadOf } from './harness/sim.ts';
 import { cornerDir } from '../src/poseViewer/shared/math/geometry.ts';
 
 // ── Validating the SIMULATOR, not the pipeline ────────────────────────────

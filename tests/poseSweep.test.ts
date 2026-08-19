@@ -48,6 +48,7 @@ function fakeRunner(offset: {
       height: pose.height + (offset.dHeight ?? 0),
       period: TEST_CELL_PITCH / pose.height,
       consistency: 0.9,
+      lineCount: 12, compositeCount: 7,
       ms: 1,
     };
   };
@@ -164,7 +165,8 @@ test('a runner that reports no orientation is not scored as a perfect one', asyn
   // leaves the quantiles alone instead of pulling them toward zero.
   const rows = await runSweep(ONE_POSE, async (_g, _d, pose) => ({
     camPos: camPosOf(TEST_WORLD, pose), camQuat: null,
-    height: pose.height, period: TEST_CELL_PITCH / pose.height, consistency: 0.9, ms: 1,
+    height: pose.height, period: TEST_CELL_PITCH / pose.height, consistency: 0.9,
+    lineCount: 12, compositeCount: 7, ms: 1,
   }));
   assert.equal(rows[0]!.recovered, true);
   assert.ok(Number.isNaN(rows[0]!.normalErrDeg));
@@ -183,7 +185,8 @@ test('the scale of a pose is recorded alongside its error', async () => {
 
 test('a pipeline that recovers nothing is recorded, not dropped', async () => {
   const rows = await runSweep(ONE_POSE, async () => ({
-    camPos: null, camQuat: null, height: null, period: null, consistency: null, ms: 5,
+    camPos: null, camQuat: null, height: null, period: null, consistency: null,
+    lineCount: null, compositeCount: null, ms: 5,
   }));
   assert.equal(rows[0]!.recovered, false);
   // And the summary has to SAY so rather than quietly averaging over one pose.

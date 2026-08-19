@@ -6,7 +6,7 @@ import { createBuffers, planPool } from '../src/pose/buffers.ts';
 import {
   type Ctx, encodeCollect, encodeFit, encodeGradient, encodeGrow, encodeLines,
   encodeGpp, encodeDecodeBuild, encodeDecodeLayout, encodeDecodeTally, encodeFinish,
-  encodeLsdFit, encodeVotes, decodePose, makeCtx,
+  encodeLsdFit, encodeVotes, encodeJoin, decodePose, makeCtx,
 } from '../src/pose/pose.ts';
 import type { Dims } from '../src/pose/pipeline.ts';
 import { rayDirInto, renderPose, truthFor, vFovRadOf } from '../src/pose/sim.ts';
@@ -492,6 +492,7 @@ async function linesOn(
     encodeLsdFit(ctx, LSDFIT);
     encodeLines(ctx, lines);
     encodeVotes(ctx, VOTES);
+    encodeJoin(ctx, { ...JOIN, vFovRad: vFovRadOf(FRAME_DIMS) });
   }, dims);
   return {
     lineCount: await readU32(device, bufs.lineCount!, 2),
@@ -694,6 +695,7 @@ test('votes: on a rendered board, every normal is perpendicular to a true floor 
       encodeLsdFit(ctx, { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 });
       encodeLines(ctx, { minLengthPx: 3 });
       encodeVotes(ctx, { vFovRad: vFovRadOf(FRAME_DIMS) });
+      encodeJoin(ctx, { ...JOIN, vFovRad: vFovRadOf(FRAME_DIMS) });
     }, FRAME);
 
     const lineCount = (await readU32(device, bufs.lineCount!, 2))[0]!;
@@ -811,16 +813,25 @@ function unpackTriad(t: Float32Array, status: number): Triad {
   };
 }
 
+// The join, ACTIVE, wherever a test runs the real chain. Disabled would leave
+// the new passes unexercised by the suite; enabled means every downstream stage
+// test doubles as an assertion that the join did not break what it feeds.
+const JOIN = { vFovRad: 0, endpointNoisePx: 0.15, kSigma: 3, maxAngleDeg: 0.5, maxOverlapFrac: 0.25, maxResidualPx: 2, polarityAbs: false };
+
 /** fit alone, over votes written straight into the buffer. */
 async function fitOnVotes(
   device: GPUDevice, v: { votes: Float32Array; count: number; maxWeight: number },
 ): Promise<Triad> {
   const bufs = await run(device, (ctx) => {
-    device.queue.writeBuffer(ctx.bufs.votes!, 0, v.votes);
-    device.queue.writeBuffer(ctx.bufs.lineCount!, 0, new Uint32Array([v.count, 0]));
-    // maxWeight is an atomicMax over FLOAT BITS, so it is written as bits here
-    // for the same reason fit.ata bitcasts them back.
-    device.queue.writeBuffer(ctx.bufs.maxWeight!, 0, new Uint32Array(new Float32Array([v.maxWeight]).buffer));
+    // THE COMPOSITE buffers, not the raw ones: fit.ata reads the join's output
+    // now. This helper tests the FIT, so it is right for it to write the fit's
+    // actual input directly -- these synthetic votes have no `lines` behind
+    // them for the join to have reduced.
+    device.queue.writeBuffer(ctx.bufs.compVotes!, 0, v.votes);
+    device.queue.writeBuffer(ctx.bufs.joinCount!, 0, new Uint32Array([v.count, 0]));
+    // compMaxWeight is an atomicMax over FLOAT BITS, so it is written as bits
+    // here for the same reason fit.ata bitcasts them back.
+    device.queue.writeBuffer(ctx.bufs.compMaxWeight!, 0, new Uint32Array(new Float32Array([v.maxWeight]).buffer));
     // status is cleared before its first bind, which is lines.emit -- and this
     // run does not encode lines.emit, so the schedule never fires.
     device.queue.writeBuffer(ctx.bufs.status!, 0, new Uint32Array([0]));
@@ -978,6 +989,7 @@ test('fit: on a rendered board, the recovered floor is the true floor', async ()
       encodeLsdFit(ctx, { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 });
       encodeLines(ctx, { minLengthPx: 3 });
       encodeVotes(ctx, { vFovRad: vFovRadOf(FRAME_DIMS) });
+      encodeJoin(ctx, { ...JOIN, vFovRad: vFovRadOf(FRAME_DIMS) });
       encodeFit(ctx);
     }, FRAME);
 
@@ -1063,6 +1075,7 @@ async function gppOn(device: GPUDevice, gray: Float64Array, dims: Dims, dd: { w:
     encodeLsdFit(ctx, { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 });
     encodeLines(ctx, { minLengthPx: 3 });
     encodeVotes(ctx, { vFovRad: vFovRadOf(dd) });
+    encodeJoin(ctx, { ...JOIN, vFovRad: vFovRadOf(dd) });
     encodeFit(ctx);
     encodeGpp(ctx, { ...GPP, vFovRad: vFovRadOf(dd) });
   }, dims);
@@ -1082,7 +1095,12 @@ async function gppOn(device: GPUDevice, gray: Float64Array, dims: Dims, dd: { w:
   const colWeights = lane(colQuads, colCount, 1);
   const colCross = Array.from({ length: colCount }, (_, i) => [colQuads[i * 4 + 2]!, colQuads[i * 4 + 3]!] as const);
   const extent = await readF32(device, bufs.extent!, 12);
-  const lineCount = (await readU32(device, bufs.lineCount!, 2))[0]!;
+  // THE COMPOSITE COUNT, because gpp.classify iterates the join's output.
+  // `family`, `samples` and the compacted row/col arrays are all indexed by
+  // COMPOSITE, so a caller pairing them against raw `lines` or `votes` would be
+  // comparing two different sets element by element -- which is exactly what
+  // this helper's callers do.
+  const lineCount = (await readU32(device, bufs.joinCount!, 2))[0]!;
   const result = await readF32(device, bufs.gppResult!, 4);
   // topK[0] is (count, 0, 0, 0); topK[1..] are (period, score, phiRow, phiCol).
   const tk = await readF32(device, bufs.topK!, 32);
@@ -1194,7 +1212,7 @@ test('gpp: classify splits the lines the way ground truth does, up to the swap',
     // the axes that GENERATED the image, so a triad that is self-consistently
     // rotated -- which the fit's own tests would accept up to their tolerance --
     // shows up here as lines landing in the wrong family.
-    const votes = await readF32(device, g.bufs.votes!, FRAME.maxLines * 4);
+    const votes = await readF32(device, g.bufs.compVotes!, FRAME.maxLines * 4);
     const family = await readU32(device, g.bufs.family!, FRAME.maxLines * 2);
     const dotAbs = (i: number, a: { x: number; y: number; z: number }) =>
       Math.abs(votes[i * 4]! * a.x + votes[i * 4 + 1]! * a.y + votes[i * 4 + 2]! * a.z);
@@ -1572,6 +1590,7 @@ async function layoutOn(device: GPUDevice, gray: Float64Array, dims: Dims, dd: t
     encodeLsdFit(ctx, { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 });
     encodeLines(ctx, { minLengthPx: 3 });
     encodeVotes(ctx, { vFovRad: vFovRadOf(dd) });
+    encodeJoin(ctx, { ...JOIN, vFovRad: vFovRadOf(dd) });
     encodeFit(ctx);
     encodeGpp(ctx, { ...LAYOUT, vFovRad: vFovRadOf(dd) });
     encodeDecodeLayout(ctx, { ...LAYOUT, vFovRad: vFovRadOf(dd) });
@@ -1880,6 +1899,7 @@ async function buildOn(device: GPUDevice, gray: Float64Array, dims: Dims, dd: ty
     encodeLsdFit(ctx, { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 });
     encodeLines(ctx, { minLengthPx: 3 });
     encodeVotes(ctx, { vFovRad: vFovRadOf(dd) });
+    encodeJoin(ctx, { ...JOIN, vFovRad: vFovRadOf(dd) });
     encodeFit(ctx);
     encodeGpp(ctx, { ...LAYOUT, vFovRad: vFovRadOf(dd) });
     encodeDecodeLayout(ctx, { ...LAYOUT, vFovRad: vFovRadOf(dd) });
@@ -1994,6 +2014,7 @@ async function decodeOn(device: GPUDevice, gray: Float64Array, dims: Dims, dd: t
     encodeLsdFit(ctx, { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 });
     encodeLines(ctx, { minLengthPx: 3 });
     encodeVotes(ctx, { vFovRad: vFovRadOf(dd) });
+    encodeJoin(ctx, { ...JOIN, vFovRad: vFovRadOf(dd) });
     encodeFit(ctx);
     encodeGpp(ctx, { ...LAYOUT, vFovRad: vFovRadOf(dd) });
     encodeDecodeLayout(ctx, { ...LAYOUT, vFovRad: vFovRadOf(dd) });
@@ -2132,6 +2153,7 @@ async function poseOn(
     encodeLsdFit(ctx, { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 });
     encodeLines(ctx, { minLengthPx: 3 });
     encodeVotes(ctx, { vFovRad: vFovRadOf(dd) });
+    encodeJoin(ctx, { ...JOIN, vFovRad: vFovRadOf(dd) });
     encodeFit(ctx);
     encodeGpp(ctx, { ...LAYOUT, vFovRad: vFovRadOf(dd) });
     encodeDecodeLayout(ctx, { ...LAYOUT, vFovRad: vFovRadOf(dd) });

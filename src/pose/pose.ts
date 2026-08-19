@@ -6,7 +6,8 @@ import {
   DECODE_BINTHRESH_PARTIALS_WGSL, DECODE_BINTHRESH_REDUCE_WGSL, DECODE_LAYOUT_WGSL,
   DECODE_BUILD_WGSL, DECODE_TALLY_WGSL, DECODE_ARGMAX_WGSL, DECODE_CORRECTNESS_WGSL,
   FINISH_WGSL,
-  GRADIENT_WGSL, GROW_WGSL, LINES_EMIT_WGSL, LINES_FLAG_WGSL, LSD_FIT_WGSL,
+  GRADIENT_WGSL, GROW_WGSL, JOIN_ANCHOR_WGSL, JOIN_ATTACH_WGSL, JOIN_REDUCE_WGSL,
+  LINES_EMIT_WGSL, LINES_FLAG_WGSL, LSD_FIT_WGSL,
   SCAN_WGSL, VOTES_WGSL,
 } from './pose.wgsl.ts';
 import { assertBinds, type Buffers, type PoolPlan } from './buffers.ts';
@@ -181,6 +182,7 @@ interface Programs {
   collectScatter: Program; collectFinalize: Program;
   lsdFit: Program;
   linesFlag: Program; linesEmit: Program; votesCast: Program;
+  joinAnchor: Program; joinAttach: Program; joinReduce: Program;
   fitAta: Program; fitEigen: Program;
   gppClassify: Program; gppCompact: Program; gppExtent: Program;
   gppSweep: Program; gppPeaks: Program; gppDistinct: Program; gppPolish: Program;
@@ -319,6 +321,13 @@ function programs(device: GPUDevice): Programs {
     votesCast: simpleProgram(device, 'votes.cast', VOTES_WGSL,
       [UNI, RO, RO, RW, RW]),
 
+    joinAnchor: simpleProgram(device, 'join.anchor', JOIN_ANCHOR_WGSL,
+      [UNI, RO, RO, RO, RW]),
+    joinAttach: simpleProgram(device, 'join.attach', JOIN_ATTACH_WGSL,
+      [UNI, RO, RO, RO, RO, RW, RW]),
+    joinReduce: simpleProgram(device, 'join.reduce', JOIN_REDUCE_WGSL,
+      [UNI, RO, RO, RO, RO, RW, RW, RW]),
+
     fitAta: simpleProgram(device, 'fit.ata', FIT_ATA_WGSL,
       [UNI, RO, RO, RO, RW]),
     fitEigen: simpleProgram(device, 'fit.eigen', FIT_EIGEN_WGSL,
@@ -356,7 +365,7 @@ function programs(device: GPUDevice): Programs {
       [UNI, RO, RO, RO, RW, RW]),
     decodeCorrectness: simpleProgram(device, 'decode.correctness', DECODE_CORRECTNESS_WGSL,
       [UNI, RO, RO, RO, RW]),
-    finish: simpleProgram(device, 'finish', FINISH_WGSL, [UNI, RO, RO, RO, RO, RO, RW, RW]),
+    finish: simpleProgram(device, 'finish', FINISH_WGSL, [UNI, RO, RO, RO, RO, RO, RO, RW, RW]),
   };
   programCache.set(device, built);
   return built;
@@ -769,6 +778,118 @@ export function encodeVotes(ctx: Ctx, s: VoteSettings): void {
     { kind: 'indirect', args: 'lineArgs' });
 }
 
+// ── S5c join ──────────────────────────────────────────────────────────────
+
+export interface JoinSettings {
+  /** VERTICAL field of view, radians -- the same quantity VoteSettings takes. */
+  vFovRad: number;
+  /**
+   * Position noise on a detected segment ENDPOINT, in pixels. Not the pixel
+   * noise of the image: an LSD endpoint is the extreme of a least-squares fit
+   * over a whole region, so it is much better than one sample.
+   */
+  endpointNoisePx: number;
+  /**
+   * How many sigma of angular disagreement still counts as the same line.
+   *
+   * A confidence level rather than a tuning constant -- and **zero disables
+   * joining entirely**, since no pair can then pass the gate and every line
+   * becomes its own singleton composite. That is a degenerate configuration of
+   * one code path rather than a second path, the same relationship
+   * `PoseOptions.alias: false` has to the pooling: it makes "join off" testable
+   * as an EXACT reproduction of the pre-join pose rather than as a branch
+   * nothing exercises.
+   */
+  kSigma: number;
+  /**
+   * Hard ceiling on the angle between two joined normals, degrees.
+   *
+   * Bounds the damage the uncertainty term cannot: see JOIN_GATE_WGSL. Also
+   * bounds a star's total spread absolutely, at twice this.
+   */
+  maxAngleDeg: number;
+  /**
+   * The most two segments may OVERLAP along their shared direction and still
+   * be joined, as a fraction of the shorter one's length.
+   *
+   * The scale-free half of the gate. 1.0 disables it.
+   */
+  maxOverlapFrac: number;
+  /**
+   * How far, in pixels, a member endpoint may sit off the finished composite
+   * before that member is dropped from it.
+   *
+   * Applied AFTER the composite is provisionally built, so it catches what no
+   * pairwise test can: a cluster that is individually plausible pair by pair
+   * and collectively a diagonal.
+   */
+  maxResidualPx: number;
+  /**
+   * Compare |dot| rather than dot, so two segments join across a gradient
+   * POLARITY flip. See JOIN_GATE_WGSL: correct for a board of black and white
+   * cells, wrong for lines drawn as strokes.
+   */
+  polarityAbs: boolean;
+}
+
+/**
+ * Collinear segments -> composite lines, by star clustering in vote space.
+ *
+ * Six passes, three of which are the shared vec2 scan. The two O(N^2) passes
+ * are DIRECT over maxLines: `joinFlag` is a scan input and must be total over
+ * the scanned range, and `anchorFlag`'s tail has to be zeroed by the pass that
+ * writes its interior.
+ */
+export function encodeJoin(ctx: Ctx, s: JoinSettings): void {
+  const { w, h, maxLines } = ctx.dims;
+  const p = programs(ctx.device);
+
+  // An endpoint's ANGULAR position noise. Radians per pixel is the vertical fov
+  // over the image height -- the small-angle average across the frame rather
+  // than the exact centre value, which is 2*tanHalf/h and varies with ndcV.
+  // The difference is absorbed by kSigma, which is what is actually swept.
+  const eps = s.endpointNoisePx * (s.vFovRad / h);
+  // (k*eps)^2. `arc` is a SINE and therefore dimensionless, so dividing a
+  // radian noise by it leaves radians and the comparison against a squared
+  // angle is dimensionally sound.
+  const gate = (s.kSigma * eps) ** 2;
+  const maxRad = (s.maxAngleDeg * Math.PI) / 180;
+  // The squared-angle form of the ceiling, so the shader compares against
+  // 2*(1-dot) without ever taking an acos.
+  const maxSq = 2 * (1 - Math.cos(maxRad));
+
+  writeUniform(ctx, 'joinUni', (dv) => {
+    dv.setUint32(0, maxLines, true);
+    dv.setUint32(4, w, true);
+    dv.setUint32(8, h, true);
+    dv.setFloat32(16, gate, true);
+    dv.setFloat32(20, Math.tan(s.vFovRad / 2), true);
+    dv.setFloat32(24, w / h, true);
+    dv.setFloat32(28, maxSq, true);
+    dv.setFloat32(32, s.maxOverlapFrac, true);
+    dv.setFloat32(36, s.maxResidualPx, true);
+    dv.setFloat32(40, s.polarityAbs ? 1 : 0, true);
+  });
+
+  pass(ctx, 'join.anchor', p.joinAnchor,
+    [['joinUni', 'votes', 'lines', 'lineCount', 'anchorFlag']],
+    { kind: 'direct', x: groups1D(maxLines) });
+  pass(ctx, 'join.attach', p.joinAttach,
+    [['joinUni', 'votes', 'lines', 'lineCount', 'anchorFlag', 'anchorOf', 'joinFlag']],
+    { kind: 'direct', x: groups1D(maxLines) });
+
+  encodeScan(ctx, {
+    ids: { blocks: 'join.scan', spine: 'join.spine', add: 'join.add' },
+    uni: 'joinScanUni', spineUni: 'joinSpineUni',
+    src: 'joinFlag', dst: 'joinScan', sums: 'joinSums', offs: 'joinOffs', total: 'joinCount',
+    count: maxLines,
+  });
+
+  pass(ctx, 'join.reduce', p.joinReduce,
+    [['joinUni', 'lines', 'lineCount', 'anchorOf', 'joinScan', 'compLines', 'compVotes', 'compMaxWeight']],
+    { kind: 'direct', x: groups1D(maxLines) });
+}
+
 // ── S6 fit ────────────────────────────────────────────────────────────────
 
 /**
@@ -792,7 +913,7 @@ export function encodeFit(ctx: Ctx): void {
   });
 
   pass(ctx, 'fit.ata', p.fitAta,
-    [['fitUni', 'votes', 'lineCount', 'maxWeight', 'ata']],
+    [['fitUni', 'compVotes', 'joinCount', 'compMaxWeight', 'ata']],
     { kind: 'direct', x: 1 });
   pass(ctx, 'fit.eigen', p.fitEigen,
     [['ata', 'triad', 'status']],
@@ -901,7 +1022,9 @@ export function encodeGppSamples(ctx: Ctx, s: GppSettings): void {
   writeGppUni(ctx, s);
 
   pass(ctx, 'gpp.classify', p.gppClassify,
-    [['gppUni', 'lines', 'lineCount', 'votes', 'triad', 'samples', 'family']],
+    // The COMPOSITES. Same layouts, so the shader's own binding names are
+    // untouched -- see pipeline.ts's note on the rebind.
+    [['gppUni', 'compLines', 'joinCount', 'compVotes', 'triad', 'samples', 'family']],
     { kind: 'direct', x: groups1D(maxLines) });
 
   encodeScan(ctx, {
@@ -1124,7 +1247,7 @@ export function encodeFinish(ctx: Ctx): void {
     dv.setUint32(12, maxLines, true);
   });
   pass(ctx, 'finish', programs(ctx.device).finish,
-    [['finishUni', 'layout', 'result', 'counts', 'lineCount', 'growArgs', 'status', 'pose']],
+    [['finishUni', 'layout', 'result', 'counts', 'lineCount', 'growArgs', 'joinCount', 'status', 'pose']],
     { kind: 'direct', x: 1 });
 }
 
@@ -1231,6 +1354,8 @@ export interface PoseResult {
   gridRows: number;
   gridCols: number;
   growRounds: number;
+  /** Composite lines after the join. See FINISH_WGSL for how to read it. */
+  compositeCount: number;
   period: number;
   height: number;
 }
@@ -1246,7 +1371,7 @@ export function decodePose(bytes: ArrayBuffer): PoseResult {
     orientation: u[10]!, boardRow: u[11]!, boardCol: u[12]!,
     votes: u[13]!, totalWindows: u[14]!, correct: u[15]!, wrong: u[16]!,
     regionCount: u[17]!, memberCount: u[18]!, lineCount: u[19]!,
-    gridRows: u[20]!, gridCols: u[21]!, growRounds: u[22]!,
+    gridRows: u[20]!, gridCols: u[21]!, growRounds: u[22]!, compositeCount: u[25]!,
     period: f[23]!, height: f[24]!,
   };
 }

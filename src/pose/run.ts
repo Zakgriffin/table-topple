@@ -4,10 +4,10 @@ import { type Buffers, type PoolPlan, bufferBytes, createBuffers, planPool } fro
 import type { Dims } from './pipeline.ts';
 import {
   type CollectSettings, type GppSettings, type GrowSettings, type LayoutSettings,
-  type GpuFrameTiming, type LineSettings, type LsdFitSettings, type PassTimer,
-  type PassTiming, type PoseResult, type VoteSettings,
+  type GpuFrameTiming, type JoinSettings, type LineSettings, type LsdFitSettings,
+  type PassTimer, type PassTiming, type PoseResult, type VoteSettings,
   decodePose, encodeCollect, encodeDecodeBuild, encodeDecodeLayout, encodeDecodeTally,
-  encodeFinish, encodeFit, encodeGpp, encodeGradient, encodeGrow, encodeLines,
+  encodeFinish, encodeFit, encodeGpp, encodeGradient, encodeGrow, encodeJoin, encodeLines,
   encodeLsdFit, encodeVotes, makeCtx,
 } from './pose.ts';
 
@@ -84,6 +84,7 @@ export interface PoseSettings {
   lsdFit: LsdFitSettings;
   lines: LineSettings;
   votes: VoteSettings;
+  join: JoinSettings;
   gpp: GppSettings;
   layout: LayoutSettings;
 }
@@ -292,6 +293,7 @@ export async function runPose(
   encodeLsdFit(c, s.lsdFit);
   encodeLines(c, s.lines);
   encodeVotes(c, s.votes);
+  encodeJoin(c, s.join);
   encodeFit(c);
   encodeGpp(c, s.gpp);
   encodeDecodeLayout(c, s.layout);

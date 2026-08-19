@@ -80,6 +80,13 @@ export interface PoseObservation {
   /** gridPeriodPhase.period. */
   period: number | null;
   consistency: number | null;
+  /**
+   * Raw detected segments, and what the join reduced them to. Both nullable:
+   * a pipeline without a join stage reports null rather than pretending the
+   * two counts are equal.
+   */
+  lineCount: number | null;
+  compositeCount: number | null;
   /** Wall-clock for the reconstruction alone, excluding rendering. */
   ms: number;
 }
@@ -138,6 +145,15 @@ export interface SweepRow {
    */
   cellsAcross: number;
   pxPerCell: number;
+  /**
+   * Segments in, composites out. THE JOIN'S ONLY DIRECT OBSERVABLE, and it
+   * reads three ways: composites near the visible grid-line count means the
+   * clustering is working, near lineCount means the gate is too tight to join
+   * anything, and far below the grid-line count means it is over-merging.
+   * Without it, a join measurement is inferred from downstream damage.
+   */
+  lineCount: number;
+  compositeCount: number;
   consistency: number;
   ms: number;
 }
@@ -208,6 +224,7 @@ export async function runSweep(spec: SweepSpec, runner: Runner): Promise<SweepRo
         cellRow: NaN, cellCol: NaN, anchorErr: NaN, subCellErr: NaN, posErr: NaN,
         heightErrRel: NaN, periodErrRel: NaN,
         normalErrDeg: NaN, yawErrDeg: NaN, cardinalTurns: NaN,
+        lineCount: obs.lineCount ?? NaN, compositeCount: obs.compositeCount ?? NaN,
         ...scale, consistency: obs.consistency ?? 0, ms: obs.ms,
       });
       continue;
@@ -240,6 +257,8 @@ export async function runSweep(spec: SweepSpec, runner: Runner): Promise<SweepRo
       periodErrRel: obs.period === null ? NaN : (obs.period - truth.period) / truth.period,
       ...orient,
       ...scale,
+      lineCount: obs.lineCount ?? NaN,
+      compositeCount: obs.compositeCount ?? NaN,
       consistency: obs.consistency ?? 0,
       ms: obs.ms,
     });
@@ -316,6 +335,8 @@ export function summarize(rows: SweepRow[], world: SimWorld, label = 'sweep'): s
       `${String(g.length).padStart(4)} ` +
       `${String(gok.length).padStart(5)} ` +
       `${String(ga.length).padStart(5)}   ` +
+      `${f(stats(gok.map((r) => r.lineCount)).median, 0).padStart(6)}` +
+      `${f(stats(gok.map((r) => r.compositeCount)).median, 0).padStart(7)}   ` +
       `${f(stats(gok.map((r) => r.subCellErr)).median).padStart(10)}   ` +
       `${f(stats(gok.map((r) => r.normalErrDeg)).median).padStart(10)}   ` +
       `${pct(stats(gok.map((r) => Math.abs(r.heightErrRel))).median).padStart(10)}   ` +
@@ -323,7 +344,7 @@ export function summarize(rows: SweepRow[], world: SimWorld, label = 'sweep'): s
       `${f(stats(gok.map((r) => r.ms)).median, 1).padStart(8)}`;
   };
 
-  const HEAD = '     n   rec    ok   subCell(med)   normal(med)   height(med)   cons(med)    ms(med)';
+  const HEAD = '     n   rec    ok  lines  comps   subCell(med)   normal(med)   height(med)   cons(med)    ms(med)';
   lines.push(`   by scale:   h   cells  px/cell${HEAD}`);
   for (const h of heights) {
     const g = rows.filter((r) => r.pose.height === h);

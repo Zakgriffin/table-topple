@@ -198,6 +198,58 @@ export const BUFFERS: Record<string, BufferSpec> = {
   votes: { kind: 'storage', bytes: (d) => d.maxLines * 16, note: '(nx,ny,nz,weight)' },
   maxWeight: { kind: 'storage', bytes: () => 4, zero: true, note: 'atomic max over float bits; zero is correct ONLY because weights are non-negative' },
 
+  // ── S5c join: collinear segments -> one composite line ─────────────────
+  //
+  // A vote IS the homogeneous coordinate of the line the segment lies on -- the
+  // cross product of two points is the line through them -- so "same 3D line"
+  // is one dot product between unit normals, encoding direction AND offset
+  // together. That is what makes this stage a comparison in vote space rather
+  // than a collinearity test in pixels, where the tolerance would have to
+  // depend on depth.
+  //
+  // ── STAR CLUSTERING, NOT CONNECTED COMPONENTS, AND THAT IS THE POINT ──
+  //
+  // Every segment attaches DIRECTLY to a representative rather than to a
+  // neighbour, so a cluster is a star and its total angular spread is bounded
+  // by 2x the tolerance at ANY size. Single linkage -- which is what a front
+  // that grows and absorbs is, and what `grow`'s pointer jumping would
+  // reproduce exactly -- has no such bound: A joins B joins C leaves A and C
+  // 2 tolerances apart, and a chain of those sweeps a diagonal composite
+  // through a whole family of segments. That failure is structural, not a
+  // tuning error, and this shape is what removes it rather than mitigating it.
+  joinUni: { kind: 'uniform', bytes: () => 48 },
+  // Written for EVERY slot in [0, maxLines) by join.anchor, tail included, so
+  // it needs no clear -- and so join.attach can read a neighbour's flag without
+  // asking whether that neighbour was in range this frame.
+  anchorFlag: { kind: 'storage', bytes: (d) => d.maxLines * 4, note: 'u32 0/1; 1 = this line is a cluster representative' },
+  anchorOf: {
+    kind: 'storage', bytes: (d) => d.maxLines * 4,
+    note: 'the representative this line belongs to. SELF for a rep, and self for an ORPHAN -- a line whose winner was itself beaten and is out of range',
+  },
+  // SAME TOTAL-FUNCTION OBLIGATION as lineFlag and family: join.attach is
+  // DIRECT over maxLines with an interior guard, not indirect off lineArgs, or
+  // the tail past the line count keeps the previous frame's flags and invents
+  // composites out of stale data. Third instance of §9's defect; declared out
+  // of existence rather than found by a test.
+  joinFlag: { kind: 'storage', bytes: (d) => d.maxLines * 8, note: 'vec2<u32> (isRep, 0). The .y lane is unused -- see below' },
+  joinScan: { kind: 'storage', bytes: (d) => d.maxLines * 8 },
+  joinSums: { kind: 'storage', bytes: (d) => scanBlocks(d.maxLines) * 8 },
+  joinOffs: { kind: 'storage', bytes: (d) => scanBlocks(d.maxLines) * 8 },
+  joinScanUni: { kind: 'uniform', bytes: () => 16 },
+  joinSpineUni: { kind: 'uniform', bytes: () => 16 },
+  // The scan's grand total, written by the spine exactly as lineCount is.
+  //
+  // The .y lane is deliberately unused. The collect pattern maps over
+  // perfectly -- (isRep, memberCount) -> (compIndex, memberOffset) would give a
+  // CSR and turn join.reduce's member scan from O(N) into O(members) -- but
+  // building memberCount needs an atomic counter, a buffer and a clear, against
+  // a reduce that costs ~20k comparisons at the observed line count. Same trade
+  // `lines` already took: one scan implementation, maxLines*4 wasted bytes.
+  joinCount: { kind: 'storage', bytes: () => 8, note: 'vec2<u32>; .x is the composite count' },
+  compLines: { kind: 'storage', bytes: (d) => d.maxLines * 16, note: '(x1,y1,x2,y2) pixel space, compacted. Same layout as `lines`, which is what lets fit and gpp rebind without a shader change' },
+  compVotes: { kind: 'storage', bytes: (d) => d.maxLines * 16, note: '(nx,ny,nz,weight), recomputed from the composite endpoints -- NOT averaged from the members' },
+  compMaxWeight: { kind: 'storage', bytes: () => 4, zero: true, note: 'as maxWeight, over composites' },
+
   // ── S6 fit ─────────────────────────────────────────────────────────────
   fitUni: { kind: 'uniform', bytes: () => 16 },
   // `ataPartials` is GONE, and with it the second pass that summed it. See
@@ -357,19 +409,51 @@ export const STAGES: readonly Stage[] = [
   { id: 'lines.emit', binds: ['linesUni', 'rects', 'lineFlag', 'lineScan', 'lines', 'lineCount', 'lineArgs', 'status'] },
   { id: 'votes.cast', binds: ['votesUni', 'lines', 'lineCount', 'votes', 'maxWeight'], indirectFrom: 'lineArgs' },
 
+  // ── join: the star clustering, then one composite per representative ────
+  //
+  // Both O(N^2) passes are DIRECT over maxLines rather than indirect off
+  // lineArgs. For `attach` that is the total-function obligation on `joinFlag`;
+  // for `anchor` it is so the tail of `anchorFlag` is zeroed by the same pass
+  // that writes the interior.
+  //
+  // The cost is brute force on purpose. The CPU ancestor's fronts existed to
+  // AVOID N^2 on one core; at the observed 70-400 lines that is ~160k dot
+  // products across 400 threads, against a fit.ata that already runs 5,400
+  // serial FMAs per lane unremarked. Any structure added to dodge it costs more
+  // than it saves and brings back the bug class it was built to avoid.
+  // Both bind `lines` as well as `votes`: the gate's third clause is about the
+  // segments' EXTENTS along their shared direction, which the vote alone --
+  // being the infinite line -- cannot express.
+  { id: 'join.anchor', binds: ['joinUni', 'votes', 'lines', 'lineCount', 'anchorFlag'] },
+  { id: 'join.attach', binds: ['joinUni', 'votes', 'lines', 'lineCount', 'anchorFlag', 'anchorOf', 'joinFlag'] },
+  { id: 'join.scan', binds: ['joinScanUni', 'joinFlag', 'joinScan', 'joinSums'] },
+  { id: 'join.spine', binds: ['joinSpineUni', 'joinSums', 'joinOffs', 'joinCount'] },
+  { id: 'join.add', binds: ['joinScanUni', 'joinOffs', 'joinScan'] },
+  // `joinFlag` is NOT bound here: "am I a representative" is `anchorOf[i] == i`,
+  // which the gather needs anyway. Deriving it rather than binding it keeps this
+  // pass at seven storage buffers instead of eight, i.e. off the baseline limit.
+  {
+    id: 'join.reduce',
+    binds: ['joinUni', 'lines', 'lineCount', 'anchorOf', 'joinScan', 'compLines', 'compVotes', 'compMaxWeight'],
+  },
+
   // ONE workgroup, dispatched DIRECTLY, reading the vote count off the device --
   // not one workgroup per 64 votes indirect off lineArgs, which is what this
   // entry used to say and what the old pipeline does. Two reasons, in FIT_ATA_WGSL's
   // header: the partial rows only ever existed for a host to sum, and the
   // indirect form is §9's iteration-domain defect again (a producer writing a
   // prefix, a consumer whose extent is fixed at encode time).
-  { id: 'fit.ata', binds: ['fitUni', 'votes', 'lineCount', 'maxWeight', 'ata'] },
+  // ON THE COMPOSITES, not the raw segments -- and with no shader change, because
+  // compVotes/compLines/joinCount have byte-for-byte the layouts of
+  // votes/lines/lineCount. Their names inside the shaders still read `votes` and
+  // `lineCount`; what a binding is CALLED at the WGSL end is this file's choice.
+  { id: 'fit.ata', binds: ['fitUni', 'compVotes', 'joinCount', 'compMaxWeight', 'ata'] },
   { id: 'fit.eigen', binds: ['ata', 'triad', 'status'] },
 
   // DIRECT over maxLines, not indirect off lineArgs, for exactly the reason
   // lines.flag is: `family` is a scan input and has to be TOTAL over the scanned
   // range. See GPP_CLASSIFY_WGSL.
-  { id: 'gpp.classify', binds: ['gppUni', 'lines', 'lineCount', 'votes', 'triad', 'samples', 'family'] },
+  { id: 'gpp.classify', binds: ['gppUni', 'compLines', 'joinCount', 'compVotes', 'triad', 'samples', 'family'] },
   { id: 'family.scan', binds: ['familyScanUni', 'family', 'familyScan', 'familySums'] },
   { id: 'family.spine', binds: ['familySpineUni', 'familySums', 'familyOffs', 'familyCounts'] },
   { id: 'family.add', binds: ['familyScanUni', 'familyOffs', 'familyScan'] },
@@ -452,5 +536,8 @@ export const STAGES: readonly Stage[] = [
   // cellPitch / distance rather than a third buffer. Reading a value from the
   // one place that already had to have it is not a saving here, it is the
   // difference between building on a baseline device and not.
-  { id: 'finish', binds: ['finishUni', 'layout', 'result', 'counts', 'lineCount', 'growArgs', 'status', 'pose'] },
+  // EXACTLY EIGHT storage buffers, the WebGPU baseline per-stage limit, and
+  // `joinCount` is the eighth. It is here rather than derived because the
+  // composite count is the join's only observable and nothing else reports it.
+  { id: 'finish', binds: ['finishUni', 'layout', 'result', 'counts', 'lineCount', 'growArgs', 'joinCount', 'status', 'pose'] },
 ];

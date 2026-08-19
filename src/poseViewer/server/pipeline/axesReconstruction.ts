@@ -593,6 +593,33 @@ async function poseContextFor(camera: Camera, w: number, h: number): Promise<Pos
   return ctx;
 }
 
+// ── The join's knobs, LIVE and un-configured, while it is being measured ──
+//
+// A mutable module object rather than config entries or per-camera sliders, and
+// deliberately so on both counts. It has no entry in pose-viewer.config.json
+// because wiring the config and migrating every fixtures/*.json before the
+// sweep has said whether joining helps would be paying the migration first and
+// asking the question second. It is a LET-style object rather than a constant
+// so the dev bridge can retune it between runs without a source edit -- and a
+// source edit reloads the page, which drops every camera and loses the pose
+// being looked at.
+//
+// kSigma 0 disables joining outright: no pair can pass the gate, every line
+// becomes its own composite, and the pose is bit-for-bit the pre-join one. That
+// is what makes an A/B here one assignment rather than two builds.
+//
+//   joinSettings.kSigma = 3   // join on
+//   joinSettings.kSigma = 0   // join off
+//   runAxesReconstruction(activeCamera())
+export const joinSettings = {
+  endpointNoisePx: 0.15,
+  kSigma: 0,
+  maxAngleDeg: 0.5,
+  maxOverlapFrac: 0.25,
+  maxResidualPx: 2,
+  polarityAbs: false,
+};
+
 // Straight off this camera's own sliders. The pipeline takes no defaults -- see
 // config.ts: every one of these has exactly one source, and it is the JSON.
 function poseSettingsFor(camera: Camera): PoseSettings {
@@ -607,6 +634,9 @@ function poseSettingsFor(camera: Camera): PoseSettings {
     },
     lines: { minLengthPx: s.lsdMinLengthPx },
     votes: { vFovRad },
+    // Read fresh every run, so a bridge eval retuning `joinSettings` takes
+    // effect on the next runAxesReconstruction with no reload.
+    join: { vFovRad, ...joinSettings },
     gpp: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
     layout: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
   };

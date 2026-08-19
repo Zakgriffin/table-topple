@@ -174,6 +174,12 @@ function poseSettingsFor(aspect: number, s: PipelineSettings): PoseSettings {
     },
     lines: { minLengthPx: s.lsdMinLengthPx },
     votes: { vFovRad },
+    // Join DISABLED, pending measurement and config wiring. kSigma 0 means no
+    // pair can pass the gate, so every line becomes its own composite and the
+    // pose is bit-for-bit the pre-join one. The three knobs have no entry in
+    // pose-viewer.config.json yet; see scripts/sweep.ts, which drives them from
+    // the command line while they are being measured.
+    join: { vFovRad, endpointNoisePx: 0.15, kSigma: 0, maxAngleDeg: 0.5, maxOverlapFrac: 0.25, maxResidualPx: 2, polarityAbs: false },
     gpp: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
     layout: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
   };

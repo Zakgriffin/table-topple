@@ -44,6 +44,36 @@ const dims: SimDims = { w: Number(wStr), h: Number(hStr), horizFovDeg: 65 };
 const supersample = Number(val('--ss', '4'));
 const quick = has('--quick');
 
+// ── The join's three knobs, on the command line while it is being measured ──
+//
+// DEFAULT OFF, because the measurement is not settled: the join is a clear win
+// up to ~12cm working distance and a clear regression beyond it, and the sweep
+// that produced both numbers turned out to render a differently-tiled board
+// from the app. So the committed default is the KNOWN state, and joining is
+// opt-in with `--kSigma 3`.
+//
+// kSigma 0 disables it entirely -- no pair can pass the gate, so every line is
+// its own composite -- and reproduces the pre-join pose bit for bit. That is
+// what makes the A/B one flag rather than two builds, and what makes the
+// plumbing testable independently of whether the idea works.
+const joinK = Number(val('--kSigma', '0'));
+const joinNoisePx = Number(val('--noisePx', '0.15'));
+const joinMaxDeg = Number(val('--maxAngle', '0.5'));
+const joinOverlap = Number(val('--overlap', '0.25'));
+const joinResidualPx = Number(val('--residualPx', '2'));
+const joinPolarityAbs = has('--absPolarity');
+
+// ── An overridable scale ladder ──
+//
+// The default ladder spans the DETECTOR's limits, which is the right shape for
+// finding where the pipeline breaks and the wrong shape for asking whether a
+// change helps the device. At 5mm cells (constants.ts) the documented working
+// distance is ~32 board units, i.e. 16cm -- and the default ladder steps
+// 24 -> 40 straight over it. `--heights 24,28,32,36,40` asks the second
+// question without disturbing the first.
+const heightsArg = val('--heights', '');
+const customHeights = heightsArg ? heightsArg.split(',').map(Number) : null;
+
 // Pose Viewer's board and its cell pitch, so the sweep scores the pipeline
 // against the same floor the app runs on rather than one invented here. Both go
 // into the renders AND into the pipeline settings below -- they have to be the
@@ -80,7 +110,7 @@ const spec: SweepSpec = quick
     //
     // Both ends are EXPECTED to be hard, and that is why they are in: a sweep
     // whose poses all succeed measures the poses, not the pipeline.
-    heights: [4, 6, 10, 16, 24, 40, 64, 90, 113],
+    heights: customHeights ?? [4, 6, 10, 16, 24, 40, 64, 90, 113],
     // Out to 55, past the old 40 ceiling. Tilt is where the grazing cutoff and
     // line dropout bite, and the arc^2 weighting measurement showed the fit's
     // behaviour still CHANGING at 40 -- so 40 was the edge of the instrument,
@@ -191,6 +221,21 @@ async function makePoseRunner() {
       },
       lines: { minLengthPx: st.lsdMinLengthPx },
       votes: { vFovRad: vFovRadOf(d) },
+      // NOT from the fixture yet. The join's three knobs have no config entry
+      // and no fixture field, deliberately: wiring them through
+      // pose-viewer.config.json and migrating every fixtures/*.json before the
+      // sweep has said whether joining helps would be paying the migration
+      // first and asking the question second. `--kSigma 0` reproduces the
+      // pre-join pipeline exactly, which is what makes that order safe.
+      join: {
+        vFovRad: vFovRadOf(d),
+        endpointNoisePx: joinNoisePx,
+        kSigma: joinK,
+        maxAngleDeg: joinMaxDeg,
+        maxOverlapFrac: joinOverlap,
+        maxResidualPx: joinResidualPx,
+        polarityAbs: joinPolarityAbs,
+      },
       gpp: { vFovRad: vFovRadOf(d), cellPitch: GRID_STEP, minGrazingCos: st.minGrazingCos },
       layout: { vFovRad: vFovRadOf(d), cellPitch: GRID_STEP, minGrazingCos: st.minGrazingCos },
     });
@@ -213,6 +258,8 @@ async function makePoseRunner() {
       height: out.height > 0 ? out.height : null,
       period: out.period > 0 ? out.period : null,
       consistency: out.ok ? out.consistency : null,
+      lineCount: out.lineCount,
+      compositeCount: out.compositeCount,
       ms,
     };
   };

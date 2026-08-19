@@ -41,6 +41,10 @@ const SETTINGS = {
   lsdFit: { rho: 0.132, toleranceDeg: 9.5, nfaTestExponent: 5, nfaEpsilon: 1 },
   lines: { minLengthPx: 3 },
   votes: { vFovRad: vFovRadOf(FRAME_DIMS) },
+  // ACTIVE in the tests, unlike the three apps: the suite is where the new
+  // passes should actually run, and a stage nothing exercises is a stage
+  // nothing checks.
+  join: { vFovRad: vFovRadOf(FRAME_DIMS), endpointNoisePx: 0.15, kSigma: 3, maxAngleDeg: 0.5, maxOverlapFrac: 0.25, maxResidualPx: 2, polarityAbs: false },
   gpp: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: GRID_STEP, minGrazingCos: 0.15 },
   layout: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: GRID_STEP, minGrazingCos: 0.15 },
 };

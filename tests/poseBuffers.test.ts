@@ -112,7 +112,7 @@ test('pooling saves what the plan claims and nothing is lost', () => {
     assert.equal(on.assignment.has(name) || dedicated, true, `'${name}' vanished from the aliased plan`);
   }
   const savedMiB = (off.totalBytes - on.totalBytes) / 1048576;
-  assert.ok(savedMiB > 3.8 && savedMiB < 4.4, `expected ~4.1 MiB saved, got ${savedMiB.toFixed(2)}`);
+  assert.ok(savedMiB > 5.0 && savedMiB < 5.6, `expected ~5.3 MiB saved, got ${savedMiB.toFixed(2)}`);
 });
 
 // ── Inspection: a live range, not an exception ────────────────────────────
@@ -124,15 +124,20 @@ test('WITHOUT the declaration, an inspected buffer would be read back CLOBBERED'
   // mechanism deleted, which is the shape six earlier mutations in this rewrite
   // hid behind.
   //
-  // Measured, not chosen: at 480x640 `lines` (maxLines*16) dies at gpp.classify
-  // and `colSamples` is born at gpp.compact, so the colouring hands the second
-  // the first's slot. Reading `lines` after the last stage would return
-  // colSamples' bytes -- a wrong answer that looks like a detector fault, since
-  // both arrays are plausible-looking f32.
+  // Measured, not chosen: at 480x640 `lines` (maxLines*16) dies at join.reduce
+  // -- gpp.classify reads `compLines` now, so `lines` dies one stage earlier
+  // than it used to -- and `samples` is born at gpp.classify, so the colouring
+  // hands the second the first's slot. Reading `lines` after the last stage
+  // would return samples' bytes: a wrong answer that looks like a detector
+  // fault, since both arrays are plausible-looking f32.
+  //
+  // The successor changed when the join landed (it was `colSamples`). That is
+  // this fixture working as intended -- it is pinned to a MEASUREMENT, so a
+  // liveness change has to be re-measured rather than silently absorbed.
   const plain = planPool(DIMS, { alias: true });
   const slot = plain.slots[plain.assignment.get('lines')!]!;
   const after = slot.occupants.slice(slot.occupants.indexOf('lines') + 1);
-  assert.deepEqual(after, ['colSamples'],
+  assert.deepEqual(after, ['samples'],
     'lines no longer aliases anything -- this fixture can no longer see the mechanism, pick another buffer');
 });
 

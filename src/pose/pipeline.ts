@@ -41,6 +41,36 @@ export interface Dims {
   hashSlots: number;
 }
 
+// ── THE CAPS, IN ONE PLACE ───────────────────────────────────────────────
+//
+// These were four independent `const MAX_REGIONS = 16384` -- one in each of the
+// three apps and one hardcoded in scripts/sweep.ts -- which is the same shape of
+// mistake the renderer parity work fixed: a number that has to agree everywhere,
+// stored everywhere. A caller may still pass its own; these are what it gets by
+// asking for the default.
+//
+// ── WHY 16384 WAS NOT ENOUGH, and why it was invisible ──
+//
+// Overflow does NOT degrade gracefully, it TRUNCATES SPATIALLY. `keptScan` is an
+// exclusive prefix over `kept` in LABEL order, and a label is its root pixel's
+// raster index -- so the dense region id rises monotonically down the image, and
+// `if (r >= u.maxRegions) { return; }` in COLLECT_REGIONMETA_WGSL discards a
+// contiguous BAND at the bottom of the frame. Measured at a nadir h=90 pose:
+// exactly 16384 regions, the last one at y=438 of 648, a straight horizontal
+// edge with a third of the image behind it, and the edge moved with yaw.
+//
+// It set `regionOverflow` in `status` the whole time, and that bit was being
+// reported. A status bit is not a substitute for the failure being visible: a
+// dense frame is precisely the frame that overflows, so the pipeline was quietly
+// running on two-thirds of an image at exactly the poses that were hardest.
+//
+// Raising the cap does not fix the failure MODE -- a big enough frame still
+// truncates, and still biases every fit toward the top of the image. Keeping the
+// LARGEST regions instead of the first-in-raster-order ones would degrade evenly
+// and is the real fix; this is the cheap half.
+export const DEFAULT_MAX_REGIONS = 65536;
+export const DEFAULT_MAX_LINES = 16384;
+
 export type Kind =
   /** A storage buffer. The only kind that participates in pooling. */
   | 'storage'

@@ -806,15 +806,17 @@ export interface JoinSettings {
    *
    * Bounds the damage the uncertainty term cannot: see JOIN_GATE_WGSL. Also
    * bounds a star's total spread absolutely, at twice this.
+   *
+   * THIS IS THE SCALE GATE, in disguise. At 65 degrees over 480px a pixel of
+   * line separation is 0.135 degrees, so this converts directly to "how many
+   * pixels apart two lines may be and still merge" -- and adjacent grid lines
+   * are exactly `px per cell` apart. 0.5 permitted 3.7px and destroyed the
+   * lattice wherever a cell was narrower than that; 0.2 permits 1.5px, which is
+   * past the bottom of the sweep, while still admitting every real join at the
+   * ~12 px/cell operating point (where neighbours are 1.62 degrees apart).
+   * Measured across the ladder 0.5 / 0.3 / 0.2 / 0.12; see the join memory.
    */
   maxAngleDeg: number;
-  /**
-   * The most two segments may OVERLAP along their shared direction and still
-   * be joined, as a fraction of the shorter one's length.
-   *
-   * The scale-free half of the gate. 1.0 disables it.
-   */
-  maxOverlapFrac: number;
   /**
    * How far, in pixels, a member endpoint may sit off the finished composite
    * before that member is dropped from it.
@@ -866,9 +868,8 @@ export function encodeJoin(ctx: Ctx, s: JoinSettings): void {
     dv.setFloat32(20, Math.tan(s.vFovRad / 2), true);
     dv.setFloat32(24, w / h, true);
     dv.setFloat32(28, maxSq, true);
-    dv.setFloat32(32, s.maxOverlapFrac, true);
-    dv.setFloat32(36, s.maxResidualPx, true);
-    dv.setFloat32(40, s.polarityAbs ? 1 : 0, true);
+    dv.setFloat32(32, s.maxResidualPx, true);
+    dv.setFloat32(36, s.polarityAbs ? 1 : 0, true);
   });
 
   pass(ctx, 'join.anchor', p.joinAnchor,

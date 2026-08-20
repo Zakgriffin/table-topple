@@ -1016,7 +1016,7 @@ const JOIN_GATE_WGSL = /* wgsl */ `
 struct U {
   maxLines: u32, w: u32, h: u32, pad0: u32,
   gate: f32, tanHalf: f32, aspect: f32, maxSq: f32,
-  maxOverlapFrac: f32, maxResidualPx: f32, polarityAbs: f32, pad2: f32,
+  maxResidualPx: f32, polarityAbs: f32, pad1: f32, pad2: f32,
 }
 @group(0) @binding(0) var<uniform> u: U;
 
@@ -1034,18 +1034,31 @@ struct U {
 // So the two clauses do different jobs, and both are needed: the uncertainty
 // term TIGHTENS the test for long, well-determined pairs below the ceiling,
 // while the ceiling CLAMPS the short ones that would otherwise roam.
-// CLAUSE 3: the two segments must not OVERLAP along their shared direction.
+// CLAUSE 3: the two segments must be DISJOINT along their shared direction.
 //
 // This is the clause the angular gate cannot express, and the one that is
-// SCALE-FREE. Two fragments of a single occluded line occupy DISJOINT stretches
+// SCALE-FREE. Two fragments of a single occluded line occupy disjoint stretches
 // of it -- that is what being fragments means. Two adjacent parallel grid lines
-// run alongside each other and overlap along their whole length. Measured: the
-// angular ceiling alone regressed recovery from 350/405 to 321/405, all of it
-// at 3-9 px/cell where neighbouring grid lines sit 0.2-0.7 degrees apart, i.e.
-// inside any tolerance loose enough to permit a real join. No fixed angle
+// run alongside each other and overlap along their whole length. No fixed angle
 // separates those two populations, because the safe angle is a function of
 // pixels-per-cell -- which is not known until after the fit this stage feeds.
-// The overlap test is, and it needs nothing the segments do not already carry.
+// Disjointness is, and it needs nothing the segments do not already carry.
+//
+// ── STRICT, AND IT USED TO BE A FRACTION ──
+//
+// This was "overlap < maxOverlapFrac * shorter", a sixth tunable defaulting to
+// 0.25. Removed rather than retuned, for three reasons. The stated purpose was
+// absorbing endpoint noise near the touching case, but a FRACTION OF THE SHORTER
+// SEGMENT is the wrong form for that -- noise is a fixed pixel quantity, and the
+// fraction was most permissive (25px on a 100px pair) exactly where it was least
+// needed. It also served a second, different argument in the same knob -- "these
+// two run alongside each other" -- which has a different natural scale. And it
+// never earned its place empirically: it was built against the hypothesis that
+// the 3-9 px/cell regression (350/405 -> 321/405 under the angular ceiling
+// alone) was an overlap problem, and it moved that number to 322.
+//
+// Touching still passes: "overlap <= 0" covers the zero-gap case, which is the
+// one a real fragmentation produces.
 //
 // Projected onto the LONGER segment's direction, so the test is symmetric in
 // (i, j) -- the anchor pass depends on that symmetry for its guarantee that no
@@ -1055,7 +1068,7 @@ struct U {
 // and is refused. That is the conservative answer and the right one: it is a
 // duplicate detection of a line already represented, so declining costs a
 // little redundancy in the votes and risks nothing.
-fn overlapOk(si: vec4<f32>, sj: vec4<f32>, maxFrac: f32) -> bool {
+fn disjoint(si: vec4<f32>, sj: vec4<f32>) -> bool {
   let di = si.zw - si.xy;
   let dj = sj.zw - sj.xy;
   let li = length(di);
@@ -1070,10 +1083,7 @@ fn overlapOk(si: vec4<f32>, sj: vec4<f32>, maxFrac: f32) -> bool {
   let b1 = max(t1, t2);
   let overlap = min(L, b1) - max(0.0, b0);
   // Disjoint, or merely touching: the case joining exists for.
-  if (overlap <= 0.0) { return true; }
-  let shorter = min(L, b1 - b0);
-  if (shorter < 1e-12) { return true; }
-  return overlap < maxFrac * shorter;
+  return overlap <= 0.0;
 }
 
 // ── CLAUSE 1: polarity, and whether it should be a constraint at all ──
@@ -1091,11 +1101,47 @@ fn overlapOk(si: vec4<f32>, sj: vec4<f32>, maxFrac: f32) -> bool {
 // that has nothing to do with geometry.
 //
 // polarityAbs = 1 compares |dot| and joins across a polarity flip.
-fn gateOk(vi: vec4<f32>, vj: vec4<f32>, si: vec4<f32>, sj: vec4<f32>, u_gate: f32, maxSq: f32, maxFrac: f32, polarityAbs: f32) -> bool {
+//
+// ── THE SCALE PROBLEM, AND ONE FALSIFIED ATTEMPT AT IT ──
+//
+// maxSq is fixed in DEGREES while the danger is fixed in CELLS. At this fov a
+// pixel of line separation is 65/480 = 0.135 degrees, so maxAngleDeg 0.5 permits
+// merges across lines up to ~3.7px apart. That is safe while a cell is wider
+// than 3.7px and structurally unsafe below, which is where the measured cliff
+// sits (helps to ~9 px/cell, destroys the lattice below ~6). No fixed angle
+// serves both ends, because the safe angle IS a function of pixels-per-cell.
+//
+// A DERIVED-SCALE CLAUSE WAS BUILT AND REMOVED. The idea: two near-parallel
+// segments that OVERLAP along their shared direction cannot be fragments of one
+// line, so the angle between such a pair samples the gap between neighbouring
+// grid lines -- giving a per-segment scale before the fit, with no period search.
+// A join.spacing pass computed it (second-smallest qualifying gap, to tolerate
+// a duplicate detection) and the gate took a fraction of it.
+//
+// IT DOES NOT MEASURE WHAT IT CLAIMS. Read back over the sweep's own heights,
+// with the true pitch running 37.7 -> 3.3 px/cell:
+//
+//   - the angle form never sees the adjacent line at all. Excluding pairs that
+//     are statistically indistinguishable also excludes the neighbours, because
+//     the noise floor for a 20px segment is ~1.8 degrees while adjacent lines at
+//     3.3 px/cell are 0.45 degrees apart. Measured p10 rose 3.5 -> 8.8 degrees as
+//     the true spacing FELL, which is the signature of a floor, not a spacing.
+//   - a perpendicular-offset form, immune to that floor, is flat: the nearest
+//     near-parallel overlapping neighbour sits at 8-10px (p10) at EVERY height,
+//     against a truth spanning 37.7 down to 3.3.
+//   - the pooled offset histogram has no peak at the cell pitch at any parallel
+//     window from 5 to 45 degrees.
+//
+// The detected-segment population simply does not carry a cell-spacing signal:
+// LSD emits several near-parallel detections per edge, and their scatter swamps
+// the board's own periodicity. Do not rebuild this from the votes. The scale has
+// to come from something that actually measures the period -- decode.layout's
+// cellPitch and distance, on a first pass -- or not at all.
+fn gateOk(vi: vec4<f32>, vj: vec4<f32>, si: vec4<f32>, sj: vec4<f32>, u_gate: f32, maxSq: f32, polarityAbs: f32) -> bool {
   var d = dot(vi.xyz, vj.xyz);
   if (polarityAbs > 0.5) { d = abs(d); }
   if (d <= 0.0) { return false; }
-  if (!overlapOk(si, sj, maxFrac)) { return false; }
+  if (!disjoint(si, sj)) { return false; }
   // CLAMPED AT ZERO, and it is not defensive. For two nearly identical normals
   // d rounds to slightly above 1.0, so 2*(1-d) comes out a small NEGATIVE
   // number -- and a negative left-hand side is below every non-negative
@@ -1154,7 +1200,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     if (j == i) { continue; }
     let vj = votes[j];
     if (vj.w <= 0.0) { continue; }
-    if (!gateOk(vi, vj, lines[i], lines[j], u.gate, u.maxSq, u.maxOverlapFrac, u.polarityAbs)) { continue; }
+    if (!gateOk(vi, vj, lines[i], lines[j], u.gate, u.maxSq, u.polarityAbs)) { continue; }
     if (vj.w > vi.w || (vj.w == vi.w && j < i)) { isAnchor = false; break; }
   }
   anchorFlag[i] = select(0u, 1u, isAnchor);
@@ -1203,7 +1249,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (anchorFlag[j] == 0u) { continue; }
       let vj = votes[j];
       if (vj.w <= 0.0) { continue; }
-      if (!gateOk(vi, vj, lines[i], lines[j], u.gate, u.maxSq, u.maxOverlapFrac, u.polarityAbs)) { continue; }
+      if (!gateOk(vi, vj, lines[i], lines[j], u.gate, u.maxSq, u.polarityAbs)) { continue; }
       let d = dot(vi.xyz, vj.xyz);
       if (d > bestDot) { bestDot = d; best = j; }
     }
@@ -1237,7 +1283,7 @@ export const JOIN_REDUCE_WGSL = /* wgsl */ `
 struct U {
   maxLines: u32, w: u32, h: u32, pad0: u32,
   gate: f32, tanHalf: f32, aspect: f32, maxSq: f32,
-  maxOverlapFrac: f32, maxResidualPx: f32, polarityAbs: f32, pad2: f32,
+  maxResidualPx: f32, polarityAbs: f32, pad1: f32, pad2: f32,
 }
 @group(0) @binding(0) var<uniform> u: U;
 @group(0) @binding(1) var<storage, read> lines: array<vec4<f32>>;
@@ -1305,6 +1351,10 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   // the diagonal that swallows a family, which is the failure single-linkage
   // produces and this whole stage is shaped to avoid -- has enormous residuals
   // and disintegrates back toward its anchor here rather than being trusted.
+  // Summed length of the members that SURVIVE the residual test -- the evidence
+  // the composite actually rests on, as opposed to the distance it reaches
+  // across. See the weight at the bottom of this function.
+  var support = 0.0;
   let span = vec2<f32>(pMax.x - pMin.x, pMax.y - pMin.y);
   let spanLen = length(span);
   if (spanLen > 1e-12) {
@@ -1320,6 +1370,7 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       // on the line and one off it is the badly-attached case exactly.
       if (abs(dot(s.xy - pMin, nrm)) > u.maxResidualPx) { continue; }
       if (abs(dot(s.zw - pMin, nrm)) > u.maxResidualPx) { continue; }
+      support = support + length(s.zw - s.xy);
       let t1 = dot(s.xy - pMin, axis);
       let t2 = dot(s.zw - pMin, axis);
       if (!any) { any = true; kMin = t1; kMax = t1; qMin = s.xy; qMax = s.xy; }
@@ -1340,8 +1391,51 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   // Written in BOTH branches, exactly as votes.cast does, so compVotes needs no
   // clear. A singleton whose source vote was degenerate lands here.
   if (arc < 1e-12) { compVotes[c] = vec4<f32>(0.0, 0.0, 0.0, 0.0); return; }
-  compVotes[c] = vec4<f32>(n / arc, arc);
-  atomicMax(&compMaxWeight, bitcast<u32>(arc));
+
+  // ── WEIGHT BY SUPPORT, NOT BY REACH ──────────────────────────────────────
+  //
+  // fit.ata weights a vote by the SQUARE of this lane, because a normal's
+  // angular error goes like endpointNoise/arc and the inverse variance is what
+  // combines. For a raw segment that is right: the segment is evidence along its
+  // whole length, so its reach and its evidence are the same number.
+  //
+  // A COMPOSITE BREAKS THAT IDENTITY. Its arc is the distance between two
+  // extreme endpoints, which two 20px fragments 300px apart can manufacture out
+  // of 40px of actual evidence -- and the quadratic weighting then rewards them
+  // for the 300px they merely span. That is why a handful of bad merges moves
+  // the height p90 by an order of magnitude while barely touching the median:
+  // the wrong composites are not just wrong, they are the most heavily weighted
+  // votes in the fit.
+  //
+  // So the reach is kept and DISCOUNTED by how much of it is actually covered:
+  //
+  //     weight = arc * sqrt(coverage)   ->   fit weight = arc^2 * coverage
+  //
+  // The precision of a composite's normal really does scale with its span, so
+  // the span stays; coverage is the probability-like factor saying how much of
+  // that span was observed rather than assumed. Two fragments bridging a long
+  // gap keep their lever arm and lose most of their vote; a genuinely occluded
+  // line, several members covering much of its length, is barely touched.
+  //
+  // NOT coverage SQUARED, which is the other natural choice and goes too far:
+  // arc^2 * coverage^2 is (sum of member lengths)^2, i.e. the lever arm deleted
+  // entirely and the composite weighted as if its fragments had never been
+  // joined -- which is the benefit this whole stage exists to buy.
+  //
+  // MEASURED ON SURVIVORS ONLY. support is summed inside the residual loop, so
+  // a member thrown out for not fitting the composite does not get to vouch for
+  // it. Clamped at 1 because members are disjoint from their anchor but not
+  // necessarily from each other.
+  //
+  // IDENTITY WITH kSigma = 0 IS PRESERVED, which is what makes "join off" still
+  // an exact reproduction of the pre-join pose: a singleton's only member is
+  // itself, so support equals its own length, coverage is exactly 1, and the
+  // weight is the arc unchanged.
+  let finalSpan = length(pMax - pMin);
+  let coverage = select(1.0, clamp(support / finalSpan, 0.0, 1.0), finalSpan > 1e-12 && support > 0.0);
+  let weight = arc * sqrt(coverage);
+  compVotes[c] = vec4<f32>(n / arc, weight);
+  atomicMax(&compMaxWeight, bitcast<u32>(weight));
 }
 `;
 

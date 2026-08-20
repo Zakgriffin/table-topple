@@ -18,6 +18,7 @@
       "showGizmoBody": true,
       "showRecoveredFloor": true,
       "recoveredFloorOpacity": 0.9,
+      "latticeBoundsProjection": false,
       "showTrueContamination": false,
       "showReconstructedContamination": false,
       "hideField": false,
@@ -65,7 +66,7 @@
       "camY": 16.5,
       "camZ": 8,
       "camYawDeg": -43,
-      "camPitchDeg": -32,
+      "tiltDeg": 58,
       "simNoise": 2,
       "simBlur": 0,
       "captureSupersample": 2

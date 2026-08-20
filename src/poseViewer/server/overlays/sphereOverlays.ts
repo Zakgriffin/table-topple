@@ -104,7 +104,14 @@ export function updateGradientCirclesDebug(camera: Camera) {
 
 export function updateGizmo(camera: SimulatedCamera): { hFovRad: number; vFovRad: number } {
   camera.camPos.set(camera.settings.camX, camera.settings.camY, camera.settings.camZ);
-  euler.set(THREE.MathUtils.degToRad(camera.settings.camPitchDeg), THREE.MathUtils.degToRad(camera.settings.camYawDeg), 0);
+  // THE ONE PLACE tiltDeg BECOMES THREE'S PITCH. An unrotated THREE camera
+  // looks down -Z, so -90 points it at the floor and tilt lifts it back toward
+  // the horizon: pitch = tilt - 90. `euler` is order 'YXZ' (shared/constants.ts),
+  // which is what makes this agree with the sweep's camQuatOf -- yaw about the
+  // world vertical whatever the tilt is. Verified equal to 0 degrees at
+  // tilt 58 / yaw -43; an 'XYZ' euler here would differ whenever BOTH are
+  // nonzero, which is most of the sweep.
+  euler.set(THREE.MathUtils.degToRad(camera.settings.tiltDeg - 90), THREE.MathUtils.degToRad(camera.settings.camYawDeg), 0);
   camera.camQuat.setFromEuler(euler);
 
   camera.gizmoCam.position.copy(camera.camPos);

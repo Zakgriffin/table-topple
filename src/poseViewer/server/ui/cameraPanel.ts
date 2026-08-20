@@ -10,7 +10,7 @@ import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, up
 import { updateLsdAvailability, updateLsdOverlay } from '../overlays/lsdOverlay.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
-import { recomputeFromLastCapture, runAxesReconstruction, updateChainTransfersReadout } from '../pipeline/axesReconstruction.ts';
+import { joinSettings, recomputeFromLastCapture, runAxesReconstruction, updateChainTransfersReadout } from '../pipeline/axesReconstruction.ts';
 import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
 import { backendFromForceCPU } from '../../shared/backend.ts';
 import { buildProjectedTexture } from '../pipeline/projectedBins.ts';
@@ -20,7 +20,7 @@ import { profilerReset, profilerSetDevToolsMirror } from '../../../profiling/pro
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../../shared/state.ts';
 import { type FieldView } from '../../shared/types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, loadConfigBtn, saveConfigBtn, configStatus, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleRectifiedLinesBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, loadConfigBtn, saveConfigBtn, configStatus, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLineJoinBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleRectifiedLinesBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Tells config.ts which camera's settings persistConfig should capture before
@@ -180,7 +180,7 @@ export function refreshCameraPanel() {
 
   if (isSimulated(cam)) {
     setNum('camX', cam.settings.camX); setNum('camY', cam.settings.camY); setNum('camZ', cam.settings.camZ);
-    setNum('camYaw', cam.settings.camYawDeg); setNum('camPitch', cam.settings.camPitchDeg); setNum('camFov', cam.settings.horizFovDeg);
+    setNum('camYaw', cam.settings.camYawDeg); setNum('camTilt', cam.settings.tiltDeg); setNum('camFov', cam.settings.horizFovDeg);
     setNum('simNoise', cam.settings.simNoise); setNum('simBlur', cam.settings.simBlur); setNum('captureSupersample', cam.settings.captureSupersample);
     setNum('viewportW', cam.settings.viewportW); setNum('viewportH', cam.settings.viewportH);
     setBool('aspectLocked', cam.settings.aspectLocked);
@@ -193,6 +193,7 @@ export function refreshCameraPanel() {
   setBool('showPoles', cam.settings.showPoles); setBool('showFrustum', cam.settings.showFrustum);
   setBool('showPatch', cam.settings.showPatch); setBool('showGizmoBody', cam.settings.showGizmoBody);
   setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setNum('recoveredFloorOpacity', cam.settings.recoveredFloorOpacity);
+  setBool('latticeBoundsProjection', cam.settings.latticeBoundsProjection);
   setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
   setNum('gridPeriodPhaseGapLowerBound', cam.settings.gridPeriodPhaseGapLowerBound);
 
@@ -229,6 +230,9 @@ export function refreshCameraPanel() {
   toggleLsdSegmentsBtn.classList.toggle('active', cam.settings.showLsdSegments);
   toggleLsdRejectedBtn.classList.toggle('active', cam.settings.showLsdRejected);
   toggleLsdRawRegionsBtn.classList.toggle('active', cam.settings.showLsdRawRegions);
+  // Off joinSettings, not off `cam` -- the join is a module-level pipeline knob
+  // shared by every camera, not a per-camera display flag. See its handler.
+  toggleLineJoinBtn.classList.toggle('active', joinSettings.kSigma > 0);
   toggleLsdCompositeBtn.classList.toggle('active', cam.settings.showLsdComposite);
   toggleCompositeLineFamiliesBtn.classList.toggle('active', cam.settings.showCompositeLineFamilies);
   toggleGapHistogramBtn.classList.toggle('active', cam.settings.showGapHistogram);
@@ -295,7 +299,7 @@ bindSlider('camX', config.camera.simulated.camX, (v) => { const cam = activeCame
 bindSlider('camY', config.camera.simulated.camY, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camY = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
 bindSlider('camZ', config.camera.simulated.camZ, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camZ = v; markCaptureDirty(cam); runAxesReconstruction(cam); } });
 bindSlider('camYaw', config.camera.simulated.camYawDeg, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camYawDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
-bindSlider('camPitch', config.camera.simulated.camPitchDeg, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.camPitchDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
+bindSlider('camTilt', config.camera.simulated.tiltDeg, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.tiltDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
 bindSlider('camFov', config.camera.common.horizFovDeg, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.horizFovDeg = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}°`);
 
 export let syncingViewportAspect = false;
@@ -434,6 +438,16 @@ gpuVotesStatus.textContent = isWebGPUSupported()
 bindCheckbox('showGizmoBody', config.camera.common.showGizmoBody, (v) => { const cam = activeCamera(); if (cam) cam.settings.showGizmoBody = v; });
 bindCheckbox('showRecoveredFloor', config.camera.common.showRecoveredFloor, (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredFloor = v; });
 bindSlider('recoveredFloorOpacity', config.camera.common.recoveredFloorOpacity, (v) => { const cam = activeCamera(); if (cam) { cam.settings.recoveredFloorOpacity = v; cam.recoveredFloorOverlayMat.opacity = v; } }, (v) => v.toFixed(2));
+// A full reconstruction, not just a reprojection, even though the pose does not
+// depend on this. The window changes `lastProjectedBins`, and the World-view
+// floor quad's GEOMETRY is built from that extent by applyRecoveredFloorOverlay
+// -- which only runs on a fresh decode. Repainting the texture alone would leave
+// the decal sized to the old window with the new crop stretched across it.
+bindCheckbox('latticeBoundsProjection', config.camera.common.latticeBoundsProjection, (v) => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.latticeBoundsProjection = v;
+  recomputeFromLastCapture(cam);
+});
 bindSlider('gridPeriodPhaseBinCount', config.camera.common.gridPeriodPhaseBinCount, (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.gridPeriodPhaseBinCount = v;

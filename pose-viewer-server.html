@@ -90,6 +90,10 @@
   #overlayPanel button.active#toggleLsdSegments { background: rgba(180,90,230,0.6); color: #fff; border-color: #b45ae6; }
   #overlayPanel button.active#toggleLsdRejected { background: rgba(230,60,60,0.6); color: #fff; border-color: #e63c3c; }
   #overlayPanel button.active#toggleLsdRawRegions { background: rgba(60,200,230,0.6); color: #fff; border-color: #3cc8e6; }
+  /* GREEN, and deliberately not in any overlay's palette: this one is not an
+     overlay. Pressing it re-runs the pipeline and moves the pose, so it should
+     not read as "another thing drawn on top of the same result". */
+  #overlayPanel button.active#toggleLineJoin { background: rgba(80,200,120,0.6); color: #fff; border-color: #50c878; }
   #overlayPanel button.active#toggleLsdComposite { background: rgba(230,180,60,0.6); color: #fff; border-color: #e6b43c; }
   /* One colour for the two views of the SAME classification: the composite
      lines coloured by family in Through-Cam, and those same lines drawn
@@ -253,6 +257,11 @@
       <div class="row"><span class="label">NFA epsilon</span><input type="range" id="lsdNfaEpsilon" min="0.01" max="10" step="0.01"><span class="val" id="lsdNfaEpsilonVal"></span></div>
       <div class="row"><span class="label">N_tests exponent</span><input type="range" id="lsdNfaTestExponent" min="1" max="8" step="1"><span class="val" id="lsdNfaTestExponentVal"></span></div>
 
+      <!-- NOT an overlay toggle: this one changes the PIPELINE, so the pose
+           itself moves when it is pressed. It flips joinSettings.kSigma between
+           3 and 0 -- see axesReconstruction.ts, which owns the knob and explains
+           why it has no config entry yet. -->
+      <button id="toggleLineJoin">join lines into composites (changes the pose)</button>
       <button id="toggleLsdComposite">composite lines</button>
       <button id="toggleCompositeLineFamilies">color by row/col family</button>
       <svg id="gridPeriodPhasePlot" viewBox="0 0 340 160" height="160" style="display:block; width:100%; margin: 4px 0; background: rgba(0,0,0,0.4); border: 1px solid #444; cursor: grab;"></svg>
@@ -334,7 +343,11 @@
       <div class="row"><span class="label">height</span><input type="range" id="camY" min="0.5" max="200" step="0.1"><span class="val" id="camYVal"></span></div>
       <div class="row"><span class="label">Z</span><input type="range" id="camZ" min="-200" max="200" step="0.1"><span class="val" id="camZVal"></span></div>
       <div class="row"><span class="label">yaw</span><input type="range" id="camYaw" min="-180" max="180" step="1"><span class="val" id="camYawVal"></span></div>
-      <div class="row"><span class="label">pitch</span><input type="range" id="camPitch" min="-89" max="89" step="1"><span class="val" id="camPitchVal"></span></div>
+      <!-- tilt, 0 = straight down at the board, matching the sweep's tiltDeg.
+           The range STARTS at 0 so exact nadir is reachable; it used to be
+           min="-89" in THREE's pitch convention, which made the one pose the
+           sweep tests most heavily the one pose this slider could not set. -->
+      <div class="row"><span class="label">tilt</span><input type="range" id="camTilt" min="0" max="89" step="1"><span class="val" id="camTiltVal"></span></div>
       <div class="row"><span class="label">horiz. FOV (deg)</span><input type="range" id="camFov" min="20" max="150" step="1"><span class="val" id="camFovVal"></span></div>
       <div class="row"><span class="label">viewport W</span><input type="range" id="viewportW" min="128" max="2000" step="32"><span class="val" id="viewportWVal"></span></div>
       <div class="row"><span class="label">viewport H</span><input type="range" id="viewportH" min="96" max="2000" step="24"><span class="val" id="viewportHVal"></span></div>
@@ -377,6 +390,7 @@
     <label class="chk"><input type="checkbox" id="showPoles"> vanishing-point poles</label>
     <label class="chk"><input type="checkbox" id="showRecoveredFloor"> recovered floor overlay (decoded position)</label>
     <div class="row"><span class="label">recovered floor opacity</span><input type="range" id="recoveredFloorOpacity" min="0" max="1" step="0.01"><span class="val" id="recoveredFloorOpacityVal"></span></div>
+    <label class="chk" title="Projected-Cam buckets only the sample lattice's extent -- a crop, at the same world scale, to exactly the cells the decode read. Falls back to the whole capture on a frame with no lattice."><input type="checkbox" id="latticeBoundsProjection"> project to sample-lattice bounds</label>
   </div>
 
   <div class="section">

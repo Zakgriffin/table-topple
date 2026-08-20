@@ -133,6 +133,10 @@ export interface CameraPose {
    *  `votes.length` -- that array is opt-in, and a readout keyed to its length
    *  reported "0 lines" on a good frame whenever the circles overlay was off. */
   lineCount?: number;
+  /** How many composites those lines collapsed into -- `pose[25]`. Equal to
+   *  `lineCount` whenever the join is disabled, so the ratio of the two IS the
+   *  merge factor. */
+  compositeCount?: number;
   /** How many line-support regions collect kept. Also off the pose block, so it
    *  needs no readback of its own; CLAMPED to maxRegions, unlike the block's own
    *  value, which is raw so `finish` can report `regionOverflow`. */
@@ -155,12 +159,20 @@ export interface CameraPose {
    *  Zero-weight votes are dropped rather than passed on. */
   votes?: { n: THREE.Vector3; weight: number }[];
   /**
-   * The detected segments. `region` is the index of the region each was fitted
-   * to -- the key every other view of that region colours by. `index` is the
-   * segment's own slot in the pipeline's line arrays, which is what joins it to
-   * `rectified`/`lineFamily` below.
+   * The COMPOSITE lines -- what the orientation fit and gpp consume, which is
+   * `compLines`, not the raw per-region segments. With the join off every
+   * detected segment is its own composite, so this is the detected segments in
+   * that state and something strictly coarser once joining is on.
+   *
+   * `index` is the array position, which is also the composite's own slot: the
+   * buffer is compacted, and `samples`/`lineFamily` are written by a
+   * `compLines`-bound stage, so they join to this by that index directly.
+   *
+   * There is no `region` any more. A composite is a star cluster that may span
+   * several regions, so the old region tag had nothing to name -- see
+   * unpackComposites for what that costs the palette.
    */
-  composites?: { region: number; index: number; line: CompositeLine }[];
+  composites?: { index: number; line: CompositeLine }[];
   /**
    * Per LINE, 4 f32: value, weight, crossMin, crossMax -- the segment's
    * coordinates once the recovered axes flatten the floor. `value` is the
@@ -189,6 +201,18 @@ export interface CameraPose {
   regions?: RegionCsr;
   /** Where decode sampled the floor, and what it read. */
   lattice?: DecodeLattice;
+  /**
+   * The patch of floor the sample lattice covers, in the same (u, v) as
+   * `lattice`'s own uAt/vAt -- outermost cell centres grown by half a pitch,
+   * since those are centres and the sampled region runs half a cell past them.
+   *
+   * SEPARATE FROM `lattice` ON PURPOSE. This is four numbers off `layout`, which
+   * is part of the pose and always read back; `lattice` is the per-cell verdicts,
+   * 83 KiB, and only fetched when the dot overlay is on. Folding the extent into
+   * it made Projected-Cam's lattice-bounds window silently depend on the sample
+   * lattice CHECKBOX -- a display toggle deciding whether a projection had bounds.
+   */
+  latticeExtent?: { minU: number; maxU: number; minV: number; maxV: number };
 }
 
 // ── The display half of the deleted pipeline's vocabulary ────────────────
@@ -197,7 +221,21 @@ export interface CameraPose {
 // than imported from a library that no longer exists. They are geometry, not
 // pipeline structure -- an axis triad, a decoded position, a line segment --
 // which is why these three came across and the rest did not.
-export interface RecoveredAxes { Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3; distance: number }
+export interface RecoveredAxes {
+  Drow: THREE.Vector3; Dcol: THREE.Vector3; Dnormal: THREE.Vector3; distance: number;
+  // The projection the DEVICE used, carried off the layout block rather than
+  // re-derived from the camera's sliders. drawRectifiedLines casts the same rays
+  // gpp.classify cast, and a display that recomputed `tanHalf` from settings
+  // would silently disagree the moment an analysis path stopped matching the
+  // capture path -- which is exactly the class of drift the sweep/app renderer
+  // divergence was.
+  //
+  // OPTIONAL because a REMOTE pose has neither. The phone sends what it
+  // recovered, not the projection it recovered it under, and inventing one from
+  // this machine's viewport would describe a different camera. Absent means the
+  // rectified-line overlay draws nothing, which is this file's standing rule.
+  tanHalf?: number; aspect?: number;
+}
 export interface CompositeLine { x1: number; y1: number; x2: number; y2: number }
 // `votes` and `totalWindows` were here and are gone: the winning anchor's vote
 // count and the number of windows that voted at all were carried on both paths
@@ -369,8 +407,8 @@ export interface CameraBase {
 export interface SimulatedCamera extends CameraBase {
   type: 'simulated';
   settings: SimulatedCameraSettings;
-  // Ground-truth pose, driven by settings.camX/Y/Z/camYawDeg/camPitchDeg --
-  // see updateGizmo.
+  // Ground-truth pose, driven by settings.camX/Y/Z/camYawDeg/tiltDeg --
+  // see updateGizmo, which is where tilt (0 = nadir) becomes THREE's pitch.
   camPos: THREE.Vector3; camQuat: THREE.Quaternion;
   gizmoCam: THREE.PerspectiveCamera; gizmoBody: THREE.Mesh; gizmoAxes: THREE.AxesHelper;
   camHelper: THREE.CameraHelper;

@@ -816,7 +816,7 @@ function unpackTriad(t: Float32Array, status: number): Triad {
 // The join, ACTIVE, wherever a test runs the real chain. Disabled would leave
 // the new passes unexercised by the suite; enabled means every downstream stage
 // test doubles as an assertion that the join did not break what it feeds.
-const JOIN = { vFovRad: 0, endpointNoisePx: 0.15, kSigma: 3, maxAngleDeg: 0.5, maxOverlapFrac: 0.25, maxResidualPx: 2, polarityAbs: false };
+const JOIN = { vFovRad: 0, endpointNoisePx: 0.15, kSigma: 3, maxAngleDeg: 0.2, maxResidualPx: 2, polarityAbs: false };
 
 /** fit alone, over votes written straight into the buffer. */
 async function fitOnVotes(

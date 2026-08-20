@@ -47,7 +47,7 @@ const SETTINGS = {
   // ACTIVE in the tests, unlike the three apps: the suite is where the new
   // passes should actually run, and a stage nothing exercises is a stage
   // nothing checks.
-  join: { vFovRad: vFovRadOf(FRAME_DIMS), endpointNoisePx: 0.15, kSigma: 3, maxAngleDeg: 0.5, maxOverlapFrac: 0.25, maxResidualPx: 2, polarityAbs: false },
+  join: { vFovRad: vFovRadOf(FRAME_DIMS), endpointNoisePx: 0.15, kSigma: 3, maxAngleDeg: 0.2, maxResidualPx: 2, polarityAbs: false },
   gpp: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: TEST_CELL_PITCH, minGrazingCos: 0.15 },
   layout: { vFovRad: vFovRadOf(FRAME_DIMS), cellPitch: TEST_CELL_PITCH, minGrazingCos: 0.15 },
 };

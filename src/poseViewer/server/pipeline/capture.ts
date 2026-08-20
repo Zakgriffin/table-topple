@@ -331,9 +331,10 @@ export async function ingestRemotePose(
     // `index` is the array position, which is the best available answer: the
     // wire carries a list, not the pipeline's own line slots. It is only ever
     // used to look up `rectified`/`lineFamily`, and a remote pose has neither,
-    // so nothing can join against a wrong one.
+    // so nothing can join against a wrong one. `c.root` is dropped with the
+    // `region` field -- see CameraPose.composites.
     ...(pipelineDebug?.voteComposites
-      ? { composites: pipelineDebug.voteComposites.map((c, i) => ({ region: c.root, index: i, line: c.line })) }
+      ? { composites: pipelineDebug.voteComposites.map((c, i) => ({ index: i, line: c.line })) }
       : {}),
   };
   camera.pose = pose;

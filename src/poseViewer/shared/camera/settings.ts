@@ -49,6 +49,12 @@ export const CameraSettingsCommonSchema = Type.Object({
   showGizmoBody: Type.Boolean(),
   showRecoveredFloor: Type.Boolean(),
   recoveredFloorOpacity: Type.Number(),
+  /**
+   * Projected-Cam's bucket grid spans the SAMPLE LATTICE's extent instead of
+   * the whole capture's -- a crop, at the same world scale, to exactly the
+   * cells the decode read. See pipeline/projectedBins.ts's ProjectionWindow.
+   */
+  latticeBoundsProjection: Type.Boolean(),
   showTrueContamination: Type.Boolean(),
   showReconstructedContamination: Type.Boolean(),
   hideField: Type.Boolean(),
@@ -208,7 +214,24 @@ export const SimulatedOnlySettingsSchema = Type.Object({
   camY: Type.Number(),
   camZ: Type.Number(),
   camYawDeg: Type.Number(),
-  camPitchDeg: Type.Number(),
+  // ── TILT, NOT PITCH, AND 0 IS NADIR ──────────────────────────────────────
+  //
+  // The sweep (tests/harness/sim.ts's SimPose) and this app describe the same
+  // camera, and until now they described it with two different numbers: the
+  // sweep's `tiltDeg` measured up from straight-down, this field measured down
+  // from the horizon, so `camPitchDeg = tiltDeg - 90`. Every sweep table prints
+  // tilt, so reading a sweep result onto the viewer meant a subtraction done in
+  // the head, and the two conventions were one sign error apart the whole time.
+  //
+  // 0 = the camera points straight down at the board, which is the datum this
+  // application actually cares about; 89 is near-grazing. THREE's own -90-is-down
+  // convention survives exactly where it belongs -- inside updateGizmo, which is
+  // the one place a THREE.Euler is constructed.
+  //
+  // It also makes exact nadir REACHABLE: the slider was min="-89", so tilt 0
+  // could not be expressed from the UI at all and refreshCameraPanel() silently
+  // clamped anything set programmatically to 1 degree off.
+  tiltDeg: Type.Number(),
   simNoise: Type.Number(),
   simBlur: Type.Number(),
   captureSupersample: Type.Number(),

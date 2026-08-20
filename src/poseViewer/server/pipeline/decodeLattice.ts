@@ -51,6 +51,37 @@ export function buildDecodeLattice(
   return { rows, cols, uAt, vAt, packed, correct: correctnessOf(layout, packed, resultBytes, pose) };
 }
 
+// ── The lattice's EXTENT, without the lattice ─────────────────────────────
+//
+// The same two sequences buildDecodeLattice generates, reduced to their bounds
+// -- and reachable on a frame where nobody asked for the per-cell buffers, which
+// is the whole reason it exists. Projected-Cam's lattice-bounds window needs
+// four numbers; making it read `lattice` made it depend on the sample-lattice
+// dot overlay being switched on, since that checkbox is what requests `packed`
+// and `result`. `layout` is part of the pose and always comes back.
+//
+// Deliberately sitting next to the loops it has to agree with rather than in the
+// consumer: this is the affine closed form of `uAt[0] - half` and
+// `uAt[cols - 1] + half`, and if those two loops ever stop being affine, this is
+// the line that has to change with them. Min/max rather than first/last so a
+// negative pitch cannot hand back an inverted window.
+export function latticeExtent(
+  layout: PoseLayout,
+): { minU: number; maxU: number; minV: number; maxV: number } | null {
+  if (layout.valid !== 1) return null;
+  const { rows, cols, cellPitch } = layout;
+  if (rows === 0 || cols === 0) return null;
+  const half = Math.abs(cellPitch) / 2;
+  const uA = layout.uPhase + layout.kMinU * cellPitch;
+  const uB = layout.uPhase + (layout.kMinU + cols - 1) * cellPitch;
+  const vA = layout.vPhase + layout.kMinV * cellPitch;
+  const vB = layout.vPhase + (layout.kMinV + rows - 1) * cellPitch;
+  return {
+    minU: Math.min(uA, uB) - half, maxU: Math.max(uA, uB) + half,
+    minV: Math.min(vA, vB) - half, maxV: Math.max(vA, vB) + half,
+  };
+}
+
 // The rotated grid, cell by cell, scored against the printed pattern -- and then
 // scored against the device, which is the point.
 //

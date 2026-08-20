@@ -2,10 +2,10 @@ import { type Camera } from '../../shared/camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { flipDy, pipelineField } from './pipelineField.ts';
-import { recomputeFromLastCapture } from '../pipeline/axesReconstruction.ts';
+import { joinSettings, recomputeFromLastCapture } from '../pipeline/axesReconstruction.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../../shared/state.ts';
-import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleRectifiedLinesBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLineJoinBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleRectifiedLinesBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import { persistConfig } from '../../shared/config.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
@@ -120,7 +120,7 @@ function drawCompositeLines(camera: Camera) {
   };
 
   const ranks = settings.showCompositeLineFamilies ? familyRanks(camera) : null;
-  for (const { region, index, line } of composites) {
+  for (const { index, line } of composites) {
     const a = toScreen(line.x1, line.y1), b = toScreen(line.x2, line.y2);
     let strokeColor: string;
     const ranked = ranks?.get(index);
@@ -133,18 +133,23 @@ function drawCompositeLines(camera: Camera) {
     } else if (ranks) {
       strokeColor = 'rgb(130,130,130)'; // classified into neither family
     } else {
-      const [hr, hg, hb] = regionRgb(region);
+      // Hashed off the COMPOSITE index, not a region -- a composite spans
+      // regions. Same hash, so neighbouring composites stay distinguishable;
+      // it no longer colour-matches the raw-regions raster, which is what the
+      // LSD rectangle view is for.
+      const [hr, hg, hb] = regionRgb(index);
       strokeColor = `rgb(${hr},${hg},${hb})`;
     }
-    // Grouped (not two independently-alpha'd strokes) so the halo+color
-    // pair composites as one opaque unit first, THEN that unit is 50%
-    // see-through against whatever's underneath -- two separately-alpha'd
-    // strokes would instead let the color line partially show the halo
-    // through itself, muddying the line's own color.
-    const lineGroup = svgEl('g', { opacity: 0.5 });
-    lineGroup.appendChild(svgEl('line', { x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: 'rgba(0,0,0,0.85)', 'stroke-width': 5 }));
-    lineGroup.appendChild(svgEl('line', { x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: strokeColor, 'stroke-width': 2.5 }));
-    lsdCompositeGroup.appendChild(lineGroup);
+    // ONE translucent stroke per composite. This used to be a 2.5px colour line
+    // over a 5px black halo, wrapped in a group so the pair flattened before the
+    // 50% alpha applied -- readable when the view drew a few dozen segments, and
+    // a solid wash now that it draws COMPOSITES: hundreds of near-parallel lines
+    // whose spacing at a wide-field pose is smaller than the halo was wide. With
+    // the halo gone the group has nothing to flatten, so the alpha moves onto the
+    // line itself.
+    lsdCompositeGroup.appendChild(svgEl('line', {
+      x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: strokeColor, 'stroke-width': 0.7, opacity: 0.5,
+    }));
   }
 }
 
@@ -322,6 +327,29 @@ toggleLsdRawRegionsBtn.addEventListener('click', () => {
   cam.settings.showLsdRawRegions = !cam.settings.showLsdRawRegions;
   toggleLsdRawRegionsBtn.classList.toggle('active', cam.settings.showLsdRawRegions);
   persistConfig();
+  recomputeFromLastCapture(cam);
+});
+// ── THE ONE TOGGLE IN THIS FILE THAT MOVES THE POSE ──────────────────────
+//
+// Every neighbour flips a per-camera `show*` flag: the run is the same, only
+// what is drawn from it changes. This flips `joinSettings.kSigma`, which is a
+// PIPELINE input -- the recovered axes, height and decode all move when it is
+// pressed, and at wide-field poses they move enormously (see the join's own
+// measurement). It is here rather than beside the LSD sliders because what it
+// changes is exactly what the composite-lines view below draws.
+//
+// NOT PERSISTED, and not per camera. joinSettings has no config entry on
+// purpose while the join's verdict is open, so persistConfig() would have
+// nothing to write; the module default (currently ON) is what a reload restores.
+// That also means the button state is global, so refreshCameraPanel syncs it
+// from joinSettings rather than from a camera.
+//
+// recomputeFromLastCapture, not drawCompositeLines: the composites have to be
+// recomputed on the device, not recoloured.
+toggleLineJoinBtn.addEventListener('click', () => {
+  const cam = activeCamera(); if (!cam) return;
+  joinSettings.kSigma = joinSettings.kSigma > 0 ? 0 : 3;
+  toggleLineJoinBtn.classList.toggle('active', joinSettings.kSigma > 0);
   recomputeFromLastCapture(cam);
 });
 toggleLsdCompositeBtn.addEventListener('click', () => {

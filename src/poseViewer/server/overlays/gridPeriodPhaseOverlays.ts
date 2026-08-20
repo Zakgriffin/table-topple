@@ -1,4 +1,5 @@
-import { type Camera, type DecodeLattice } from '../../shared/camera/model.ts';
+import * as THREE from 'three';
+import { type Camera, type CompositeLine, type DecodeLattice } from '../../shared/camera/model.ts';
 import { persistConfig } from '../../shared/config.ts';
 import { activeCamera } from '../camera/store.ts';
 import { type ProjectedBins } from '../../shared/types.ts';
@@ -99,7 +100,12 @@ export function hideGridPeriodPhaseProjected() {
 // per capture, so a new one is a new object and an unchanged one is the same
 // pointer.
 let drawn: {
-  lattice: DecodeLattice | undefined; rectified: Float32Array | undefined; bins: ProjectedBins;
+  lattice: DecodeLattice | undefined;
+  // The COMPOSITES, because that is what drawRectifiedLines now projects --
+  // memoizing on `rectified` would miss a frame where the segments moved but
+  // the samples array happened to be reused.
+  rectLines: { index: number; line: CompositeLine }[] | undefined;
+  bins: ProjectedBins;
   x: number; y: number; w: number; h: number; rot: number;
 } | null = null;
 
@@ -131,10 +137,10 @@ export function drawGridPeriodPhaseProjected(
 ) {
   const s = camera.settings;
   const lattice = s.showSampleLattice ? camera.pose?.lattice : undefined;
-  const rectified = s.showRectifiedLines ? camera.pose?.rectified : undefined;
+  const rectLines = s.showRectifiedLines ? camera.pose?.composites : undefined;
   const bins = camera.lastProjectedBins;
-  if ((!lattice && !rectified) || !bins) { hideGridPeriodPhaseProjected(); return; }
-  if (drawn && drawn.lattice === lattice && drawn.rectified === rectified && drawn.bins === bins
+  if ((!lattice && !rectLines) || !bins) { hideGridPeriodPhaseProjected(); return; }
+  if (drawn && drawn.lattice === lattice && drawn.rectLines === rectLines && drawn.bins === bins
     && drawn.x === x && drawn.y === y && drawn.w === w && drawn.h === h && drawn.rot === rotationSteps) return;
 
   clearGroups();
@@ -155,9 +161,9 @@ export function drawGridPeriodPhaseProjected(
   const toScreenU = (u: number) => x + ((bins.maxU - u) / bins.binWidthU / bins.w) * w;
   const toScreenV = (v: number) => y + (1 - (v - bins.minV) / bins.binWidthV / bins.h) * h;
 
-  if (rectified) drawRectifiedLines(camera, rectified, toScreenU, toScreenV);
+  if (rectLines) drawRectifiedLines(camera, toScreenU, toScreenV);
 
-  if (!lattice) { drawn = { lattice, rectified, bins, x, y, w, h, rot: rotationSteps }; return; }
+  if (!lattice) { drawn = { lattice, rectLines, bins, x, y, w, h, rot: rotationSteps }; return; }
   const { rows, cols, uAt, vAt, packed, correct } = lattice;
   const frag = document.createDocumentFragment();
   for (let i = 0; i < rows; i++) {
@@ -188,50 +194,89 @@ export function drawGridPeriodPhaseProjected(
   // browser consider layout for each child.
   sampleLatticeGroup.appendChild(frag);
 
-  drawn = { lattice, rectified, bins, x, y, w, h, rot: rotationSteps };
+  drawn = { lattice, rectLines, bins, x, y, w, h, rot: rotationSteps };
 }
 
-// ── The detected segments, rectified ─────────────────────────────────────
+// ── The detected segments, rectified -- PROJECTED, not parameterized ─────
 //
-// A row line's `value` is the coordinate it holds CONSTANT (its xCol) and its
-// cross span is the coordinate it RUNS ALONG (xRow); a column line is the other
-// way round. Getting that pairing backwards is the mistake this invites, and it
-// reads right either way -- "row family, row coordinate" is the wrong sentence.
-// GPP_CLASSIFY_WGSL's header states it in the same terms; this is the display
-// side of the same fact.
+// ── WHY THIS NO LONGER READS `samples` FOR THE GEOMETRY ──
 //
-// GNOMONIC IN, FLOOR OUT. `value` and the cross span are gnomonic coordinates on
-// the recovered axes, and floor coordinates are those times the camera's
-// distance -- the same `distance * x` decode.layout uses to place the lattice.
-// That is why this needs `recoveredAxes` and draws nothing without it: a
-// rectified line has no position on this rect until something says how high the
-// camera was.
+// It used to draw each line from `samples`: `value` on one axis, the cross span
+// on the other. That form CANNOT PRODUCE A TILTED LINE -- both endpoints were
+// handed the same `value` -- so every line came out exactly horizontal or
+// exactly vertical no matter how wrong the triad was. A 74-degree orientation
+// error rendered as a tidy grid, and the one overlay whose job is to show
+// whether the fit worked was structurally incapable of showing that it had not.
+//
+// The residual is not merely unrendered, it is DESTROYED UPSTREAM.
+// GPP_CLASSIFY_WGSL projects both endpoints and then averages:
+//
+//     let xCol = (xCol1 + xCol2) * 0.5;
+//
+// and |xCol1 - xCol2| IS the misfit -- zero exactly when the line really does
+// rectify to a constant coordinate, which is what a correct triad means. At a
+// broken pose the median line's "constant" coordinate varied by 53% of the
+// length the line ran, i.e. a ~28 degree tilt, all of it averaged away and then
+// drawn flat.
+//
+// So this projects the composite's OWN TWO ENDPOINTS through the same gnomonic
+// map, and draws the segment between them. With a good fit that is the same
+// picture as before; with a bad one the lines fan and tilt, which is the whole
+// point. `samples` is still what the PERIOD SEARCH consumes -- this is a display
+// disagreeing with a summary statistic, not with the pipeline.
+//
+// GNOMONIC IN, FLOOR OUT: gnomonic coordinates times the camera's distance, the
+// same `distance * x` decode.layout uses to place the lattice. That is why this
+// needs `recoveredAxes` and draws nothing without it.
+//
+// `family` still comes from the pipeline rather than being re-derived here -- it
+// is only the COLOUR, and the row/col predicate lives in GPP_CLASSIFY_WGSL.
 function drawRectifiedLines(
-  camera: Camera, rectified: Float32Array,
+  camera: Camera,
   toScreenU: (u: number) => number, toScreenV: (v: number) => number,
 ) {
-  const distance = camera.pose?.recoveredAxes?.distance;
+  const axes = camera.pose?.recoveredAxes;
   const family = camera.pose?.lineFamily;
-  const lineCount = camera.pose?.lineCount;
-  if (distance === undefined || !family || lineCount === undefined) return;
+  const composites = camera.pose?.composites;
+  if (!axes || !family || !composites) return;
+  const { Drow, Dcol, Dnormal, distance, tanHalf, aspect } = axes;
+  // A remote pose carries no projection -- see RecoveredAxes. Drawing nothing is
+  // right: there is no ray to cast, and a guessed one would put every line in
+  // the wrong place while looking entirely plausible.
+  if (tanHalf === undefined || aspect === undefined) return;
+  const { w, h } = camera.rtSize;
+
+  // Byte-identical to GPP_CLASSIFY_WGSL's `rayDir`, which is itself byte-identical
+  // to VOTES_WGSL's. Three copies of one projection is two too many, but the
+  // alternative here is a fourth convention: the display MUST cast the ray the
+  // device cast or it is drawing a different line.
+  const ray = (px: number, py: number) => {
+    const ndcU = (px / w) * 2 - 1;
+    const ndcV = 1 - (py / h) * 2;
+    return new THREE.Vector3(tanHalf * aspect * ndcU, tanHalf * ndcV, -1).normalize();
+  };
 
   const frag = document.createDocumentFragment();
-  const n = Math.min(lineCount, family.length, rectified.length / 4);
+  const n = Math.min(composites.length, family.length);
   for (let i = 0; i < n; i++) {
     // -1 is a real third state: a degenerate line, or one whose endpoints had no
     // gnomonic image. It is not a column line, and drawing it as one would put a
     // segment at value 0 across the whole rect.
     const fam = family[i]!;
     if (fam < 0) continue;
-    const value = distance * rectified[i * 4]!;
-    const a = distance * rectified[i * 4 + 2]!, b = distance * rectified[i * 4 + 3]!;
-    const isRow = fam === 1;
-    const p1 = isRow ? { u: a, v: value } : { u: value, v: a };
-    const p2 = isRow ? { u: b, v: value } : { u: value, v: b };
+    const { line } = composites[i]!;
+    const r1 = ray(line.x1, line.y1), r2 = ray(line.x2, line.y2);
+    const d1 = r1.dot(Dnormal), d2 = r2.dot(Dnormal);
+    // The same guard the shader applies, and for the same reason: a ray nearly
+    // parallel to the tangent plane has no gnomonic image, and dividing by it
+    // puts an infinity into the path coordinates.
+    if (Math.abs(d1) < 1e-9 || Math.abs(d2) < 1e-9) continue;
+    const p1 = { u: (-r1.dot(Drow) / d1) * distance, v: (-r1.dot(Dcol) / d1) * distance };
+    const p2 = { u: (-r2.dot(Drow) / d2) * distance, v: (-r2.dot(Dcol) / d2) * distance };
     frag.appendChild(svgEl('line', {
       x1: toScreenU(p1.u), y1: toScreenV(p1.v),
       x2: toScreenU(p2.u), y2: toScreenV(p2.v),
-      stroke: isRow ? 'rgba(60,140,255,0.8)' : 'rgba(255,60,60,0.8)',
+      stroke: fam === 1 ? 'rgba(60,140,255,0.8)' : 'rgba(255,60,60,0.8)',
       'stroke-width': 1.5,
     }));
   }

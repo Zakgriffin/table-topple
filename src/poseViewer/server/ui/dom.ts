@@ -38,6 +38,9 @@ export const toggleTopGradientBtn = document.getElementById('toggleTopGradient')
 export const toggleLsdSegmentsBtn = document.getElementById('toggleLsdSegments') as HTMLButtonElement;
 export const toggleLsdRejectedBtn = document.getElementById('toggleLsdRejected') as HTMLButtonElement;
 export const toggleLsdRawRegionsBtn = document.getElementById('toggleLsdRawRegions') as HTMLButtonElement;
+// The odd one out in this block: every other toggle here selects a VIEW, this
+// one selects a PIPELINE. See its handler in hoverDebugOverlays.ts.
+export const toggleLineJoinBtn = document.getElementById('toggleLineJoin') as HTMLButtonElement;
 export const toggleLsdCompositeBtn = document.getElementById('toggleLsdComposite') as HTMLButtonElement;
 export const toggleCompositeLineFamiliesBtn = document.getElementById('toggleCompositeLineFamilies') as HTMLButtonElement;
 export const lsdReadout = document.getElementById('lsdReadout') as HTMLDivElement;

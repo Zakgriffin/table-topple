@@ -75,8 +75,9 @@ export type LocalPose = {
 // are overflow bounds, not tuning: going over sets a status bit rather than
 // corrupting a result. Written here rather than read from the config because
 // they are a property of how much GPU memory a context may claim.
-const MAX_REGIONS = 16384;
-const MAX_LINES = 16384;
+import { DEFAULT_MAX_LINES, DEFAULT_MAX_REGIONS } from '../../pose/pipeline.ts';
+const MAX_REGIONS = DEFAULT_MAX_REGIONS;
+const MAX_LINES = DEFAULT_MAX_LINES;
 
 // ── The declared inspect catalogue: exactly two buffers ──────────────────
 //
@@ -179,7 +180,7 @@ function poseSettingsFor(aspect: number, s: PipelineSettings): PoseSettings {
     // pose is bit-for-bit the pre-join one. The three knobs have no entry in
     // pose-viewer.config.json yet; see scripts/sweep.ts, which drives them from
     // the command line while they are being measured.
-    join: { vFovRad, endpointNoisePx: 0.15, kSigma: 0, maxAngleDeg: 0.5, maxOverlapFrac: 0.25, maxResidualPx: 2, polarityAbs: false },
+    join: { vFovRad, endpointNoisePx: 0.15, kSigma: 0, maxAngleDeg: 0.2, maxResidualPx: 2, polarityAbs: false },
     gpp: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
     layout: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
   };
@@ -244,7 +245,13 @@ function toLocalPose(frame: PoseFrame): LocalPose {
       // `distance` IS the camera's height above the floor, read off the same
       // block that carries the axes it belongs with, so the two cannot be paired
       // across a frame.
-      ? { Drow: axis(0), Dcol: axis(1), Dnormal: axis(2), distance: layout.distance }
+      // tanHalf/aspect ride along for the same reason: they are the projection
+      // the DEVICE used, and a consumer that recomputed them from its own
+      // viewport would be describing a different camera.
+      ? {
+        Drow: axis(0), Dcol: axis(1), Dnormal: axis(2), distance: layout.distance,
+        tanHalf: layout.tanHalf, aspect: layout.aspect,
+      }
       : null,
     positionDecode: pose.ok
       ? {

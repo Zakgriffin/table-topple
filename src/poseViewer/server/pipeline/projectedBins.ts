@@ -125,10 +125,13 @@ function projectSamplesCPU(camera: Camera): ProjectedSamplesDense | null {
 // something else GPU-side, deliberately not tackled yet). Bins stage 1's
 // dense per-pixel samples into a bucketW x bucketH grid -- shared,
 // unchanged, by both the CPU and GPU stage-1 paths below.
-function bucketSamples(camera: Camera, bucketW: number, bucketH: number, proj: ProjectedSamplesDense): {
+function bucketSamples(
+  camera: Camera, bucketW: number, bucketH: number, proj: ProjectedSamplesDense, window: ProjectionWindow,
+): {
   bins: ProjectedBins; sums: Float64Array; counts: Float64Array; gradCxSum: Float64Array; gradCySum: Float64Array;
 } {
-  const { u, v, cx, cy, valid, minU, maxU, minV, maxV } = proj;
+  const { u, v, cx, cy, valid } = proj;
+  const { minU, maxU, minV, maxV } = window;
   const binWidthU = (maxU - minU) / bucketW || 1;
   const binWidthV = (maxV - minV) / bucketH || 1;
   const bins: ProjectedBins = { minU, maxU, minV, maxV, binWidthU, binWidthV, w: bucketW, h: bucketH };
@@ -139,8 +142,14 @@ function bucketSamples(camera: Camera, bucketW: number, bucketH: number, proj: P
   const n = valid.length;
   for (let i = 0; i < n; i++) {
     if (!valid[i]) continue;
-    const bu = Math.min(bucketW - 1, Math.max(0, Math.floor((maxU - u[i]) / binWidthU)));
-    const bv = Math.min(bucketH - 1, Math.max(0, Math.floor((v[i] - minV) / binWidthV)));
+    const bu = Math.floor((maxU - u[i]) / binWidthU);
+    const bv = Math.floor((v[i] - minV) / binWidthV);
+    // DROPPED, not clamped to the edge bucket. Under the full-extent window
+    // nothing is ever outside and the old clamp was a no-op; under the lattice
+    // window most of the frame is outside, and clamping would pile every
+    // off-window pixel onto the border row and column as a bright smear that
+    // looks like real projected content.
+    if (bu < 0 || bu >= bucketW || bv < 0 || bv >= bucketH) continue;
     const bi = bv * bucketW + bu;
     const srcO = i * 4;
     sums[bi * 3] += camera.distortedPreviewData[srcO];
@@ -160,23 +169,78 @@ function bucketSamples(camera: Camera, bucketW: number, bucketH: number, proj: P
 // autocorrelation distance path.
 export type ProjectedSampleResult = ReturnType<typeof bucketSamples> | null;
 
-// Picks bucketW/bucketH so every bucket is a SQUARE in world (floor-plane)
-// units -- binWidthU === binWidthV -- rather than one bucket per screen
-// pixel on each axis independently (the old behavior, castAndBucket*'s
-// default call pattern below used to use), which only produced square cells
-// when the projected floor extent itself happened to be square. The longer
-// of the two floor axes gets a full max(rtSize.w, rtSize.h) buckets; the
-// shorter axis gets proportionally fewer, so the shared bin width tracks
-// the EXTENT's own aspect ratio instead of the viewport's -- meaning
-// bucketW and bucketH will generally differ from each other (and from
-// rtSize.w/h), unlike a same-count-both-axes "square grid" (which does NOT
-// by itself guarantee square cells). `|| 1` / `Math.max(1, ...)` guard the
-// degenerate near-zero-extent case (e.g. a single valid ray) from producing
-// a zero-width bin or a zero-bucket axis.
-function squareCellBucketDims(camera: Camera, extentU: number, extentV: number): { bucketW: number; bucketH: number } {
+// ── WHICH PATCH OF FLOOR THE PICTURE COVERS ──────────────────────────────
+//
+// The bounds the bucket grid spans, in floor (u, v). Two choices, and the
+// setting picks between them:
+//
+//   FULL     every ray that cleared the grazing cutoff -- the whole capture,
+//            which is what this has always drawn.
+//   LATTICE  exactly the cells the decode sampled, so the picture and the
+//            sample-lattice dots cover the same ground.
+//
+// Everything downstream reads the window off `lastProjectedBins`, so the
+// lattice-dot and rectified-line overlays follow it for free (their toScreenU/V
+// are bin lookups) and stay registered with the image underneath. The World-view
+// floor decal follows it too -- under the lattice window that quad shrinks to the
+// decoded region, which is correct rather than incidental: the decal shows what
+// the texture holds.
+type ProjectionWindow = { minU: number; maxU: number; minV: number; maxV: number };
+
+// `pose.latticeExtent`, NOT `pose.lattice`. The extent is four numbers off the
+// layout block and rides on every pose; the lattice is 83 KiB of per-cell
+// verdicts, fetched only when the dot overlay is switched on. Reading the
+// latter here made this window silently require that checkbox -- see
+// CameraPose.latticeExtent.
+// Picks the window and the bucket grid together, because the two decisions are
+// one: every bucket is a SQUARE in world (floor-plane) units -- binWidthU ===
+// binWidthV -- rather than one bucket per screen pixel on each axis
+// independently (the old behavior, castAndBucket*'s default call pattern below
+// used to use), which only produced square cells when the projected floor extent
+// itself happened to be square. The longer of the two floor axes gets a full
+// max(rtSize.w, rtSize.h) buckets; the shorter axis gets proportionally fewer,
+// so the shared bin width tracks the EXTENT's own aspect ratio instead of the
+// viewport's -- meaning bucketW and bucketH will generally differ from each
+// other (and from rtSize.w/h), unlike a same-count-both-axes "square grid"
+// (which does NOT by itself guarantee square cells).
+//
+// THE BIN WIDTH COMES OFF THE WINDOW, so the bucket BUDGET is what both modes
+// share and the resolution is what changes. The lattice window is therefore a
+// crop that ZOOMS: the same long axis still gets max(rtSize.w, rtSize.h)
+// buckets, spread over a smaller patch of floor, so the decoded region rectifies
+// at more buckets per board cell instead of at the whole capture's scale. That is
+// the point of the tighter extent -- the full extent is dominated by far-field
+// floor that stretches enormously near the grazing cutoff, and letting it set the
+// bin width makes the near field, which is where the resolvable detail is, far
+// coarser than the rays feeding it could support.
+//
+// WHAT THIS COSTS is holes. Once the bin width drops below the projected spacing
+// of the source rays -- always true somewhere in the far half of the window --
+// buckets fall between rays and paint with count 0. paintProjectedTexture writes
+// those BLACK AND OPAQUE, which is the same thing it writes for a genuinely dark
+// board cell, so "no data" and "dark cell" are not distinguishable in the output.
+// Scattering samples forward is what has this limit; a magnified rectification
+// without holes needs the backward map (per output bucket, invert the gnomonic
+// map to a source pixel and sample there), which is a different stage, not a
+// tuning of this one.
+//
+// `|| 1` / `Math.max(1, ...)` guard the degenerate near-zero-extent case (e.g. a
+// single valid ray) from producing a zero-width bin or a zero-bucket axis.
+function windowAndBucketDims(camera: Camera, proj: ProjectedSamplesDense): {
+  window: ProjectionWindow; bucketW: number; bucketH: number;
+} {
+  const full: ProjectionWindow = { minU: proj.minU, maxU: proj.maxU, minV: proj.minV, maxV: proj.maxV };
+  // Falls back to the full window on a frame with no lattice -- an undecoded
+  // frame still has a projection worth looking at, and blanking the view would
+  // hide the very thing that explains why the decode failed.
+  const window = (camera.settings.latticeBoundsProjection ? camera.pose?.latticeExtent : null) ?? full;
   const longAxisBuckets = Math.max(camera.rtSize.w, camera.rtSize.h);
-  const binWidth = Math.max(extentU, extentV) / longAxisBuckets || 1;
-  return { bucketW: Math.max(1, Math.round(extentU / binWidth)), bucketH: Math.max(1, Math.round(extentV / binWidth)) };
+  const binWidth = Math.max(window.maxU - window.minU, window.maxV - window.minV) / longAxisBuckets || 1;
+  return {
+    window,
+    bucketW: Math.max(1, Math.round((window.maxU - window.minU) / binWidth)),
+    bucketH: Math.max(1, Math.round((window.maxV - window.minV) / binWidth)),
+  };
 }
 
 // The numeric half of what used to be buildProjectedTexture -- bins feed the
@@ -197,8 +261,8 @@ function squareCellBucketDims(camera: Camera, extentU: number, extentV: number):
 function computeProjectedBinsCPU(camera: Camera): ProjectedSampleResult {
   const proj = camera.pose?.recoveredAxes ? projectSamplesCPU(camera) : null;
   if (!proj) { camera.lastProjectedBins = null; return null; }
-  const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
-  const result = bucketSamples(camera, bucketW, bucketH, proj);
+  const { window, bucketW, bucketH } = windowAndBucketDims(camera, proj);
+  const result = bucketSamples(camera, bucketW, bucketH, proj, window);
   camera.lastProjectedBins = result.bins;
   return result;
 }
@@ -217,8 +281,8 @@ function computeProjectedBinsCPU(camera: Camera): ProjectedSampleResult {
 async function computeProjectedBinsGPU(camera: Camera): Promise<ProjectedSampleResult> {
   const proj = camera.pose?.recoveredAxes ? await projectSamplesGPU(camera) : null;
   if (!proj) { camera.lastProjectedBins = null; return null; }
-  const { bucketW, bucketH } = squareCellBucketDims(camera, proj.maxU - proj.minU, proj.maxV - proj.minV);
-  const result = bucketSamples(camera, bucketW, bucketH, proj);
+  const { window, bucketW, bucketH } = windowAndBucketDims(camera, proj);
+  const result = bucketSamples(camera, bucketW, bucketH, proj, window);
   camera.lastProjectedBins = result.bins;
   return result;
 }

@@ -19,7 +19,7 @@ import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
 import { backendFromForceCPU } from '../../shared/backend.ts';
 import { captureDistortedGrayscale, getAnalysisVFovRad } from './capture.ts';
 import { computeProjectedBinsAuto, paintProjectedTexture, type ProjectedSampleResult } from './projectedBins.ts';
-import { buildDecodeLattice } from './decodeLattice.ts';
+import { buildDecodeLattice, latticeExtent } from './decodeLattice.ts';
 import { flipRowsF64 } from './distortion.ts';
 import { refreshModeVisualizations } from './modeRefresh.ts';
 import { type Span, spanEnd } from '../../../profiling/profiler.ts';
@@ -475,8 +475,9 @@ const poseContexts = new WeakMap<Camera, { ctx: PoseContext; w: number; h: numbe
 // with the sweep's own choice so a Pose Viewer capture and a swept pose overflow
 // at the same point -- `lineOverflow`/`regionOverflow` mean "raise a constant"
 // (§15), and they should mean it at the same constant in both places.
-const MAX_REGIONS = 16384;
-const MAX_LINES = 16384;
+import { DEFAULT_MAX_LINES, DEFAULT_MAX_REGIONS } from '../../../pose/pipeline.ts';
+const MAX_REGIONS = DEFAULT_MAX_REGIONS;
+const MAX_LINES = DEFAULT_MAX_LINES;
 
 // ── WHAT THE DISPLAY READS BACK, declared once ───────────────────────────
 //
@@ -499,7 +500,7 @@ const MAX_LINES = 16384;
 // is the reason the two rasters gate on their own toggles below rather than
 // riding along with the rectangles.
 const INSPECT = [
-  'triad', 'layout', 'fx', 'fy', 'votes', 'lines', 'lineScan', 'rects',
+  'triad', 'layout', 'fx', 'fy', 'votes', 'compLines', 'rects',
   'members', 'regionOffsets', 'regionSizes', 'packed', 'result', 'samples', 'family',
 ] as const;
 
@@ -540,9 +541,19 @@ function inspectFor(camera: Camera): readonly string[] {
   // not fetched either. Its own comment is the reason it matters: a real capture
   // is hundreds of thousands of votes, which is why showTopCircles defaults off.
   if (s.showTopCircles || s.showAxisVectors) want.push('votes');
-  // The segments themselves, plus what is needed to say WHICH REGION produced
-  // each one -- see unpackComposites. Both are kilobytes.
-  if (s.showLsdComposite) want.push('lines', 'lineScan');
+  // ── THE COMPOSITES, NOT THE SEGMENTS ────────────────────────────────────
+  //
+  // This asked for `lines` + `lineScan` -- the per-region emitted SEGMENTS --
+  // which made "show composite lines" draw the same thing the LSD rectangle
+  // view already drew, one outline per detected segment, and made the toggle's
+  // name a lie the moment the join stage existed.
+  //
+  // `compLines` is what fit and gpp actually consume, and it is correct with the
+  // join both ON and OFF: join.reduce runs unconditionally, so at kSigma 0 every
+  // line is its own composite and compLines is `lines` compacted. One buffer
+  // covers both states, and `lineScan`'s region walk goes away with it -- the
+  // buffer is already compacted, so the count is just pose.compositeCount.
+  if (s.showLsdComposite) want.push('compLines');
   // The fitted rectangles, for the segment outlines and the accept/reject
   // readout. EITHER toggle: the rejected view is the same buffer filtered the
   // other way, so gating on showLsdSegments alone would leave it dark whenever
@@ -563,14 +574,17 @@ function inspectFor(camera: Camera): readonly string[] {
   if (s.showSampleLattice) want.push('packed', 'result');
   // The rectified lines, and the family colouring of the composite lines -- TWO
   // VIEWS OF ONE CLASSIFICATION, which is why one pair of buffers serves both.
-  // `samples`/`family` are per LINE (uncompacted), so they join to `composites`
-  // by index; `rowSamples`/`colSamples` hold the same numbers compacted per
-  // family, which would have cost a second join to get back to a line.
+  // `samples`/`family` are written by gpp.classify, which is bound to
+  // `compLines`/`compVotes` -- so they are indexed BY COMPOSITE, and they join to
+  // `composites` by array position. That is also why this overlay had to move off
+  // `lines`: with the join on, colouring segment i by family[i] paired a raw
+  // segment with a different composite's classification.
   if (s.showRectifiedLines || (s.showLsdComposite && s.showCompositeLineFamilies)) {
     want.push('samples', 'family');
-    // The Through-Cam view needs the segments themselves to colour; the
-    // Projected-Cam one does not, but asking twice is free -- runPose dedupes.
-    if (s.showLsdComposite) want.push('lines', 'lineScan');
+    // BOTH views need the composites now. The Through-Cam one colours them; the
+    // Projected-Cam one PROJECTS them, because `samples` cannot express a
+    // rectified line that is not axis-aligned -- see drawRectifiedLines.
+    want.push('compLines');
   }
   return want;
 }
@@ -611,11 +625,19 @@ async function poseContextFor(camera: Camera, w: number, h: number): Promise<Pos
 //   joinSettings.kSigma = 3   // join on
 //   joinSettings.kSigma = 0   // join off
 //   runAxesReconstruction(activeCamera())
+//
+// ── DEFAULTED ON, IN THIS APP ONLY, AND ONLY WHILE IT IS BEING LOOKED AT ──
+//
+// kSigma 3 rather than 0, so a source edit -- which reloads the page and resets
+// this module -- does not silently drop the viewer back to the pre-join pose
+// mid-investigation. That is a WORKBENCH default, not a verdict: the sweep
+// (scripts/sweep.ts) still defaults to 0, table-topple and the phone client are
+// untouched, and the join still destroys the lattice below ~6 px/cell. Anything
+// read off this page from here on is the JOINED pose unless kSigma is put back.
 export const joinSettings = {
   endpointNoisePx: 0.15,
-  kSigma: 0,
-  maxAngleDeg: 0.5,
-  maxOverlapFrac: 0.25,
+  kSigma: 3,
+  maxAngleDeg: 0.2,
   maxResidualPx: 2,
   polarityAbs: false,
 };
@@ -682,54 +704,41 @@ function unpackVotes(bytes: ArrayBuffer, lineCount: number): { n: THREE.Vector3;
   return out;
 }
 
-// The detected segments, each tagged with the region it came from.
+// The COMPOSITE lines -- what the orientation fit and gpp actually see.
 //
-// ── THE TAG IS THE REGION INDEX, AND THAT IS A DELIBERATE DEPARTURE ──
+// ── THIS USED TO WALK REGIONS, AND NOW DOES NOT ──
 //
-// The old app hashed a colour from `root`: the region's LOWEST-INDEX MEMBER
-// PIXEL. Reproducing that exactly is possible -- it is `members[regionOffsets[r]]`
-// -- but it costs the full region CSR (1.17 MiB of `members`) on a view that
-// otherwise needs kilobytes, and `root` was never meaningful: lsdOverlay.ts's own
-// comment calls it "just some deterministic, stable member pixel to hash off of".
+// It took `lines` + `lineScan` and reconstructed which region emitted each
+// segment, because the display's colour key was the region index. Three things
+// killed that:
 //
-// What DOES matter is that this view and the raw-regions raster agree, so a
-// segment and the blob it was fitted to come out the same colour. Hashing the
-// region index satisfies that in both, and the raster can keep using the CSR it
-// needs for its pixels anyway. The visible change is that the palette is
-// shuffled relative to the old app; the property the palette is FOR is kept.
+//   1. It drew SEGMENTS. Once the join stage existed, "composite line" named
+//      something real and this was not it -- the view was a recolouring of the
+//      LSD rectangle view.
+//   2. `compLines` is already COMPACTED, so there is no scan to walk. The count
+//      is pose.compositeCount, straight off the pose block (`pose[25]`).
+//   3. A composite HAS no region. It is a star cluster of segments that may come
+//      from many regions, so the old tag has no value to carry.
 //
-// ── HOW A LINE FINDS ITS REGION, without re-deriving the predicate ──
-//
-// `lineScan` is the exclusive prefix of the accept flags, so region r emitted a
-// line exactly when its running index INCREMENTS -- and that line is at
-// lineScan[r].x. Reading it this way rather than re-testing `rects`'s accepted
-// flag and length matters: the predicate lives in LINES_FLAG_WGSL, and a second
-// copy here would drift silently the first time a threshold moves.
-//
-// `regionCount` comes from the POSE BLOCK, not from a `counts` readback. `finish`
-// writes `pose[17] = counts.x`, so the number was always crossing the bus with
-// the pose and inspecting `counts` for it was a second copy of a value we
-// already had.
+// The colour key is therefore the composite's own index. It still satisfies the
+// property the palette exists for within this view -- adjacent composites are
+// distinguishable -- but it NO LONGER MATCHES the raw-regions raster's colours,
+// which was the old key's one cross-view guarantee. That guarantee could not
+// survive a stage that merges across regions, and the LSD rectangle view (which
+// still draws per region) is where a segment-to-blob colour match belongs.
 function unpackComposites(
-  lines: ArrayBuffer, lineScan: ArrayBuffer, regionCount: number, lineCount: number,
-): { region: number; index: number; line: CompositeLine }[] {
-  const seg = new Float32Array(lines);
-  const scan = new Uint32Array(lineScan);
-  const emitted = Math.min(lineCount, seg.length / 4);
-  const out: { region: number; index: number; line: CompositeLine }[] = [];
-  for (let r = 0; r < regionCount; r++) {
-    // vec2 per entry, and only .x carries the flag -- see BUFFERS.lineFlag.
-    const at = scan[r * 2]!;
-    // The tail past the last region compares against the total, which is what
-    // `lineScan[r + 1]` would have held had the scan run one element further.
-    const next = r + 1 < regionCount ? scan[(r + 1) * 2]! : emitted;
-    if (next <= at || at >= emitted) continue;
+  compLines: ArrayBuffer, compositeCount: number,
+): { index: number; line: CompositeLine }[] {
+  const seg = new Float32Array(compLines);
+  // Clamped for the same reason unpackVotes clamps: the count is what the device
+  // FOUND, and join.reduce truncates at maxLines. A count past the buffer would
+  // read the tail, which holds last frame's composites.
+  const n = Math.min(compositeCount, seg.length / 4);
+  const out: { index: number; line: CompositeLine }[] = [];
+  for (let i = 0; i < n; i++) {
     out.push({
-      // `at` IS the line's own slot, and carrying it is what lets the family
-      // colouring join this segment to its rectified coordinates without a
-      // second scan of the same flags.
-      region: r, index: at,
-      line: { x1: seg[at * 4]!, y1: seg[at * 4 + 1]!, x2: seg[at * 4 + 2]!, y2: seg[at * 4 + 3]! },
+      index: i,
+      line: { x1: seg[i * 4]!, y1: seg[i * 4 + 1]!, x2: seg[i * 4 + 2]!, y2: seg[i * 4 + 3]! },
     });
   }
   return out;
@@ -781,17 +790,28 @@ function toCameraPose(frame: PoseFrame): CameraPose {
   // publishing the raw count would walk a display loop off the end of `rects`.
   // The overflow is still reported, in `status`.
   const regionCount = Math.min(pose.regionCount, MAX_REGIONS);
+  const extent = latticeExtent(layout);
 
   return {
     status: pose.status,
     lineCount: pose.lineCount,
+    // How many composites those lines collapsed into. Equal to lineCount when the
+    // join is off, and the merge ratio between them is the number the sweep's
+    // `lines`/`comps` columns report -- so it is worth having on screen while the
+    // join's verdict is open.
+    compositeCount: pose.compositeCount,
     regionCount,
 
     // `distance` IS the camera's height above the floor -- the same quantity the
     // pose block reports as `height`, read here off the block that also carries
     // the axes it belongs with, so the two cannot be paired across a frame.
     ...(fitOk && layout.valid === 1
-      ? { recoveredAxes: { Drow: axis(0), Dcol: axis(1), Dnormal: axis(2), distance: layout.distance } }
+      ? {
+        recoveredAxes: {
+          Drow: axis(0), Dcol: axis(1), Dnormal: axis(2), distance: layout.distance,
+          tanHalf: layout.tanHalf, aspect: layout.aspect,
+        },
+      }
       : {}),
     ...(pose.ok
       ? {
@@ -809,8 +829,8 @@ function toCameraPose(frame: PoseFrame): CameraPose {
     ...(inspected['fx'] ? { fx: new Float32Array(inspected['fx']) } : {}),
     ...(inspected['fy'] ? { fy: new Float32Array(inspected['fy']) } : {}),
     ...(inspected['votes'] ? { votes: unpackVotes(inspected['votes'], pose.lineCount) } : {}),
-    ...(inspected['lines'] && inspected['lineScan']
-      ? { composites: unpackComposites(inspected['lines'], inspected['lineScan'], regionCount, pose.lineCount) }
+    ...(inspected['compLines']
+      ? { composites: unpackComposites(inspected['compLines'], pose.compositeCount) }
       : {}),
     ...(inspected['rects'] ? { rects: new Float32Array(inspected['rects']) } : {}),
     ...(inspected['samples'] ? { rectified: new Float32Array(inspected['samples']) } : {}),
@@ -833,6 +853,11 @@ function toCameraPose(frame: PoseFrame): CameraPose {
     ...(inspected['packed'] && inspected['result']
       ? { lattice: buildDecodeLattice(layout, inspected['packed'], inspected['result'], pose) ?? undefined }
       : {}),
+    // UNCONDITIONAL, unlike the lattice above -- it is four numbers off `layout`,
+    // which is already here because it is the pose. Gating it on the same
+    // readback would tie Projected-Cam's lattice-bounds window to whether the
+    // dot overlay happens to be switched on. See CameraPose.latticeExtent.
+    ...(extent ? { latticeExtent: extent } : {}),
   };
 }
 

@@ -41,8 +41,9 @@ import type { ARCameraPose } from './overlay.ts';
 // frame is nowhere near either. Written here rather than read from the config
 // because they are a property of how much GPU memory a context may claim, which
 // is not a thing anyone should be adjusting from a JSON file to fix a decode.
-const MAX_REGIONS = 16384;
-const MAX_LINES = 16384;
+import { DEFAULT_MAX_LINES, DEFAULT_MAX_REGIONS } from '../../pose/pipeline.ts';
+const MAX_REGIONS = DEFAULT_MAX_REGIONS;
+const MAX_LINES = DEFAULT_MAX_LINES;
 
 let ctx: PoseContext | null = null;
 
@@ -102,7 +103,7 @@ function poseSettingsFor(aspect: number): PoseSettings {
     // pose is bit-for-bit the pre-join one. The three knobs have no entry in
     // pose-viewer.config.json yet; see scripts/sweep.ts, which drives them from
     // the command line while they are being measured.
-    join: { vFovRad, endpointNoisePx: 0.15, kSigma: 0, maxAngleDeg: 0.5, maxOverlapFrac: 0.25, maxResidualPx: 2, polarityAbs: false },
+    join: { vFovRad, endpointNoisePx: 0.15, kSigma: 0, maxAngleDeg: 0.2, maxResidualPx: 2, polarityAbs: false },
     gpp: { vFovRad, cellPitch: CELL_PITCH, minGrazingCos: p.minGrazingCos },
     layout: { vFovRad, cellPitch: CELL_PITCH, minGrazingCos: p.minGrazingCos },
   };

@@ -174,6 +174,22 @@ export interface CameraPose {
    */
   composites?: { index: number; line: CompositeLine }[];
   /**
+   * The RAW segments -- one per accepted region, before the join collapsed them
+   * -- each tagged with the composite it ended up in.
+   *
+   * `composite` is what makes the three line views one picture: it is how a
+   * segment inherits its composite's colour and its row/column family, and
+   * seeing several segments in one colour IS seeing what the join did. It comes
+   * from `joinScan[anchorOf[j]].x`, which is literally the gather join.reduce
+   * performs -- see unpackSegments. -1 when the segment's root fell outside the
+   * scan, which should not happen and is drawn in the unclassified grey rather
+   * than indexed with a negative.
+   *
+   * `index` is the segment's own slot in `lines`, NOT a region index: lines.emit
+   * compacts accepted regions, so the two spaces differ.
+   */
+  segments?: { index: number; line: CompositeLine; composite: number }[];
+  /**
    * Per LINE, 4 f32: value, weight, crossMin, crossMax -- the segment's
    * coordinates once the recovered axes flatten the floor. `value` is the
    * coordinate the line holds CONSTANT (xCol for a row line, xRow for a column
@@ -401,7 +417,16 @@ export interface CameraBase {
   // correct, no GL errors, yet zero pixels) for reasons not worth chasing
   // further -- ordinary triangles + MeshBasicMaterial has no such failure
   // mode. See updateGradientCirclesDebug for the ribbon construction.
-  gradientCirclesGeo: THREE.BufferGeometry; gradientCirclesMat: THREE.MeshBasicMaterial; gradientCirclesLines: THREE.Mesh;
+  // TWO MESHES, one per line kind, because the kinds differ in OPACITY and a
+  // material carries one opacity for everything drawn through it. Vertex alpha
+  // would have kept it to one mesh, at the cost of an alpha lane on every vertex
+  // to express two values. The pair also lets each kind's visibility be a plain
+  // mesh flag rather than a rebuild.
+  //
+  // Kept as explicit fields rather than a Record<LineKind, ...> because LineKind
+  // lives in server/overlays/lines.ts and `shared/` must not import `server/`.
+  segmentArcsGeo: THREE.BufferGeometry; segmentArcsMat: THREE.MeshBasicMaterial; segmentArcsMesh: THREE.Mesh;
+  compositeArcsGeo: THREE.BufferGeometry; compositeArcsMat: THREE.MeshBasicMaterial; compositeArcsMesh: THREE.Mesh;
   axisVectorsGeo: THREE.BufferGeometry; axisVectorsMat: THREE.LineBasicMaterial; axisVectorsLines: THREE.LineSegments;
 }
 export interface SimulatedCamera extends CameraBase {

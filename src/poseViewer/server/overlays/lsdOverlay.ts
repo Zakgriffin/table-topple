@@ -1,7 +1,7 @@
 import { type Camera, type RegionCsr } from '../../shared/camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import {
-  growthCandidateGroup, lsdReadout, lsdRectanglesGroup, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn,
+  growthCandidateGroup, lsdReadout, lsdRectanglesGroup, toggleCompositeLinesBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn,
   toggleLsdSegmentsBtn,
 } from '../ui/dom.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
@@ -262,5 +262,5 @@ export function updateLsdAvailability() {
   toggleLsdSegmentsBtn.disabled = false;
   toggleLsdRejectedBtn.disabled = false;
   toggleLsdRawRegionsBtn.disabled = false;
-  toggleLsdCompositeBtn.disabled = false;
+  toggleCompositeLinesBtn.disabled = false;
 }

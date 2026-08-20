@@ -74,10 +74,21 @@ export const CameraSettingsCommonSchema = Type.Object({
   // fitted from) as small dots, so the raw growing result can be compared
   // directly against the fitted rectangle it produced.
   showLsdRawRegions: Type.Boolean(),
-  // draw the merged composite lines fed by the segments above (the join walk
-  // that produced them is deleted; see votes.ts's compositesFromLsdRectangles
-  // for what fills this now)
-  showLsdComposite: Type.Boolean(),
+  // ── THE TWO LINE OVERLAYS ───────────────────────────────────────────────
+  //
+  // One concept drawn THREE WAYS, and these two booleans drive all three at
+  // once: image-space SVG in Through-Cam, rectified SVG in Projected-Cam, and
+  // great-circle arcs on the sphere in World/Inside. Shared state on purpose --
+  // "composite lines are on" is a fact about the pose being looked at, not
+  // about which window it is being looked at through. See overlays/lines.ts,
+  // which owns the one model and the one colour function all three read.
+  //
+  // SEGMENTS are the raw per-region detections, pre-join; COMPOSITES are what
+  // the join collapsed them into, and what the orientation fit and gpp actually
+  // consume. With the join off they are the same objects, which is exactly what
+  // makes showing both at once the way to SEE the join.
+  showLineSegments: Type.Boolean(),
+  showCompositeLines: Type.Boolean(),
 
   // The two histograms in the grid period/phase debug plot
   // (overlays/gridPeriodPhaseOverlays.ts). Both are DRAWING-ONLY -- neither
@@ -193,8 +204,14 @@ export const CameraSettingsCommonSchema = Type.Object({
 
   showRecoveredPoles: Type.Boolean(),
   showAxisVectors: Type.Boolean(),
-  showTopCircles: Type.Boolean(),
-  topCirclesLineWidth: Type.Number(),
+  // WORLD/INSIDE ONLY, and it EXTENDS the line overlays rather than being one
+  // of its own: each drawn arc is completed into the full great circle its
+  // segment lies on, in that line's own colour. It used to be one circle per
+  // VOTE coloured red->blue by vote weight, which is a different quantity from
+  // everything else on screen and cost hundreds of thousands of circles on a
+  // real capture. Now it is one per drawn line, so ~300.
+  showLineRings: Type.Boolean(),
+  lineRingWidth: Type.Number(),
 
   // Grazing-angle cutoff (cosine) shared by projectSamplesCPU (forward:
   // screen pixel -> floor point) and buildDecodeSampleGrid (reverse: floor
@@ -202,15 +219,16 @@ export const CameraSettingsCommonSchema = Type.Object({
   // Higher = stricter (excludes more of the near-horizon view).
   minGrazingCos: Type.Number(),
   gridPeriodPhaseBinCount: Type.Number(),
-  showCompositeLineFamilies: Type.Boolean(),
+  // Recolour BOTH line overlays by the row/column family gpp classified them
+  // into, in every view at once, instead of by line identity.
+  //
+  // The classification is per COMPOSITE -- `family` is written by gpp.classify,
+  // which is bound to compLines -- so a raw segment inherits its composite's
+  // family through the anchorOf/joinScan map (see overlays/lines.ts). Reading
+  // family[i] with a SEGMENT index is the bug this codebase already hit once:
+  // it pairs a segment with an unrelated composite's classification.
+  colorLinesByFamily: Type.Boolean(),
   showSampleLattice: Type.Boolean(),
-  // The detected segments drawn in RECTIFIED space on the Projected-Cam rect --
-  // each line as the straight segment it becomes once the recovered axes flatten
-  // the floor, coloured by which family (row or column) it was classified into.
-  // A toggle where the old app drew these unconditionally: they cost a readback
-  // of the per-line rectified coordinates now, so a view nobody is looking at
-  // should not be paying for it every capture.
-  showRectifiedLines: Type.Boolean(),
   // Purely a display-time rotation of the Projected-Cam view (WebGL texture
   // + debug overlay) by camera.pose.positionDecode.orientation * 90 degrees,
   // so "up" matches the pattern's true cardinal orientation instead of

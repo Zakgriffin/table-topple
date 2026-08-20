@@ -94,12 +94,14 @@
      overlay. Pressing it re-runs the pipeline and moves the pose, so it should
      not read as "another thing drawn on top of the same result". */
   #overlayPanel button.active#toggleLineJoin { background: rgba(80,200,120,0.6); color: #fff; border-color: #50c878; }
-  #overlayPanel button.active#toggleLsdComposite { background: rgba(230,180,60,0.6); color: #fff; border-color: #e6b43c; }
+  #overlayPanel button.active#toggleCompositeLines { background: rgba(230,180,60,0.6); color: #fff; border-color: #e6b43c; }
+  /* Dimmer than the composites', because that is the relationship on screen:
+     segments are the fainter, thinner strokes the composites are drawn over. */
+  #overlayPanel button.active#toggleLineSegments { background: rgba(230,180,60,0.32); color: #fff; border-color: rgba(230,180,60,0.7); }
   /* One colour for the two views of the SAME classification: the composite
      lines coloured by family in Through-Cam, and those same lines drawn
      rectified in Projected-Cam. */
-  #overlayPanel button.active#toggleCompositeLineFamilies,
-  #overlayPanel button.active#toggleRectifiedLines { background: rgba(100,140,230,0.6); color: #fff; border-color: #648ce6; }
+  #overlayPanel button.active#toggleColorByFamily { background: rgba(100,140,230,0.6); color: #fff; border-color: #648ce6; }
   /* Active colors deliberately match each histogram's own bars in the plot
      (gray gaps, white values) so the button says which series it controls. */
   #overlayPanel button.active#toggleGapHistogram { background: rgba(200,200,200,0.45); color: #fff; border-color: #c8c8c8; }
@@ -384,14 +386,32 @@
     <div class="row pipe"><span class="label">rounds</span><input type="range" id="joinRounds" min="1" max="8" step="1"><span class="val" id="joinRoundsVal"></span></div>
     <div class="row pipe"><span class="label">max residual</span><input type="range" id="joinMaxResidualPx" min="0" max="10" step="0.5"><span class="val" id="joinMaxResidualPxVal"></span></div>
     <label class="chk pipe" title="Compare |dot| rather than dot on the vote normals, joining across a gradient polarity flip. Correct for a board of black and white cells, wrong for lines drawn as strokes -- and measured WORSE."><input type="checkbox" id="joinPolarityAbs"> absolute polarity</label>
-    <button id="toggleLsdComposite">composite lines</button>
-    <button id="toggleCompositeLineFamilies">color by row/col family</button>
+  </div>
+
+  <!-- ── ONE OVERLAY, EVERY VIEW ─────────────────────────────────────────
+       The only section in the pane listed for all four views, and the reason
+       the `data-views` list is a LIST. These two toggles drive image-space SVG
+       in Through-Cam, rectified SVG in Projected-Cam and great-circle arcs on
+       the sphere in World/Inside, all at once, in one colour scheme -- see
+       overlays/lines.ts. "Composite lines are on" is a fact about the pose you
+       are looking at, not about the window you are looking through.
+
+       Sitting between S5c and S6 because that is where both objects exist: the
+       segments came out of S5, the composites out of S5c. -->
+  <div class="section" data-views="world inside through projected">
+    <h2>lines &mdash; all views</h2>
+    <button id="toggleLineSegments">line segments (pre-join)</button>
+    <button id="toggleCompositeLines">composite lines</button>
+    <button id="toggleColorByFamily">color by row/col family</button>
   </div>
 
   <div class="section" data-views="world inside">
     <h2>S6 &middot; fit</h2>
-    <label class="chk"><input type="checkbox" id="showTopCircles"> top circles (rings)</label>
-    <div class="row"><span class="label">ring stroke weight</span><input type="range" id="topCirclesLineWidth" min="0.5" max="8" step="0.5"><span class="val" id="topCirclesLineWidthVal"></span></div>
+    <!-- EXTENDS the line overlays rather than being an overlay of its own: each
+         arc drawn from the section above is completed into the full great circle
+         its line lies on, in that line's own colour. -->
+    <label class="chk"><input type="checkbox" id="showLineRings"> complete arcs into full rings</label>
+    <div class="row"><span class="label">ring stroke weight</span><input type="range" id="lineRingWidth" min="0.5" max="8" step="0.5"><span class="val" id="lineRingWidthVal"></span></div>
     <label class="chk"><input type="checkbox" id="showRecoveredPoles"> reconstructed poles</label>
     <label class="chk"><input type="checkbox" id="showAxisVectors"> vote axis vectors</label>
   </div>
@@ -428,7 +448,6 @@
     <h2>S8 &middot; decode &middot; projected view</h2>
     <button id="toggleTrueCardinalOrientation">use true cardinal orientation</button>
     <button id="toggleSampleLattice">sample lattice</button>
-    <button id="toggleRectifiedLines">rectified lines (row/column families)</button>
     <label class="chk" title="Projected-Cam buckets only the sample lattice's extent -- a crop, at the same world scale, to exactly the cells the decode read. Falls back to the whole capture on a frame with no lattice."><input type="checkbox" id="latticeBoundsProjection"> project to sample-lattice bounds</label>
   </div>
 </div>

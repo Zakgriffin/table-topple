@@ -5,12 +5,13 @@ import { flipDy, pipelineField } from './pipelineField.ts';
 import { recomputeFromLastCapture } from '../pipeline/axesReconstruction.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../../shared/state.ts';
-import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleRectifiedLinesBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, throughCamCanvas, toggleColorByFamilyBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleCompositeLinesBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleLineSegmentsBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import { persistConfig } from '../../shared/config.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
-import { regionRgb, repaintLsdRawRegionsHighlight } from './lsdOverlay.ts';
-import { drawOneArrow, svgEl } from './svgUtil.ts';
+import { repaintLsdRawRegionsHighlight } from './lsdOverlay.ts';
+import { drawLinesSvg, drawableLines } from './lines.ts';
+import { drawOneArrow } from './svgUtil.ts';
 
 // Clears the gradient/level-line arrow groups only -- NOT lsdRectanglesGroup/
 // lsdCompositeGroup, even though all four now share the same <svg> (see
@@ -50,107 +51,35 @@ export function clearArrowOverlays() {
 // correct as written -- and it was correct-looking either way round, which is
 // why the stale comment survived. See overlays/pipelineField.ts.
 //
-// Each classified line's position in its own family, ordered by the rectified
-// coordinate -- which is the order the period search assigns integer indices in,
-// so this is literally the sequence the fit will register them as.
+// ── THE LINE OVERLAY MOVED TO overlays/lines.ts ──────────────────────────
 //
-// SORTED HERE, not upstream. `rectified` arrives in line order because that is
-// the order `samples` is written in, and the two families interleave; the
-// pipeline's own compaction (`rowSamples`/`colSamples`) does not sort either,
-// since gpp only ever needs the spread and the resultant. So the ranking is a
-// display question and this is where it belongs.
+// `familyRanks` and `drawCompositeLines` lived here, and between them they
+// owned the Through-Cam half of a picture the Projected-Cam and World views
+// each drew their own way. They are one model now, with one colour function and
+// one style table, so the three views differ ONLY in how they place a line.
+// This file keeps the projection, which is genuinely its own: image space,
+// through the letterboxed Through-Cam rect.
 //
-// Returns null when the buffers were not requested, which is the usual "absent
-// means draw something else" rather than a failure.
-function familyRanks(camera: Camera): Map<number, { isRow: boolean; t: number }> | null {
-  const rectified = camera.pose?.rectified, family = camera.pose?.lineFamily;
-  const lineCount = camera.pose?.lineCount;
-  if (!rectified || !family || lineCount === undefined) return null;
-
-  const n = Math.min(lineCount, family.length, rectified.length / 4);
-  const byFamily: [{ i: number; value: number }[], { i: number; value: number }[]] = [[], []];
-  for (let i = 0; i < n; i++) {
-    const fam = family[i]!;
-    if (fam < 0) continue; // neither family -- see CameraPose.lineFamily
-    byFamily[fam]!.push({ i, value: rectified[i * 4]! });
-  }
-  const out = new Map<number, { isRow: boolean; t: number }>();
-  for (const fam of [0, 1] as const) {
-    const list = byFamily[fam]!;
-    list.sort((p, q) => p.value - q.value);
-    // A single-member family has no gradient to shade along, so it takes the
-    // full colour rather than a 0/0.
-    const last = Math.max(list.length - 1, 1);
-    list.forEach((e, k) => out.set(e.i, { isRow: fam === 1, t: k / last }));
-  }
-  return out;
-}
-
-// TWO COLOURINGS, and they answer different questions.
+// ── THE COORDINATES ARE TOP-DOWN ─────────────────────────────────────────
 //
-// By default each segment takes overlays/lsdOverlay.ts's regionRgb, hashed from
-// the index of the REGION it was fitted to -- the same call the fitted outline
-// and the region's own member pixels make, which is what makes those views one
-// picture rather than three. That answers "which blob produced this".
-//
-// `showCompositeLineFamilies` answers a different one -- "what will the period
-// search make of this" -- so it recolours by CLASSIFICATION: blue for the row
-// family, red for the column family, each shaded by the line's RANK within its
-// family. The rank is the order the search registers lines in, so a segment
-// whose shade breaks the gradient along the floor is one the search has ordered
-// wrongly, which is what makes a period wrong. Grey for a line gpp classified
-// into neither family (degenerate, or no gnomonic image).
-//
-// It is the same classification the Projected-Cam rectified lines draw, off the
-// same two buffers -- see gridPeriodPhaseOverlays.ts. This view keeps the lines
-// where they are in the IMAGE; that one straightens them.
-function drawCompositeLines(camera: Camera) {
-  while (lsdCompositeGroup.firstChild) lsdCompositeGroup.removeChild(lsdCompositeGroup.firstChild);
-  const settings = camera.settings;
-  const composites = camera.pose?.composites;
-  if (!settings.showLsdComposite || !composites) return;
+// An earlier version of this comment claimed the endpoints came from a
+// row-flipped gray. They do not, and the arithmetic below never matched that
+// claim: `rasterY = fieldH - 1 - fy` followed by measuring UP from the rect's
+// bottom is the composition that maps a TOP-DOWN fy=0 to the TOP of the rect.
+// src/pose's lines are in the pipeline's own top-down pixel space, which is the
+// dominant convention everywhere except the preview textures, so this is correct
+// as written -- and it was correct-looking either way round, which is why the
+// stale comment survived. See overlays/pipelineField.ts.
+function drawThroughCamLines(camera: Camera) {
   const rect = computeThroughRect(camera);
   const fieldW = camera.rtSize.w, fieldH = camera.rtSize.h;
-  const toScreen = (fx: number, fy: number) => {
+  drawLinesSvg(lsdCompositeGroup, camera, drawableLines(camera), (fx, fy) => {
     const rasterY = fieldH - 1 - fy;
     return {
       x: rect.x + (fx + 0.5) * (rect.w / fieldW),
       y: rect.y + rect.h - (rasterY + 0.5) * (rect.h / fieldH),
     };
-  };
-
-  const ranks = settings.showCompositeLineFamilies ? familyRanks(camera) : null;
-  for (const { index, line } of composites) {
-    const a = toScreen(line.x1, line.y1), b = toScreen(line.x2, line.y2);
-    let strokeColor: string;
-    const ranked = ranks?.get(index);
-    if (ranked) {
-      // Shade from near-black at rank 0 to full colour at the last -- the
-      // sequence, not just the membership. Value, not hue: the hue is the family
-      // and must stay readable as one of two things.
-      const [hr, hg, hb] = hsvToRgb(ranked.isRow ? 210 : 0, 0.85, 0.35 + 0.65 * ranked.t);
-      strokeColor = `rgb(${hr},${hg},${hb})`;
-    } else if (ranks) {
-      strokeColor = 'rgb(130,130,130)'; // classified into neither family
-    } else {
-      // Hashed off the COMPOSITE index, not a region -- a composite spans
-      // regions. Same hash, so neighbouring composites stay distinguishable;
-      // it no longer colour-matches the raw-regions raster, which is what the
-      // LSD rectangle view is for.
-      const [hr, hg, hb] = regionRgb(index);
-      strokeColor = `rgb(${hr},${hg},${hb})`;
-    }
-    // ONE translucent stroke per composite. This used to be a 2.5px colour line
-    // over a 5px black halo, wrapped in a group so the pair flattened before the
-    // 50% alpha applied -- readable when the view drew a few dozen segments, and
-    // a solid wash now that it draws COMPOSITES: hundreds of near-parallel lines
-    // whose spacing at a wide-field pose is smaller than the halo was wide. With
-    // the halo gone the group has nothing to flatten, so the alpha moves onto the
-    // line itself.
-    lsdCompositeGroup.appendChild(svgEl('line', {
-      x1: a.x, y1: a.y, x2: b.x, y2: b.y, stroke: strokeColor, 'stroke-width': 0.7, opacity: 0.5,
-    }));
-  }
+  });
 }
 
 // Single per-hover entry point -- operates on the ACTIVE camera, since only
@@ -170,7 +99,7 @@ export function updateHoverOverlays(clientX: number, clientY: number) {
 
   if (globalState.mode !== 'through') return;
 
-  drawCompositeLines(camera);
+  drawThroughCamLines(camera);
 
   // Field-pixel-under-cursor, computed UNCONDITIONALLY (not gated behind
   // arrowsOn) -- tracked on the camera itself so other hover-driven repaints
@@ -334,21 +263,35 @@ toggleLsdRawRegionsBtn.addEventListener('click', () => {
 // toggle in this file that moved the POSE rather than the view, and keeping the
 // button and the slider apart would mean each having to reach into the other to
 // stay in sync -- which this file cannot do, since cameraPanel imports it.
-toggleLsdCompositeBtn.addEventListener('click', () => {
+// ── THE TWO LINE TOGGLES, WHICH ARE NOT THROUGH-CAM TOGGLES ─────────────
+//
+// Each drives all three views at once, so neither can repaint just this one --
+// and both gate a readback (`compLines`, or `lines`+`anchorOf`+`joinScan`), so a
+// run taken while one was off has nothing to draw FROM. Hence the recompute,
+// same as every other readback-gating toggle here. refreshModeVisualizations
+// then redraws whichever view is actually on screen.
+toggleLineSegmentsBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
-  cam.settings.showLsdComposite = !cam.settings.showLsdComposite;
-  toggleLsdCompositeBtn.classList.toggle('active', cam.settings.showLsdComposite);
+  cam.settings.showLineSegments = !cam.settings.showLineSegments;
+  toggleLineSegmentsBtn.classList.toggle('active', cam.settings.showLineSegments);
   persistConfig();
-  drawCompositeLines(cam);
+  recomputeFromLastCapture(cam);
+});
+toggleCompositeLinesBtn.addEventListener('click', () => {
+  const cam = activeCamera(); if (!cam) return;
+  cam.settings.showCompositeLines = !cam.settings.showCompositeLines;
+  toggleCompositeLinesBtn.classList.toggle('active', cam.settings.showCompositeLines);
+  persistConfig();
+  recomputeFromLastCapture(cam);
 });
 // It DOES recolour the same lines rather than recomputing them -- but the colour
 // now comes from a readback (`samples`/`family`, see inspectFor), so a run taken
 // while this was off has nothing to recolour FROM. Hence the recompute, same as
 // every other toggle that gates a buffer.
-toggleCompositeLineFamiliesBtn.addEventListener('click', () => {
+toggleColorByFamilyBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
-  cam.settings.showCompositeLineFamilies = !cam.settings.showCompositeLineFamilies;
-  toggleCompositeLineFamiliesBtn.classList.toggle('active', cam.settings.showCompositeLineFamilies);
+  cam.settings.colorLinesByFamily = !cam.settings.colorLinesByFamily;
+  toggleColorByFamilyBtn.classList.toggle('active', cam.settings.colorLinesByFamily);
   persistConfig();
   recomputeFromLastCapture(cam);
 });
@@ -395,14 +338,9 @@ toggleSampleLatticeBtn.addEventListener('click', () => {
   persistConfig();
   recomputeFromLastCapture(cam);
 });
-// Same story one overlay across: it gates `samples`/`family`.
-toggleRectifiedLinesBtn.addEventListener('click', () => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.showRectifiedLines = !cam.settings.showRectifiedLines;
-  toggleRectifiedLinesBtn.classList.toggle('active', cam.settings.showRectifiedLines);
-  persistConfig();
-  recomputeFromLastCapture(cam);
-});
+// (The rectified-lines toggle was here. It is gone: the Projected-Cam view of
+// the composites is the SAME overlay in another projection, so it turns on with
+// `showCompositeLines` like the other two views do.)
 
 
 // No-op hook -- see contaminationOverlays.ts's updateContaminationAvailability

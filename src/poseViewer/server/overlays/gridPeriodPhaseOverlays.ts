@@ -1,10 +1,10 @@
-import * as THREE from 'three';
 import { type Camera, type CompositeLine, type DecodeLattice } from '../../shared/camera/model.ts';
 import { persistConfig } from '../../shared/config.ts';
 import { activeCamera } from '../camera/store.ts';
 import { type ProjectedBins } from '../../shared/types.ts';
 import { gridPeriodPhasePlotSvg, projectedSvgOverlay, rectifiedLinesGroup, sampleLatticeGroup, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleProductCurveBtn, toggleValueHistogramBtn } from '../ui/dom.ts';
 import { svgEl, svgText } from './svgUtil.ts';
+import { cameraRay, drawLinesSvg, drawableLines } from './lines.ts';
 
 // ── Grid period/phase debug visualizations — the PLOT is still empty ─────
 //
@@ -101,10 +101,15 @@ export function hideGridPeriodPhaseProjected() {
 // pointer.
 let drawn: {
   lattice: DecodeLattice | undefined;
-  // The COMPOSITES, because that is what drawRectifiedLines now projects --
-  // memoizing on `rectified` would miss a frame where the segments moved but
-  // the samples array happened to be reused.
-  rectLines: { index: number; line: CompositeLine }[] | undefined;
+  // The two line arrays THEMSELVES, because that is what gets projected --
+  // memoizing on `rectified` would miss a frame where the lines moved but the
+  // samples array happened to be reused. Each is undefined when its toggle is
+  // off, so flipping a toggle changes the key.
+  comps: { index: number; line: CompositeLine }[] | undefined;
+  segs: { index: number; line: CompositeLine; composite: number }[] | undefined;
+  // The colouring is not derivable from the arrays: recolouring by family
+  // changes every stroke while both arrays stay the same object.
+  byFamily: boolean;
   bins: ProjectedBins;
   x: number; y: number; w: number; h: number; rot: number;
 } | null = null;
@@ -137,10 +142,15 @@ export function drawGridPeriodPhaseProjected(
 ) {
   const s = camera.settings;
   const lattice = s.showSampleLattice ? camera.pose?.lattice : undefined;
-  const rectLines = s.showRectifiedLines ? camera.pose?.composites : undefined;
+  // The SAME two toggles Through-Cam reads -- this view is one more projection
+  // of that overlay, not one of its own.
+  const comps = s.showCompositeLines ? camera.pose?.composites : undefined;
+  const segs = s.showLineSegments ? camera.pose?.segments : undefined;
+  const byFamily = s.colorLinesByFamily;
   const bins = camera.lastProjectedBins;
-  if ((!lattice && !rectLines) || !bins) { hideGridPeriodPhaseProjected(); return; }
-  if (drawn && drawn.lattice === lattice && drawn.rectLines === rectLines && drawn.bins === bins
+  if ((!lattice && !comps && !segs) || !bins) { hideGridPeriodPhaseProjected(); return; }
+  if (drawn && drawn.lattice === lattice && drawn.comps === comps && drawn.segs === segs
+    && drawn.byFamily === byFamily && drawn.bins === bins
     && drawn.x === x && drawn.y === y && drawn.w === w && drawn.h === h && drawn.rot === rotationSteps) return;
 
   clearGroups();
@@ -161,9 +171,9 @@ export function drawGridPeriodPhaseProjected(
   const toScreenU = (u: number) => x + ((bins.maxU - u) / bins.binWidthU / bins.w) * w;
   const toScreenV = (v: number) => y + (1 - (v - bins.minV) / bins.binWidthV / bins.h) * h;
 
-  if (rectLines) drawRectifiedLines(camera, toScreenU, toScreenV);
+  if (comps || segs) drawRectifiedLines(camera, toScreenU, toScreenV);
 
-  if (!lattice) { drawn = { lattice, rectLines, bins, x, y, w, h, rot: rotationSteps }; return; }
+  if (!lattice) { drawn = { lattice, comps, segs, byFamily, bins, x, y, w, h, rot: rotationSteps }; return; }
   const { rows, cols, uAt, vAt, packed, correct } = lattice;
   const frag = document.createDocumentFragment();
   for (let i = 0; i < rows; i++) {
@@ -194,12 +204,18 @@ export function drawGridPeriodPhaseProjected(
   // browser consider layout for each child.
   sampleLatticeGroup.appendChild(frag);
 
-  drawn = { lattice, rectLines, bins, x, y, w, h, rot: rotationSteps };
+  drawn = { lattice, comps, segs, byFamily, bins, x, y, w, h, rot: rotationSteps };
 }
 
-// ── The detected segments, rectified -- PROJECTED, not parameterized ─────
+// ── The lines, rectified -- PROJECTED, not parameterized ─────────────────
 //
-// ── WHY THIS NO LONGER READS `samples` FOR THE GEOMETRY ──
+// The SAME overlay Through-Cam draws, in a different projection: the model, the
+// colours and the stroke all come from overlays/lines.ts, and only the map from
+// image pixel to screen point is this file's own. It used to be a separate
+// drawing with its own flat family palette and its own stroke width, which is
+// what made the two views impossible to compare.
+//
+// ── WHY THIS DOES NOT READ `samples` FOR THE GEOMETRY ──
 //
 // It used to draw each line from `samples`: `value` on one axis, the cross span
 // on the other. That form CANNOT PRODUCE A TILTED LINE -- both endpoints were
@@ -219,66 +235,39 @@ export function drawGridPeriodPhaseProjected(
 // length the line ran, i.e. a ~28 degree tilt, all of it averaged away and then
 // drawn flat.
 //
-// So this projects the composite's OWN TWO ENDPOINTS through the same gnomonic
-// map, and draws the segment between them. With a good fit that is the same
-// picture as before; with a bad one the lines fan and tilt, which is the whole
-// point. `samples` is still what the PERIOD SEARCH consumes -- this is a display
+// So this projects each line's OWN TWO ENDPOINTS through the same gnomonic map
+// and draws the segment between them. With a good fit that is the same picture
+// as before; with a bad one the lines fan and tilt, which is the whole point.
+// `samples` is still what the PERIOD SEARCH consumes -- this is a display
 // disagreeing with a summary statistic, not with the pipeline.
 //
 // GNOMONIC IN, FLOOR OUT: gnomonic coordinates times the camera's distance, the
 // same `distance * x` decode.layout uses to place the lattice. That is why this
 // needs `recoveredAxes` and draws nothing without it.
-//
-// `family` still comes from the pipeline rather than being re-derived here -- it
-// is only the COLOUR, and the row/col predicate lives in GPP_CLASSIFY_WGSL.
 function drawRectifiedLines(
   camera: Camera,
   toScreenU: (u: number) => number, toScreenV: (v: number) => number,
 ) {
   const axes = camera.pose?.recoveredAxes;
-  const family = camera.pose?.lineFamily;
-  const composites = camera.pose?.composites;
-  if (!axes || !family || !composites) return;
+  if (!axes) return;
   const { Drow, Dcol, Dnormal, distance, tanHalf, aspect } = axes;
   // A remote pose carries no projection -- see RecoveredAxes. Drawing nothing is
   // right: there is no ray to cast, and a guessed one would put every line in
   // the wrong place while looking entirely plausible.
   if (tanHalf === undefined || aspect === undefined) return;
   const { w, h } = camera.rtSize;
+  const ray = cameraRay(tanHalf, aspect, w, h);
 
-  // Byte-identical to GPP_CLASSIFY_WGSL's `rayDir`, which is itself byte-identical
-  // to VOTES_WGSL's. Three copies of one projection is two too many, but the
-  // alternative here is a fourth convention: the display MUST cast the ray the
-  // device cast or it is drawing a different line.
-  const ray = (px: number, py: number) => {
-    const ndcU = (px / w) * 2 - 1;
-    const ndcV = 1 - (py / h) * 2;
-    return new THREE.Vector3(tanHalf * aspect * ndcU, tanHalf * ndcV, -1).normalize();
-  };
-
-  const frag = document.createDocumentFragment();
-  const n = Math.min(composites.length, family.length);
-  for (let i = 0; i < n; i++) {
-    // -1 is a real third state: a degenerate line, or one whose endpoints had no
-    // gnomonic image. It is not a column line, and drawing it as one would put a
-    // segment at value 0 across the whole rect.
-    const fam = family[i]!;
-    if (fam < 0) continue;
-    const { line } = composites[i]!;
-    const r1 = ray(line.x1, line.y1), r2 = ray(line.x2, line.y2);
-    const d1 = r1.dot(Dnormal), d2 = r2.dot(Dnormal);
+  drawLinesSvg(rectifiedLinesGroup, camera, drawableLines(camera), (px, py) => {
+    const r = ray(px, py);
+    const d = r.dot(Dnormal);
     // The same guard the shader applies, and for the same reason: a ray nearly
     // parallel to the tangent plane has no gnomonic image, and dividing by it
-    // puts an infinity into the path coordinates.
-    if (Math.abs(d1) < 1e-9 || Math.abs(d2) < 1e-9) continue;
-    const p1 = { u: (-r1.dot(Drow) / d1) * distance, v: (-r1.dot(Dcol) / d1) * distance };
-    const p2 = { u: (-r2.dot(Drow) / d2) * distance, v: (-r2.dot(Dcol) / d2) * distance };
-    frag.appendChild(svgEl('line', {
-      x1: toScreenU(p1.u), y1: toScreenV(p1.v),
-      x2: toScreenU(p2.u), y2: toScreenV(p2.v),
-      stroke: fam === 1 ? 'rgba(60,140,255,0.8)' : 'rgba(255,60,60,0.8)',
-      'stroke-width': 1.5,
-    }));
-  }
-  rectifiedLinesGroup.appendChild(frag);
+    // puts an infinity into the path coordinates. Null skips the whole line.
+    if (Math.abs(d) < 1e-9) return null;
+    return {
+      x: toScreenU((-r.dot(Drow) / d) * distance),
+      y: toScreenV((-r.dot(Dcol) / d) * distance),
+    };
+  });
 }

@@ -51,8 +51,11 @@ export const toggleLsdRawRegionsBtn = document.getElementById('toggleLsdRawRegio
 // the two drive the same setting and this file's importers cannot reach that
 // one without a cycle.
 export const toggleLineJoinBtn = document.getElementById('toggleLineJoin') as HTMLButtonElement;
-export const toggleLsdCompositeBtn = document.getElementById('toggleLsdComposite') as HTMLButtonElement;
-export const toggleCompositeLineFamiliesBtn = document.getElementById('toggleCompositeLineFamilies') as HTMLButtonElement;
+// The two line overlays. Not Through-Cam toggles despite living beside them
+// here: each drives all three views at once -- see overlays/lines.ts.
+export const toggleLineSegmentsBtn = document.getElementById('toggleLineSegments') as HTMLButtonElement;
+export const toggleCompositeLinesBtn = document.getElementById('toggleCompositeLines') as HTMLButtonElement;
+export const toggleColorByFamilyBtn = document.getElementById('toggleColorByFamily') as HTMLButtonElement;
 export const lsdReadout = document.getElementById('lsdReadout') as HTMLDivElement;
 export const lsdSvgOverlay = document.getElementById('lsdSvgOverlay') as unknown as SVGSVGElement;
 export const lsdRectanglesGroup = document.getElementById('lsdRectanglesGroup') as unknown as SVGGElement;
@@ -64,7 +67,6 @@ export const toggleGradientArrowBtn = document.getElementById('toggleGradientArr
 export const toggleLevelLineArrowBtn = document.getElementById('toggleLevelLineArrow') as HTMLButtonElement;
 export const toggleTrueCardinalOrientationBtn = document.getElementById('toggleTrueCardinalOrientation') as HTMLButtonElement;
 export const toggleSampleLatticeBtn = document.getElementById('toggleSampleLattice') as HTMLButtonElement;
-export const toggleRectifiedLinesBtn = document.getElementById('toggleRectifiedLines') as HTMLButtonElement;
 export const simDistortionSection = document.getElementById('simDistortionSection') as HTMLDivElement;
 
 export const modeBtns: Record<Mode, HTMLButtonElement> = {

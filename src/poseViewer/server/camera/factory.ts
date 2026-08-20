@@ -6,6 +6,7 @@ import { type Camera, type CameraBase, type PhysicalCamera, type SimulatedCamera
 import { type CameraSettingsCommon } from '../../shared/camera/settings.ts';
 import { createDefaultPhysicalSettings, createDefaultSimulatedSettings } from '../../shared/config.ts';
 import { bumpCameraSerial, cameras, isSimulated, nextCameraSerial } from './store.ts';
+import { LINE_STYLE } from '../overlays/lines.ts';
 
 // ── Camera factories ─────────────────────────────────────────────────────
 //
@@ -171,14 +172,22 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
   const recoveredColPoleB = makeRecoveredPoleMarker(0x0000ff);
 
   // Rendered as a flat triangle ribbon, not a native GL line -- see
-  // model.ts's own comment on gradientCirclesGeo for why. DoubleSide since
+  // model.ts's own comment on segmentArcsGeo for why. DoubleSide since
   // this is a debug overlay meant to stay visible from any orbit angle,
   // including nearly edge-on to a given circle's own plane.
-  const gradientCirclesGeo = new THREE.BufferGeometry();
-  const gradientCirclesMat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.35, side: THREE.DoubleSide });
-  const gradientCirclesLines = new THREE.Mesh(gradientCirclesGeo, gradientCirclesMat);
-  gradientCirclesLines.layers.set(DEBUG_LAYER);
-  sphereAnchor.add(gradientCirclesLines);
+  // Opacity STRAIGHT OFF overlays/lines.ts's table, the same numbers the two SVG
+  // views stroke with -- which is the whole point of the pair: one material per
+  // kind is how the sphere expresses a per-kind opacity at all.
+  const makeArcs = (opacity: number) => {
+    const geo = new THREE.BufferGeometry();
+    const mat = new THREE.MeshBasicMaterial({ vertexColors: true, transparent: true, opacity, side: THREE.DoubleSide });
+    const mesh = new THREE.Mesh(geo, mat);
+    mesh.layers.set(DEBUG_LAYER);
+    sphereAnchor.add(mesh);
+    return { geo, mat, mesh };
+  };
+  const segmentArcs = makeArcs(LINE_STYLE.segment.opacity);
+  const compositeArcs = makeArcs(LINE_STYLE.composite.opacity);
 
   const axisVectorsGeo = new THREE.BufferGeometry();
   const axisVectorsMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.6 });
@@ -201,7 +210,9 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
     recoveredRowPoleA, recoveredRowPoleB, recoveredColPoleA, recoveredColPoleB,
     recoveredFloorOverlayMat, recoveredFloorOverlay, recoveredFloorOutline,
     sphereAnchor, sphereShell, circlesGroup, rowCirclePool, colCirclePool, frustumLine,
-    patchGeo, patchMat, patchMesh, gradientCirclesGeo, gradientCirclesMat, gradientCirclesLines,
+    patchGeo, patchMat, patchMesh,
+    segmentArcsGeo: segmentArcs.geo, segmentArcsMat: segmentArcs.mat, segmentArcsMesh: segmentArcs.mesh,
+    compositeArcsGeo: compositeArcs.geo, compositeArcsMat: compositeArcs.mat, compositeArcsMesh: compositeArcs.mesh,
     axisVectorsGeo, axisVectorsMat, axisVectorsLines,
   };
   return base;

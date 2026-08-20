@@ -8,7 +8,7 @@ import { updateContaminationAvailability } from '../overlays/contaminationOverla
 import { updateTopGradientAvailability } from '../overlays/gradientHighlightOverlays.ts';
 import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, updateHoverOverlays } from '../overlays/hoverDebugOverlays.ts';
 import { updateLsdAvailability, updateLsdOverlay } from '../overlays/lsdOverlay.ts';
-import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
+import { updateAxisVectors, updateLineArcs } from '../overlays/sphereOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
 import { recomputeFromLastCapture, runAxesReconstruction, updateChainTransfersReadout } from '../pipeline/axesReconstruction.ts';
 import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
@@ -20,7 +20,7 @@ import { profilerReset, profilerSetDevToolsMirror } from '../../../profiling/pro
 import { rebuildFloorPattern, rebuildFloorTexture } from '../scene/floor.ts';
 import { globalState } from '../../shared/state.ts';
 import { type FieldView } from '../../shared/types.ts';
-import { bindCheckbox, bindRadioGroup, bindSlider, loadConfigBtn, saveConfigBtn, configStatus, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleCompositeLineFamiliesBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLineJoinBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleRectifiedLinesBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
+import { bindCheckbox, bindRadioGroup, bindSlider, loadConfigBtn, saveConfigBtn, configStatus, cameraSettingsSectionsEl, cameraTabsEl, captureAxesBtn, fieldViewRawLabel, globalSettingsSectionEl, gpuVotesStatus, physCameraDetailFields, physCaptureModeReadout, setSectionHidden, simCameraDetailFields, simDistortionSection, simOnlyFieldViews, toggleColorByFamilyBtn, toggleDistinctnessCurveBtn, toggleGapHistogramBtn, toggleGradientArrowBtn, toggleProductCurveBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLineJoinBtn, toggleLineSegmentsBtn, toggleCompositeLinesBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn, toggleValueHistogramBtn } from './dom.ts';
 import { layoutPip } from './layout.ts';
 
 // Tells config.ts which camera's settings persistConfig should capture before
@@ -226,8 +226,8 @@ export function refreshCameraPanel() {
   setNum('joinMaxResidualPx', cam.settings.joinMaxResidualPx);
   setBool('joinPolarityAbs', cam.settings.joinPolarityAbs);
   setBool('showRecoveredPoles', cam.settings.showRecoveredPoles); setBool('showAxisVectors', cam.settings.showAxisVectors);
-  setBool('showTopCircles', cam.settings.showTopCircles);
-  setNum('topCirclesLineWidth', cam.settings.topCirclesLineWidth);
+  setBool('showLineRings', cam.settings.showLineRings);
+  setNum('lineRingWidth', cam.settings.lineRingWidth);
   setNum('minGrazingCos', cam.settings.minGrazingCos);
   setBool('axesAutoCapture', cam.settings.axesAutoCapture);
   setNum('axesCaptureInterval', cam.settings.axesCaptureIntervalMs);
@@ -237,7 +237,7 @@ export function refreshCameraPanel() {
   toggleReconContamBtn.classList.toggle('active', cam.settings.showReconstructedContamination);
   toggleTrueCardinalOrientationBtn.classList.toggle('active', cam.settings.useTrueCardinalOrientation);
   toggleSampleLatticeBtn.classList.toggle('active', cam.settings.showSampleLattice);
-  toggleRectifiedLinesBtn.classList.toggle('active', cam.settings.showRectifiedLines);
+  toggleLineSegmentsBtn.classList.toggle('active', cam.settings.showLineSegments);
   toggleGradientArrowBtn.classList.toggle('active', cam.settings.showGradientArrow);
   toggleLevelLineArrowBtn.classList.toggle('active', cam.settings.showLevelLineArrow);
   toggleTopGradientBtn.classList.toggle('active', cam.settings.showTopGradient);
@@ -245,8 +245,8 @@ export function refreshCameraPanel() {
   toggleLsdRejectedBtn.classList.toggle('active', cam.settings.showLsdRejected);
   toggleLsdRawRegionsBtn.classList.toggle('active', cam.settings.showLsdRawRegions);
   toggleLineJoinBtn.classList.toggle('active', cam.settings.joinKSigma > 0);
-  toggleLsdCompositeBtn.classList.toggle('active', cam.settings.showLsdComposite);
-  toggleCompositeLineFamiliesBtn.classList.toggle('active', cam.settings.showCompositeLineFamilies);
+  toggleCompositeLinesBtn.classList.toggle('active', cam.settings.showCompositeLines);
+  toggleColorByFamilyBtn.classList.toggle('active', cam.settings.colorLinesByFamily);
   toggleGapHistogramBtn.classList.toggle('active', cam.settings.showGapHistogram);
   toggleValueHistogramBtn.classList.toggle('active', cam.settings.showValueHistogram);
   toggleDistinctnessCurveBtn.classList.toggle('active', cam.settings.showDistinctnessCurve);
@@ -561,13 +561,16 @@ toggleLineJoinBtn.addEventListener('click', () => {
 });
 
 bindCheckbox('showRecoveredPoles', config.camera.common.showRecoveredPoles, (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
-// Turning either on refreshes immediately -- updateGradientCirclesDebug now
+// Turning either on refreshes immediately -- the sphere builders now
 // skips its work while both are off (see its own comment), so the geometry
 // sitting there when you flip one on could otherwise be stale until the
 // next capture.
-bindCheckbox('showAxisVectors', config.camera.common.showAxisVectors, (v) => { const cam = activeCamera(); if (cam) { cam.settings.showAxisVectors = v; if (v) updateGradientCirclesDebug(cam); } });
-bindCheckbox('showTopCircles', config.camera.common.showTopCircles, (v) => { const cam = activeCamera(); if (cam) { cam.settings.showTopCircles = v; if (v) updateGradientCirclesDebug(cam); } });
-bindSlider('topCirclesLineWidth', config.camera.common.topCirclesLineWidth, (v) => { const cam = activeCamera(); if (cam) { cam.settings.topCirclesLineWidth = v; updateGradientCirclesDebug(cam); } }, (v) => v.toFixed(1));
+bindCheckbox('showAxisVectors', config.camera.common.showAxisVectors, (v) => { const cam = activeCamera(); if (cam) { cam.settings.showAxisVectors = v; if (v) updateAxisVectors(cam); } });
+// Rebuilds unconditionally, unlike its neighbours: this flag does not turn an
+// overlay on, it changes how far every existing arc sweeps, so turning it OFF
+// has to rebuild too or the rings stay drawn.
+bindCheckbox('showLineRings', config.camera.common.showLineRings, (v) => { const cam = activeCamera(); if (cam) { cam.settings.showLineRings = v; updateLineArcs(cam); } });
+bindSlider('lineRingWidth', config.camera.common.lineRingWidth, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lineRingWidth = v; updateLineArcs(cam); } }, (v) => v.toFixed(1));
 // Feeds projectSamplesCPU/buildDecodeSampleGrid (stages 9+10) -- recompute
 // from the last capture rather than waiting for the next unrelated one.
 bindSlider('minGrazingCos', config.camera.common.minGrazingCos, (v) => { const cam = activeCamera(); if (cam) { cam.settings.minGrazingCos = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));

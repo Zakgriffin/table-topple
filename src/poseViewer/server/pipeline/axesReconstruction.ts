@@ -13,7 +13,7 @@ import {
 import { angleBetweenDegV } from '../../shared/math/geometry.ts';
 import { updatePositionReadoutText } from '../overlays/projectedCamOverlays.ts';
 import { applyRecoveredFloorOverlay, updateRecoveredCamGizmo, updateRecoveredFloorOutline } from '../overlays/recoveredOverlays.ts';
-import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
+import { updateAxisVectors, updateLineArcs } from '../overlays/sphereOverlays.ts';
 import { globalState } from '../../shared/state.ts';
 import { axesReadout, captureAxesBtn, lsdChainTransfers } from '../ui/dom.ts';
 import { backendFromForceCPU } from '../../shared/backend.ts';
@@ -296,7 +296,8 @@ async function runVisualTailBody(camera: Camera, posted: PendingVisuals): Promis
   // next to the chain that recorded it -- deferred, those are different
   // moments, and this is the one the user is looking at.
   if (isActive) updateChainTransfersReadout(camera);
-  updateGradientCirclesDebug(camera);
+  updateLineArcs(camera);
+  updateAxisVectors(camera);
 
   const projectSpan = appSpan('app.project');
   // Captured outside the `if` (stays null when there's no recovered axes to
@@ -502,6 +503,20 @@ const MAX_LINES = DEFAULT_MAX_LINES;
 const INSPECT = [
   'triad', 'layout', 'fx', 'fy', 'votes', 'compLines', 'rects',
   'members', 'regionOffsets', 'regionSizes', 'packed', 'result', 'samples', 'family',
+  // ── THE SEGMENTS, AND WHAT BECAME OF THEM ──────────────────────────────
+  //
+  // `lines` MUST BE DECLARED, not merely requested. It dies at join.refit and
+  // `compLines` takes its slot (tests/poseBuffers.test.ts pins exactly that), so
+  // reading it undeclared returns the COMPOSITES' bytes -- a wrong answer that
+  // looks like a detector fault, since both are plausible f32 in the same
+  // layout. Declaring forces it out of the aliasing pool, at the cost of a slot.
+  //
+  // `anchorOf` (leaf -> root) and `joinScan` (the exclusive prefix that hands
+  // each root its compacted slot) are the join's own gather, read back so the
+  // display can perform it too: joinScan[anchorOf[j]].x is segment j's
+  // composite. No new GPU work -- join.reduce already computes this to write
+  // compLines, and this reads the same two buffers it reads.
+  'lines', 'anchorOf', 'joinScan',
 ] as const;
 
 // ── WHAT THIS FRAME ACTUALLY ASKS FOR ────────────────────────────────────
@@ -536,11 +551,11 @@ function inspectFor(camera: Camera): readonly string[] {
   const fields = s.showTopGradient || s.showTrueContamination || s.showReconstructedContamination
     || s.showGradientArrow || s.showLevelLineArrow;
   if (fields) want.push('fx', 'fy');
-  // The same gate updateGradientCirclesDebug applies to itself (it returns
-  // immediately when neither is on), stated one stage earlier so the bytes are
-  // not fetched either. Its own comment is the reason it matters: a real capture
-  // is hundreds of thousands of votes, which is why showTopCircles defaults off.
-  if (s.showTopCircles || s.showAxisVectors) want.push('votes');
+  // The same gate updateAxisVectors applies to itself, stated one stage earlier
+  // so the bytes are not fetched either. It matters because a real capture is
+  // hundreds of thousands of votes -- which is why the SPHERE ARCS stopped
+  // reading this buffer and draw the ~300 detected lines instead.
+  if (s.showAxisVectors) want.push('votes');
   // ── THE COMPOSITES, NOT THE SEGMENTS ────────────────────────────────────
   //
   // This asked for `lines` + `lineScan` -- the per-region emitted SEGMENTS --
@@ -553,7 +568,11 @@ function inspectFor(camera: Camera): readonly string[] {
   // line is its own composite and compLines is `lines` compacted. One buffer
   // covers both states, and `lineScan`'s region walk goes away with it -- the
   // buffer is already compacted, so the count is just pose.compositeCount.
-  if (s.showLsdComposite) want.push('compLines');
+  if (s.showCompositeLines) want.push('compLines');
+  // The raw segments plus the join's gather, so each one can be drawn in its
+  // COMPOSITE's colour. `compLines` too: the family lookup below is indexed by
+  // composite, and a segment reaches it through this map.
+  if (s.showLineSegments) want.push('lines', 'anchorOf', 'joinScan');
   // The fitted rectangles, for the segment outlines and the accept/reject
   // readout. EITHER toggle: the rejected view is the same buffer filtered the
   // other way, so gating on showLsdSegments alone would leave it dark whenever
@@ -579,11 +598,20 @@ function inspectFor(camera: Camera): readonly string[] {
   // `composites` by array position. That is also why this overlay had to move off
   // `lines`: with the join on, colouring segment i by family[i] paired a raw
   // segment with a different composite's classification.
-  if (s.showRectifiedLines || (s.showLsdComposite && s.showCompositeLineFamilies)) {
+  // ── ONE REQUEST FOR THREE VIEWS ─────────────────────────────────────────
+  //
+  // `showRectifiedLines` used to be a third toggle here. It is gone: composite
+  // lines now draw in every view at once, so the Projected-Cam rectified view is
+  // the same overlay in another projection, asking for the same bytes.
+  //
+  // `samples`/`family` are indexed BY COMPOSITE (gpp.classify binds compLines),
+  // which is why the segments overlay needs the anchorOf map above to colour by
+  // family at all -- family[segmentIndex] would pair a segment with an unrelated
+  // composite's classification.
+  if (s.showCompositeLines || s.showLineSegments) {
     want.push('samples', 'family');
-    // BOTH views need the composites now. The Through-Cam one colours them; the
-    // Projected-Cam one PROJECTS them, because `samples` cannot express a
-    // rectified line that is not axis-aligned -- see drawRectifiedLines.
+    // The Projected-Cam projection needs the composites themselves, because
+    // `samples` cannot express a rectified line that is not axis-aligned.
     want.push('compLines');
   }
   return want;
@@ -677,7 +705,7 @@ function poseSettingsFor(camera: Camera): PoseSettings {
 // what §15 warns about, one level up.
 
 // One vote per detected line: (nx, ny, nz, weight), a vec4 per slot, in
-// MATH_QUAT's fixed math frame -- which is the frame updateGradientCirclesDebug
+// MATH_QUAT's fixed math frame -- which is the frame updateAxisVectors
 // rotates OUT of, and the frame the stage tests score these against.
 //
 // ZERO-WEIGHT VOTES ARE DROPPED, not passed on. A line whose two endpoints
@@ -735,6 +763,44 @@ function unpackComposites(
     out.push({
       index: i,
       line: { x1: seg[i * 4]!, y1: seg[i * 4 + 1]!, x2: seg[i * 4 + 2]!, y2: seg[i * 4 + 3]! },
+    });
+  }
+  return out;
+}
+
+// The RAW segments, each tagged with the composite it joined into.
+//
+// ── THE TAG IS join.reduce's OWN GATHER, RERUN ON THE HOST ───────────────
+//
+// JOIN_REDUCE_WGSL is three lines: for every root `i`, `compLines[joinScan[i].x]
+// = clusterLine[i]`. So a root's composite index IS `joinScan[i].x`, and since
+// `anchorOf` maps every leaf segment to its root and is kept FLAT by design
+// (see the join's own notes on why it never chains), segment j's composite is
+//
+//     joinScan[anchorOf[j]].x
+//
+// Rerunning the device's own indexing rather than inventing a second scheme is
+// the point: there is no separate mapping to get wrong, and if the join changes
+// how it compacts, this reads the change rather than disagreeing with it.
+//
+// `joinScan` is vec2<u32> with only .x meaningful, hence the stride of 2.
+function unpackSegments(
+  lines: ArrayBuffer, anchorOf: ArrayBuffer, joinScan: ArrayBuffer, lineCount: number,
+): { index: number; line: CompositeLine; composite: number }[] {
+  const seg = new Float32Array(lines);
+  const anchor = new Uint32Array(anchorOf);
+  const scan = new Uint32Array(joinScan);
+  // Clamped against every buffer that bounds it, for the reason unpackComposites
+  // clamps: past `lineCount` these hold the previous frame's bytes.
+  const n = Math.min(lineCount, seg.length / 4, anchor.length);
+  const roots = scan.length / 2;
+  const out: { index: number; line: CompositeLine; composite: number }[] = [];
+  for (let i = 0; i < n; i++) {
+    const root = anchor[i]!;
+    out.push({
+      index: i,
+      line: { x1: seg[i * 4]!, y1: seg[i * 4 + 1]!, x2: seg[i * 4 + 2]!, y2: seg[i * 4 + 3]! },
+      composite: root < roots ? scan[root * 2]! : -1,
     });
   }
   return out;
@@ -827,6 +893,16 @@ function toCameraPose(frame: PoseFrame): CameraPose {
     ...(inspected['votes'] ? { votes: unpackVotes(inspected['votes'], pose.lineCount) } : {}),
     ...(inspected['compLines']
       ? { composites: unpackComposites(inspected['compLines'], pose.compositeCount) }
+      : {}),
+    // All three or none, like the region CSR below: the map is meaningless
+    // without the segments and the segments are uncolourable without the map,
+    // so inspectFor requests them as a set.
+    ...(inspected['lines'] && inspected['anchorOf'] && inspected['joinScan']
+      ? {
+        segments: unpackSegments(
+          inspected['lines'], inspected['anchorOf'], inspected['joinScan'], pose.lineCount,
+        ),
+      }
       : {}),
     ...(inspected['rects'] ? { rects: new Float32Array(inspected['rects']) } : {}),
     ...(inspected['samples'] ? { rectified: new Float32Array(inspected['samples']) } : {}),

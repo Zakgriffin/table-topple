@@ -42,9 +42,10 @@ export async function refreshModeVisualizations(
     updateTopGradientOverlay(camera);
     updateLsdOverlay(camera);
     updateHoverOverlays(lastHoverClientX, lastHoverClientY);
-    // The grid period/phase SVG plot lives in the Through-Cam toggle panel
-    // (#contamToggles, pose-viewer-server.html), not Projected-Cam's, despite what
-    // it's plotting -- self-gates on the pose's gridPeriodPhase existing internally.
+    // The grid period/phase SVG plot lives in the right pane's S7 section,
+    // shown for Through-Cam rather than Projected-Cam despite what it plots --
+    // it is the 2D pipeline's own stage, and that pane is one list ordered by
+    // stage. Self-gates internally on there being data to draw.
     drawGridPeriodPhasePlot(camera);
   } else if (mode === 'projected') {
     await buildProjectedTexture(camera, backendFromForceCPU(globalState.forceCPU), precomputedProjection);

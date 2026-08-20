@@ -33,6 +33,16 @@ export const GlobalSettingsSchema = Type.Object({
   // page should not undo how you left the workspace.
   panelCollapsed: Type.Boolean(),
   overlayPanelCollapsed: Type.Boolean(),
+  // The right pane shows one view's controls at a time (see ui/mode.ts). Off,
+  // it shows ALL THREE groups at once, with the ones that do not act on the
+  // current view dimmed rather than hidden -- they stay live and clickable,
+  // which is the same meaning `.chk.inactive` already carries in this panel.
+  //
+  // The point of the OFF state is that a control is findable without knowing
+  // which view files it, and that two views' settings can be set up before
+  // switching. The point of the ON state is that a pane ordered by pipeline
+  // stage stays short enough to read as one list.
+  overlayPaneThisViewOnly: Type.Boolean(),
   // The floor is one shared object, not owned by any camera.
   showFloor: Type.Boolean(),
   floorCellOutlineSubdiv: Type.Number(),

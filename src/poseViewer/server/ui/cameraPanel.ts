@@ -10,7 +10,7 @@ import { lastHoverClientX, lastHoverClientY, updateGradientArrowAvailability, up
 import { updateLsdAvailability, updateLsdOverlay } from '../overlays/lsdOverlay.ts';
 import { updateGradientCirclesDebug } from '../overlays/sphereOverlays.ts';
 import { drawGridPeriodPhasePlot } from '../overlays/gridPeriodPhaseOverlays.ts';
-import { joinSettings, recomputeFromLastCapture, runAxesReconstruction, updateChainTransfersReadout } from '../pipeline/axesReconstruction.ts';
+import { recomputeFromLastCapture, runAxesReconstruction, updateChainTransfersReadout } from '../pipeline/axesReconstruction.ts';
 import { markCaptureDirty, resizeCaptureBuffers } from '../pipeline/capture.ts';
 import { backendFromForceCPU } from '../../shared/backend.ts';
 import { buildProjectedTexture } from '../pipeline/projectedBins.ts';
@@ -128,6 +128,20 @@ export function renderCameraTabs() {
   cameraTabsEl.appendChild(addBtn);
 }
 
+// Drives a slider from code the same way a drag does: set the value, then
+// dispatch the 'input' event bindSlider is already listening for, so the
+// readout, the setting write, persistence and the onChange reaction all happen
+// through the one path. Module-level rather than local to refreshCameraPanel
+// because the join toggle below is a second caller -- a button that moves a
+// slider is exactly this, and doing it by assignment would leave the thumb
+// where it was.
+function setPanelNum(id: string, v: number) {
+  const el = document.getElementById(id) as HTMLInputElement | null;
+  if (!el) return;
+  el.value = String(v);
+  el.dispatchEvent(new Event('input'));
+}
+
 // Re-syncs the WHOLE side panel to match whatever's currently selected --
 // either a specific camera (per-camera controls, further split into
 // simulated-only/physical-only sub-fields) or the Global tab (just
@@ -165,12 +179,7 @@ export function refreshCameraPanel() {
   setSectionHidden(simOnlyFieldViews, !isSimulated(cam));
   fieldViewRawLabel.textContent = isSimulated(cam) ? 'raw' : 'capture';
 
-  const setNum = (id: string, v: number) => {
-    const el = document.getElementById(id) as HTMLInputElement | null;
-    if (!el) return;
-    el.value = String(v);
-    el.dispatchEvent(new Event('input'));
-  };
+  const setNum = setPanelNum;
   const setBool = (id: string, v: boolean) => {
     const el = document.getElementById(id) as HTMLInputElement | null;
     if (!el) return;
@@ -211,6 +220,12 @@ export function refreshCameraPanel() {
   setNum('lsdNfaEpsilon', cam.settings.lsdNfaEpsilon);
   setNum('lsdNfaTestExponent', cam.settings.lsdNfaTestExponent);
   setNum('lsdMinLengthPx', cam.settings.lsdMinLengthPx);
+  setNum('joinKSigma', cam.settings.joinKSigma);
+  setNum('joinEndpointNoisePx', cam.settings.joinEndpointNoisePx);
+  setNum('joinReachFrac', cam.settings.joinReachFrac);
+  setNum('joinRounds', cam.settings.joinRounds);
+  setNum('joinMaxResidualPx', cam.settings.joinMaxResidualPx);
+  setBool('joinPolarityAbs', cam.settings.joinPolarityAbs);
   setBool('showRecoveredPoles', cam.settings.showRecoveredPoles); setBool('showAxisVectors', cam.settings.showAxisVectors);
   setBool('showTopCircles', cam.settings.showTopCircles);
   setNum('topCirclesLineWidth', cam.settings.topCirclesLineWidth);
@@ -230,9 +245,7 @@ export function refreshCameraPanel() {
   toggleLsdSegmentsBtn.classList.toggle('active', cam.settings.showLsdSegments);
   toggleLsdRejectedBtn.classList.toggle('active', cam.settings.showLsdRejected);
   toggleLsdRawRegionsBtn.classList.toggle('active', cam.settings.showLsdRawRegions);
-  // Off joinSettings, not off `cam` -- the join is a module-level pipeline knob
-  // shared by every camera, not a per-camera display flag. See its handler.
-  toggleLineJoinBtn.classList.toggle('active', joinSettings.kSigma > 0);
+  toggleLineJoinBtn.classList.toggle('active', cam.settings.joinKSigma > 0);
   toggleLsdCompositeBtn.classList.toggle('active', cam.settings.showLsdComposite);
   toggleCompositeLineFamiliesBtn.classList.toggle('active', cam.settings.showCompositeLineFamilies);
   toggleGapHistogramBtn.classList.toggle('active', cam.settings.showGapHistogram);
@@ -342,6 +355,9 @@ bindCheckbox('showPoles', config.camera.common.showPoles, (v) => { const cam = a
 bindCheckbox('showFrustum', config.camera.common.showFrustum, (v) => { const cam = activeCamera(); if (cam) cam.settings.showFrustum = v; });
 bindCheckbox('showPatch', config.camera.common.showPatch, (v) => { const cam = activeCamera(); if (cam) cam.settings.showPatch = v; });
 bindCheckbox('showFloor', config.global.showFloor, (v) => { globalState.showFloor = v; });
+// (`overlayPaneThisViewOnly` is bound in ui/mode.ts, with the panel chrome it
+// belongs to -- it selects which of the right pane's view groups are on screen
+// and touches no camera at all.)
 bindSlider('floorCellOutlineSubdiv', config.global.floorCellOutlineSubdiv, (v) => {
   globalState.floorCellOutlineSubdiv = v;
   rebuildFloorTexture();
@@ -454,11 +470,21 @@ bindSlider('gridPeriodPhaseBinCount', config.camera.common.gridPeriodPhaseBinCou
   drawGridPeriodPhasePlot(cam);
 }, (v) => v.toFixed(0));
 
+// PURELY VISUAL, and currently not even that -- see below. The
+// "feeds computeGridPeriodPhase (stage 7) directly" recompute that used to be
+// here was a full pipeline re-run on every drag of a slider that reaches no
+// stage at all: poseSettingsFor does not pass it, and GppSettings has no field
+// for it. It went with the old pipeline, whose host-side period search read it.
+//
+// Its own doc comment still describes a filter on gridPeriodPhaseOverlays.ts's
+// per-family median gaps, and that file does not read it either -- the plot is
+// an empty state awaiting the intermediate readback. So this is a knob with no
+// consumer, kept with the rest of that plot's shell rather than deleted
+// piecemeal. Whether the shell stays is one decision, not seven.
 bindSlider('gridPeriodPhaseGapLowerBound', config.camera.common.gridPeriodPhaseGapLowerBound, (v) => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.gridPeriodPhaseGapLowerBound = v;
   drawGridPeriodPhasePlot(cam);
-  recomputeFromLastCapture(cam); // feeds computeGridPeriodPhase (stage 7) directly
   pushSettingsIfPhysical();
 }, (v) => v.toFixed(4));
 bindSlider('simNoise', config.camera.simulated.simNoise, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
@@ -493,9 +519,16 @@ function refreshLsd() {
 bindSlider('lsdToleranceDeg', config.camera.common.lsdToleranceDeg, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdToleranceDeg = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => `${v.toFixed(1)}°`);
 bindSlider('lsdRhoNoiseThreshold', config.camera.common.lsdRhoNoiseThreshold, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoNoiseThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
 bindSlider('lsdRhoHighThreshold', config.camera.common.lsdRhoHighThreshold, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdRhoHighThreshold = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(3));
-// 0 is the REAL algorithm (run growRegionsCCL to its fixpoint), not "off" --
-// labelled "auto" rather than "0" so the slider's own left end doesn't read as
-// a disabled/no-growth state the way the grow-steps slider it replaces did.
+// 0 is the REAL algorithm (run grow to its fixpoint), not "off" -- labelled
+// "auto" rather than "0" so the slider's left end does not read as a
+// disabled/no-growth state.
+//
+// IT REACHED NOTHING UNTIL 2026-08-20: poseSettingsFor never passed it on, so
+// encodeGrow took its own GROW_ROUNDS default and this slider moved a value
+// that was persisted, pushed to the phone and stored in fixtures without ever
+// changing a pixel. It is wired now, which makes it genuinely pose-moving --
+// below convergence the labelling is half-grown, and the run says so through
+// the growNotConverged status bit.
 bindSlider('lsdCclSteps', config.camera.common.lsdCclSteps, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdCclSteps = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => (v === 0 ? 'auto' : v.toFixed(0)));
 bindSlider('lsdMinRegionSize', config.camera.common.lsdMinRegionSize, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinRegionSize = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
 bindSlider('lsdNfaEpsilon', config.camera.common.lsdNfaEpsilon, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdNfaEpsilon = v; refreshLsd(); recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(2));
@@ -506,6 +539,45 @@ bindSlider('lsdNfaTestExponent', config.camera.common.lsdNfaTestExponent, (v) =>
 // up the new value -- reusing the last capture rather than waiting for the
 // next unrelated "capture now"/axesAutoCapture tick.
 bindSlider('lsdMinLengthPx', config.camera.common.lsdMinLengthPx, (v) => { const cam = activeCamera(); if (cam) { cam.settings.lsdMinLengthPx = v; recomputeFromLastCapture(cam); } pushSettingsIfPhysical(); }, (v) => v.toFixed(0));
+
+// ── S5c, the join ────────────────────────────────────────────────────────
+//
+// Six knobs and a button, all driving the pose. Every one of them takes the
+// same reaction -- recompute from the last capture -- because the join runs on
+// the device and its composites cannot be recoloured into existence.
+//
+// `joinRefresh` rather than `refreshLsd`: the LSD debug overlay draws the
+// PRE-join rectangles, which none of these change.
+function joinRefresh() {
+  const cam = activeCamera(); if (!cam) return;
+  toggleLineJoinBtn.classList.toggle('active', cam.settings.joinKSigma > 0);
+  recomputeFromLastCapture(cam);
+  pushSettingsIfPhysical();
+}
+bindSlider('joinKSigma', config.camera.common.joinKSigma, (v) => { const cam = activeCamera(); if (cam) cam.settings.joinKSigma = v; joinRefresh(); }, (v) => (v === 0 ? 'off' : v.toFixed(1)));
+bindSlider('joinEndpointNoisePx', config.camera.common.joinEndpointNoisePx, (v) => { const cam = activeCamera(); if (cam) cam.settings.joinEndpointNoisePx = v; joinRefresh(); }, (v) => v.toFixed(2));
+bindSlider('joinReachFrac', config.camera.common.joinReachFrac, (v) => { const cam = activeCamera(); if (cam) cam.settings.joinReachFrac = v; joinRefresh(); }, (v) => v.toFixed(2));
+bindSlider('joinRounds', config.camera.common.joinRounds, (v) => { const cam = activeCamera(); if (cam) cam.settings.joinRounds = v; joinRefresh(); }, (v) => v.toFixed(0));
+bindSlider('joinMaxResidualPx', config.camera.common.joinMaxResidualPx, (v) => { const cam = activeCamera(); if (cam) cam.settings.joinMaxResidualPx = v; joinRefresh(); }, (v) => v.toFixed(1));
+bindCheckbox('joinPolarityAbs', config.camera.common.joinPolarityAbs, (v) => { const cam = activeCamera(); if (cam) cam.settings.joinPolarityAbs = v; joinRefresh(); });
+
+// The one-click A/B, and it drives the SAME setting the kSigma slider does --
+// which is why it lives here rather than with the overlay toggles in
+// hoverDebugOverlays.ts. Switching off remembers the kSigma that was in force
+// so switching back on restores it, instead of snapping to a hardcoded 3 and
+// quietly discarding whatever the slider was set to. The remembered value is
+// module state on purpose: it is the undo for a button press, not a
+// configuration, and it should not survive a reload as one.
+let lastJoinKSigma = config.camera.common.joinKSigma || 3;
+toggleLineJoinBtn.addEventListener('click', () => {
+  const cam = activeCamera(); if (!cam) return;
+  if (cam.settings.joinKSigma > 0) lastJoinKSigma = cam.settings.joinKSigma;
+  // Through setNum, not by assignment: the slider is the control of record, and
+  // dispatching its own 'input' event is what keeps the thumb, the readout, the
+  // setting, persistence and the recompute in one path instead of five.
+  setPanelNum('joinKSigma', cam.settings.joinKSigma > 0 ? 0 : lastJoinKSigma);
+});
+
 bindCheckbox('showRecoveredPoles', config.camera.common.showRecoveredPoles, (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
 // Turning either on refreshes immediately -- updateGradientCirclesDebug now
 // skips its work while both are off (see its own comment), so the geometry

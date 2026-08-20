@@ -184,6 +184,39 @@
      starting a whole new .section (which would add a top border and rule off
      things that belong together). */
   .subhead { font-size: 10px; text-transform: uppercase; letter-spacing: 0.5px; color: #789; margin: 10px 0 4px; }
+
+  /* ── PIPELINE-BEARING vs PURELY VISUAL ──────────────────────────────────
+     `.pipe` means MOVING THIS MOVES THE POSE. Everything unmarked only changes
+     what is drawn from the same run, which is the large majority of an overlay
+     pane -- so this marks the EXCEPTION rather than the rule, and the pane stays
+     calm instead of striped.
+
+     Amber, deliberately: it is outside every overlay button's palette (those
+     colours mean "this is what I draw") and distinct from --cam-accent, the
+     per-camera green that means "this control belongs to that camera".
+
+     An inset box-shadow rather than a border-left, because the active-state
+     rules above set `border-color` on all four sides -- a left BORDER would be
+     recoloured the moment a pipeline-bearing button lit up, which is exactly
+     when the marking matters most. */
+  .pipe { box-shadow: inset 2px 0 0 #d9a441; }
+  .row.pipe, label.chk.pipe { padding: 3px 6px 3px 8px; border-radius: 3px; background: rgba(217,164,65,0.07); }
+  #overlayPanel button.pipe { padding-left: 14px; background: rgba(217,164,65,0.10); }
+  .paneLegend { font-size: 10px; color: #789; line-height: 1.4; margin-bottom: 10px; padding-left: 8px; box-shadow: inset 2px 0 0 #d9a441; }
+
+  /* The show-everything switch, and how an off-view section reads when it is on.
+     A TAG ON THE HEADING, naming the view the section belongs to -- not a dim.
+     Opacity is spoken for in this panel: `.section.disabled`, `button:disabled`
+     and `.chk.inactive` all use it to mean "you cannot use this right now", and
+     these controls are fully live (setting up another view before switching to
+     it is the entire point of the unfiltered mode). A dimmed live control reads
+     as a broken one, which is exactly how this landed the first time. */
+  .paneFilter { padding-bottom: 8px; border-bottom: 1px solid rgba(255,255,255,0.15); margin-bottom: 4px; }
+  .viewTag {
+    float: right; font-size: 9px; letter-spacing: 0.5px; color: #9ab;
+    background: rgba(255,255,255,0.09); border-radius: 3px; padding: 1px 5px;
+  }
+  .viewTag:empty { display: none; }
   /* The LSD chain's toggles are not four independent choices: the stages hand
      device buffers straight to each other, so each one's COST depends on its
      neighbours (see pipelineGPU/fieldResidency.ts). The side rule says "one
@@ -232,58 +265,172 @@
 <svg id="projectedSvgOverlay"><g id="rectifiedLinesGroup"></g><g id="sampleLatticeGroup"></g></svg>
 <svg id="lsdSvgOverlay"><g id="lsdRectanglesGroup"></g><g id="lsdCompositeGroup"></g><g id="gradientArrowGroup"></g><g id="levelLineArrowGroup"></g><g id="growthCandidateGroup"></g></svg>
 <button id="overlayPanelToggle" title="show/hide overlay panel">&rsaquo;</button>
-<div id="overlayPanel">
-  <h1>Overlays</h1>
-  <div id="contamToggles">
-    <div class="section">
-      <h2>Field overlays</h2>
-      <button id="toggleHideField">hide field</button>
-      <button id="toggleTrueContam">true contamination overlay (red)</button>
-      <button id="toggleReconContam">reconstructed contamination overlay (orange)</button>
-      <button id="toggleTopGradient">top gradient overlay (green)</button>
-    </div>
-    <div class="section">
-      <h2>LSD pipeline (production composite-line source)</h2>
-      <button id="toggleLsdSegments">LSD rectangles</button>
-      <button id="toggleLsdRejected">show rejected candidates</button>
-      <button id="toggleLsdRawRegions">raw region pixels (pre-fit)</button>
-      <div id="lsdReadout" class="hint"></div>
-      <div class="row"><span class="label">tau (angle tol.)</span><input type="range" id="lsdToleranceDeg" min="1" max="90" step="0.5"><span class="val" id="lsdToleranceDegVal"></span></div>
-      <div class="row"><span class="label">rho low (edge floor)</span><input type="range" id="lsdRhoNoiseThreshold" min="0" max="0.2" step="0.002"><span class="val" id="lsdRhoNoiseThresholdVal"></span></div>
-      <div class="row"><span class="label">rho high (survival)</span><input type="range" id="lsdRhoHighThreshold" min="0" max="0.4" step="0.002"><span class="val" id="lsdRhoHighThresholdVal"></span></div>
-      <div class="row"><span class="label">CCL steps</span><input type="range" id="lsdCclSteps" min="0" max="60" step="1"><span class="val" id="lsdCclStepsVal"></span></div>
-      <div class="row"><span class="label">min region size</span><input type="range" id="lsdMinRegionSize" min="1" max="20" step="1"><span class="val" id="lsdMinRegionSizeVal"></span></div>
-      <div class="row"><span class="label">min length (px)</span><input type="range" id="lsdMinLengthPx" min="0" max="100" step="1"><span class="val" id="lsdMinLengthPxVal"></span></div>
-      <div class="row"><span class="label">NFA epsilon</span><input type="range" id="lsdNfaEpsilon" min="0.01" max="10" step="0.01"><span class="val" id="lsdNfaEpsilonVal"></span></div>
-      <div class="row"><span class="label">N_tests exponent</span><input type="range" id="lsdNfaTestExponent" min="1" max="8" step="1"><span class="val" id="lsdNfaTestExponentVal"></span></div>
+<!-- ── THE RIGHT PANE: ONE CHRONOLOGICAL LIST OF THE WHOLE PIPELINE ──────
+     Not three panes stacked. ONE list, in the order the algorithm runs, out of
+     which each view shows the sections worth looking at while you are in it.
+     Every section declares that itself, in `data-views` -- so the shown list
+     for a view is a query over this markup rather than a second list in the TS
+     that could drift out of step with it. `world inside` is how the two 3D
+     views share one list: they render the same scene from two cameras.
 
-      <!-- NOT an overlay toggle: this one changes the PIPELINE, so the pose
-           itself moves when it is pressed. It flips joinSettings.kSigma between
-           3 and 0 -- see axesReconstruction.ts, which owns the knob and explains
-           why it has no config entry yet. -->
-      <button id="toggleLineJoin">join lines into composites (changes the pose)</button>
-      <button id="toggleLsdComposite">composite lines</button>
-      <button id="toggleCompositeLineFamilies">color by row/col family</button>
-      <svg id="gridPeriodPhasePlot" viewBox="0 0 340 160" height="160" style="display:block; width:100%; margin: 4px 0; background: rgba(0,0,0,0.4); border: 1px solid #444; cursor: grab;"></svg>
-      <button id="toggleGapHistogram">gap histogram (gray, all-pairs spacings)</button>
-      <button id="toggleValueHistogram">value histogram (white, line positions)</button>
-      <button id="toggleDistinctnessCurve">distinctness curve (blue)</button>
-      <button id="toggleProductCurve">resultant x distinctness (violet)</button>
-      <div class="row"><span class="label">bucket count</span><input type="range" id="gridPeriodPhaseBinCount" min="5" max="150" step="1"><span class="val" id="gridPeriodPhaseBinCountVal"></span></div>
-      <div class="row"><span class="label">gap lower bound</span><input type="range" id="gridPeriodPhaseGapLowerBound" min="0" max="0.05" step="0.0005"><span class="val" id="gridPeriodPhaseGapLowerBoundVal"></span></div>
-    </div>
+     Section headings are the library's own stage names (src/pose/pose.ts's
+     S1..S8 comment banners). Reading the pane top to bottom is reading the
+     algorithm in the order it runs, and that ordering is what made the two
+     ALIASED sliders visible -- see S2.
+
+     The convention this sits inside: a tunable or toggle that pertains to a
+     specific VIEW lives in the right pane. The left panel keeps what DEFINES
+     the scene and the capture (camera pose, lens, distortion, board), the
+     drivers (capture now, auto-recompute), the readouts, and the global/config
+     blocks. -->
+<div id="overlayPanel">
+  <!-- ONE title, naming the current view exactly. ui/mode.ts sets it from the
+       mode button's own text, so the two cannot drift apart. -->
+  <h1 id="overlayPaneTitle">World</h1>
+  <!-- The amber key is hoisted out of any one section: the marking it explains
+       appears wherever a pipeline-bearing control does, which is most stages. -->
+  <div class="paneLegend">Amber marks a control that moves the pose. Everything else only changes what is drawn from the same run.</div>
+  <!-- Filter on (the default), only this view's sections. Filter off, the whole
+       pipeline list, with each off-view section TAGGED on its heading with the
+       view it belongs to (`.viewTag`, built in ui/mode.ts from `data-views`).
+       Tagged rather than dimmed: those controls are fully live, and everything
+       else in this panel uses opacity to mean "you cannot use this". -->
+  <label class="chk paneFilter" title="On: only the sections that act on the current view. Off: the whole pipeline list, with each other view's sections tagged by view -- still live, so another view can be set up before switching to it."><input type="checkbox" id="overlayPaneThisViewOnly"> only this view's controls</label>
+
+  <div class="section" data-views="world inside">
+    <h2>input &middot; scene</h2>
+    <label class="chk"><input type="checkbox" id="showFloor"> floor</label>
+    <div class="row"><span class="label">cell outline</span><input type="range" id="floorCellOutlineSubdiv" min="0" max="20" step="1"><span class="val" id="floorCellOutlineSubdivVal"></span></div>
   </div>
-  <div id="arrowToggles" class="section">
-    <h2>Gradient arrows (hover)</h2>
-    <button id="toggleGradientArrow">gradient arrow</button>
-    <button id="toggleLevelLineArrow">level line arrow</button>
+
+  <div class="section" data-views="world inside">
+    <h2>input &middot; camera</h2>
+    <label class="chk"><input type="checkbox" id="showGizmoBody"> camera box</label>
+    <label class="chk"><input type="checkbox" id="showFrustum"> frustum outline</label>
+    <label class="chk"><input type="checkbox" id="showPatch"> live viewport image patch</label>
+  </div>
+
+  <div class="section" data-views="through">
+    <h2>S1 &middot; gradient</h2>
+    <button id="toggleHideField">hide field</button>
+    <button id="toggleGradientArrow">gradient arrow (hover)</button>
+    <button id="toggleLevelLineArrow">level line arrow (hover)</button>
     <div class="row"><span class="label">arrow scale</span><input type="range" id="gradientArrowScale" min="25" max="2550" step="25"><span class="val" id="gradientArrowScaleVal"></span></div>
+    <button id="toggleTopGradient">top gradient overlay (green)</button>
+    <button id="toggleTrueContam">true contamination overlay (red)</button>
+    <button id="toggleReconContam">reconstructed contamination overlay (orange)</button>
   </div>
-  <div id="projectedToggles" class="section">
-    <h2>Projected view</h2>
+
+  <!-- THE TWO ALIASED SLIDERS LIVE HERE, and both are labelled with BOTH stages
+       they drive. poseSettingsFor hands each of them to `grow` AND to `lsdFit`,
+       which the library treats as independent parameters -- so a slider filed
+       under S2 also retunes S4. That is LSD's own design (one tau, one
+       participation floor), not an accident; the label is what stops it being a
+       surprise. -->
+  <div class="section" data-views="through">
+    <h2>S2 &middot; grow</h2>
+    <div class="row pipe"><span class="label">tau &mdash; grow + fit</span><input type="range" id="lsdToleranceDeg" min="1" max="90" step="0.5"><span class="val" id="lsdToleranceDegVal"></span></div>
+    <div class="row pipe"><span class="label">rho low &mdash; grow + fit</span><input type="range" id="lsdRhoNoiseThreshold" min="0" max="0.2" step="0.002"><span class="val" id="lsdRhoNoiseThresholdVal"></span></div>
+    <!-- The round SCRUBBER. "auto" runs to the fixpoint, which is the real
+         algorithm; anything below convergence is a deliberately half-grown
+         labelling, and the pose says so (growNotConverged). -->
+    <div class="row pipe"><span class="label">grow rounds</span><input type="range" id="lsdCclSteps" min="0" max="60" step="1"><span class="val" id="lsdCclStepsVal"></span></div>
+    <button id="toggleLsdRawRegions">raw region pixels (pre-fit)</button>
+  </div>
+
+  <div class="section" data-views="through">
+    <h2>S3 &middot; collect</h2>
+    <div class="row pipe"><span class="label">rho high (survival)</span><input type="range" id="lsdRhoHighThreshold" min="0" max="0.4" step="0.002"><span class="val" id="lsdRhoHighThresholdVal"></span></div>
+    <div class="row pipe"><span class="label">min region size</span><input type="range" id="lsdMinRegionSize" min="1" max="20" step="1"><span class="val" id="lsdMinRegionSizeVal"></span></div>
+  </div>
+
+  <div class="section" data-views="through">
+    <h2>S4 &middot; lsdFit + NFA</h2>
+    <div class="row pipe"><span class="label">NFA epsilon</span><input type="range" id="lsdNfaEpsilon" min="0.01" max="10" step="0.01"><span class="val" id="lsdNfaEpsilonVal"></span></div>
+    <div class="row pipe"><span class="label">N_tests exponent</span><input type="range" id="lsdNfaTestExponent" min="1" max="8" step="1"><span class="val" id="lsdNfaTestExponentVal"></span></div>
+    <button id="toggleLsdSegments">LSD rectangles</button>
+    <button id="toggleLsdRejected">show rejected candidates</button>
+    <div id="lsdReadout" class="hint"></div>
+  </div>
+
+  <div class="section" data-views="through">
+    <h2>S5 &middot; lines</h2>
+    <div class="row pipe"><span class="label">min length (px)</span><input type="range" id="lsdMinLengthPx" min="0" max="100" step="1"><span class="val" id="lsdMinLengthPxVal"></span></div>
+  </div>
+
+  <!-- S5b, the votes: each line sweeps a plane through the camera centre, and
+       its normal is a point on the unit sphere. That sphere is a WORLD-view
+       object, which is why this section sits between S5 and S5c in the list but
+       shows in a different view from its neighbours. -->
+  <div class="section" data-views="world inside">
+    <h2>S5b &middot; votes</h2>
+    <label class="chk"><input type="checkbox" id="showSphere"> sphere shell</label>
+    <label class="chk"><input type="checkbox" id="showCircles"> grid-line great circles</label>
+    <label class="chk"><input type="checkbox" id="showPoles"> vanishing-point poles</label>
+  </div>
+
+  <!-- S5c, the iterative reach-bounded corridor join. kSigma 0 is the EXACT off
+       -- no pair passes the gate, every line becomes its own singleton
+       composite, and the pose is bit-for-bit the pre-join one -- which is why
+       the button below is a one-click A/B and not a second code path. It drives
+       the same kSigma the slider does, restoring whatever the slider last held
+       rather than a hardcoded 3. -->
+  <div class="section" data-views="through">
+    <h2>S5c &middot; join</h2>
+    <button id="toggleLineJoin" class="pipe">join lines into composites</button>
+    <div class="row pipe"><span class="label">k&sigma; (0 = off)</span><input type="range" id="joinKSigma" min="0" max="8" step="0.1"><span class="val" id="joinKSigmaVal"></span></div>
+    <div class="row pipe"><span class="label">endpoint noise</span><input type="range" id="joinEndpointNoisePx" min="0" max="2" step="0.05"><span class="val" id="joinEndpointNoisePxVal"></span></div>
+    <div class="row pipe"><span class="label">reach frac</span><input type="range" id="joinReachFrac" min="0" max="20" step="0.25"><span class="val" id="joinReachFracVal"></span></div>
+    <div class="row pipe"><span class="label">rounds</span><input type="range" id="joinRounds" min="1" max="8" step="1"><span class="val" id="joinRoundsVal"></span></div>
+    <div class="row pipe"><span class="label">max residual</span><input type="range" id="joinMaxResidualPx" min="0" max="10" step="0.5"><span class="val" id="joinMaxResidualPxVal"></span></div>
+    <label class="chk pipe" title="Compare |dot| rather than dot on the vote normals, joining across a gradient polarity flip. Correct for a board of black and white cells, wrong for lines drawn as strokes -- and measured WORSE."><input type="checkbox" id="joinPolarityAbs"> absolute polarity</label>
+    <button id="toggleLsdComposite">composite lines</button>
+    <button id="toggleCompositeLineFamilies">color by row/col family</button>
+  </div>
+
+  <div class="section" data-views="world inside">
+    <h2>S6 &middot; fit</h2>
+    <label class="chk"><input type="checkbox" id="showTopCircles"> top circles (rings)</label>
+    <div class="row"><span class="label">ring stroke weight</span><input type="range" id="topCirclesLineWidth" min="0.5" max="8" step="0.5"><span class="val" id="topCirclesLineWidthVal"></span></div>
+    <label class="chk"><input type="checkbox" id="showRecoveredPoles"> reconstructed poles</label>
+    <label class="chk"><input type="checkbox" id="showAxisVectors"> vote axis vectors</label>
+  </div>
+
+  <!-- The plot is a documented EMPTY STATE, not rot: its data came from the
+       deleted pipeline's gridPeriodPhase, and pose recovers the same period and
+       phase on the device without ever materialising the search's working set.
+       The four toggles and the bin count still drive only this plot -- they are
+       kept so the shape is intact for the readback that will refill it. See
+       overlays/gridPeriodPhaseOverlays.ts's header. -->
+  <div class="section" data-views="through">
+    <h2>S7 &middot; grid period + phase</h2>
+    <div class="row pipe"><span class="label">min grazing cos</span><input type="range" id="minGrazingCos" min="0" max="0.5" step="0.01"><span class="val" id="minGrazingCosVal"></span></div>
+    <svg id="gridPeriodPhasePlot" viewBox="0 0 340 160" height="160" style="display:block; width:100%; margin: 4px 0; background: rgba(0,0,0,0.4); border: 1px solid #444; cursor: grab;"></svg>
+    <button id="toggleGapHistogram">gap histogram (gray, all-pairs spacings)</button>
+    <button id="toggleValueHistogram">value histogram (white, line positions)</button>
+    <button id="toggleDistinctnessCurve">distinctness curve (blue)</button>
+    <button id="toggleProductCurve">resultant x distinctness (violet)</button>
+    <div class="row"><span class="label">bucket count</span><input type="range" id="gridPeriodPhaseBinCount" min="5" max="150" step="1"><span class="val" id="gridPeriodPhaseBinCountVal"></span></div>
+    <div class="row"><span class="label">gap lower bound</span><input type="range" id="gridPeriodPhaseGapLowerBound" min="0" max="0.05" step="0.0005"><span class="val" id="gridPeriodPhaseGapLowerBoundVal"></span></div>
+  </div>
+
+  <!-- S8 is TWO sections because the decode is drawn in two views: the floor
+       decal in the 3D scene, the sample lattice on the Projected-Cam rect. One
+       section shown in all three views would put lattice controls in front of
+       someone looking at the world, which is the thing this pane exists to
+       stop. -->
+  <div class="section" data-views="world inside">
+    <h2>S8 &middot; decode &middot; floor</h2>
+    <label class="chk"><input type="checkbox" id="showRecoveredFloor"> recovered floor overlay (decoded position)</label>
+    <div class="row"><span class="label">floor opacity</span><input type="range" id="recoveredFloorOpacity" min="0" max="1" step="0.01"><span class="val" id="recoveredFloorOpacityVal"></span></div>
+  </div>
+
+  <div class="section" data-views="projected">
+    <h2>S8 &middot; decode &middot; projected view</h2>
     <button id="toggleTrueCardinalOrientation">use true cardinal orientation</button>
     <button id="toggleSampleLattice">sample lattice</button>
     <button id="toggleRectifiedLines">rectified lines (row/column families)</button>
+    <label class="chk" title="Projected-Cam buckets only the sample lattice's extent -- a crop, at the same world scale, to exactly the cells the decode read. Falls back to the whole capture on a frame with no lattice."><input type="checkbox" id="latticeBoundsProjection"> project to sample-lattice bounds</label>
   </div>
 </div>
 <div id="insideHint">drag to look around &middot; scroll to zoom &middot; you are standing at the camera's optical center</div>
@@ -303,8 +450,10 @@
 
   <div class="section" id="globalSettingsSection">
     <h2>global</h2>
-    <label class="chk"><input type="checkbox" id="showFloor"> floor</label>
-    <div class="row"><span class="label">cell outline</span><input type="range" id="floorCellOutlineSubdiv" min="0" max="20" step="1"><span class="val" id="floorCellOutlineSubdivVal"></span></div>
+    <!-- `showFloor` and the cell outline moved to the WORLD pane on the right:
+         they are world-view drawing, and the pane is organised by view. They are
+         the one thing there that is global rather than per-camera -- the pane is
+         about which view a control acts on, not about how it is scoped. -->
     <div class="row"><span class="label">De Bruijn board size</span><input type="range" id="boardSize" min="0" max="512" step="1"><span class="val" id="boardSizeVal"></span></div>
     <div class="hint" id="gpuVotesStatus"></div>
 
@@ -380,26 +529,14 @@
     <label class="chk" title="hue = direction mod 180&deg;, saturation = magnitude"><input type="radio" name="fieldView" id="fieldViewGradient2x2" value="gradient2x2"> gradient field (undirected)</label>
   </div>
 
-  <div class="section">
-    <h2>camera overlays</h2>
-    <label class="chk"><input type="checkbox" id="showGizmoBody"> camera box</label>
-    <label class="chk"><input type="checkbox" id="showFrustum"> frustum outline</label>
-    <label class="chk"><input type="checkbox" id="showPatch"> live viewport image patch</label>
-    <label class="chk"><input type="checkbox" id="showSphere"> sphere shell</label>
-    <label class="chk"><input type="checkbox" id="showCircles"> grid-line great circles</label>
-    <label class="chk"><input type="checkbox" id="showPoles"> vanishing-point poles</label>
-    <label class="chk"><input type="checkbox" id="showRecoveredFloor"> recovered floor overlay (decoded position)</label>
-    <div class="row"><span class="label">recovered floor opacity</span><input type="range" id="recoveredFloorOpacity" min="0" max="1" step="0.01"><span class="val" id="recoveredFloorOpacityVal"></span></div>
-    <label class="chk" title="Projected-Cam buckets only the sample lattice's extent -- a crop, at the same world scale, to exactly the cells the decode read. Falls back to the whole capture on a frame with no lattice."><input type="checkbox" id="latticeBoundsProjection"> project to sample-lattice bounds</label>
-  </div>
-
+  <!-- The camera-overlay and axes-reconstruction TOGGLES moved to the right
+       panes -- gizmo/sphere/fit/decode overlays to the World pane, the
+       sample-lattice crop to the Projected pane, `minGrazingCos` to the Through
+       pane's S7 group, since it is the one PIPELINE-BEARING knob that was
+       stranded outside the pipeline pane. What stays here is the DRIVER: when a
+       reconstruction runs, and what it reported. -->
   <div class="section">
     <h2>axes reconstruction</h2>
-    <label class="chk"><input type="checkbox" id="showTopCircles"> show top circles (rings)</label>
-    <div class="row"><span class="label">ring stroke weight</span><input type="range" id="topCirclesLineWidth" min="0.5" max="8" step="0.5"><span class="val" id="topCirclesLineWidthVal"></span></div>
-    <label class="chk"><input type="checkbox" id="showRecoveredPoles"> show reconstructed poles</label>
-    <label class="chk"><input type="checkbox" id="showAxisVectors"> show vote axis vectors</label>
-    <div class="row"><span class="label">min grazing cos</span><input type="range" id="minGrazingCos" min="0" max="0.5" step="0.01"><span class="val" id="minGrazingCosVal"></span></div>
     <button id="captureAxesBtn" class="captureBtn">&#9889; capture now</button>
     <label class="chk"><input type="checkbox" id="axesAutoCapture"> auto-recompute</label>
     <div class="row"><span class="label">interval (ms)</span><input type="range" id="axesCaptureInterval" min="50" max="2000" step="50"><span class="val" id="axesCaptureIntervalVal"></span></div>

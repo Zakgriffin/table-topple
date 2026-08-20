@@ -607,49 +607,41 @@ async function poseContextFor(camera: Camera, w: number, h: number): Promise<Pos
   return ctx;
 }
 
-// ── The join's knobs, LIVE and un-configured, while it is being measured ──
-//
-// A mutable module object rather than config entries or per-camera sliders, and
-// deliberately so on both counts. It has no entry in pose-viewer.config.json
-// because wiring the config and migrating every fixtures/*.json before the
-// sweep has said whether joining helps would be paying the migration first and
-// asking the question second. It is a LET-style object rather than a constant
-// so the dev bridge can retune it between runs without a source edit -- and a
-// source edit reloads the page, which drops every camera and loses the pose
-// being looked at.
-//
-// kSigma 0 disables joining outright: no pair can pass the gate, every line
-// becomes its own composite, and the pose is bit-for-bit the pre-join one. That
-// is what makes an A/B here one assignment rather than two builds.
-//
-//   joinSettings.kSigma = 3   // join on
-//   joinSettings.kSigma = 0   // join off
-//   runAxesReconstruction(activeCamera())
-//
-// ── DEFAULTED ON, IN THIS APP ONLY, AND ONLY WHILE IT IS BEING LOOKED AT ──
-//
-// kSigma 3 rather than 0, so a source edit -- which reloads the page and resets
-// this module -- does not silently drop the viewer back to the pre-join pose
-// mid-investigation. That is a WORKBENCH default, not a verdict: the sweep
-// (scripts/sweep.ts) still defaults to 0, table-topple and the phone client are
-// untouched, and the join still destroys the lattice below ~6 px/cell. Anything
-// read off this page from here on is the JOINED pose unless kSigma is put back.
-export const joinSettings = {
-  endpointNoisePx: 0.5,
-  kSigma: 3,
-  reachFrac: 4,
-  rounds: 3,
-  maxResidualPx: 2,
-  polarityAbs: false,
-};
-
 // Straight off this camera's own sliders. The pipeline takes no defaults -- see
 // config.ts: every one of these has exactly one source, and it is the JSON.
+//
+// ── TWO SLIDERS THAT EACH DRIVE TWO STAGES ───────────────────────────────
+//
+// `lsdToleranceDeg` and `lsdRhoNoiseThreshold` are ALIASED: each is handed to
+// both `grow` and `lsdFit`, which the library treats as independent parameters.
+// That is deliberate and it is what LSD's own design intends -- one tau, one
+// participation floor -- but it means a slider labelled for one stage silently
+// retunes another, so the panel labels both stages on the row. Splitting them
+// into four sliders is a config migration for a decoupling nobody has asked
+// for; do it when a measurement asks, not before.
+//
+// ── THE JOIN'S KNOBS ARE ORDINARY SETTINGS NOW ───────────────────────────
+//
+// They used to be a mutable module-level `joinSettings` object with no config
+// entry, so the sweep could answer "does joining help" before anyone paid a
+// fixture migration. It does, at every scale, so they are per-camera settings
+// like everything else here.
+//
+// `joinKSigma` 0 still disables joining outright: no pair passes the gate,
+// every line becomes its own singleton composite, and the pose is bit-for-bit
+// the pre-join one. That identity is what makes the panel's join toggle a
+// one-click A/B rather than two builds, and it is a standing test.
 function poseSettingsFor(camera: Camera): PoseSettings {
   const s = camera.settings;
   const vFovRad = getAnalysisVFovRad(camera);
   return {
-    grow: { rhoLow: s.lsdRhoNoiseThreshold, toleranceDeg: s.lsdToleranceDeg },
+    // `rounds` is the lsdCclSteps scrubber: 0 means "run to the fixpoint",
+    // which is `undefined` here so pose.ts's GROW_ROUNDS stays the one place
+    // that number lives. Anything else is a deliberately half-grown labelling.
+    grow: {
+      rhoLow: s.lsdRhoNoiseThreshold, toleranceDeg: s.lsdToleranceDeg,
+      rounds: s.lsdCclSteps > 0 ? s.lsdCclSteps : undefined,
+    },
     collect: { rhoHigh: s.lsdRhoHighThreshold, minRegionSize: s.lsdMinRegionSize },
     lsdFit: {
       rho: s.lsdRhoNoiseThreshold, toleranceDeg: s.lsdToleranceDeg,
@@ -657,9 +649,12 @@ function poseSettingsFor(camera: Camera): PoseSettings {
     },
     lines: { minLengthPx: s.lsdMinLengthPx },
     votes: { vFovRad },
-    // Read fresh every run, so a bridge eval retuning `joinSettings` takes
-    // effect on the next runAxesReconstruction with no reload.
-    join: { vFovRad, ...joinSettings },
+    join: {
+      vFovRad,
+      kSigma: s.joinKSigma, endpointNoisePx: s.joinEndpointNoisePx,
+      reachFrac: s.joinReachFrac, rounds: s.joinRounds,
+      maxResidualPx: s.joinMaxResidualPx, polarityAbs: s.joinPolarityAbs,
+    },
     gpp: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
     layout: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
   };

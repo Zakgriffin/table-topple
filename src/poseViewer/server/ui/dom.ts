@@ -30,7 +30,14 @@ export const sampleLatticeGroup = document.getElementById('sampleLatticeGroup') 
 export const rectifiedLinesGroup = document.getElementById('rectifiedLinesGroup') as unknown as SVGGElement;
 export const overlayPanel = document.getElementById('overlayPanel') as HTMLDivElement;
 export const overlayPanelToggle = document.getElementById('overlayPanelToggle') as HTMLButtonElement;
-export const contamToggles = document.getElementById('contamToggles') as HTMLDivElement;
+// The right pane's single heading, naming whichever view is current.
+// ui/mode.ts fills it from the mode button's own text.
+//
+// There are no per-view wrapper elements to export any more: the pane is one
+// chronological list of sections, each declaring its own `data-views`, and
+// mode.ts selects over that. `worldToggles`/`throughToggles`/`projectedToggles`
+// -- and `contamToggles`/`arrowToggles` before them -- were those wrappers.
+export const overlayPaneTitle = document.getElementById('overlayPaneTitle') as HTMLHeadingElement;
 export const toggleHideFieldBtn = document.getElementById('toggleHideField') as HTMLButtonElement;
 export const toggleTrueContamBtn = document.getElementById('toggleTrueContam') as HTMLButtonElement;
 export const toggleReconContamBtn = document.getElementById('toggleReconContam') as HTMLButtonElement;
@@ -39,7 +46,10 @@ export const toggleLsdSegmentsBtn = document.getElementById('toggleLsdSegments')
 export const toggleLsdRejectedBtn = document.getElementById('toggleLsdRejected') as HTMLButtonElement;
 export const toggleLsdRawRegionsBtn = document.getElementById('toggleLsdRawRegions') as HTMLButtonElement;
 // The odd one out in this block: every other toggle here selects a VIEW, this
-// one selects a PIPELINE. See its handler in hoverDebugOverlays.ts.
+// one selects a PIPELINE -- it is `.pipe`-marked in the markup for exactly that
+// reason. Its handler lives with the join SLIDERS in ui/cameraPanel.ts, because
+// the two drive the same setting and this file's importers cannot reach that
+// one without a cycle.
 export const toggleLineJoinBtn = document.getElementById('toggleLineJoin') as HTMLButtonElement;
 export const toggleLsdCompositeBtn = document.getElementById('toggleLsdComposite') as HTMLButtonElement;
 export const toggleCompositeLineFamiliesBtn = document.getElementById('toggleCompositeLineFamilies') as HTMLButtonElement;
@@ -52,8 +62,6 @@ export const levelLineArrowGroup = document.getElementById('levelLineArrowGroup'
 export const growthCandidateGroup = document.getElementById('growthCandidateGroup') as unknown as SVGGElement;
 export const toggleGradientArrowBtn = document.getElementById('toggleGradientArrow') as HTMLButtonElement;
 export const toggleLevelLineArrowBtn = document.getElementById('toggleLevelLineArrow') as HTMLButtonElement;
-export const arrowToggles = document.getElementById('arrowToggles') as HTMLDivElement;
-export const projectedToggles = document.getElementById('projectedToggles') as HTMLDivElement;
 export const toggleTrueCardinalOrientationBtn = document.getElementById('toggleTrueCardinalOrientation') as HTMLButtonElement;
 export const toggleSampleLatticeBtn = document.getElementById('toggleSampleLattice') as HTMLButtonElement;
 export const toggleRectifiedLinesBtn = document.getElementById('toggleRectifiedLines') as HTMLButtonElement;

@@ -503,6 +503,19 @@ export interface GrowSettings {
   rhoLow: number;
   /** Level-line angular tolerance, degrees. */
   toleranceDeg: number;
+  /**
+   * How many hook+compress rounds to encode. Omit for GROW_ROUNDS, which is the
+   * only value the pipeline should ship with.
+   *
+   * A DEBUG SCRUBBER, and the one setting here that is meant to produce a WRONG
+   * answer: capping the rounds below the fixpoint leaves the labelling
+   * half-grown, so the overlay can watch components coalesce. That truncation
+   * is not silent -- `grow.gate` leaves `growArgs` non-zero, which surfaces as
+   * the `growNotConverged` status bit, and `growRounds` reports what was
+   * actually spent. Connected components are a fixpoint, so anything at or
+   * above convergence is the same answer.
+   */
+  rounds?: number;
 }
 
 const GROW_GROUP0 = ['growUni', 'fx', 'fy', 'ux', 'uy', 'label', 'next', 'changed'] as const;
@@ -547,8 +560,13 @@ export function encodeGrowRound(ctx: Ctx): void {
   pass(ctx, 'grow.gate', p.growGate, [GROW_GROUP0, ['growArgs']], { kind: 'direct', x: 1 });
 }
 
-export function encodeGrow(ctx: Ctx, s: GrowSettings, rounds = GROW_ROUNDS): void {
+// The round count comes off the SETTINGS, not a third parameter. It used to be
+// both, and nothing ever passed the parameter -- which is exactly how the app's
+// `lsdCclSteps` slider spent months bound, persisted and pushed over the dev
+// bridge while reaching nothing at all.
+export function encodeGrow(ctx: Ctx, s: GrowSettings): void {
   encodeGrowInit(ctx, s);
+  const rounds = s.rounds ?? GROW_ROUNDS;
   for (let i = 0; i < rounds; i++) encodeGrowRound(ctx);
 }
 

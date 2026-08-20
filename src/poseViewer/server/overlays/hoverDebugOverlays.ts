@@ -2,10 +2,10 @@ import { type Camera } from '../../shared/camera/model.ts';
 import { activeCamera } from '../camera/store.ts';
 import { hsvToRgb } from '../pipeline/distortion.ts';
 import { flipDy, pipelineField } from './pipelineField.ts';
-import { joinSettings, recomputeFromLastCapture } from '../pipeline/axesReconstruction.ts';
+import { recomputeFromLastCapture } from '../pipeline/axesReconstruction.ts';
 import { updateDistortedPreview } from '../pipeline/preview.ts';
 import { globalState } from '../../shared/state.ts';
-import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLineJoinBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleRectifiedLinesBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
+import { canvas, gradientArrowGroup, levelLineArrowGroup, lsdCompositeGroup, throughCamCanvas, toggleCompositeLineFamiliesBtn, toggleGradientArrowBtn, toggleHideFieldBtn, toggleLevelLineArrowBtn, toggleLsdCompositeBtn, toggleLsdRawRegionsBtn, toggleLsdRejectedBtn, toggleLsdSegmentsBtn, toggleReconContamBtn, toggleTopGradientBtn, toggleRectifiedLinesBtn, toggleSampleLatticeBtn, toggleTrueCardinalOrientationBtn, toggleTrueContamBtn } from '../ui/dom.ts';
 import { computeThroughRect } from '../ui/layout.ts';
 import { persistConfig } from '../../shared/config.ts';
 import { updateContaminationOverlays } from './contaminationOverlays.ts';
@@ -329,29 +329,11 @@ toggleLsdRawRegionsBtn.addEventListener('click', () => {
   persistConfig();
   recomputeFromLastCapture(cam);
 });
-// ── THE ONE TOGGLE IN THIS FILE THAT MOVES THE POSE ──────────────────────
-//
-// Every neighbour flips a per-camera `show*` flag: the run is the same, only
-// what is drawn from it changes. This flips `joinSettings.kSigma`, which is a
-// PIPELINE input -- the recovered axes, height and decode all move when it is
-// pressed, and at wide-field poses they move enormously (see the join's own
-// measurement). It is here rather than beside the LSD sliders because what it
-// changes is exactly what the composite-lines view below draws.
-//
-// NOT PERSISTED, and not per camera. joinSettings has no config entry on
-// purpose while the join's verdict is open, so persistConfig() would have
-// nothing to write; the module default (currently ON) is what a reload restores.
-// That also means the button state is global, so refreshCameraPanel syncs it
-// from joinSettings rather than from a camera.
-//
-// recomputeFromLastCapture, not drawCompositeLines: the composites have to be
-// recomputed on the device, not recoloured.
-toggleLineJoinBtn.addEventListener('click', () => {
-  const cam = activeCamera(); if (!cam) return;
-  joinSettings.kSigma = joinSettings.kSigma > 0 ? 0 : 3;
-  toggleLineJoinBtn.classList.toggle('active', joinSettings.kSigma > 0);
-  recomputeFromLastCapture(cam);
-});
+// THE JOIN TOGGLE USED TO LIVE HERE, and it moved to ui/cameraPanel.ts to sit
+// beside the `joinKSigma` slider it now shares a setting with. It was the one
+// toggle in this file that moved the POSE rather than the view, and keeping the
+// button and the slider apart would mean each having to reach into the other to
+// stay in sync -- which this file cannot do, since cameraPanel imports it.
 toggleLsdCompositeBtn.addEventListener('click', () => {
   const cam = activeCamera(); if (!cam) return;
   cam.settings.showLsdComposite = !cam.settings.showLsdComposite;

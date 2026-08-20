@@ -113,11 +113,18 @@ export const CameraSettingsCommonSchema = Type.Object({
   // below lsdRhoNoiseThreshold to degrade to plain single-threshold
   // behavior. See pose/stages/lsd/regions.cpu.ts's growRegionsCCL.
   lsdRhoHighThreshold: Type.Number(),
-  // DEBUG SCRUBBER ONLY (0 = run to the fixpoint, the real algorithm): caps
-  // how many hook+compress rounds growRegionsCCL runs so the overlay can
-  // watch components coalesce. Unlike the lsdGrowSteps it replaces, this
-  // cannot change the converged answer -- connected components are a
-  // fixpoint, not an iteration budget -- only how far along you're looking.
+  // DEBUG SCRUBBER (0 = run to the fixpoint, the real algorithm): caps how
+  // many grow hook+compress rounds are encoded, so the overlay can watch
+  // components coalesce. Connected components are a fixpoint, not an iteration
+  // budget, so anything at or above convergence is the same answer -- but
+  // BELOW it this is genuinely pipeline-bearing, and the pose it produces is a
+  // half-grown one. Not silently: a truncated run raises the growNotConverged
+  // status bit and reports its own growRounds.
+  //
+  // IT REACHED NOTHING UNTIL 2026-08-20. It was bound, persisted, stored in
+  // fixtures and pushed over the dev bridge while poseSettingsFor never passed
+  // it on; encodeGrow took its own GROW_ROUNDS default. See pose.ts's
+  // GrowSettings.rounds.
   lsdCclSteps: Type.Number(),
   // epsilon -- accept a candidate rectangle iff NFA < this (LSD default 1:
   // expect <1 false detection per image)
@@ -136,15 +143,46 @@ export const CameraSettingsCommonSchema = Type.Object({
   // (output-changing) tuning knob: a floor on how much evidence a line
   // segment needs.
   lsdMinRegionSize: Type.Number(),
-  // The last survivor of the join walk's four parameters -- the other three
-  // (join steps, merge similarity, max travel) went with the walk itself.
-  //
   // NOT the same filter as lsdMinRegionSize, and the two are easy to confuse:
   // minRegionSize counts PIXELS in a connected component and runs BEFORE any
   // rectangle is fitted; this compares the FITTED rectangle's long-axis extent
-  // and runs after NFA acceptance, in compositesFromLsdRectangles. A fat
-  // 8-pixel blob passes the first and fails this one.
+  // and runs after NFA acceptance, in the lines stage. A fat 8-pixel blob
+  // passes the first and fails this one.
   lsdMinLengthPx: Type.Number(),
+
+  // ── S5c join: collinear segments -> composite lines ────────────────────
+  //
+  // The iterative reach-bounded corridor join (see pose.ts's JoinSettings for
+  // the derivation of every one of these, and pose.wgsl.ts's JOIN_GATE_WGSL
+  // for the gate itself). These used to be a module-level `joinSettings`
+  // object in axesReconstruction.ts, deliberately outside the config while the
+  // sweep was still deciding whether joining helps at all. It does -- at every
+  // scale -- so they are ordinary per-camera settings now.
+  //
+  // TWO KNOBS, ONE NUMBER: joinKSigma and joinEndpointNoisePx reach the shader
+  // only as their product (tol = kSigma * noise * sqrt(2)). The split is so
+  // each means something -- one a confidence level, one a noise model.
+  //
+  // joinKSigma 0 is the EXACT OFF: no pair can pass the gate, every line
+  // becomes its own singleton composite, and the pose is bit-for-bit the
+  // pre-join one. That identity is a standing test, not a nicety.
+  joinKSigma: Type.Number(),
+  joinEndpointNoisePx: Type.Number(),
+  // How far a segment's front may travel, as a multiple of its OWN length.
+  // Measured at 4; the derivation fixes the form, not the constant (290
+  // anchors at 1, 306 at 4, 289 unbounded). Do not "correct" it to 1.
+  joinReachFrac: Type.Number(),
+  // Merge rounds. 1 reproduces one-shot star clustering exactly; measured
+  // converged at 3 (r3 and r6 are byte-identical). Overshooting is safe.
+  joinRounds: Type.Number(),
+  // How far a member endpoint may sit off the finished composite before that
+  // member is dropped. Structurally cannot fire on a two-member cluster --
+  // the composite is built THROUGH those two endpoints.
+  joinMaxResidualPx: Type.Number(),
+  // Compare |dot| rather than dot on the vote normals, joining across a
+  // gradient polarity flip. Correct for a board of black and white cells,
+  // wrong for lines drawn as strokes -- and measured WORSE.
+  joinPolarityAbs: Type.Boolean(),
 
   // showLevelLineArrow: the gradient rotated -90deg (LSD's own level-line
   // convention, see pose/stages/lsd/levelLine.ts) -- was

@@ -204,7 +204,6 @@ export function refreshCameraPanel() {
   setBool('showRecoveredFloor', cam.settings.showRecoveredFloor); setNum('recoveredFloorOpacity', cam.settings.recoveredFloorOpacity);
   setBool('latticeBoundsProjection', cam.settings.latticeBoundsProjection);
   setNum('gridPeriodPhaseBinCount', cam.settings.gridPeriodPhaseBinCount);
-  setNum('gridPeriodPhaseGapLowerBound', cam.settings.gridPeriodPhaseGapLowerBound);
 
 
   const fieldViewId = 'fieldView' + cam.settings.fieldView[0].toUpperCase() + cam.settings.fieldView.slice(1);
@@ -470,23 +469,6 @@ bindSlider('gridPeriodPhaseBinCount', config.camera.common.gridPeriodPhaseBinCou
   drawGridPeriodPhasePlot(cam);
 }, (v) => v.toFixed(0));
 
-// PURELY VISUAL, and currently not even that -- see below. The
-// "feeds computeGridPeriodPhase (stage 7) directly" recompute that used to be
-// here was a full pipeline re-run on every drag of a slider that reaches no
-// stage at all: poseSettingsFor does not pass it, and GppSettings has no field
-// for it. It went with the old pipeline, whose host-side period search read it.
-//
-// Its own doc comment still describes a filter on gridPeriodPhaseOverlays.ts's
-// per-family median gaps, and that file does not read it either -- the plot is
-// an empty state awaiting the intermediate readback. So this is a knob with no
-// consumer, kept with the rest of that plot's shell rather than deleted
-// piecemeal. Whether the shell stays is one decision, not seven.
-bindSlider('gridPeriodPhaseGapLowerBound', config.camera.common.gridPeriodPhaseGapLowerBound, (v) => {
-  const cam = activeCamera(); if (!cam) return;
-  cam.settings.gridPeriodPhaseGapLowerBound = v;
-  drawGridPeriodPhasePlot(cam);
-  pushSettingsIfPhysical();
-}, (v) => v.toFixed(4));
 bindSlider('simNoise', config.camera.simulated.simNoise, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simNoise = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
 bindSlider('simBlur', config.camera.simulated.simBlur, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.simBlur = v; markCaptureDirty(cam); runAxesReconstruction(cam); } }, (v) => v.toFixed(0));
 bindSlider('captureSupersample', config.camera.simulated.captureSupersample, (v) => { const cam = activeCamera(); if (cam && isSimulated(cam)) { cam.settings.captureSupersample = v; resizeCaptureBuffers(cam); runAxesReconstruction(cam); } }, (v) => `${v.toFixed(0)}x`);

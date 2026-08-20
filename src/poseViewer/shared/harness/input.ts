@@ -54,7 +54,6 @@ export interface PipelineSettings {
   lsdNfaEpsilon: number; lsdNfaTestExponent: number;
   lsdMinLengthPx: number;
   horizFovDeg: number;
-  gridPeriodPhaseGapLowerBound: number;
   minGrazingCos: number;
 }
 

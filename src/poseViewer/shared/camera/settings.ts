@@ -202,12 +202,6 @@ export const CameraSettingsCommonSchema = Type.Object({
   // Higher = stricter (excludes more of the near-horizon view).
   minGrazingCos: Type.Number(),
   gridPeriodPhaseBinCount: Type.Number(),
-  // Below this, a red/blue neighbor gap (gridPeriodPhaseOverlays.ts's
-  // per-family median lines) is excluded from the median -- filters out the
-  // same near-duplicate-line noise gaps pose/stages/period/gridPeriodPhase.ts's own
-  // seed-period mode search is built to shrug off, which would otherwise
-  // drag a small-sample median toward ~0 instead of the true spacing.
-  gridPeriodPhaseGapLowerBound: Type.Number(),
   showCompositeLineFamilies: Type.Boolean(),
   showSampleLattice: Type.Boolean(),
   // The detected segments drawn in RECTIFIED space on the Projected-Cam rect --

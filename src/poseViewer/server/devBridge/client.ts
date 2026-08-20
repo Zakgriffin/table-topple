@@ -54,7 +54,7 @@ function buildCameraSettingsPayload(cam: PhysicalCamera) {
   const s = cam.settings;
   return {
     horizFovDeg: s.horizFovDeg,
-    gridPeriodPhaseGapLowerBound: s.gridPeriodPhaseGapLowerBound, minGrazingCos: s.minGrazingCos,
+    minGrazingCos: s.minGrazingCos,
     lsdToleranceDeg: s.lsdToleranceDeg, lsdRhoNoiseThreshold: s.lsdRhoNoiseThreshold,
     lsdRhoHighThreshold: s.lsdRhoHighThreshold, lsdCclSteps: s.lsdCclSteps,
     lsdMinRegionSize: s.lsdMinRegionSize,

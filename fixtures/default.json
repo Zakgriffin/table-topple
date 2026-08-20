@@ -60,7 +60,6 @@
         "topCirclesLineWidth": 1,
         "minGrazingCos": 0.1,
         "gridPeriodPhaseBinCount": 150,
-        "gridPeriodPhaseGapLowerBound": 0.005,
         "showCompositeLineFamilies": false,
         "showSampleLattice": true,
         "showRectifiedLines": true,

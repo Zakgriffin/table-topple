@@ -296,7 +296,7 @@ export interface CameraBase {
   // order -- recomputeFromLastCapture (pipeline/axesReconstruction.ts)
   // reads this instead of taking a fresh capture, so settings that only
   // affect stages downstream of capture (LSD tuning,
-  // gridPeriodPhaseGapLowerBound, minGrazingCos, forceCPU) can recompute without re-rendering/re-photographing.
+  // the join knobs, minGrazingCos, forceCPU) can recompute without re-rendering/re-photographing.
   // Deliberately a SEPARATE buffer from lastNoisedPreviewGray -- that one is
   // also written by the passive preview loop on its own throttled cycle
   // (see pipeline/preview.ts), which would otherwise risk this drifting

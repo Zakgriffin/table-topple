@@ -124,20 +124,23 @@ test('WITHOUT the declaration, an inspected buffer would be read back CLOBBERED'
   // mechanism deleted, which is the shape six earlier mutations in this rewrite
   // hid behind.
   //
-  // Measured, not chosen: at 480x640 `lines` (maxLines*16) dies at join.reduce
-  // -- gpp.classify reads `compLines` now, so `lines` dies one stage earlier
-  // than it used to -- and `samples` is born at gpp.classify, so the colouring
-  // hands the second the first's slot. Reading `lines` after the last stage
-  // would return samples' bytes: a wrong answer that looks like a detector
-  // fault, since both arrays are plausible-looking f32.
+  // Measured, not chosen: at 480x640 `lines` (maxLines*16) now dies at
+  // join.refit, and `compLines` is born at join.reduce, so the colouring hands
+  // the second the first's slot. Reading `lines` after the last stage would
+  // return compLines' bytes: a wrong answer that looks like a detector fault,
+  // since both arrays are plausible-looking f32 in the same layout.
   //
-  // The successor changed when the join landed (it was `colSamples`). That is
-  // this fixture working as intended -- it is pinned to a MEASUREMENT, so a
+  // The successor has changed three times -- `colSamples`, then `samples`, now
+  // `compLines` -- and every time it was a real liveness change. Most recently
+  // the iterative join stopped binding `lines` in join.reduce (the geometry
+  // moved to join.refit, and the gather works off clusterLine), which ended
+  // `lines`' live range one stage earlier and let compLines into its slot. That
+  // is this fixture working as intended: it is pinned to a MEASUREMENT, so a
   // liveness change has to be re-measured rather than silently absorbed.
   const plain = planPool(DIMS, { alias: true });
   const slot = plain.slots[plain.assignment.get('lines')!]!;
   const after = slot.occupants.slice(slot.occupants.indexOf('lines') + 1);
-  assert.deepEqual(after, ['samples'],
+  assert.deepEqual(after, ['compLines', 'colSamples'],
     'lines no longer aliases anything -- this fixture can no longer see the mechanism, pick another buffer');
 });
 

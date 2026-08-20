@@ -635,9 +635,10 @@ async function poseContextFor(camera: Camera, w: number, h: number): Promise<Pos
 // untouched, and the join still destroys the lattice below ~6 px/cell. Anything
 // read off this page from here on is the JOINED pose unless kSigma is put back.
 export const joinSettings = {
-  endpointNoisePx: 0.15,
+  endpointNoisePx: 0.5,
   kSigma: 3,
-  maxAngleDeg: 0.2,
+  reachFrac: 4,
+  rounds: 3,
   maxResidualPx: 2,
   polarityAbs: false,
 };

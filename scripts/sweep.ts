@@ -110,8 +110,9 @@ const renderLikeTheApp = (world: SimWorld, pose: SimPose, d: SimDims): Float64Ar
 // what makes the A/B one flag rather than two builds, and what makes the
 // plumbing testable independently of whether the idea works.
 const joinK = Number(val('--kSigma', '0'));
-const joinNoisePx = Number(val('--noisePx', '0.15'));
-const joinMaxDeg = Number(val('--maxAngle', '0.2'));
+const joinNoisePx = Number(val('--noisePx', '0.5'));
+const joinReach = Number(val('--reach', '4'));
+const joinRounds = Number(val('--rounds', '3'));
 const joinResidualPx = Number(val('--residualPx', '2'));
 const joinPolarityAbs = has('--absPolarity');
 
@@ -292,7 +293,8 @@ async function makePoseRunner() {
         vFovRad: vFovRadOf(d),
         endpointNoisePx: joinNoisePx,
         kSigma: joinK,
-        maxAngleDeg: joinMaxDeg,
+        reachFrac: joinReach,
+        rounds: joinRounds,
         maxResidualPx: joinResidualPx,
         polarityAbs: joinPolarityAbs,
       },
@@ -383,7 +385,7 @@ const renderProvenance = {
   supersample, simNoise, simBlur,
   levels: { dark: DARK_LEVEL, light: LIGHT_LEVEL, background: BACKGROUND },
   fixture: 'fixtures/default.json',
-  join: { kSigma: joinK, endpointNoisePx: joinNoisePx, maxAngleDeg: joinMaxDeg,
+  join: { kSigma: joinK, endpointNoisePx: joinNoisePx, reachFrac: joinReach, rounds: joinRounds,
     maxResidualPx: joinResidualPx, polarityAbs: joinPolarityAbs },
 };
 console.error(summarize(rows, world, `src/pose${alias ? ' (gpu, POOLED)' : ' (gpu)'} @ ${dims.w}x${dims.h}`));
@@ -391,7 +393,7 @@ console.error('');
 console.error(`   render provenance  ${configHashOf(renderProvenance)}   (${CONFIG_PATH})`);
 console.error(`     board ${renderProvenance.board} order ${renderProvenance.order}, ${renderProvenance.res} @ ${dims.horizFovDeg}deg`);
 console.error(`     supersample ${supersample}, noise ${simNoise}, blur ${simBlur}, levels ${DARK_LEVEL}/${LIGHT_LEVEL} bg ${BACKGROUND}`);
-console.error(`     join ${joinK === 0 ? 'OFF' : `kSigma ${joinK} maxAngle ${joinMaxDeg} residual ${joinResidualPx}`}`);
+console.error(`     join ${joinK === 0 ? 'OFF' : `kSigma ${joinK} reach ${joinReach} rounds ${joinRounds} residual ${joinResidualPx}`}`);
 console.error('');
 console.error(gpuBreakdown());
 console.error('');

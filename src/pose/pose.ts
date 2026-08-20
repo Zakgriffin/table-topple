@@ -6,7 +6,8 @@ import {
   DECODE_BINTHRESH_PARTIALS_WGSL, DECODE_BINTHRESH_REDUCE_WGSL, DECODE_LAYOUT_WGSL,
   DECODE_BUILD_WGSL, DECODE_TALLY_WGSL, DECODE_ARGMAX_WGSL, DECODE_CORRECTNESS_WGSL,
   FINISH_WGSL,
-  GRADIENT_WGSL, GROW_WGSL, JOIN_ANCHOR_WGSL, JOIN_ATTACH_WGSL, JOIN_REDUCE_WGSL,
+  GRADIENT_WGSL, GROW_WGSL, JOIN_ANCHOR_WGSL, JOIN_ATTACH_WGSL, JOIN_FLATTEN_WGSL,
+  JOIN_INIT_WGSL, JOIN_REDUCE_WGSL, JOIN_REFIT_WGSL,
   LINES_EMIT_WGSL, LINES_FLAG_WGSL, LSD_FIT_WGSL,
   SCAN_WGSL, VOTES_WGSL,
 } from './pose.wgsl.ts';
@@ -182,7 +183,8 @@ interface Programs {
   collectScatter: Program; collectFinalize: Program;
   lsdFit: Program;
   linesFlag: Program; linesEmit: Program; votesCast: Program;
-  joinAnchor: Program; joinAttach: Program; joinReduce: Program;
+  joinInit: Program; joinRefit: Program; joinAnchor: Program;
+  joinAttach: Program; joinFlatten: Program; joinReduce: Program;
   fitAta: Program; fitEigen: Program;
   gppClassify: Program; gppCompact: Program; gppExtent: Program;
   gppSweep: Program; gppPeaks: Program; gppDistinct: Program; gppPolish: Program;
@@ -321,10 +323,16 @@ function programs(device: GPUDevice): Programs {
     votesCast: simpleProgram(device, 'votes.cast', VOTES_WGSL,
       [UNI, RO, RO, RW, RW]),
 
+    joinInit: simpleProgram(device, 'join.init', JOIN_INIT_WGSL,
+      [UNI, RW]),
+    joinRefit: simpleProgram(device, 'join.refit', JOIN_REFIT_WGSL,
+      [UNI, RO, RO, RO, RW, RW]),
     joinAnchor: simpleProgram(device, 'join.anchor', JOIN_ANCHOR_WGSL,
       [UNI, RO, RO, RO, RW]),
     joinAttach: simpleProgram(device, 'join.attach', JOIN_ATTACH_WGSL,
-      [UNI, RO, RO, RO, RO, RW, RW]),
+      [UNI, RO, RO, RO, RO, RW]),
+    joinFlatten: simpleProgram(device, 'join.flatten', JOIN_FLATTEN_WGSL,
+      [UNI, RO, RO, RW, RW]),
     joinReduce: simpleProgram(device, 'join.reduce', JOIN_REDUCE_WGSL,
       [UNI, RO, RO, RO, RO, RW, RW, RW]),
 
@@ -787,10 +795,24 @@ export interface JoinSettings {
    * Position noise on a detected segment ENDPOINT, in pixels. Not the pixel
    * noise of the image: an LSD endpoint is the extreme of a least-squares fit
    * over a whole region, so it is much better than one sample.
+   *
+   * With the corridor gate this is measured in the same units it is used in --
+   * the corridor's half-width is kSigma * endpointNoisePx * sqrt(2) pixels,
+   * straight off the error-propagation bound in JOIN_GATE_WGSL. It used to be
+   * converted to radians first and compared against a squared angle.
+   *
+   * 0.15 FOR MONTHS, AND THAT WAS AN UNDERESTIMATE. The corridor sweep put the
+   * best half-width at ~2.1px, which under 0.15 would have meant a 10-sigma
+   * confidence level -- not a confidence level at all, but a model saying the
+   * noise is about 3x what it was declared to be. Re-encoded as 0.5 at 3 sigma:
+   * identical arithmetic, knobs that mean what they say. The angular gate could
+   * not have surfaced this, because there this number was scaled by fov and
+   * divided by an arc before anyone saw it in pixels.
    */
   endpointNoisePx: number;
   /**
-   * How many sigma of angular disagreement still counts as the same line.
+   * How many sigma of LATERAL disagreement still counts as the same line: the
+   * corridor's half-width is this many times the endpoint-noise bound.
    *
    * A confidence level rather than a tuning constant -- and **zero disables
    * joining entirely**, since no pair can then pass the gate and every line
@@ -802,21 +824,27 @@ export interface JoinSettings {
    */
   kSigma: number;
   /**
-   * Hard ceiling on the angle between two joined normals, degrees.
+   * How far a segment's front may travel, as a multiple of the segment's own
+   * length. Two segments may join when their fronts meet, i.e. when the gap
+   * between them is at most `reachFrac * (Li + Lj)`.
    *
-   * Bounds the damage the uncertainty term cannot: see JOIN_GATE_WGSL. Also
-   * bounds a star's total spread absolutely, at twice this.
+   * THE SCALE-FREE CORE OF THE GATE, and 1.0 is the principled value rather
+   * than a tuned one: at exactly one own-length of travel, a front's lateral
+   * uncertainty equals endpointNoisePx * sqrt(2) regardless of how long the
+   * segment is. See JOIN_GATE_WGSL for the derivation.
    *
-   * THIS IS THE SCALE GATE, in disguise. At 65 degrees over 480px a pixel of
-   * line separation is 0.135 degrees, so this converts directly to "how many
-   * pixels apart two lines may be and still merge" -- and adjacent grid lines
-   * are exactly `px per cell` apart. 0.5 permitted 3.7px and destroyed the
-   * lattice wherever a cell was narrower than that; 0.2 permits 1.5px, which is
-   * past the bottom of the sweep, while still admitting every real join at the
-   * ~12 px/cell operating point (where neighbours are 1.62 degrees apart).
-   * Measured across the ladder 0.5 / 0.3 / 0.2 / 0.12; see the join memory.
+   * MEASURED AT 4, NOT AT THE 1 THE DERIVATION SUGGESTS. The argument fixes the
+   * FORM of the constraint -- reach proportional to own length -- but not the
+   * constant, and the sweep is unambiguous: anchor-exact runs 290 at reach 1,
+   * 306 at reach 4, and back to 289 with the reach bound effectively removed
+   * (reach 1000). So the bound is genuinely load-bearing, just looser than the
+   * one-sigma-of-one-own-length reading of it. Do not "correct" this to 1 on the
+   * strength of the derivation; the derivation does not determine it.
+   *
+   * REPLACED `maxAngleDeg`, which was the scale gate in disguise and denominated
+   * in degrees while the danger is denominated in cells.
    */
-  maxAngleDeg: number;
+  reachFrac: number;
   /**
    * How far, in pixels, a member endpoint may sit off the finished composite
    * before that member is dropped from it.
@@ -826,6 +854,19 @@ export interface JoinSettings {
    * and collectively a diagonal.
    */
   maxResidualPx: number;
+  /**
+   * How many merge rounds to encode. Each is anchor -> attach -> flatten ->
+   * refit, and each recomputes the geometry the next one gates on -- so a
+   * cluster's REACH grows only as fast as the length it has actually assembled.
+   * Two 20px fragments 30px apart become a 70px composite, and a 70px composite
+   * legitimately reaches further than either fragment did.
+   *
+   * **1 reproduces the one-shot star clustering exactly**, which is what makes
+   * the iteration testable as a superset of the thing it generalises rather than
+   * as a rewrite. Overshooting is safe: a converged round is a no-op, costing
+   * four dispatches and changing nothing.
+   */
+  rounds: number;
   /**
    * Compare |dot| rather than dot, so two segments join across a gradient
    * POLARITY flip. See JOIN_GATE_WGSL: correct for a board of black and white
@@ -846,38 +887,60 @@ export function encodeJoin(ctx: Ctx, s: JoinSettings): void {
   const { w, h, maxLines } = ctx.dims;
   const p = programs(ctx.device);
 
-  // An endpoint's ANGULAR position noise. Radians per pixel is the vertical fov
-  // over the image height -- the small-angle average across the frame rather
-  // than the exact centre value, which is 2*tanHalf/h and varies with ndcV.
-  // The difference is absorbed by kSigma, which is what is actually swept.
-  const eps = s.endpointNoisePx * (s.vFovRad / h);
-  // (k*eps)^2. `arc` is a SINE and therefore dimensionless, so dividing a
-  // radian noise by it leaves radians and the comparison against a squared
-  // angle is dimensionally sound.
-  const gate = (s.kSigma * eps) ** 2;
-  const maxRad = (s.maxAngleDeg * Math.PI) / 180;
-  // The squared-angle form of the ceiling, so the shader compares against
-  // 2*(1-dot) without ever taking an acos.
-  const maxSq = 2 * (1 - Math.cos(maxRad));
+  // The corridor's half-width, IN PIXELS -- no projection anywhere. A front that
+  // travels its own segment's length arrives with lateral error
+  // endpointNoisePx*sqrt(2) whatever that length is (JOIN_GATE_WGSL derives it),
+  // so this is that bound at a confidence level. kSigma 0 gives 0, which no
+  // perpendicular distance can be under, which is the exact-off switch.
+  const tol = s.kSigma * s.endpointNoisePx * Math.SQRT2;
 
   writeUniform(ctx, 'joinUni', (dv) => {
     dv.setUint32(0, maxLines, true);
     dv.setUint32(4, w, true);
     dv.setUint32(8, h, true);
-    dv.setFloat32(16, gate, true);
+    dv.setFloat32(16, tol, true);
     dv.setFloat32(20, Math.tan(s.vFovRad / 2), true);
     dv.setFloat32(24, w / h, true);
-    dv.setFloat32(28, maxSq, true);
+    dv.setFloat32(28, s.reachFrac, true);
     dv.setFloat32(32, s.maxResidualPx, true);
     dv.setFloat32(36, s.polarityAbs ? 1 : 0, true);
   });
 
-  pass(ctx, 'join.anchor', p.joinAnchor,
-    [['joinUni', 'votes', 'lines', 'lineCount', 'anchorFlag']],
+  // ── THE ROUND LOOP ───────────────────────────────────────────────────────
+  //
+  //   init -> refit -> R x [ anchor -> attach -> flatten -> refit ]
+  //
+  // `refit` sits at BOTH ends deliberately: it has to precede the first anchor
+  // (which gates on cluster geometry) and follow the last flatten (or the
+  // compaction would publish the second-to-last round's composites). The extra
+  // pass is one O(N^2) dispatch, ~0.12ms.
+  //
+  // A CONVERGED ROUND IS A NO-OP, so overshooting `rounds` costs time and
+  // nothing else: with no pair left inside the corridor every cluster is its own
+  // anchor, parent is the identity, flatten rewrites the pointers it already
+  // had, and refit recomputes the same geometry. That is the same early-out
+  // shape grow's rounds have, minus the indirect-args trick -- worth having here
+  // too if the round count ever grows past a handful.
+  pass(ctx, 'join.init', p.joinInit,
+    [['joinUni', 'anchorOf']],
     { kind: 'direct', x: groups1D(maxLines) });
-  pass(ctx, 'join.attach', p.joinAttach,
-    [['joinUni', 'votes', 'lines', 'lineCount', 'anchorFlag', 'anchorOf', 'joinFlag']],
+  pass(ctx, 'join.refit', p.joinRefit,
+    [['joinUni', 'lines', 'lineCount', 'anchorOf', 'clusterLine', 'clusterVote']],
     { kind: 'direct', x: groups1D(maxLines) });
+  for (let r = 0; r < Math.max(1, s.rounds); r++) {
+    pass(ctx, 'join.anchor', p.joinAnchor,
+      [['joinUni', 'clusterVote', 'clusterLine', 'lineCount', 'anchorFlag']],
+      { kind: 'direct', x: groups1D(maxLines) });
+    pass(ctx, 'join.attach', p.joinAttach,
+      [['joinUni', 'clusterVote', 'clusterLine', 'lineCount', 'anchorFlag', 'parent']],
+      { kind: 'direct', x: groups1D(maxLines) });
+    pass(ctx, 'join.flatten', p.joinFlatten,
+      [['joinUni', 'lineCount', 'parent', 'anchorOf', 'joinFlag']],
+      { kind: 'direct', x: groups1D(maxLines) });
+    pass(ctx, 'join.refit', p.joinRefit,
+      [['joinUni', 'lines', 'lineCount', 'anchorOf', 'clusterLine', 'clusterVote']],
+      { kind: 'direct', x: groups1D(maxLines) });
+  }
 
   encodeScan(ctx, {
     ids: { blocks: 'join.scan', spine: 'join.spine', add: 'join.add' },
@@ -887,7 +950,7 @@ export function encodeJoin(ctx: Ctx, s: JoinSettings): void {
   });
 
   pass(ctx, 'join.reduce', p.joinReduce,
-    [['joinUni', 'lines', 'lineCount', 'anchorOf', 'joinScan', 'compLines', 'compVotes', 'compMaxWeight']],
+    [['joinUni', 'joinFlag', 'joinScan', 'clusterLine', 'clusterVote', 'compLines', 'compVotes', 'compMaxWeight']],
     { kind: 'direct', x: groups1D(maxLines) });
 }
 

@@ -103,7 +103,7 @@ function poseSettingsFor(aspect: number): PoseSettings {
     // pose is bit-for-bit the pre-join one. The three knobs have no entry in
     // pose-viewer.config.json yet; see scripts/sweep.ts, which drives them from
     // the command line while they are being measured.
-    join: { vFovRad, endpointNoisePx: 0.15, kSigma: 0, maxAngleDeg: 0.2, maxResidualPx: 2, polarityAbs: false },
+    join: { vFovRad, endpointNoisePx: 0.5, kSigma: 0, reachFrac: 4, rounds: 3, maxResidualPx: 2, polarityAbs: false },
     gpp: { vFovRad, cellPitch: CELL_PITCH, minGrazingCos: p.minGrazingCos },
     layout: { vFovRad, cellPitch: CELL_PITCH, minGrazingCos: p.minGrazingCos },
   };

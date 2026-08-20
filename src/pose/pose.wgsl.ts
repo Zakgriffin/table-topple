@@ -969,330 +969,239 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
 // ── S5c join: collinear segments -> one composite line ────────────────────
 //
-// ── THE GATE, which is three clauses and no transcendentals ──
+// ── THE GATE IS A CORRIDOR, NOT AN ANGLE ──
+//
+// A segment may only join a partner its own FRONT can reach, and a front
+// travels its segment's own length. That single rule is what makes this stage
+// scale-free, and the reason is one line of error propagation:
+//
+//   a segment of length L with endpoint noise eps has direction uncertainty
+//   dTheta ~ eps*sqrt(2)/L, so extrapolating a distance R past its end lands
+//   with lateral error R*dTheta = R*eps*sqrt(2)/L -- and at R = L that is
+//   eps*sqrt(2), INDEPENDENT OF L.
+//
+// A front that runs its own length arrives with the same positional uncertainty
+// whether it came from a 15px fragment or a 300px line. So the reach rule is not
+// a heuristic about trusting long segments more; it is the exact normalization
+// that makes every segment equally reliable at the moment two fronts meet. Two
+// fronts meet when the gap is at most Li + Lj, which is symmetric in (i, j) --
+// and the anchor pass depends on that symmetry.
+//
+// ── WHAT THIS REPLACED, AND WHY IT HAD TO GO ──
+//
+// The gate used to bound the ANGLE between the two votes and say nothing about
+// the gap. The lateral error such a test tolerates is (angle) x (gap), so it
+// GROWS WITHOUT LIMIT as segments get further apart: a direction measured over
+// 20px was being extrapolated across 300px. That is the bleeding mechanism
+// stated exactly -- fragments merging onto the next grid line over.
+//
+// maxAngleDeg 0.5 was papering over it and was itself the whole scale gate in
+// disguise: at 65 degrees over 480px a pixel of separation is 0.135 degrees, so
+// 0.5 permitted merges across lines 3.7px apart, and the lattice was destroyed
+// wherever a cell was narrower than that. Tightening to 0.2 worked (measured:
+// height p90 29.4% -> 4.7%) but it is a blunt instrument -- a fixed angle is
+// simultaneously far too loose for a 20px segment, whose own direction precision
+// is ~0.6 degrees, and needlessly tight for a 200px one at ~0.06. It bought the
+// far end by forbidding short segments to join at all.
+//
+// The corridor has no such trade. Short segments join NEARBY partners, where
+// their poor direction cannot hurt; long segments reach far, where they have
+// earned it. And the gate no longer knows anything about the camera: gaps and
+// perpendicular offsets, both in pixels, both read straight off `lines`. There
+// is no fov, no tanHalf, no arc-as-sine convention and no squared angle left in
+// it -- which is what makes the degrees-versus-cells unit error that destroyed
+// the lattice for months structurally impossible to reintroduce.
+//
+// ── THE FOUR CLAUSES ──
 //
 // 1. POLARITY, and it is SIGNED rather than abs(). `theta` is disambiguated
 //    over the full 360 degrees by the region's own mean level-line direction
 //    (see LSD_FIT_WGSL), so it carries GRADIENT POLARITY. Two fragments of one
-//    edge share a polarity, share a theta, get their endpoints written in the
-//    same order by lines.emit, and so agree in sign already -- no abs is needed
-//    for a legitimate join. The two edges of ONE DRAWN STROKE have opposite
-//    polarity, theta differing by pi, endpoints swapped, and therefore
-//    ANTIPARALLEL normals. A 3px-wide grid line puts those two edges ~0.2
-//    degrees apart in normal space, under any sensible tolerance, and abs()
-//    would merge them into a composite spanning a stroke. Signed disposes of
-//    that structurally rather than by validation.
+//    edge share a polarity and so agree in sign already -- no abs is needed for
+//    a legitimate join. The two edges of ONE DRAWN STROKE have opposite
+//    polarity, theta differing by pi, and therefore ANTIPARALLEL normals, which
+//    abs() would merge into a composite spanning a stroke. Signed disposes of
+//    that structurally rather than by validation. This is the one clause still
+//    read off the vote rather than the segment, because polarity is the one
+//    thing pixel geometry does not carry.
 //
-// 2. ANGULAR AGREEMENT, SCALED BY EACH SEGMENT'S OWN UNCERTAINTY. A vote's
-//    normal has angular error ~ endpointNoise/arc, so its variance goes like
-//    1/arc^2. The test is the squared angle against the summed variances:
+// 2. DISJOINTNESS. Two fragments of a single occluded line occupy disjoint
+//    stretches of it -- that is what being fragments means. Two adjacent
+//    parallel grid lines run alongside each other and overlap along their whole
+//    length. Strict: touching passes, any overlap fails.
 //
-//        2*(1 - dot) < k^2 * eps^2 * (1/arc_i^2 + 1/arc_j^2)
+// 3. REACH. gap <= reachFrac * (Li + Lj) -- the two fronts must actually meet.
 //
-//    2*(1-dot) is the squared angle to second order, so nothing here computes
-//    an angle. A FIXED tolerance would either over-join the 3px fragments the
-//    minLengthPx floor admits or under-join the long segments that carry the
-//    information; this tightens exactly where the evidence is good. `k` is a
-//    confidence level, not a tuning constant.
+// 4. THE CORRIDOR. All FOUR endpoint-to-other-line perpendicular distances
+//    within tol. Requiring both of j's endpoints near i's infinite line is also
+//    an angular test, but one automatically scaled by j's own length: a long j
+//    must be very parallel, a short j need not be. That is exactly the right
+//    behaviour and it falls out for free, which is why there is no separate
+//    angular clause any more.
 //
-// 3. (NOT YET HERE.) Interval disjointness -- real joins are fragments of one
-//    occluded line and do not overlap along it -- is the second axis of
-//    evidence, and it lands with the composite residual check.
-//
-// ── WHY POSITION IS ALREADY IN THE TEST ──
-//
-// `n = r1 x r2` is the cross product of two POINTS, which is the homogeneous
-// coordinate of the LINE THROUGH THEM: two numbers, matching the two degrees of
-// freedom a 2D line has, encoding direction AND offset together. Two parallel
-// but offset lines lie in different planes through the camera centre and so
-// have different normals. The angle between two such normals is exactly the
-// angle the CAMERA SUBTENDS between the lines -- about 0.07 degrees per pixel
-// of separation at this fov -- so adjacent grid lines 40px apart sit 5.5
-// degrees apart, an order of magnitude outside any tolerance here. The test
-// degrades only when two lines are a pixel or two apart in the image, which is
-// where they are genuinely indistinguishable.
+// `tol` IS DERIVED, NOT TUNED. It is kSigma * endpointNoisePx * sqrt(2), i.e.
+// the eps*sqrt(2) bound above at a confidence level -- so the corridor's width
+// is the arithmetic, and kSigma stays what it always was, a confidence rather
+// than a tuning constant. **kSigma = 0 gives tol = 0**, no pair can pass, every
+// line becomes its own singleton composite, and the pre-join pose is reproduced
+// exactly. That is the same disable this stage has always had, on the same knob.
 
 const JOIN_GATE_WGSL = /* wgsl */ `
 struct U {
   maxLines: u32, w: u32, h: u32, pad0: u32,
-  gate: f32, tanHalf: f32, aspect: f32, maxSq: f32,
+  tol: f32, tanHalf: f32, aspect: f32, reachFrac: f32,
   maxResidualPx: f32, polarityAbs: f32, pad1: f32, pad2: f32,
 }
 @group(0) @binding(0) var<uniform> u: U;
 
-// vi and vj are (n.xyz unit, arc). Both arcs are > 0 at every call site.
+// Signed separation along the LONGER segment's direction. Positive is the gap
+// between two disjoint segments; zero or negative means they overlap.
 //
-// maxSq is an ABSOLUTE ceiling on the angle, and it is not belt-and-braces.
-// The uncertainty term is a ratio, so a 3px fragment -- which minLengthPx
-// admits by default -- has a normal so poor that its own gate opens to tens of
-// degrees. That is statistically honest and operationally fatal here: the
-// composite is built from EXTREME ENDPOINTS, so a single member attached at a
-// large angle drags an endpoint far off the true line and corrupts the whole
-// cluster. The ceiling is what makes the short-segment case degrade to "no
-// join" instead of "wrong join".
+// Projected onto the longer one so the result is symmetric in (i, j) -- the
+// anchor pass needs that for its guarantee that no two anchors are within
+// tolerance of one another.
 //
-// So the two clauses do different jobs, and both are needed: the uncertainty
-// term TIGHTENS the test for long, well-determined pairs below the ceiling,
-// while the ceiling CLAMPS the short ones that would otherwise roam.
-// CLAUSE 3: the two segments must be DISJOINT along their shared direction.
-//
-// This is the clause the angular gate cannot express, and the one that is
-// SCALE-FREE. Two fragments of a single occluded line occupy disjoint stretches
-// of it -- that is what being fragments means. Two adjacent parallel grid lines
-// run alongside each other and overlap along their whole length. No fixed angle
-// separates those two populations, because the safe angle is a function of
-// pixels-per-cell -- which is not known until after the fit this stage feeds.
-// Disjointness is, and it needs nothing the segments do not already carry.
-//
-// ── STRICT, AND IT USED TO BE A FRACTION ──
-//
-// This was "overlap < maxOverlapFrac * shorter", a sixth tunable defaulting to
-// 0.25. Removed rather than retuned, for three reasons. The stated purpose was
-// absorbing endpoint noise near the touching case, but a FRACTION OF THE SHORTER
-// SEGMENT is the wrong form for that -- noise is a fixed pixel quantity, and the
-// fraction was most permissive (25px on a 100px pair) exactly where it was least
-// needed. It also served a second, different argument in the same knob -- "these
-// two run alongside each other" -- which has a different natural scale. And it
-// never earned its place empirically: it was built against the hypothesis that
-// the 3-9 px/cell regression (350/405 -> 321/405 under the angular ceiling
-// alone) was an overlap problem, and it moved that number to 322.
-//
-// Touching still passes: "overlap <= 0" covers the zero-gap case, which is the
-// one a real fragmentation produces.
-//
-// Projected onto the LONGER segment's direction, so the test is symmetric in
-// (i, j) -- the anchor pass depends on that symmetry for its guarantee that no
-// two anchors are within tolerance of one another.
-//
-// A short segment lying WHOLLY INSIDE a long one overlaps by its whole length
-// and is refused. That is the conservative answer and the right one: it is a
-// duplicate detection of a line already represented, so declining costs a
-// little redundancy in the votes and risks nothing.
-fn disjoint(si: vec4<f32>, sj: vec4<f32>) -> bool {
-  let di = si.zw - si.xy;
-  let dj = sj.zw - sj.xy;
-  let li = length(di);
-  let lj = length(dj);
+// A short segment lying WHOLLY INSIDE a long one returns a negative gap and is
+// refused. That is the conservative answer and the right one: it is a duplicate
+// detection of a line already represented, so declining costs a little
+// redundancy in the votes and risks nothing.
+fn gapAlong(si: vec4<f32>, sj: vec4<f32>) -> f32 {
+  let li = length(si.zw - si.xy);
+  let lj = length(sj.zw - sj.xy);
   var a = si; var b = sj; var L = li;
   if (lj > li) { a = sj; b = si; L = lj; }
-  if (L < 1e-12) { return true; }
+  if (L < 1e-12) { return 0.0; }
   let dir = (a.zw - a.xy) / L;
   let t1 = dot(b.xy - a.xy, dir);
   let t2 = dot(b.zw - a.xy, dir);
-  let b0 = min(t1, t2);
-  let b1 = max(t1, t2);
-  let overlap = min(L, b1) - max(0.0, b0);
-  // Disjoint, or merely touching: the case joining exists for.
-  return overlap <= 0.0;
+  // a spans [0, L]; b spans [b0, b1]. Beyond the far end, before the near end,
+  // or overlapping -- max picks whichever, and is <= 0 exactly when they overlap.
+  return max(min(t1, t2) - L, -max(t1, t2));
 }
 
-// ── CLAUSE 1: polarity, and whether it should be a constraint at all ──
-//
-// n and -n are THE SAME INFINITE LINE: a homogeneous line coordinate is defined
-// up to scale, sign included. So requiring matching signs adds a PHOTOMETRIC
-// condition on top of the geometric one -- the two segments must also be dark
-// on the same side.
-//
-// Whether that is wanted depends on the board. For a line DRAWN as a stroke,
-// its two edges have opposite polarity, and signed comparison keeps them apart
-// for free. But this board is black and white CELLS, so a grid line is a
-// boundary whose dark side ALTERNATES along its length with the pattern -- and
-// signed comparison then refuses to join fragments of one line for a reason
-// that has nothing to do with geometry.
-//
-// polarityAbs = 1 compares |dot| and joins across a polarity flip.
-//
-// ── THE SCALE PROBLEM, AND ONE FALSIFIED ATTEMPT AT IT ──
-//
-// maxSq is fixed in DEGREES while the danger is fixed in CELLS. At this fov a
-// pixel of line separation is 65/480 = 0.135 degrees, so maxAngleDeg 0.5 permits
-// merges across lines up to ~3.7px apart. That is safe while a cell is wider
-// than 3.7px and structurally unsafe below, which is where the measured cliff
-// sits (helps to ~9 px/cell, destroys the lattice below ~6). No fixed angle
-// serves both ends, because the safe angle IS a function of pixels-per-cell.
-//
-// A DERIVED-SCALE CLAUSE WAS BUILT AND REMOVED. The idea: two near-parallel
-// segments that OVERLAP along their shared direction cannot be fragments of one
-// line, so the angle between such a pair samples the gap between neighbouring
-// grid lines -- giving a per-segment scale before the fit, with no period search.
-// A join.spacing pass computed it (second-smallest qualifying gap, to tolerate
-// a duplicate detection) and the gate took a fraction of it.
-//
-// IT DOES NOT MEASURE WHAT IT CLAIMS. Read back over the sweep's own heights,
-// with the true pitch running 37.7 -> 3.3 px/cell:
-//
-//   - the angle form never sees the adjacent line at all. Excluding pairs that
-//     are statistically indistinguishable also excludes the neighbours, because
-//     the noise floor for a 20px segment is ~1.8 degrees while adjacent lines at
-//     3.3 px/cell are 0.45 degrees apart. Measured p10 rose 3.5 -> 8.8 degrees as
-//     the true spacing FELL, which is the signature of a floor, not a spacing.
-//   - a perpendicular-offset form, immune to that floor, is flat: the nearest
-//     near-parallel overlapping neighbour sits at 8-10px (p10) at EVERY height,
-//     against a truth spanning 37.7 down to 3.3.
-//   - the pooled offset histogram has no peak at the cell pitch at any parallel
-//     window from 5 to 45 degrees.
-//
-// The detected-segment population simply does not carry a cell-spacing signal:
-// LSD emits several near-parallel detections per edge, and their scatter swamps
-// the board's own periodicity. Do not rebuild this from the votes. The scale has
-// to come from something that actually measures the period -- decode.layout's
-// cellPitch and distance, on a first pass -- or not at all.
-fn gateOk(vi: vec4<f32>, vj: vec4<f32>, si: vec4<f32>, sj: vec4<f32>, u_gate: f32, maxSq: f32, polarityAbs: f32) -> bool {
+// The larger of the two perpendicular distances from p1/p2 to the INFINITE line
+// through segment s. A degenerate s has no line, so nothing may be near it.
+fn maxPerp(s: vec4<f32>, p1: vec2<f32>, p2: vec2<f32>) -> f32 {
+  let d = s.zw - s.xy;
+  let L = length(d);
+  if (L < 1e-12) { return 1e30; }
+  let nrm = vec2<f32>(-d.y, d.x) / L;
+  return max(abs(dot(p1 - s.xy, nrm)), abs(dot(p2 - s.xy, nrm)));
+}
+
+fn gateOk(vi: vec4<f32>, vj: vec4<f32>, si: vec4<f32>, sj: vec4<f32>, tol: f32, reachFrac: f32, polarityAbs: f32) -> bool {
   var d = dot(vi.xyz, vj.xyz);
   if (polarityAbs > 0.5) { d = abs(d); }
   if (d <= 0.0) { return false; }
-  if (!disjoint(si, sj)) { return false; }
-  // CLAMPED AT ZERO, and it is not defensive. For two nearly identical normals
-  // d rounds to slightly above 1.0, so 2*(1-d) comes out a small NEGATIVE
-  // number -- and a negative left-hand side is below every non-negative
-  // threshold, so such a pair would join no matter how tight the gate. That
-  // made kSigma = 0 fail to disable joining, which is exactly what the
-  // reproduce-the-baseline check caught: a squared angle cannot be negative,
-  // and pretending otherwise inverted the test at its most sensitive point.
-  let sq = max(0.0, 2.0 * (1.0 - d));
-  if (sq > maxSq) { return false; }
-  return sq < u_gate * (1.0 / (vi.w * vi.w) + 1.0 / (vj.w * vj.w));
+
+  let li = length(si.zw - si.xy);
+  let lj = length(sj.zw - sj.xy);
+  if (li < 1e-12 || lj < 1e-12) { return false; }
+
+  let gap = gapAlong(si, sj);
+  if (gap < 0.0) { return false; }
+  if (gap > reachFrac * (li + lj)) { return false; }
+
+  // BOTH directions, or the test is not symmetric: j's endpoints may sit on i's
+  // line while i's stray off j's whenever the two differ in length.
+  //
+  // STRICTLY INSIDE, and that is not a style choice. A perpendicular distance is
+  // non-negative, so rejecting on ">= tol" is what makes tol = 0 admit NOTHING.
+  // Rejecting on "> tol" instead leaves a hole: a pair of exactly collinear
+  // segments has distance 0.0, and 0.0 > 0.0 is false, so they merge however
+  // tightly the gate is shut. Exactly collinear is not
+  // exotic here: two fragments of one axis-aligned grid line share a y to the
+  // last bit. This is the second time this stage has had a disable that did not
+  // disable -- the first was 2*(1-dot) going negative for near-identical normals
+  // -- and both were caught by the same check, that kSigma 0 must reproduce the
+  // pre-join pose. Keep that check.
+  if (maxPerp(si, sj.xy, sj.zw) >= tol) { return false; }
+  return maxPerp(sj, si.xy, si.zw) < tol;
 }
 `;
 
-// ── join.anchor: am I a local maximum? ────────────────────────────────────
+// ── THE ROUND STRUCTURE: reach has to be EARNED ───────────────────────────
 //
-// Independent per segment, which is the whole reason this parallelises: no
-// element needs to know anything about the partition, only about its own
-// neighbourhood. That is the same trick that parallelises greedy NMS and
-// Luby's maximal independent set.
+// One shot of anchor-then-attach can only ever merge segments that were already
+// within reach of each other AS SEGMENTS. But two 20px fragments 30px apart are
+// a 70px composite once joined, and a 70px composite legitimately reaches
+// further than either fragment did. So the clustering iterates, and each round
+// recomputes the geometry it gates on:
 //
-// The lexicographic (arc, index) tiebreak is LOAD-BEARING. With a plain `>`,
-// two mutual neighbours of exactly equal arc would BOTH declare anchorhood --
-// and equal arcs are not exotic, two fragments of one edge at the same length
-// produce them. Comparing the index second makes the order total.
+//     init -> refit -> R x [ anchor -> attach -> flatten -> refit ] -> scan -> reduce
 //
-// A consequence worth naming: no two anchors are ever within tolerance of each
-// other, since whichever ranked lower disqualified itself. So the anchor set is
-// a PACKING on the sphere, and its size is bounded by geometry rather than
-// chosen -- there is no k here, and there could not be: the number of visible
-// grid lines depends on view, distance and occlusion.
+// Growth is bounded by accumulated evidence at every step: a cluster can only
+// reach as far as the length it has actually assembled, and it can only assemble
+// that length by having reached it. That is what makes iteration safe here where
+// the CPU ancestor's fronts cascaded -- a front carried its parent's direction
+// forward, so drift compounded invisibly, whereas `refit` re-derives the whole
+// composite from its members every round and the corridor is tested against THAT.
+// Drift gets measured instead of accumulated.
 //
-// A DEGENERATE VOTE (weight 0, which votes.cast writes rather than dropping)
-// is its own singleton anchor. That keeps composites a PARTITION of the lines
-// and preserves the existing behaviour exactly -- such a line contributed
-// nothing to the fit before and contributes nothing now.
-export const JOIN_ANCHOR_WGSL = JOIN_GATE_WGSL + /* wgsl */ `
-@group(0) @binding(1) var<storage, read> votes: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> lines: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> lineCount: vec2<u32>;
-@group(0) @binding(4) var<storage, read_write> anchorFlag: array<u32>;
+// ── WHY THE CLUSTERS ARE NOT COMPACTED BETWEEN ROUNDS ──
+//
+// The obvious shape is to compact into a composite list each round and feed it
+// to the next, which needs a scan per round, a second set of segment/vote/count
+// buffers to ping-pong against, and a parity argument so the final round lands
+// in the buffers fit.ata binds. None of that is necessary.
+//
+// Instead `anchorOf` maps every LEAF SEGMENT to its cluster root, and the
+// cluster's geometry lives in `clusterLine`/`clusterVote` INDEXED BY THAT ROOT.
+// Rounds rewrite pointers; nothing moves. Compaction happens once, at the end.
+//
+// It also disposes of an accounting bug the compacted form would have had. The
+// composite weight is discounted by COVERAGE -- how much of its span is actually
+// covered by evidence -- and if round two saw round one's composites as its
+// members, it would count each member's whole span as support, gaps included,
+// and coverage would ratchet toward 1 no matter how thin the evidence. Because
+// `anchorOf` is kept flat, leaf to root, `refit` always sums real segment
+// lengths and never sees a composite as a member.
+
+// ── join.init: every segment starts as its own cluster ────────────────────
+//
+// Total over maxLines, tail included: `refit` reads anchorOf at every index to
+// decide rootness, and a stale pointer from the previous frame would attach this
+// frame's segments to last frame's clusters.
+export const JOIN_INIT_WGSL = JOIN_GATE_WGSL + /* wgsl */ `
+@group(0) @binding(1) var<storage, read_write> anchorOf: array<u32>;
 
 @compute @workgroup_size(64)
 fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= u.maxLines) { return; }
-  let count = min(lineCount.x, u.maxLines);
-  // NOT an early return without a write: the tail past the line count is zeroed
-  // HERE so join.attach can read any neighbour's flag unconditionally.
-  if (i >= count) { anchorFlag[i] = 0u; return; }
-
-  let vi = votes[i];
-  if (vi.w <= 0.0) { anchorFlag[i] = 1u; return; }
-
-  var isAnchor = true;
-  for (var j = 0u; j < count; j = j + 1u) {
-    if (j == i) { continue; }
-    let vj = votes[j];
-    if (vj.w <= 0.0) { continue; }
-    if (!gateOk(vi, vj, lines[i], lines[j], u.gate, u.maxSq, u.polarityAbs)) { continue; }
-    if (vj.w > vi.w || (vj.w == vi.w && j < i)) { isAnchor = false; break; }
-  }
-  anchorFlag[i] = select(0u, 1u, isAnchor);
+  anchorOf[i] = i;
 }
 `;
 
-// ── join.attach: everyone else picks an anchor ────────────────────────────
+// ── join.refit: a cluster -> the line that best represents it ─────────────
 //
-// A second pass rather than more work in the first, because every anchor flag
-// has to be settled before any of them can be read -- there is no global
-// barrier inside a dispatch.
+// ONE THREAD PER ROOT, which then walks every segment looking for its own
+// members. O(members) of real work per root and O(N) of scanning, all in
+// parallel -- and it needs no CSR, no atomic counter and no scatter pass.
 //
-// ORPHANS BECOME SINGLETONS. `i` can lose anchorhood to `j` while `j` itself
-// lost to some `k` that is outside `i`'s gate, leaving `i` with no anchor in
-// range. Chasing that with more rounds would reintroduce exactly the chaining
-// this shape exists to prevent, so it falls to its own composite -- which
-// degrades to the pre-join behaviour for that line, the correct conservative
-// answer.
-//
-// `joinFlag` is written for EVERY slot in [0, maxLines) including the tail. It
-// is a scan input, and the scan runs over maxLines.
-export const JOIN_ATTACH_WGSL = JOIN_GATE_WGSL + /* wgsl */ `
-@group(0) @binding(1) var<storage, read> votes: array<vec4<f32>>;
-@group(0) @binding(2) var<storage, read> lines: array<vec4<f32>>;
-@group(0) @binding(3) var<storage, read> lineCount: vec2<u32>;
-@group(0) @binding(4) var<storage, read> anchorFlag: array<u32>;
-@group(0) @binding(5) var<storage, read_write> anchorOf: array<u32>;
-@group(0) @binding(6) var<storage, read_write> joinFlag: array<vec2<u32>>;
-
-@compute @workgroup_size(64)
-fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
-  let i = gid.x;
-  if (i >= u.maxLines) { return; }
-  let count = min(lineCount.x, u.maxLines);
-  if (i >= count) {
-    anchorOf[i] = i;
-    joinFlag[i] = vec2<u32>(0u, 0u);
-    return;
-  }
-
-  var best = i;
-  let vi = votes[i];
-  if (anchorFlag[i] == 0u && vi.w > 0.0) {
-    var bestDot = -1.0;
-    for (var j = 0u; j < count; j = j + 1u) {
-      if (anchorFlag[j] == 0u) { continue; }
-      let vj = votes[j];
-      if (vj.w <= 0.0) { continue; }
-      if (!gateOk(vi, vj, lines[i], lines[j], u.gate, u.maxSq, u.polarityAbs)) { continue; }
-      let d = dot(vi.xyz, vj.xyz);
-      if (d > bestDot) { bestDot = d; best = j; }
-    }
-  }
-  anchorOf[i] = best;
-  joinFlag[i] = vec2<u32>(select(0u, 1u, best == i), 0u);
-}
-`;
-
-// ── join.reduce: a cluster -> one composite line, and its vote ────────────
-//
-// ONE THREAD PER REPRESENTATIVE, which then walks every line looking for its
-// own members. That is O(members) per rep and O(N) work per rep-thread, all of
-// them in parallel -- and it needs no CSR, no atomic counter and no scatter
-// pass to build one.
+// This is where ALL the geometry lives now. It used to be the back half of
+// join.reduce, which ran once; the round loop needs it every round, and reduce
+// is left as a pure compaction gather.
 //
 // ── THE COMPOSITE IS ITS EXTREME ENDPOINTS, NOT ITS MEMBERS' AVERAGE ──
 //
 // The lever arm is the entire point of joining. Two 20px fragments 300px apart
-// give a 340px span, and a normal roughly 17x more accurate than either
+// give a 340px span and a normal roughly 17x more accurate than either
 // fragment's; averaging the two member votes would reduce the error by sqrt(2)
 // and no more. So the composite is rebuilt GEOMETRICALLY from the two extreme
-// endpoints and its vote recomputed from those -- the member votes are used to
-// decide the grouping and then thrown away.
+// endpoints and its vote recomputed from those -- the member votes decide the
+// grouping and are then thrown away.
 //
 // Their weakness, recorded rather than implied: exactly two of the cluster's
 // endpoints determine the answer, so one bad extreme skews the whole composite.
 // A weighted 2x2 scatter over ALL member endpoints (closed form, no Jacobi)
 // keeps the span AND uses every member, and is the next thing to try here.
-export const JOIN_REDUCE_WGSL = /* wgsl */ `
-struct U {
-  maxLines: u32, w: u32, h: u32, pad0: u32,
-  gate: f32, tanHalf: f32, aspect: f32, maxSq: f32,
-  maxResidualPx: f32, polarityAbs: f32, pad1: f32, pad2: f32,
-}
-@group(0) @binding(0) var<uniform> u: U;
+export const JOIN_REFIT_WGSL = JOIN_GATE_WGSL + /* wgsl */ `
 @group(0) @binding(1) var<storage, read> lines: array<vec4<f32>>;
 @group(0) @binding(2) var<storage, read> lineCount: vec2<u32>;
 @group(0) @binding(3) var<storage, read> anchorOf: array<u32>;
-@group(0) @binding(4) var<storage, read> joinScan: array<vec2<u32>>;
-@group(0) @binding(5) var<storage, read_write> compLines: array<vec4<f32>>;
-@group(0) @binding(6) var<storage, read_write> compVotes: array<vec4<f32>>;
-@group(0) @binding(7) var<storage, read_write> compMaxWeight: atomic<u32>;
+@group(0) @binding(4) var<storage, read_write> clusterLine: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> clusterVote: array<vec4<f32>>;
 
 // VOTES_WGSL's rayDir verbatim. The two must agree exactly or a composite's
 // vote would live in a different frame from a raw segment's.
@@ -1307,21 +1216,27 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let i = gid.x;
   if (i >= u.maxLines) { return; }
   let count = min(lineCount.x, u.maxLines);
-  if (i >= count) { return; }
-  // "Am I a representative" derived rather than bound -- see pipeline.ts.
-  if (anchorOf[i] != i) { return; }
-  let c = joinScan[i].x;
-  if (c >= u.maxLines) { return; }
+  // A non-root and the tail both get a ZERO VOTE rather than being skipped.
+  // anchor and attach read an arbitrary neighbour's cluster unconditionally, and
+  // weight 0 is the value they already treat as "not a candidate" -- so this
+  // needs no extra rootness test on their side, and no slot can carry a previous
+  // round's geometry into this one.
+  if (i >= count || anchorOf[i] != i) {
+    clusterLine[i] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    clusterVote[i] = vec4<f32>(0.0, 0.0, 0.0, 0.0);
+    return;
+  }
 
-  // Extremes are measured along the ANCHOR's own direction: it is the longest
-  // segment in the cluster by construction, so it is the best estimate of the
-  // composite's axis available before the composite exists.
+  // Extremes are measured along the ROOT's own direction. It is the strongest
+  // member of the cluster by construction -- anchorhood is won on weight -- so
+  // it is the best estimate of the composite's axis available before the
+  // composite exists.
   let segI = lines[i];
   let raw = vec2<f32>(segI.z - segI.x, segI.w - segI.y);
   let len = length(raw);
   // minLengthPx is a user-facing slider that can be set to 0, so a zero-length
-  // anchor is reachable. Any direction gives the same two extremes for a
-  // single degenerate point; this only has to not be NaN.
+  // root is reachable. Any direction gives the same two extremes for a single
+  // degenerate point; this only has to not be NaN.
   let dir = select(vec2<f32>(1.0, 0.0), raw / len, len > 1e-12);
 
   let origin = segI.xy;
@@ -1343,17 +1258,16 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   // The pass above is decided by exactly TWO of the cluster's endpoints, so one
   // member attached at a bad angle drags an extreme far off the true line and
   // there is nothing in the extremes themselves to notice. This second pass
-  // measures every member's perpendicular distance to the PROVISIONAL
-  // composite and re-derives the extremes from the members that fit.
+  // measures every member's perpendicular distance to the PROVISIONAL composite
+  // and re-derives the extremes from the members that fit.
   //
-  // Members are only ever REMOVED, so the composite count fixed by the scan
-  // cannot change and no compaction has to be redone. A runaway composite --
-  // the diagonal that swallows a family, which is the failure single-linkage
-  // produces and this whole stage is shaped to avoid -- has enormous residuals
-  // and disintegrates back toward its anchor here rather than being trusted.
-  // Summed length of the members that SURVIVE the residual test -- the evidence
-  // the composite actually rests on, as opposed to the distance it reaches
-  // across. See the weight at the bottom of this function.
+  // Members are only ever REMOVED, and only from the geometry -- anchorOf is
+  // untouched, so the cluster keeps its membership and the scan's composite
+  // count cannot change under it.
+  //
+  // Summed length of the members that SURVIVE is the cluster's SUPPORT: the
+  // evidence it rests on, as opposed to the distance it reaches across. See the
+  // weight at the bottom.
   var support = 0.0;
   let span = vec2<f32>(pMax.x - pMin.x, pMax.y - pMin.y);
   let spanLen = length(span);
@@ -1366,8 +1280,8 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
     for (var j = 0u; j < count; j = j + 1u) {
       if (anchorOf[j] != i) { continue; }
       let s = lines[j];
-      // BOTH endpoints must fit, or the member is out. A segment with one end
-      // on the line and one off it is the badly-attached case exactly.
+      // BOTH endpoints must fit, or the member is out. A segment with one end on
+      // the line and one off it is the badly-attached case exactly.
       if (abs(dot(s.xy - pMin, nrm)) > u.maxResidualPx) { continue; }
       if (abs(dot(s.zw - pMin, nrm)) > u.maxResidualPx) { continue; }
       support = support + length(s.zw - s.xy);
@@ -1379,18 +1293,18 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
       if (t2 < kMin) { kMin = t2; qMin = s.zw; }
       if (t2 > kMax) { kMax = t2; qMax = s.zw; }
     }
-    // "any" is false only if even the anchor failed its own residual, which
-    // cannot happen -- it defines the axis -- but the guard costs nothing and
-    // an empty composite would be a silent zero-length vote.
+    // "any" is false only if even the root failed its own residual, which cannot
+    // happen -- it defines the axis -- but the guard costs nothing and an empty
+    // composite would be a silent zero-length vote.
     if (any) { pMin = qMin; pMax = qMax; }
   }
 
-  compLines[c] = vec4<f32>(pMin, pMax);
+  clusterLine[i] = vec4<f32>(pMin, pMax);
   let n = cross(rayDir(pMin.x, pMin.y), rayDir(pMax.x, pMax.y));
   let arc = length(n);
-  // Written in BOTH branches, exactly as votes.cast does, so compVotes needs no
-  // clear. A singleton whose source vote was degenerate lands here.
-  if (arc < 1e-12) { compVotes[c] = vec4<f32>(0.0, 0.0, 0.0, 0.0); return; }
+  // Written in BOTH branches, exactly as votes.cast does, so clusterVote needs
+  // no clear. A singleton whose source vote was degenerate lands here.
+  if (arc < 1e-12) { clusterVote[i] = vec4<f32>(0.0, 0.0, 0.0, 0.0); return; }
 
   // ── WEIGHT BY SUPPORT, NOT BY REACH ──────────────────────────────────────
   //
@@ -1422,20 +1336,200 @@ fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
   // entirely and the composite weighted as if its fragments had never been
   // joined -- which is the benefit this whole stage exists to buy.
   //
-  // MEASURED ON SURVIVORS ONLY. support is summed inside the residual loop, so
-  // a member thrown out for not fitting the composite does not get to vouch for
-  // it. Clamped at 1 because members are disjoint from their anchor but not
+  // Clamped at 1 because members are disjoint from their root but not
   // necessarily from each other.
   //
-  // IDENTITY WITH kSigma = 0 IS PRESERVED, which is what makes "join off" still
-  // an exact reproduction of the pre-join pose: a singleton's only member is
+  // IDENTITY WITH kSigma = 0 IS PRESERVED, which is what makes "join off" an
+  // exact reproduction of the pre-join pose: a singleton's only member is
   // itself, so support equals its own length, coverage is exactly 1, and the
   // weight is the arc unchanged.
   let finalSpan = length(pMax - pMin);
   let coverage = select(1.0, clamp(support / finalSpan, 0.0, 1.0), finalSpan > 1e-12 && support > 0.0);
-  let weight = arc * sqrt(coverage);
-  compVotes[c] = vec4<f32>(n / arc, weight);
-  atomicMax(&compMaxWeight, bitcast<u32>(weight));
+  clusterVote[i] = vec4<f32>(n / arc, arc * sqrt(coverage));
+}
+`;
+
+// ── join.anchor: am I a local maximum? ────────────────────────────────────
+//
+// Independent per cluster, which is the whole reason this parallelises: no
+// element needs to know anything about the partition, only about its own
+// neighbourhood. That is the same trick that parallelises greedy NMS and Luby's
+// maximal independent set.
+//
+// STAR CLUSTERING WITHIN A ROUND, and that is what keeps the iteration honest.
+// Every cluster attaches DIRECTLY to a representative rather than to a
+// neighbour, so a round's angular spread is bounded by 2x the tolerance however
+// many clusters it absorbs. Single linkage -- which is what an unbounded front
+// is, and what `grow`'s pointer jumping would reproduce exactly -- has no such
+// bound: A joins B joins C leaves A and C two tolerances apart, and a chain of
+// those sweeps a diagonal composite through a whole family. Iterating a bounded
+// step is a different thing from running an unbounded one, because between
+// rounds `refit` re-derives the geometry and the next round's corridor is tested
+// against the composite rather than against its parent's direction.
+//
+// The lexicographic (weight, index) tiebreak is LOAD-BEARING. With a plain `>`,
+// two mutual neighbours of exactly equal weight would BOTH declare anchorhood --
+// and equal weights are not exotic, two fragments of one edge at the same length
+// produce them. Comparing the index second makes the order total.
+//
+// A consequence worth naming: no two anchors are ever within tolerance of each
+// other, since whichever ranked lower disqualified itself. So the anchor set is
+// a PACKING, and its size is bounded by geometry rather than chosen -- there is
+// no k here, and there could not be: the number of visible grid lines depends on
+// view, distance and occlusion.
+//
+// A DEGENERATE CLUSTER (weight 0, which refit writes for non-roots and for a
+// vote with no arc) is its own singleton anchor. That keeps composites a
+// PARTITION of the lines.
+export const JOIN_ANCHOR_WGSL = JOIN_GATE_WGSL + /* wgsl */ `
+@group(0) @binding(1) var<storage, read> clusterVote: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> clusterLine: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> lineCount: vec2<u32>;
+@group(0) @binding(4) var<storage, read_write> anchorFlag: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= u.maxLines) { return; }
+  let count = min(lineCount.x, u.maxLines);
+  // NOT an early return without a write: the tail past the line count is zeroed
+  // HERE so join.attach can read any neighbour's flag unconditionally.
+  if (i >= count) { anchorFlag[i] = 0u; return; }
+
+  let vi = clusterVote[i];
+  if (vi.w <= 0.0) { anchorFlag[i] = 1u; return; }
+
+  var isAnchor = true;
+  for (var j = 0u; j < count; j = j + 1u) {
+    if (j == i) { continue; }
+    let vj = clusterVote[j];
+    if (vj.w <= 0.0) { continue; }
+    if (!gateOk(vi, vj, clusterLine[i], clusterLine[j], u.tol, u.reachFrac, u.polarityAbs)) { continue; }
+    if (vj.w > vi.w || (vj.w == vi.w && j < i)) { isAnchor = false; break; }
+  }
+  anchorFlag[i] = select(0u, 1u, isAnchor);
+}
+`;
+
+// ── join.attach: every other cluster picks an anchor ──────────────────────
+//
+// A second pass rather than more work in the first, because every anchor flag
+// has to be settled before any of them can be read -- there is no global barrier
+// inside a dispatch.
+//
+// ORPHANS STAY WHERE THEY ARE. `i` can lose anchorhood to `j` while `j` itself
+// lost to some `k` outside `i`'s gate, leaving `i` with no anchor in range.
+// Chasing that WITHIN a round would be single linkage by another name; instead
+// it keeps its own cluster and gets another go next round, by which time the
+// geometry it is being judged against has been refit. That is the difference
+// between iterating and chaining.
+//
+// Writes `parent`, a rep-to-rep pointer, NOT `anchorOf` -- the leaf mapping is
+// one indirection away and join.flatten is what applies it.
+export const JOIN_ATTACH_WGSL = JOIN_GATE_WGSL + /* wgsl */ `
+@group(0) @binding(1) var<storage, read> clusterVote: array<vec4<f32>>;
+@group(0) @binding(2) var<storage, read> clusterLine: array<vec4<f32>>;
+@group(0) @binding(3) var<storage, read> lineCount: vec2<u32>;
+@group(0) @binding(4) var<storage, read> anchorFlag: array<u32>;
+@group(0) @binding(5) var<storage, read_write> parent: array<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= u.maxLines) { return; }
+  let count = min(lineCount.x, u.maxLines);
+  // SELF for the tail, not zero: join.flatten dereferences parent at an
+  // arbitrary root index, and a tail pointing at 0 would graft every stale slot
+  // onto cluster 0.
+  if (i >= count) { parent[i] = i; return; }
+
+  var best = i;
+  let vi = clusterVote[i];
+  if (anchorFlag[i] == 0u && vi.w > 0.0) {
+    var bestDot = -1.0;
+    for (var j = 0u; j < count; j = j + 1u) {
+      if (anchorFlag[j] == 0u) { continue; }
+      let vj = clusterVote[j];
+      if (vj.w <= 0.0) { continue; }
+      if (!gateOk(vi, vj, clusterLine[i], clusterLine[j], u.tol, u.reachFrac, u.polarityAbs)) { continue; }
+      let d = dot(vi.xyz, vj.xyz);
+      if (d > bestDot) { bestDot = d; best = j; }
+    }
+  }
+  parent[i] = best;
+}
+`;
+
+// ── join.flatten: apply one round of pointers to the leaves ───────────────
+//
+// ONE JUMP IS ENOUGH, and that is a property of star clustering rather than an
+// optimization. `parent` maps a root to an ANCHOR root, and an anchor is its own
+// parent by construction, so parent-of-parent is parent. `grow` needs repeated
+// pointer jumping because its links are arbitrary; this does not.
+//
+// Also writes the scan input. `joinFlag` must be a total function over
+// [0, maxLines) because the scan runs over maxLines, and the tail has to read 0
+// or the composite count runs away -- the same obligation lineFlag and family
+// carry, and the reason those three are called out in pipeline.ts.
+export const JOIN_FLATTEN_WGSL = JOIN_GATE_WGSL + /* wgsl */ `
+@group(0) @binding(1) var<storage, read> lineCount: vec2<u32>;
+@group(0) @binding(2) var<storage, read> parent: array<u32>;
+@group(0) @binding(3) var<storage, read_write> anchorOf: array<u32>;
+@group(0) @binding(4) var<storage, read_write> joinFlag: array<vec2<u32>>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= u.maxLines) { return; }
+  let count = min(lineCount.x, u.maxLines);
+  if (i >= count) {
+    anchorOf[i] = i;
+    joinFlag[i] = vec2<u32>(0u, 0u);
+    return;
+  }
+  let root = parent[anchorOf[i]];
+  anchorOf[i] = root;
+  joinFlag[i] = vec2<u32>(select(0u, 1u, root == i), 0u);
+}
+`;
+
+// ── join.reduce: compact the surviving clusters ───────────────────────────
+//
+// A GATHER AND NOTHING ELSE now. Every composite's geometry was settled by the
+// last `refit`; this only moves it to its scanned slot.
+//
+// Rootness comes from `joinFlag` rather than from `anchorOf[i] == i`, which is
+// the same fact but cheaper here: joinFlag is already zero across the tail, so
+// binding it drops both `anchorOf` and `lineCount` and leaves this pass at seven
+// storage buffers rather than nine. (The old comment claimed the opposite trade,
+// correctly, at a time when this pass still did the geometry and needed the
+// membership walk.)
+export const JOIN_REDUCE_WGSL = /* wgsl */ `
+struct U {
+  maxLines: u32, w: u32, h: u32, pad0: u32,
+  tol: f32, tanHalf: f32, aspect: f32, reachFrac: f32,
+  maxResidualPx: f32, polarityAbs: f32, pad1: f32, pad2: f32,
+}
+@group(0) @binding(0) var<uniform> u: U;
+@group(0) @binding(1) var<storage, read> joinFlag: array<vec2<u32>>;
+@group(0) @binding(2) var<storage, read> joinScan: array<vec2<u32>>;
+@group(0) @binding(3) var<storage, read> clusterLine: array<vec4<f32>>;
+@group(0) @binding(4) var<storage, read> clusterVote: array<vec4<f32>>;
+@group(0) @binding(5) var<storage, read_write> compLines: array<vec4<f32>>;
+@group(0) @binding(6) var<storage, read_write> compVotes: array<vec4<f32>>;
+@group(0) @binding(7) var<storage, read_write> compMaxWeight: atomic<u32>;
+
+@compute @workgroup_size(64)
+fn main(@builtin(global_invocation_id) gid: vec3<u32>) {
+  let i = gid.x;
+  if (i >= u.maxLines) { return; }
+  if (joinFlag[i].x == 0u) { return; }
+  let c = joinScan[i].x;
+  if (c >= u.maxLines) { return; }
+  compLines[c] = clusterLine[i];
+  let v = clusterVote[i];
+  compVotes[c] = v;
+  atomicMax(&compMaxWeight, bitcast<u32>(v.w));
 }
 `;
 

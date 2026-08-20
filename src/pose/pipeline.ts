@@ -262,6 +262,21 @@ export const BUFFERS: Record<string, BufferSpec> = {
   // composites out of stale data. Third instance of §9's defect; declared out
   // of existence rather than found by a test.
   joinFlag: { kind: 'storage', bytes: (d) => d.maxLines * 8, note: 'vec2<u32> (isRep, 0). The .y lane is unused -- see below' },
+  // ── THE ROUND LOOP'S STATE, and why none of it is ping-ponged ──
+  //
+  // `anchorOf` maps every LEAF SEGMENT to its cluster root and is rewritten in
+  // place each round; the cluster's geometry lives here, INDEXED BY THAT ROOT.
+  // So a round moves pointers and nothing else, and compaction happens once at
+  // the end rather than per round -- which is what removes the second set of
+  // segment/vote/count buffers, the per-round scan, and the parity argument that
+  // would otherwise be needed to land the last round in the buffers fit.ata
+  // binds. See JOIN_REFIT_WGSL.
+  clusterLine: { kind: 'storage', bytes: (d) => d.maxLines * 16, note: '(x1,y1,x2,y2) per ROOT index, NOT compacted. Zeroed at non-roots by refit' },
+  clusterVote: { kind: 'storage', bytes: (d) => d.maxLines * 16, note: '(nx,ny,nz,weight) per ROOT index. weight 0 = not a live cluster, which is what anchor/attach already skip on' },
+  // Rep-to-rep for ONE round. Separate from `anchorOf` because attach must read
+  // the round's existing clustering while writing the next one, and a single
+  // array cannot be both without a barrier that does not exist inside a dispatch.
+  parent: { kind: 'storage', bytes: (d) => d.maxLines * 4, note: 'u32; the anchor this ROOT attaches to this round, self if none' },
   joinScan: { kind: 'storage', bytes: (d) => d.maxLines * 8 },
   joinSums: { kind: 'storage', bytes: (d) => scanBlocks(d.maxLines) * 8 },
   joinOffs: { kind: 'storage', bytes: (d) => scanBlocks(d.maxLines) * 8 },
@@ -454,17 +469,28 @@ export const STAGES: readonly Stage[] = [
   // Both bind `lines` as well as `votes`: the gate's third clause is about the
   // segments' EXTENTS along their shared direction, which the vote alone --
   // being the infinite line -- cannot express.
-  { id: 'join.anchor', binds: ['joinUni', 'votes', 'lines', 'lineCount', 'anchorFlag'] },
-  { id: 'join.attach', binds: ['joinUni', 'votes', 'lines', 'lineCount', 'anchorFlag', 'anchorOf', 'joinFlag'] },
+  //
+  // THE ROUND LOOP is init -> refit -> R x [anchor, attach, flatten, refit].
+  // Repeated ids are fine and already used by grow's rounds: liveness is
+  // first-bind to last-bind over this list, and every round binds the same
+  // buffers because nothing is ping-ponged.
+  { id: 'join.init', binds: ['joinUni', 'anchorOf'] },
+  { id: 'join.refit', binds: ['joinUni', 'lines', 'lineCount', 'anchorOf', 'clusterLine', 'clusterVote'] },
+  { id: 'join.anchor', binds: ['joinUni', 'clusterVote', 'clusterLine', 'lineCount', 'anchorFlag'] },
+  { id: 'join.attach', binds: ['joinUni', 'clusterVote', 'clusterLine', 'lineCount', 'anchorFlag', 'parent'] },
+  { id: 'join.flatten', binds: ['joinUni', 'lineCount', 'parent', 'anchorOf', 'joinFlag'] },
   { id: 'join.scan', binds: ['joinScanUni', 'joinFlag', 'joinScan', 'joinSums'] },
   { id: 'join.spine', binds: ['joinSpineUni', 'joinSums', 'joinOffs', 'joinCount'] },
   { id: 'join.add', binds: ['joinScanUni', 'joinOffs', 'joinScan'] },
-  // `joinFlag` is NOT bound here: "am I a representative" is `anchorOf[i] == i`,
-  // which the gather needs anyway. Deriving it rather than binding it keeps this
-  // pass at seven storage buffers instead of eight, i.e. off the baseline limit.
+  // `joinFlag` IS bound here now, and it is the cheaper of the two ways to say
+  // "am I a representative". It is already zero across the tail, so binding it
+  // drops both `anchorOf` and `lineCount` and holds this pass at seven storage
+  // buffers -- off the baseline limit of eight. The reverse trade was correct
+  // while this pass still did the geometry and needed the membership walk; the
+  // geometry moved to join.refit.
   {
     id: 'join.reduce',
-    binds: ['joinUni', 'lines', 'lineCount', 'anchorOf', 'joinScan', 'compLines', 'compVotes', 'compMaxWeight'],
+    binds: ['joinUni', 'joinFlag', 'joinScan', 'clusterLine', 'clusterVote', 'compLines', 'compVotes', 'compMaxWeight'],
   },
 
   // ONE workgroup, dispatched DIRECTLY, reading the vote count off the device --

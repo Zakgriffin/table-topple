@@ -97,19 +97,22 @@ const renderLikeTheApp = (world: SimWorld, pose: SimPose, d: SimDims): Float64Ar
   return out;
 };
 
-// ── The join's three knobs, on the command line while it is being measured ──
+// ── The join's six knobs, overridable per run ────────────────────────────
 //
-// DEFAULT OFF, because the measurement is not settled: the join is a clear win
-// up to ~12cm working distance and a clear regression beyond it, and the sweep
-// that produced both numbers turned out to render a differently-tiled board
-// from the app. So the committed default is the KNOWN state, and joining is
-// opt-in with `--kSigma 3`.
+// DEFAULT ON, and these defaults are pose-viewer.config.json's, the phone
+// clients' and the suite's, to the digit. The join is not a variant any more.
 //
-// kSigma 0 disables it entirely -- no pair can pass the gate, so every line is
-// its own composite -- and reproduces the pre-join pose bit for bit. That is
-// what makes the A/B one flag rather than two builds, and what makes the
-// plumbing testable independently of whether the idea works.
-const joinK = Number(val('--kSigma', '0'));
+// It used to default OFF, on a measurement that said "clear win up to ~12cm,
+// clear regression beyond it" -- taken with a sweep that turned out to render a
+// differently-tiled board from the app. Both halves of that are void: 5bbaa51
+// fixed the board, and the corridor rewrite wins at EVERY scale, hardest at the
+// far end that used to be the disaster (h=90: 8 -> 27 exact anchors).
+//
+// `--kSigma 0` is still the exact off -- no pair passes the gate, every line is
+// its own singleton composite, and the pre-join pose comes back bit for bit. So
+// the A/B is still one flag rather than two builds, and it is the first thing
+// to reach for when a sweep result looks wrong.
+const joinK = Number(val('--kSigma', '3'));
 const joinNoisePx = Number(val('--noisePx', '0.5'));
 const joinReach = Number(val('--reach', '4'));
 const joinRounds = Number(val('--rounds', '3'));
@@ -283,12 +286,18 @@ async function makePoseRunner() {
       },
       lines: { minLengthPx: st.lsdMinLengthPx },
       votes: { vFovRad: vFovRadOf(d) },
-      // NOT from the fixture yet. The join's three knobs have no config entry
-      // and no fixture field, deliberately: wiring them through
-      // pose-viewer.config.json and migrating every fixtures/*.json before the
-      // sweep has said whether joining helps would be paying the migration
-      // first and asking the question second. `--kSigma 0` reproduces the
-      // pre-join pipeline exactly, which is what makes that order safe.
+      // NOT from the fixture, unlike every stage above it. The join's six knobs
+      // are ordinary settings now -- they are in pose-viewer.config.json and in
+      // fixtures/*.json -- but `PipelineSettings` (shared/harness/input.ts),
+      // which is what a fixture hands a harness, does not carry them. So they
+      // come off the command line, and the defaults above are the JSON's.
+      //
+      // Adding them to PipelineSettings would change what this sweep runs:
+      // fixtures/default.json records joinKSigma 0, because that capture was
+      // taken before the join existed. Reading the fixture would therefore turn
+      // the join OFF here, which is right for reprocessing that capture and
+      // wrong for a sweep that renders its own poses and only borrows the
+      // fixture's tuning. Worth resolving deliberately, not by plumbing.
       join: {
         vFovRad: vFovRadOf(d),
         endpointNoisePx: joinNoisePx,

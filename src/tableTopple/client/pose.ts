@@ -98,12 +98,18 @@ function poseSettingsFor(aspect: number): PoseSettings {
     },
     lines: { minLengthPx: p.lsdMinLengthPx },
     votes: { vFovRad },
-    // Join DISABLED, pending measurement and config wiring. kSigma 0 means no
-    // pair can pass the gate, so every line becomes its own composite and the
-    // pose is bit-for-bit the pre-join one. The three knobs have no entry in
-    // pose-viewer.config.json yet; see scripts/sweep.ts, which drives them from
-    // the command line while they are being measured.
-    join: { vFovRad, endpointNoisePx: 0.5, kSigma: 0, reachFrac: 4, rounds: 3, maxResidualPx: 2, polarityAbs: false },
+    // Join ON, and these are the same six numbers every other call site runs:
+    // pose-viewer.config.json's defaults, the sweep's defaults, and the suite's.
+    // kSigma 0 would be the exact off -- no pair passes the gate, every line
+    // becomes its own singleton composite, and the pose is bit-for-bit the
+    // pre-join one -- which is the A/B to reach for if a device pose looks wrong
+    // here.
+    //
+    // STILL A LITERAL, not config: this page never fetches
+    // pose-viewer.config.json, so giving the phone clients a config path is its
+    // own piece of work. Until then these have to be changed in step with the
+    // JSON by hand.
+    join: { vFovRad, endpointNoisePx: 0.5, kSigma: 3, reachFrac: 4, rounds: 3, maxResidualPx: 2, polarityAbs: false },
     gpp: { vFovRad, cellPitch: CELL_PITCH, minGrazingCos: p.minGrazingCos },
     layout: { vFovRad, cellPitch: CELL_PITCH, minGrazingCos: p.minGrazingCos },
   };

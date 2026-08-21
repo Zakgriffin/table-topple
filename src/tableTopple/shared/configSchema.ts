@@ -84,6 +84,39 @@ export const PoseTuningSchema = Type.Object({
   // Minimum fitted-segment LENGTH in pixels. Not the same filter as
   // lsdMinRegionSize, and the two are easy to confuse.
   lsdMinLengthPx: Type.Number(),
+
+  // ── S5c join: collinear segments -> composite lines ────────────────────
+  //
+  // The iterative reach-bounded corridor join. See src/pose/pose.ts's
+  // JoinSettings for the derivation of every one of these and pose.wgsl.ts's
+  // JOIN_GATE_WGSL for the gate itself -- not repeated here, because this file
+  // is the values and that one is the reasoning.
+  //
+  // TWO KNOBS, ONE NUMBER: joinKSigma and joinEndpointNoisePx reach the shader
+  // only as their product (tol = kSigma * noise * sqrt(2)). The split is so
+  // each means something -- one a confidence level, one a noise model.
+  //
+  // joinKSigma 0 is the EXACT OFF: no pair can pass the gate, every line
+  // becomes its own singleton composite, and the pose is bit-for-bit the
+  // pre-join one. On a page with no settings UI at all, editing this file is
+  // the only way to run that A/B -- which is the first thing to reach for if a
+  // pose on this device looks wrong.
+  joinKSigma: Type.Number(),
+  joinEndpointNoisePx: Type.Number(),
+  // How far a segment's front may travel, as a multiple of its OWN length.
+  // Measured at 4; the derivation fixes the form, not the constant. Do not
+  // "correct" it to 1.
+  joinReachFrac: Type.Number(),
+  // Merge rounds. 1 reproduces one-shot star clustering exactly; measured
+  // converged at 3. Overshooting is safe, and costs four dispatches a round.
+  joinRounds: Type.Number(),
+  // How far a member endpoint may sit off the finished composite before that
+  // member is dropped.
+  joinMaxResidualPx: Type.Number(),
+  // Compare |dot| rather than dot on the vote normals, joining across a
+  // gradient polarity flip. Measured WORSE; false is the shipping value.
+  joinPolarityAbs: Type.Boolean(),
+
   // How close to edge-on the board may be before its geometry is refused.
   minGrazingCos: Type.Number(),
 }, strict);

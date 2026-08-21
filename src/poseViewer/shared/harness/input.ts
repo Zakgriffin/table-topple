@@ -53,6 +53,23 @@ export interface PipelineSettings {
   lsdMinRegionSize: number;
   lsdNfaEpsilon: number; lsdNfaTestExponent: number;
   lsdMinLengthPx: number;
+  // ── S5c join ──────────────────────────────────────────────────────────
+  //
+  // Here for the same reason every other field is: the phone computes a pose
+  // from THIS bag and nothing else, so a knob missing from it is a knob the
+  // device cannot be told about. They were literals in client/pose.ts until
+  // 2026-08-20 and had to be hand-copied out of the JSON.
+  //
+  // ONE CONSUMER MUST NOT READ THESE: scripts/sweep.ts. A HarnessInput built by
+  // inputFromFixture carries the FIXTURE's values, and fixtures/default.json
+  // records joinKSigma 0 because that capture predates the join -- correct for
+  // reprocessing that capture, wrong for a sweep that renders its own poses and
+  // only borrows the fixture's detector tuning. The sweep takes its join
+  // defaults from pose-viewer.config.json instead; see the comment at its
+  // `--kSigma` flag.
+  joinKSigma: number; joinEndpointNoisePx: number;
+  joinReachFrac: number; joinRounds: number;
+  joinMaxResidualPx: number; joinPolarityAbs: boolean;
   horizFovDeg: number;
   minGrazingCos: number;
 }

@@ -98,18 +98,20 @@ function poseSettingsFor(aspect: number): PoseSettings {
     },
     lines: { minLengthPx: p.lsdMinLengthPx },
     votes: { vFovRad },
-    // Join ON, and these are the same six numbers every other call site runs:
-    // pose-viewer.config.json's defaults, the sweep's defaults, and the suite's.
-    // kSigma 0 would be the exact off -- no pair passes the gate, every line
-    // becomes its own singleton composite, and the pose is bit-for-bit the
-    // pre-join one -- which is the A/B to reach for if a device pose looks wrong
-    // here.
+    // The join's six knobs, out of table-topple.config.json like everything
+    // else here. They were LITERALS until 2026-08-20, which made this the one
+    // stage in the file that contradicted the header above -- "no value is
+    // invented here and none is defaulted" was true of eight settings and false
+    // of six.
     //
-    // STILL A LITERAL, not config: this page never fetches
-    // pose-viewer.config.json, so giving the phone clients a config path is its
-    // own piece of work. Until then these have to be changed in step with the
-    // JSON by hand.
-    join: { vFovRad, endpointNoisePx: 0.5, kSigma: 3, reachFrac: 4, rounds: 3, maxResidualPx: 2, polarityAbs: false },
+    // joinKSigma 0 is the exact off, and on a page with no settings UI editing
+    // the JSON is the only way to reach it. See shared/configSchema.ts.
+    join: {
+      vFovRad,
+      endpointNoisePx: p.joinEndpointNoisePx, kSigma: p.joinKSigma,
+      reachFrac: p.joinReachFrac, rounds: p.joinRounds,
+      maxResidualPx: p.joinMaxResidualPx, polarityAbs: p.joinPolarityAbs,
+    },
     gpp: { vFovRad, cellPitch: CELL_PITCH, minGrazingCos: p.minGrazingCos },
     layout: { vFovRad, cellPitch: CELL_PITCH, minGrazingCos: p.minGrazingCos },
   };

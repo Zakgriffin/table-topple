@@ -4,6 +4,7 @@ import { findPhysicalCameraByConnection, removeCameraTab } from '../camera/lifec
 import { activeCamera, cameras, isPhysical, nextCameraColor } from '../camera/store.ts';
 import type { RemotePoseMessage } from '../../shared/camera/model.ts';
 import { tryUnpackPoseResultWithImage } from '../../shared/devBridge/poseResultWire.ts';
+import type { PipelineSettings } from '../../shared/harness/input.ts';
 import { renderer } from '../scene/renderer.ts';
 import { globalState } from '../../shared/state.ts';
 import { configStatus } from '../ui/dom.ts';
@@ -47,10 +48,16 @@ export function sendToDevBridge(obj: unknown) {
   if (devBridgeSocket && devBridgeSocket.readyState === WebSocket.OPEN) devBridgeSocket.send(JSON.stringify(obj));
 }
 
-// Builds the 16-field PoseInput['settings'] payload for one physical
-// camera's phone -- see pose/poseCompute.ts's PoseInput and this
-// session's on-device-pose-recovery plan.
-function buildCameraSettingsPayload(cam: PhysicalCamera) {
+// Builds the pipeline-tunable payload for one physical camera's phone -- every
+// field of PipelineSettings (shared/harness/input.ts), which is the exact
+// surface client/pose.ts reconstructs from.
+//
+// The RETURN TYPE IS DECLARED, and that is the point: this used to be an
+// inferred object literal, so a field added to PipelineSettings and forgotten
+// here compiled cleanly and simply never reached the phone -- the settingsSync
+// spread on the far side merges whatever arrives. Naming the type makes an
+// omission a compile error at the one place it can be fixed.
+function buildCameraSettingsPayload(cam: PhysicalCamera): PipelineSettings {
   const s = cam.settings;
   return {
     horizFovDeg: s.horizFovDeg,
@@ -61,6 +68,9 @@ function buildCameraSettingsPayload(cam: PhysicalCamera) {
     lsdNfaEpsilon: s.lsdNfaEpsilon,
     lsdNfaTestExponent: s.lsdNfaTestExponent,
     lsdMinLengthPx: s.lsdMinLengthPx,
+    joinKSigma: s.joinKSigma, joinEndpointNoisePx: s.joinEndpointNoisePx,
+    joinReachFrac: s.joinReachFrac, joinRounds: s.joinRounds,
+    joinMaxResidualPx: s.joinMaxResidualPx, joinPolarityAbs: s.joinPolarityAbs,
   };
 }
 

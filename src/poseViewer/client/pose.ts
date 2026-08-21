@@ -175,18 +175,26 @@ function poseSettingsFor(aspect: number, s: PipelineSettings): PoseSettings {
     },
     lines: { minLengthPx: s.lsdMinLengthPx },
     votes: { vFovRad },
-    // Join ON, and these are the same six numbers every other call site runs:
-    // pose-viewer.config.json's defaults, the sweep's defaults, and the suite's.
-    // kSigma 0 would be the exact off -- no pair passes the gate, every line
-    // becomes its own singleton composite, and the pose is bit-for-bit the
-    // pre-join one -- which is the A/B to reach for if a device pose looks wrong
-    // here.
+    // The join's six knobs, off the same synced block as everything else here
+    // -- so the desktop's S5c sliders retune the join ON THE PHONE, live, the
+    // way they already retuned every other stage.
     //
-    // STILL A LITERAL, not config: this page never fetches
-    // pose-viewer.config.json, so giving the phone clients a config path is its
-    // own piece of work. Until then these have to be changed in step with the
-    // JSON by hand.
-    join: { vFovRad, endpointNoisePx: 0.5, kSigma: 3, reachFrac: 4, rounds: 3, maxResidualPx: 2, polarityAbs: false },
+    // These were LITERALS until 2026-08-20, on a comment claiming this page
+    // never fetches pose-viewer.config.json. It does (main.ts imports
+    // shared/config.ts, and seeds `cameraSettings` from config.camera.common),
+    // so the hand-copying that comment described was never necessary.
+    //
+    // joinKSigma 0 is the exact off -- no pair passes the gate, every line
+    // becomes its own singleton composite, and the pose is bit-for-bit the
+    // pre-join one. It is now reachable from the desktop's own slider, which
+    // makes it the first A/B to run if a device pose looks wrong, with no
+    // rebuild and no trip to the phone.
+    join: {
+      vFovRad,
+      endpointNoisePx: s.joinEndpointNoisePx, kSigma: s.joinKSigma,
+      reachFrac: s.joinReachFrac, rounds: s.joinRounds,
+      maxResidualPx: s.joinMaxResidualPx, polarityAbs: s.joinPolarityAbs,
+    },
     gpp: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
     layout: { vFovRad, cellPitch: GRID_STEP, minGrazingCos: s.minGrazingCos },
   };

@@ -69,7 +69,14 @@ if (configErrors.length > 0) {
 }
 const cfg = rawConfig as {
   global: { boardSize: number };
-  camera: { common: { horizFovDeg: number }; simulated: { simNoise: number; simBlur: number; captureSupersample: number } };
+  camera: {
+    common: {
+      horizFovDeg: number;
+      joinKSigma: number; joinEndpointNoisePx: number; joinReachFrac: number;
+      joinRounds: number; joinMaxResidualPx: number; joinPolarityAbs: boolean;
+    };
+    simulated: { simNoise: number; simBlur: number; captureSupersample: number };
+  };
 };
 
 const [wStr, hStr] = val('--res', '480x648').split('x');
@@ -99,25 +106,40 @@ const renderLikeTheApp = (world: SimWorld, pose: SimPose, d: SimDims): Float64Ar
 
 // ── The join's six knobs, overridable per run ────────────────────────────
 //
-// DEFAULT ON, and these defaults are pose-viewer.config.json's, the phone
-// clients' and the suite's, to the digit. The join is not a variant any more.
+// CONFIG-DEFAULTED, like `--fov` and the three simulated-camera flags above,
+// which brings the join under the rule this file already states: a flag is an
+// override of a config value, never a default in its own right. They were
+// LITERALS until 2026-08-20 and had to be edited in step with the JSON by hand.
 //
-// It used to default OFF, on a measurement that said "clear win up to ~12cm,
-// clear regression beyond it" -- taken with a sweep that turned out to render a
-// differently-tiled board from the app. Both halves of that are void: 5bbaa51
-// fixed the board, and the corridor rewrite wins at EVERY scale, hardest at the
-// far end that used to be the disaster (h=90: 8 -> 27 exact anchors).
+// THEY DELIBERATELY DO NOT COME FROM `st` (the fixture), even though every
+// other detector setting below does, and `PipelineSettings` now carries them so
+// `st.joinKSigma` would compile. fixtures/default.json records joinKSigma 0 --
+// that capture predates the join and 0 is the honest record of what it was
+// taken under. Reading it here would silently turn the join OFF in a sweep that
+// renders its OWN poses and merely borrows the fixture's thresholds. The two
+// blocks agree on all 54 other keys; this is the one place they must not.
+//
+// The join is not a variant any more. It used to default OFF, on a measurement
+// that said "clear win up to ~12cm, clear regression beyond it" -- taken with a
+// sweep that turned out to render a differently-tiled board from the app. Both
+// halves of that are void: 5bbaa51 fixed the board, and the corridor rewrite
+// wins at EVERY scale, hardest at the far end that used to be the disaster
+// (h=90: 8 -> 27 exact anchors).
 //
 // `--kSigma 0` is still the exact off -- no pair passes the gate, every line is
 // its own singleton composite, and the pre-join pose comes back bit for bit. So
 // the A/B is still one flag rather than two builds, and it is the first thing
 // to reach for when a sweep result looks wrong.
-const joinK = Number(val('--kSigma', '3'));
-const joinNoisePx = Number(val('--noisePx', '0.5'));
-const joinReach = Number(val('--reach', '4'));
-const joinRounds = Number(val('--rounds', '3'));
-const joinResidualPx = Number(val('--residualPx', '2'));
-const joinPolarityAbs = has('--absPolarity');
+const jc = cfg.camera.common;
+const joinK = Number(val('--kSigma', String(jc.joinKSigma)));
+const joinNoisePx = Number(val('--noisePx', String(jc.joinEndpointNoisePx)));
+const joinReach = Number(val('--reach', String(jc.joinReachFrac)));
+const joinRounds = Number(val('--rounds', String(jc.joinRounds)));
+const joinResidualPx = Number(val('--residualPx', String(jc.joinMaxResidualPx)));
+// The one flag that cannot fall back to the config the same way: `has()` is a
+// presence test, so `--absPolarity` can only ever turn it ON. The config value
+// is what a run without the flag uses, and false is the shipping value.
+const joinPolarityAbs = jc.joinPolarityAbs || has('--absPolarity');
 
 // ── An overridable scale ladder ──
 //
@@ -286,18 +308,10 @@ async function makePoseRunner() {
       },
       lines: { minLengthPx: st.lsdMinLengthPx },
       votes: { vFovRad: vFovRadOf(d) },
-      // NOT from the fixture, unlike every stage above it. The join's six knobs
-      // are ordinary settings now -- they are in pose-viewer.config.json and in
-      // fixtures/*.json -- but `PipelineSettings` (shared/harness/input.ts),
-      // which is what a fixture hands a harness, does not carry them. So they
-      // come off the command line, and the defaults above are the JSON's.
-      //
-      // Adding them to PipelineSettings would change what this sweep runs:
-      // fixtures/default.json records joinKSigma 0, because that capture was
-      // taken before the join existed. Reading the fixture would therefore turn
-      // the join OFF here, which is right for reprocessing that capture and
-      // wrong for a sweep that renders its own poses and only borrows the
-      // fixture's tuning. Worth resolving deliberately, not by plumbing.
+      // NOT `st.*`, unlike every stage above it -- these come from
+      // pose-viewer.config.json via the `--kSigma` block near the top, which is
+      // where the reasoning lives. `st` would compile and would run the join
+      // OFF. Do not "make this consistent" with its neighbours.
       join: {
         vFovRad: vFovRadOf(d),
         endpointNoisePx: joinNoisePx,

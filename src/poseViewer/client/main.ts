@@ -187,20 +187,17 @@ panelToggleBtn.addEventListener('click', () => {
 // globalState here is THIS page's own module instance (pose-viewer-client.html
 // is a separate Vite entry point from pose-viewer-server.html -- a totally separate
 // JS realm/module graph, not shared memory), so mutating it locally from a
-// settingsSync message is safe -- see this session's on-device-pose-recovery
-// plan. Source of truth stays the desktop's own sliders; this just mirrors
-// whatever it last pushed. Defaults below match camera/settings.ts's own
-// createDefaultCommonSettings so a device-compute cycle run before the
-// first settingsSync arrives (e.g. right after toggling the checkbox on
-// before the desktop's on-connect push lands) still produces a sane result.
+// settingsSync message is safe. Source of truth stays the desktop's own
+// sliders; this just mirrors whatever it last pushed. The seed below is what a
+// device-compute cycle runs on before the first settingsSync arrives (e.g.
+// right after toggling the checkbox on, before the desktop's on-connect push
+// lands) -- a narrow window, but one in which this page computes real poses.
 //
-// THESE ARE A HAND-MAINTAINED COPY and they have already drifted once (the
-// 2026-08-05 default rebaseline moved seven of them and this list was missed
-// until the compiler caught an unrelated change here). If a default moves in
-// createDefaultCommonSettings, move it here too -- the drift is invisible in
-// normal use, because the desktop's on-connect settingsSync overwrites all of
-// it within a second of the phone connecting, and only shows up in the narrow
-// window before that push lands.
+// SEEDED FROM THE CONFIG FILE, which this page fetches like the desktop does.
+// It was a hand-written literal list once and it drifted (the 2026-08-05
+// rebaseline moved seven defaults and missed it); spreading camera.common
+// removed the copy rather than documenting it, and a new setting now arrives
+// here for free. That is why the join's six knobs needed nothing on this line.
 let cameraSettings: PipelineSettings = { ...config.camera.common };
 
 // WHEN a sync landed and WHAT board size it carried are poseRecords.ts's --

@@ -11,6 +11,12 @@
     "lsdNfaTestExponent": 5,
     "lsdMinRegionSize": 2,
     "lsdMinLengthPx": 3,
+    "joinKSigma": 3,
+    "joinEndpointNoisePx": 0.5,
+    "joinReachFrac": 4,
+    "joinRounds": 3,
+    "joinMaxResidualPx": 2,
+    "joinPolarityAbs": false,
     "minGrazingCos": 0.1
   }
 }

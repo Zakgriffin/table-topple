@@ -43,6 +43,11 @@ export type FieldView = Static<typeof FieldViewSchema>;
 export const CameraSettingsCommonSchema = Type.Object({
   showSphere: Type.Boolean(),
   showCircles: Type.Boolean(),
+  // BOTH HALVES of the vanishing-point poles: the true pair (simulated cameras
+  // only, opaque, base size) and the recovered pair (every camera, translucent,
+  // one RECOVERED_SHELL larger). One toggle per thing, the same way showGizmoBody
+  // draws both camera boxes -- it absorbed the separate `showRecoveredPoles`
+  // that used to live down in the S6 section.
   showPoles: Type.Boolean(),
   showFrustum: Type.Boolean(),
   showPatch: Type.Boolean(),
@@ -202,7 +207,11 @@ export const CameraSettingsCommonSchema = Type.Object({
   showLevelLineArrow: Type.Boolean(),
   gradientArrowScale: Type.Number(),
 
-  showRecoveredPoles: Type.Boolean(),
+  // showRecoveredPoles WAS HERE. The recovered poles are the second half of a
+  // true/recovered pair and are drawn by `showPoles` now, the way `showGizmoBody`
+  // has always drawn both camera boxes -- one toggle per THING, not per form.
+  // Having two meant the truth could be hidden while its estimate stayed on
+  // screen, which is the one arrangement that makes the pair unreadable.
   showAxisVectors: Type.Boolean(),
   // WORLD/INSIDE ONLY, and it EXTENDS the line overlays rather than being one
   // of its own: each drawn arc is completed into the full great circle its

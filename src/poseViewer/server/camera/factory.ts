@@ -1,5 +1,5 @@
 import * as THREE from 'three';
-import { CIRCLE_SEGMENTS, DEBUG_LAYER, PATCH_RES, SPHERE_RADIUS } from '../../shared/constants.ts';
+import { CIRCLE_SEGMENTS, DEBUG_LAYER, PATCH_RES, RECOVERED_SHELL, SPHERE_RADIUS } from '../../shared/constants.ts';
 import { colLineKs, rowLineKs } from '../../shared/math/geometry.ts';
 import { scene } from '../scene/renderer.ts';
 import { type Camera, type CameraBase, type PhysicalCamera, type SimulatedCamera } from '../../shared/camera/model.ts';
@@ -19,13 +19,21 @@ import { LINE_STYLE } from '../overlays/lines.ts';
 function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Color, settings: CameraSettingsCommon) {
   const aspect = rtSize.w / rtSize.h;
 
-  // Recovered/decoded pose gizmo: TRANSLUCENT in the camera's own color --
-  // translucent consistently means "recovered" (a decode, not a certainty)
-  // across every camera, including physical ones (which have no
-  // ground-truth gizmo at all). Ground-truth (only simulated cameras have
-  // one, see createSimulatedCamera) is the solid/opaque one instead.
+  // Recovered/decoded pose gizmo: TRANSLUCENT, and a RECOVERED_SHELL-thick skin
+  // outside the ground-truth box below -- the shared true-vs-recovered
+  // convention, see constants.ts for the whole rule. Ground truth (only
+  // simulated cameras have one, see createSimulatedCamera) is the solid,
+  // base-size one instead.
+  //
+  // TWICE the shell per dimension: BoxGeometry takes full SIDE LENGTHS, and each
+  // of the two opposing faces has to move out by one shell. The pole markers add
+  // it once because SphereGeometry takes a radius.
+  //
+  // The SIZE half of this convention is new: the box used to be exactly the same
+  // dimensions as the ground-truth box and differed only in opacity, so two
+  // gizmos at the same pose z-fought instead of nesting.
   const recoveredCamGizmo = new THREE.Mesh(
-    new THREE.BoxGeometry(0.3, 0.25, 0.4),
+    new THREE.BoxGeometry(0.3 + 2 * RECOVERED_SHELL, 0.25 + 2 * RECOVERED_SHELL, 0.4 + 2 * RECOVERED_SHELL),
     new THREE.MeshStandardMaterial({ color, transparent: true, opacity: 0.4 }),
   );
   recoveredCamGizmo.visible = false;
@@ -159,8 +167,35 @@ function makeCameraBaseParts(rtSize: { w: number; h: number }, color: THREE.Colo
   scene.add(recoveredFloorOutline);
   recoveredFloorOutline.layers.set(DEBUG_LAYER);
 
+  // ── The recovered poles: translucent, larger, and GRAY UNTIL DECODE ──────
+  //
+  // Same true-vs-recovered convention as the gizmo above, on the shared
+  // RECOVERED_SHELL. Added ONCE, not twice: SphereGeometry takes a radius, which
+  // is already a half-extent, so this puts the surface exactly one shell outside
+  // the true marker's -- the same gap the camera box gets. The radius used to be
+  // a hardcoded 0.09, a 1.5x ratio that no other overlay followed.
+  //
+  // WHY EACH MARKER CARRIES TWO MATERIALS. The fit recovers the two floor axes
+  // as an unordered pair: the 4-fold cardinal ambiguity (row<->col swap, either
+  // sign) leaves the SET of four pole positions {+/-a, +/-b} completely
+  // unchanged and moves only the LABELS. So the positions are known as soon as
+  // there is a triad, and which one is "row" is known only once decode picks an
+  // orientation. Gray says exactly that: here are the two axes, we cannot yet
+  // say which is which. Red/blue is the strictly stronger claim and is reserved
+  // for when decode has earned it -- see sphereOverlays.ts's paintRecoveredPoles.
+  //
+  // Two materials rather than one mutated `.color`: swapping a material
+  // reference is free and reversible, while writing into a shared material would
+  // repaint every camera's markers at once.
   function makeRecoveredPoleMarker(color: number): THREE.Mesh {
-    const m = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 8), new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.6 }));
+    const m = new THREE.Mesh(
+      new THREE.SphereGeometry(0.06 + RECOVERED_SHELL, 12, 8),
+      new THREE.MeshBasicMaterial({ color, transparent: true, opacity: 0.6 }),
+    );
+    // Parked on the mesh so the paint step needs no lookup table keyed by which
+    // of the four markers this is.
+    m.userData.decodedMat = m.material;
+    m.userData.grayMat = new THREE.MeshBasicMaterial({ color: 0x999999, transparent: true, opacity: 0.6 });
     m.layers.set(DEBUG_LAYER);
     m.visible = false;
     sphereAnchor.add(m);
@@ -308,6 +343,15 @@ export function destroyCamera(camera: Camera) {
       const mat = (child as any).material;
       if (Array.isArray(mat)) mat.forEach((m) => m.dispose());
       else if (mat) mat.dispose();
+      // The recovered pole markers SWAP between two materials (gray until decode
+      // resolves the cardinal labels, coloured after), so `child.material` is
+      // only ever one of them and whichever is off duty would leak. Disposing a
+      // material twice is a no-op in THREE, so this needs no "is it the current
+      // one" test.
+      for (const key of ['grayMat', 'decodedMat'] as const) {
+        const held = child.userData[key] as THREE.Material | undefined;
+        if (held) held.dispose();
+      }
     });
   };
   disposeObj(camera.recoveredCamGizmo);

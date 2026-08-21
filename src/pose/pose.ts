@@ -339,7 +339,7 @@ function programs(device: GPUDevice): Programs {
     fitAta: simpleProgram(device, 'fit.ata', FIT_ATA_WGSL,
       [UNI, RO, RO, RO, RW]),
     fitEigen: simpleProgram(device, 'fit.eigen', FIT_EIGEN_WGSL,
-      [RO, RW, RW]),
+      [RO, RW, RW, RW]),
 
     gppClassify: simpleProgram(device, 'gpp.classify', GPP_CLASSIFY_WGSL,
       [UNI, RO, RO, RO, RO, RW, RW]),
@@ -998,7 +998,7 @@ export function encodeFit(ctx: Ctx): void {
     [['fitUni', 'compVotes', 'joinCount', 'compMaxWeight', 'ata']],
     { kind: 'direct', x: 1 });
   pass(ctx, 'fit.eigen', p.fitEigen,
-    [['ata', 'triad', 'status']],
+    [['ata', 'triad', 'status', 'pose']],
     { kind: 'direct', x: 1 });
 }
 
@@ -1440,6 +1440,32 @@ export interface PoseResult {
   compositeCount: number;
   period: number;
   height: number;
+  /**
+   * THE FIT'S OWN MISFIT, both in [0, 1] with 0 perfect. Written by `fit.eigen`
+   * itself, not by `finish`, and present on EVERY frame -- including one whose
+   * decode failed, which is the case they exist for.
+   *
+   * The triad is orthonormal however badly the fit went, so these are the only
+   * signal that distinguishes a real board from noise that happened to produce
+   * axes. Read them BEFORE believing an orientation.
+   *
+   * `fitResidual` -- do the vote normals lie on a common quadric at all.
+   * `fitPlanarity` -- is that quadric a genuine PAIR OF PLANES, which is what
+   * the triad extraction assumes. The second is the load-bearing one: a small
+   * residual against an ellipsoid still yields a confident triad pointing
+   * nowhere. See FIT_EIGEN_WGSL for the derivation of both.
+   */
+  fitResidual: number;
+  fitPlanarity: number;
+  /**
+   * How much evidence the SECOND recovered axis has, in [0, 1] -- and this one
+   * is 1-is-good, unlike the two above. Near 0 means the fit saw only ONE family
+   * of parallel lines and the "pair of planes" is a doubled plane, which
+   * `fitPlanarity` cannot see because a doubled plane is a legitimate pair (it
+   * reports ~1e-17 on exactly that input). Check this before trusting a low
+   * planarity.
+   */
+  fitAxisSupport: number;
 }
 
 export function decodePose(bytes: ArrayBuffer): PoseResult {
@@ -1455,5 +1481,6 @@ export function decodePose(bytes: ArrayBuffer): PoseResult {
     regionCount: u[17]!, memberCount: u[18]!, lineCount: u[19]!,
     gridRows: u[20]!, gridCols: u[21]!, growRounds: u[22]!, compositeCount: u[25]!,
     period: f[23]!, height: f[24]!,
+    fitResidual: f[26]!, fitPlanarity: f[27]!, fitAxisSupport: f[28]!,
   };
 }

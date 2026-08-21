@@ -85,34 +85,52 @@ export function applyPoseVisualizations(camera: Camera, isActive: boolean, extra
   // unless the lattice resolved.
   const rowDirRecovered = pose?.recoveredAxes?.Drow ?? null;
   const colDirRecovered = pose?.recoveredAxes?.Dcol ?? null;
-  if (pose?.positionDecode && rowDirRecovered && colDirRecovered) {
-    const { recoveredCamQuat } = pose.positionDecode;
-    const rowDirWorld = rowDirRecovered.clone().applyQuaternion(recoveredCamQuat);
-    const colDirWorld = colDirRecovered.clone().applyQuaternion(recoveredCamQuat);
-    // Decode's own 4-way disambiguation (tallyPositionVotes, see
-    // decodeGrid.ts) can legitimately swap which of Drow/Dcol maps to
-    // the world ROW vs COL axis (and negate either) -- fitPairOfPlanes
-    // only ever recovers the row/col PLANE PAIR up to that ambiguity,
-    // by construction (it's a property of the quadric fit, not a bug).
-    // axisErr is UNDIRECTED (angle to the nearer of +axis/-axis) since
-    // both ends of an axis already get their own pole marker -- a
-    // clean 180-degree flip isn't actually wrong, just a labeling
-    // choice for which end is which. Picking whichever of the two
-    // (row->ROW,col->COL) / (row->COL,col->ROW) pairings has the lower
-    // TOTAL undirected error is legitimate here (unlike the old
-    // pre-decode version of this check used to be) because
-    // rowDirWorld/colDirWorld are genuinely in world space now --
-    // decode has already resolved which pairing is physically correct,
-    // this just detects which one it was.
+
+  // ── WHICH ROTATION PUTS THE RECOVERED AXES IN WORLD SPACE ────────────────
+  //
+  // NOT `recoveredCamQuat`, and that correction is the whole point of this
+  // block. That quaternion is BUILT FROM this triad -- solveRecoveredCamQuat
+  // does quatFromMat(worldBasis * transpose(mathBasis)) with mathBasis made of
+  // Drow/Dcol -- so `Drow.applyQuaternion(recoveredCamQuat)` is by construction
+  // exactly +/-ROW_DIR or +/-COL_DIR. Measured across tilt 0-40 and yaw 0-70:
+  // 0 to 0.02 degrees from a cardinal axis, which is f32 round-off in
+  // quatFromMat and not a measurement of anything. The markers landed on the
+  // truth poles however bad the fit was, and this readout printed ~0.00 always.
+  //
+  // The TRUE camera quaternion is independent of the fit, so mapping the triad
+  // through it turns the gap between a recovered pole and its true pole into the
+  // fit's actual orientation error -- the same quantity the recovered-vs-true
+  // GIZMO pair already shows, now in the same frame. A physical camera has no
+  // ground truth, so it keeps the decode quaternion and its poles stay
+  // tautological; they are still worth drawing against the great circles (do the
+  // per-line arcs actually concentrate where the fit says?) but they can never
+  // show error. See project_pose_display_wiring.
+  const truthQuat = isSimulated(camera) ? camera.camQuat : null;
+  const placementQuat = truthQuat ?? pose?.positionDecode?.recoveredCamQuat ?? null;
+
+  if (placementQuat && rowDirRecovered && colDirRecovered) {
+    const rowDirWorld = rowDirRecovered.clone().applyQuaternion(placementQuat);
+    const colDirWorld = colDirRecovered.clone().applyQuaternion(placementQuat);
+    // THE FIT RECOVERS AN UNORDERED PAIR. fitPairOfPlanes resolves the row/col
+    // plane pair only up to a 4-fold ambiguity (swap the two, negate either) --
+    // a property of the quadric fit, not a bug -- and that ambiguity leaves the
+    // SET of four pole positions completely unchanged while moving only the
+    // labels. Which is exactly why the markers can be placed before decode and
+    // only COLOURED after it.
+    //
+    // axisErr is UNDIRECTED (angle to the nearer of +axis/-axis) since both ends
+    // of an axis already get their own marker: a clean 180-degree flip is a
+    // labelling choice for which end is which, not an error.
     const axisErr = (v: THREE.Vector3, axis: THREE.Vector3) => Math.min(angleBetweenDegV(v, axis), angleBetweenDegV(v, axis.clone().negate()));
     const errUnswapped = axisErr(rowDirWorld, ROW_DIR) + axisErr(colDirWorld, COL_DIR);
     const errSwapped = axisErr(rowDirWorld, COL_DIR) + axisErr(colDirWorld, ROW_DIR);
+    // NEAREST-AXIS assignment, and it is a DISPLAY choice, not a claim. Red
+    // tracks whichever recovered vector came out closest to the world ROW axis
+    // so it never sits on top of a blue ground-truth pole. When decode HAS run
+    // the markers are coloured and this agrees with the orientation decode
+    // picked; when it has not, they are gray and the pairing is not asserted at
+    // all -- which is the honest state, since nothing has resolved it yet.
     const swapped = errSwapped < errUnswapped;
-    // Red pole markers always track whichever recovered vector ended
-    // up closest to the world ROW axis, blue always tracks whichever
-    // is closest to COL -- a fixed rowDirWorld->red assignment would
-    // sometimes put red poles next to the blue ground-truth poles
-    // whenever swapped is true.
     const redDirWorld = swapped ? colDirWorld : rowDirWorld;
     const blueDirWorld = swapped ? rowDirWorld : colDirWorld;
     camera.recoveredRowPoleA.position.copy(redDirWorld).multiplyScalar(SPHERE_RADIUS);
@@ -120,10 +138,14 @@ export function applyPoseVisualizations(camera: Camera, isActive: boolean, extra
     camera.recoveredColPoleA.position.copy(blueDirWorld).multiplyScalar(SPHERE_RADIUS);
     camera.recoveredColPoleB.position.copy(blueDirWorld).multiplyScalar(-SPHERE_RADIUS);
 
-    if (isSimulated(camera)) {
+    // Only meaningful against ground truth, which is also the only case where
+    // the placement quaternion is independent of the triad being measured.
+    // Before this it read "[post-decode]" and printed ~0.00 unconditionally.
+    if (truthQuat) {
       const rowErr = axisErr(redDirWorld, ROW_DIR);
       const colErr = axisErr(blueDirWorld, COL_DIR);
-      orientationErrorLine = `row err ${rowErr.toFixed(2)}°  col err ${colErr.toFixed(2)}°  [post-decode${swapped ? ', swapped' : ''}]`;
+      const cardinal = pose?.positionDecode ? '' : ', pre-decode';
+      orientationErrorLine = `row err ${rowErr.toFixed(2)}°  col err ${colErr.toFixed(2)}°  [vs truth${swapped ? ', swapped' : ''}${cardinal}]`;
     }
   }
   updateRecoveredCamGizmo(camera);
@@ -149,6 +171,22 @@ export function applyPoseVisualizations(camera: Camera, isActive: boolean, extra
     const failed = failureLine(pose);
     if (failed) lines.push(failed);
     else if (orientationErrorLine) lines.push(orientationErrorLine);
+    // ── The fit's own misfit, and it is shown on FAILED frames too ──
+    //
+    // Placed directly under the failure line on purpose. The triad is
+    // orthonormal however badly the fit went, so before this line the readout
+    // had no way to say "a frame came back with axes and the axes are wrong" --
+    // it could only say the fit was DEGENERATE, which is a different and much
+    // rarer thing. See FIT_EIGEN_WGSL.
+    //
+    // `support` is the one that reads backwards (1 is good), so it is labelled
+    // rather than left to look like a third error term.
+    if (pose?.fitPlanarity !== undefined) {
+      lines.push(
+        `fit: residual ${pose.fitResidual!.toExponential(1)}`
+        + `  planarity ${pose.fitPlanarity.toExponential(1)}`
+        + `  axis support ${(pose.fitAxisSupport! * 100).toFixed(1)}%`);
+    }
     if (pose?.recoveredAxes) {
       const trueDist = isSimulated(camera) ? camera.camPos.y : NaN;
       const dist = pose.recoveredAxes.distance;
@@ -863,6 +901,13 @@ function toCameraPose(frame: PoseFrame): CameraPose {
     // join's verdict is open.
     compositeCount: pose.compositeCount,
     regionCount,
+
+    // Carried WHATEVER the fit did, and deliberately outside the `fitOk` spread
+    // below: a degenerate fit is exactly the frame whose misfit is worth reading,
+    // and gating these on success would publish them only when nobody needs them.
+    fitResidual: pose.fitResidual,
+    fitPlanarity: pose.fitPlanarity,
+    fitAxisSupport: pose.fitAxisSupport,
 
     // `distance` IS the camera's height above the floor -- the same quantity the
     // pose block reports as `height`, read here off the block that also carries

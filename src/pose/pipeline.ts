@@ -504,7 +504,9 @@ export const STAGES: readonly Stage[] = [
   // votes/lines/lineCount. Their names inside the shaders still read `votes` and
   // `lineCount`; what a binding is CALLED at the WGSL end is this file's choice.
   { id: 'fit.ata', binds: ['fitUni', 'compVotes', 'joinCount', 'compMaxWeight', 'ata'] },
-  { id: 'fit.eigen', binds: ['ata', 'triad', 'status'] },
+  // Binds `pose` for slots 26/27 only -- its own misfit. `finish` owns 0..25 and
+  // runs later; see FIT_EIGEN_WGSL on why this is not plumbed through there.
+  { id: 'fit.eigen', binds: ['ata', 'triad', 'status', 'pose'] },
 
   // DIRECT over maxLines, not indirect off lineArgs, for exactly the reason
   // lines.flag is: `family` is a scan input and has to be TOTAL over the scanned

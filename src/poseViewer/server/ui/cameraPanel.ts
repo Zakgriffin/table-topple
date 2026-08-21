@@ -225,7 +225,7 @@ export function refreshCameraPanel() {
   setNum('joinRounds', cam.settings.joinRounds);
   setNum('joinMaxResidualPx', cam.settings.joinMaxResidualPx);
   setBool('joinPolarityAbs', cam.settings.joinPolarityAbs);
-  setBool('showRecoveredPoles', cam.settings.showRecoveredPoles); setBool('showAxisVectors', cam.settings.showAxisVectors);
+  setBool('showAxisVectors', cam.settings.showAxisVectors);
   setBool('showLineRings', cam.settings.showLineRings);
   setNum('lineRingWidth', cam.settings.lineRingWidth);
   setNum('minGrazingCos', cam.settings.minGrazingCos);
@@ -560,7 +560,6 @@ toggleLineJoinBtn.addEventListener('click', () => {
   setPanelNum('joinKSigma', cam.settings.joinKSigma > 0 ? 0 : lastJoinKSigma);
 });
 
-bindCheckbox('showRecoveredPoles', config.camera.common.showRecoveredPoles, (v) => { const cam = activeCamera(); if (cam) cam.settings.showRecoveredPoles = v; });
 // Turning either on refreshes immediately -- the sphere builders now
 // skips its work while both are off (see its own comment), so the geometry
 // sitting there when you flip one on could otherwise be stale until the

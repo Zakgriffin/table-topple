@@ -966,6 +966,69 @@ test('fit: no votes is reported, not fitted -- and does not inherit the last fra
   });
 });
 
+test('fit: the misfit slots separate a real board from garbage the triad cannot', async () => {
+  // WHAT THIS EXISTS TO CATCH, and why an assertion on the triad could not.
+  //
+  // The triad is orthonormal BY CONSTRUCTION -- b1 and b2 are orthonormal Jacobi
+  // eigenvectors, so (b1+b2).(b1-b2) = 0 identically. A triad fitted to white
+  // noise is exactly as orthonormal as one fitted to a board, which is why a
+  // 74-degree orientation error used to leave no trace anywhere in the output
+  // and every consumer inherited the blindness.
+  //
+  // So the property under test is DISCRIMINATION, not a value. Each input below
+  // produces a clean orthonormal triad; what must differ is the misfit.
+  await withDevice(async (device) => {
+    const N = FRAME.w * FRAME.h;
+
+    const board = await poseOn(
+      device, renderPose(TEST_WORLD, { height: 10, overRow: 40.1, overCol: 40.6, tiltDeg: 20, yawDeg: 15 }, FRAME_DIMS, 4),
+      FRAME, FRAME_DIMS);
+
+    // Strong edges everywhere, but curved -- the best quadric through these vote
+    // normals is a cone, not a pair of planes.
+    const rings = new Float64Array(N);
+    for (let y = 0; y < FRAME.h; y++) {
+      for (let x = 0; x < FRAME.w; x++) {
+        const dx = x - FRAME.w / 2, dy = y - FRAME.h / 2;
+        rings[y * FRAME.w + x] = (Math.hypot(dx, dy) % 8 < 4) ? 20 : 188;
+      }
+    }
+    const curved = await poseOn(device, rings, FRAME, FRAME_DIMS);
+
+    // ONE family of parallel lines. The fitted quadric is a DOUBLED plane, which
+    // is a perfectly legitimate plane pair -- so planarity reports a flawless fit
+    // and only the axis-support term can tell that the second axis is a fiction.
+    const stripes = new Float64Array(N);
+    for (let y = 0; y < FRAME.h; y++) {
+      for (let x = 0; x < FRAME.w; x++) stripes[y * FRAME.w + x] = (x % 10 < 5) ? 20 : 188;
+    }
+    const oneFamily = await poseOn(device, stripes, FRAME, FRAME_DIMS);
+
+    // THE PREMISE. If a triad ever came back non-orthonormal the rest of this
+    // test would be measuring something else, and the motivation above would be
+    // wrong -- so it is asserted rather than assumed.
+    assert.ok(board.fitPlanarity < 0.05,
+      `a real board must fit a plane pair (got ${board.fitPlanarity})`);
+    assert.ok(board.fitAxisSupport > 0.5,
+      `a real board must support BOTH axes (got ${board.fitAxisSupport})`);
+
+    // Curved evidence is caught by planarity: the quadric is not two planes.
+    assert.ok(curved.fitPlanarity > board.fitPlanarity * 10,
+      `curved edges must read far less planar than a board `
+      + `(board ${board.fitPlanarity.toExponential(2)}, rings ${curved.fitPlanarity.toExponential(2)})`);
+
+    // One family is caught ONLY by axis support -- and planarity actively says
+    // the fit is perfect, which is the whole reason the third number exists.
+    assert.ok(oneFamily.fitPlanarity < board.fitPlanarity,
+      'a doubled plane is a LEGITIMATE plane pair -- planarity cannot catch this, '
+      + `and if it now does, this test is no longer testing what it claims `
+      + `(board ${board.fitPlanarity.toExponential(2)}, stripes ${oneFamily.fitPlanarity.toExponential(2)})`);
+    assert.ok(oneFamily.fitAxisSupport < 0.01,
+      `one line family must report almost no support for the second axis `
+      + `(got ${oneFamily.fitAxisSupport.toExponential(2)})`);
+  });
+});
+
 test('fit: on a rendered board, the recovered floor is the true floor', async () => {
   // THE LOAD-BEARING TEST. The synthetic fixture proves the algebra against
   // votes that are exactly consistent; this one runs the whole chain -- gradient
@@ -2450,6 +2513,11 @@ test('§18: the POOLED buffer set produces a bit-identical pose', async () => {
         'ok', 'status', 'consistency', 'orientation', 'boardRow', 'boardCol',
         'votes', 'totalWindows', 'correct', 'wrong', 'regionCount', 'memberCount',
         'lineCount', 'gridRows', 'gridCols', 'growRounds', 'period', 'height',
+        // The fit's three misfit slots. They are the ONLY fields of this block
+        // written by a stage other than `finish`, so they are the ones a pooling
+        // bug could reach without touching anything else -- see FINISH_WGSL's
+        // zeroing loop, which stops short of them on purpose.
+        'fitResidual', 'fitPlanarity', 'fitAxisSupport',
       ] as const) {
         assert.deepEqual(pooled[k], flat[k],
           `${k} differs under pooling at tilt${pose.tiltDeg} yaw${pose.yawDeg}: ` +

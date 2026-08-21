@@ -1720,11 +1720,56 @@ fn main(@builtin(local_invocation_id) lid: vec3<u32>) {
 // pipeline gets a confident triad built from nothing. That is the condition
 // `fitDegenerate` reports here.
 //
-// (The triad is orthonormal BY CONSTRUCTION for the same reason the dead guard
+// ── THE FIT NOW REPORTS ITS OWN MISFIT, AND IT COULD NOT BEFORE ──
+//
+// The triad is orthonormal BY CONSTRUCTION for the same reason the dead guard
 // was dead: b1.b2 = 0 makes (b1+b2).(b1-b2) = |b1|^2 - |b2|^2 = 0, and both are
-// perpendicular to the third eigenvector. So this fit cannot report its own
-// misfit -- the residual is invisible in the output. Known, and out of scope
-// for a port.)
+// perpendicular to the third eigenvector. So the OUTPUT SHAPE cannot express a
+// bad fit -- a triad built from noise is exactly as orthonormal as one built
+// from a clean board, and a 74-degree orientation error leaves no trace in it.
+// Every downstream consumer inherits that blindness: the recovered pole markers
+// are placed by a quaternion built from this triad, so they land on the cardinal
+// axes whatever happened here.
+//
+// The evidence was being computed and thrown away. Jacobi produces ALL the
+// eigenvalues of both matrices; only two eigenVECTORS were ever read. Three
+// ratios come out for free, and they answer three DIFFERENT questions -- which
+// is why all three are written rather than one combined "quality" number:
+//
+//   fitResidual = lambdaMin6 / lambdaMax6            (0 is perfect)
+//     "Do the vote normals lie on a common quadric cone AT ALL." ATA is a Gram
+//     matrix and lambdaMin6 is by construction the minimum of q^T ATA q over
+//     unit q -- which IS the least-squares cost this stage minimizes. Scale-free:
+//     normalizing ATA by maxWeight scales both ends.
+//
+//   fitPlanarity = |lambdaZero3| / lambdaMaxAbs3     (0 is perfect)
+//     "Is that quadric actually a PAIR OF PLANES." For a true plane pair
+//     C = (n1 n2^T + n2 n1^T)/2, and C(n1 x n2) = 0 exactly -- the eigenvalue
+//     along the floor normal vanishes. Nothing constrains the 6x6 fit to produce
+//     such a quadric; the code simply ASSUMES it did and reads b1, b2 off it.
+//     This is that assumption, measured. MEASURED MONOTONIC in the true
+//     orientation error: 1.7e-3 at 0.02deg, 6.1e-2 at 36deg, while the triad's
+//     own orthonormality sits flat at ~1e-8 across the same span.
+//
+//   fitAxisSupport = |lambdaMid3| / lambdaMaxAbs3    (1 is perfect, 0 is worst)
+//     "Is the SECOND axis real." A quadric fitted to ONE family of parallel
+//     lines is a DOUBLED plane -- still a legitimate plane pair, so planarity
+//     comes back ~1e-17 and reports a flawless fit for an input that determines
+//     only one axis. A doubled plane vanishes TWO eigenvalues rather than one:
+//     with n1.n2 = c the non-zero pair is (1+c)/2 and -(1-c)/2, and c -> 1
+//     collapses the second. Measured 0.98-0.999 on real boards, 3e-17 on a
+//     single stripe family.
+//
+// THE SECOND AND THIRD ARE THE LOAD-BEARING ONES, and they catch different
+// things: a small residual against an ellipsoid still yields a confident triad
+// pointing nowhere, and a perfect planarity against a doubled plane yields a
+// second axis that is pure invention.
+//
+// Reported, never gated. A threshold here would be a new tuning constant, and
+// three numbers are more useful to a caller than one verdict.
+//
+// Written on the DEGENERATE path too, because `pose` may be an arena slice
+// holding last frame's bytes -- see §11 on allocZeroed.
 //
 // ── THE MUTATION RUN, AND WHAT IT FOUND ──
 //
@@ -1769,8 +1814,29 @@ export const FIT_EIGEN_WGSL = /* wgsl */ `
 @group(0) @binding(0) var<storage, read> ata: array<f32, 21>;
 @group(0) @binding(1) var<storage, read_write> triad: array<vec3<f32>, 3>;
 @group(0) @binding(2) var<storage, read_write> status: atomic<u32>;
+// The 128-byte result block, for slots 26..28 ONLY. "finish" owns 0..25 and runs
+// LATER, so it cannot clobber these and these cannot clobber it. Bound here
+// rather than plumbed through "finish" because that stage is already at EIGHT
+// storage buffers, the baseline per-stage limit -- and because a stage reporting
+// its own misfit is exactly the stage that should write it.
+@group(0) @binding(3) var<storage, read_write> pose: array<u32, 32>;
 
 const FIT_DEGENERATE: u32 = 32u; // bit 5 of the status word
+
+// THIS STAGE'S THREE SLOTS in the shared result block. FINISH_WGSL declares the
+// same bound under the same name and zeroes only BELOW it; the two declarations
+// must agree, and there is no way to share a constant across shader modules.
+const FIT_MISFIT_SLOT: u32 = 26u;
+
+// MUST BE CALLED ON EVERY EXIT FROM main(). finish no longer zeroes these, so an
+// unwritten slot is last frame's misfit reported against this frame's triad --
+// the exact class of bug the zeroing loop exists to prevent. There are two exits
+// today and both call it.
+fn reportMisfit(residual: f32, planarity: f32, support: f32) {
+  pose[FIT_MISFIT_SLOT] = bitcast<u32>(residual);
+  pose[FIT_MISFIT_SLOT + 1u] = bitcast<u32>(planarity);
+  pose[FIT_MISFIT_SLOT + 2u] = bitcast<u32>(support);
+}
 
 // One n x n symmetric matrix and its accumulated rotations, both at stride n
 // inside a fixed 6x6 arena. workgroup_size is 1, so private storage is the whole
@@ -1863,6 +1929,11 @@ fn main() {
     triad[0] = vec3<f32>(1.0, 0.0, 0.0);
     triad[1] = vec3<f32>(0.0, 1.0, 0.0);
     triad[2] = vec3<f32>(0.0, 0.0, 1.0);
+    // WORST ON ALL THREE, not zero. There is no evidence, so the identity triad
+    // above fits nothing -- and leaving the slots unwritten would report the
+    // PREVIOUS frame's misfit against this frame's triad. Support's worst value
+    // is 0 rather than 1; see its derivation in the header.
+    reportMisfit(1.0, 1.0, 0.0);
     return;
   }
 
@@ -1872,9 +1943,19 @@ fn main() {
   // agree except through round-off near zero -- which is precisely the entry
   // being selected, so the tie-break is worth keeping identical.
   var mi = 0u;
+  var maxEig6 = A[0];
   for (var i = 1u; i < 6u; i = i + 1u) {
     if (A[i * 6u + i] < A[mi * 6u + mi]) { mi = i; }
+    if (A[i * 6u + i] > maxEig6) { maxEig6 = A[i * 6u + i]; }
   }
+  // The residual RELATIVE to the strongest direction in the same matrix. maxEig6
+  // is > 0 here: norm2 > 0 above means ATA is a non-zero Gram matrix, so its
+  // largest eigenvalue is strictly positive. The select() guards f32 underflow,
+  // not the algebra. max(0) because a Gram matrix's eigenvalues are non-negative
+  // in exact arithmetic and mi is chosen SIGNED, so round-off at exactly the
+  // selected entry can hand back a tiny negative.
+  let residual = select(1.0, max(0.0, A[mi * 6u + mi]) / maxEig6, maxEig6 > 0.0);
+
   var m: array<f32, 6>;
   for (var i = 0u; i < 6u; i = i + 1u) { m[i] = V[i * 6u + mi]; }
 
@@ -1889,9 +1970,27 @@ fn main() {
   // Here the near-zero eigenvalue is the one wanted, and its SIGN is arbitrary
   // -- so this one is by magnitude.
   var zi = 0u;
+  var maxAbs3 = abs(A[0]);
   for (var i = 1u; i < 3u; i = i + 1u) {
     if (abs(A[i * 3u + i]) < abs(A[zi * 3u + zi])) { zi = i; }
+    if (abs(A[i * 3u + i]) > maxAbs3) { maxAbs3 = abs(A[i * 3u + i]); }
   }
+  // The MIDDLE magnitude -- neither the near-zero one nor the largest.
+  var midAbs3 = 0.0;
+  for (var i = 0u; i < 3u; i = i + 1u) {
+    let e = abs(A[i * 3u + i]);
+    if (i != zi && e != maxAbs3) { midAbs3 = e; }
+  }
+  // Guards the case where two eigenvalues TIE at the max, which the != test
+  // above skips both of: then the middle IS the max.
+  if (midAbs3 == 0.0 && abs(A[zi * 3u + zi]) != maxAbs3) { midAbs3 = maxAbs3; }
+
+  // All three, at the one exit that has them. See the header for what each
+  // measures and which failure each one is the only witness to.
+  reportMisfit(
+    residual,
+    select(1.0, abs(A[zi * 3u + zi]) / maxAbs3, maxAbs3 > 0.0),
+    select(0.0, midAbs3 / maxAbs3, maxAbs3 > 0.0));
 
   var b: array<vec3<f32>, 2>;
   var bi = 0u;
@@ -3624,6 +3723,13 @@ const NO_REGIONS: u32 = 4u;
 const NO_VOTES: u32 = 16u;
 const DECODE_NO_ANCHOR: u32 = 1024u;
 
+// Where this stage's ownership of the result block ENDS. Slots at and above it
+// belong to fit.eigen, which declares the same bound under the same name -- see
+// the zeroing loop in main() for the split, and FIT_EIGEN_WGSL for what lives
+// there. The two declarations must agree; there is no way to share a constant
+// across two separate shader modules.
+const FIT_MISFIT_SLOT: u32 = 26u;
+
 // THREE's Quaternion.setFromRotationMatrix, transcribed. A correctness constant
 // rather than a structure: the four-branch form exists because each branch
 // divides by a term that the others cannot guarantee is non-zero, and picking
@@ -3662,7 +3768,26 @@ fn main() {
   // Written in full on every path. This is THE readback, so a field that keeps
   // its previous value here is a previous frame's answer handed to the caller as
   // this frame's.
-  for (var k = 0u; k < 32u; k = k + 1u) { pose[k] = 0u; }
+  //
+  // ── THE BLOCK IS OWNED BY TWO STAGES, AND THE SPLIT IS AT 26 ──
+  //
+  // Slots 0..25 are this stage's. Slots 26..28 are fit.eigen's -- the fit's own
+  // misfit, which has to survive a frame that never reaches a decode, because a
+  // frame that failed is exactly when you want to know whether the FIT was the
+  // reason. fit.eigen runs EARLIER, so zeroing to 32 here silently erased it;
+  // that cost one debugging cycle and the symptom was a perfect 0.00 on every
+  // input including a blank frame.
+  //
+  // THE INVARIANT IS UNCHANGED: every slot is still written on every path. It is
+  // just no longer true that ONE stage does it. fit.eigen dispatches
+  // unconditionally and writes all three of its slots on BOTH of its exits (the
+  // degenerate early return writes the worst value for each). If you add a third
+  // exit there, it must write them too.
+  //
+  // Kept as a zeroing loop with a named bound rather than moving the misfit into
+  // its own buffer, because the alternative is a NINTH storage buffer on this
+  // pass and eight is the baseline per-stage limit.
+  for (var k = 0u; k < FIT_MISFIT_SLOT; k = k + 1u) { pose[k] = 0u; }
 
   // ── The reporting half of the status word ──
   //

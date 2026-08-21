@@ -307,7 +307,15 @@
 
   <div class="section" data-views="world inside">
     <h2>input &middot; camera</h2>
+    <!-- Each of these draws the TRUE form and the RECOVERED form of one thing
+         from a single toggle -- opaque base-size vs translucent one shell
+         larger, see RECOVERED_SHELL in shared/constants.ts. A physical camera has no ground
+         truth, so it shows only the translucent half. `showPoles` moved up here
+         from S5b to join that group: it used to control only the true poles
+         while a separate `showRecoveredPoles` in S6 controlled the other half,
+         which is the one place the convention was not followed. -->
     <label class="chk"><input type="checkbox" id="showGizmoBody"> camera box</label>
+    <label class="chk"><input type="checkbox" id="showPoles"> vanishing-point poles</label>
     <label class="chk"><input type="checkbox" id="showFrustum"> frustum outline</label>
     <label class="chk"><input type="checkbox" id="showPatch"> live viewport image patch</label>
   </div>
@@ -368,7 +376,6 @@
     <h2>S5b &middot; votes</h2>
     <label class="chk"><input type="checkbox" id="showSphere"> sphere shell</label>
     <label class="chk"><input type="checkbox" id="showCircles"> grid-line great circles</label>
-    <label class="chk"><input type="checkbox" id="showPoles"> vanishing-point poles</label>
   </div>
 
   <!-- S5c, the iterative reach-bounded corridor join. kSigma 0 is the EXACT off
@@ -412,7 +419,10 @@
          its line lies on, in that line's own colour. -->
     <label class="chk"><input type="checkbox" id="showLineRings"> complete arcs into full rings</label>
     <div class="row"><span class="label">ring stroke weight</span><input type="range" id="lineRingWidth" min="0.5" max="8" step="0.5"><span class="val" id="lineRingWidthVal"></span></div>
-    <label class="chk"><input type="checkbox" id="showRecoveredPoles"> reconstructed poles</label>
+    <!-- "reconstructed poles" was here. It is the recovered half of the poles
+         pair, and it is now drawn by `showPoles` in input &middot; camera along
+         with the true half -- one toggle per THING, exactly as "camera box"
+         already worked. -->
     <label class="chk"><input type="checkbox" id="showAxisVectors"> vote axis vectors</label>
   </div>
 

@@ -142,6 +142,22 @@ export interface CameraPose {
    *  value, which is raw so `finish` can report `regionOverflow`. */
   regionCount?: number;
 
+  /**
+   * THE FIT'S OWN MISFIT -- see `PoseResult` in src/pose/pose.ts for what each
+   * one measures. Present on every locally-computed frame INCLUDING one whose
+   * fit was degenerate or whose decode failed, which is the case they exist for:
+   * `recoveredAxes` being absent says a triad was not published, and these say
+   * whether the underlying fit was worth publishing.
+   *
+   * Kept as three separate numbers rather than one score because they catch
+   * three different failures, and a low `fitPlanarity` is NOT evidence of a good
+   * fit on its own -- a single family of lines scores ~1e-17 there and is
+   * caught only by `fitAxisSupport`.
+   */
+  fitResidual?: number;
+  fitPlanarity?: number;
+  fitAxisSupport?: number;
+
   /** The recovered axis frame and its scale. Absent when the fit was degenerate
    *  or the lattice never resolved -- `status` says which. */
   recoveredAxes?: RecoveredAxes;

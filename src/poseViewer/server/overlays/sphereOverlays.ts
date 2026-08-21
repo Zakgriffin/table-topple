@@ -275,11 +275,41 @@ export function updateSphereOverlays(camera: Camera, vFovRad: number) {
   // earlier. Nothing changes, because `positionDecode` cannot exist without the
   // lattice `recoveredAxes` waits for -- the pair was only ever as available as
   // the later of the two.
-  const recoveredPolesVisible = settings.showRecoveredPoles && !!camera.pose?.recoveredAxes && !!camera.pose.positionDecode;
-  camera.recoveredRowPoleA.visible = recoveredPolesVisible;
-  camera.recoveredRowPoleB.visible = recoveredPolesVisible;
-  camera.recoveredColPoleA.visible = recoveredPolesVisible;
-  camera.recoveredColPoleB.visible = recoveredPolesVisible;
+  // ── Shown on a TRIAD; coloured only on a DECODE ─────────────────────────
+  //
+  // The gate used to also require `positionDecode`, so a frame that recovered a
+  // perfectly good axis frame and failed to decode drew nothing -- which hid the
+  // fit precisely when you most wanted to look at it.
+  //
+  // It can be relaxed because the two conditions answer different questions. The
+  // fit recovers the axis pair up to a 4-fold ambiguity that leaves the four
+  // pole POSITIONS unchanged and moves only the labels, so a triad is already
+  // enough to place them. Decode is what resolves row-vs-col, and that is the
+  // only thing the RED/BLUE colouring asserts. Gray means "these are the two
+  // axes; which is which is not yet known" -- a real state, drawn honestly,
+  // rather than an absence.
+  //
+  // Still gated on a placement rotation existing: a physical camera with no
+  // decode has no camera->world transform at all, so there is nowhere to put
+  // them. See applyPoseVisualizations for which quaternion is used and why it is
+  // NOT the decode one on a simulated camera.
+  // ONE TOGGLE FOR BOTH HALVES, like `showGizmoBody` and its two boxes. There
+  // used to be a second setting, `showRecoveredPoles`, living in a different pane
+  // section -- so the true poles and the recovered poles could be turned on
+  // independently, which no other true/recovered pair allowed. Deleted; the
+  // remaining half is drawn below under this same flag.
+  const decoded = !!camera.pose?.positionDecode;
+  const placeable = isSimulated(camera) || decoded;
+  const recoveredPolesVisible = settings.showPoles && !!camera.pose?.recoveredAxes && placeable;
+  for (const marker of [
+    camera.recoveredRowPoleA, camera.recoveredRowPoleB,
+    camera.recoveredColPoleA, camera.recoveredColPoleB,
+  ]) {
+    marker.visible = recoveredPolesVisible;
+    // Both materials are built in camera/factory.ts and parked on the mesh; this
+    // only swaps which one is bound, so nothing is allocated per frame.
+    marker.material = (decoded ? marker.userData.decodedMat : marker.userData.grayMat) as THREE.Material;
+  }
   camera.axisVectorsLines.visible = settings.showAxisVectors;
   // One mesh per kind, each gated on its own toggle. `showLineRings` does NOT
   // gate either -- it only decides how far each arc sweeps (see updateLineArcs),
